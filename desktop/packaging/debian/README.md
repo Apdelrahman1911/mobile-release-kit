@@ -3,7 +3,12 @@
 This packaging path is incomplete and **not a qualified desktop distribution**.
 The Rust publisher and package layout are separate from installed Python/import
 qualification, UI/native acceptance, package signing and protected delivery.
-All existing product execution gates remain closed.
+The separate normal-shell connection to accepted installed A is limited to
+passive help/project/draft operations and has pending native acceptance. It
+does not make this package a complete installer or enable Save, credentials,
+tools, network or Store actions. Current verification reuses the accepted
+runtime package and runs the freshly compiled shell separately; it does not
+claim that package contains the new shell.
 
 ## What the package owns
 

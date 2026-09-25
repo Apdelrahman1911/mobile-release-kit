@@ -1,5 +1,7 @@
 import { useId } from 'react';
 import { blockingAncestor, getValue } from '../catalog.ts';
+import { isProjectPathField, projectPathDraftReason, projectPathHelp } from '../projectPaths.ts';
+import type { ProjectPathControls } from '../projectPaths.ts';
 import type { FieldContext, FieldHelp, HelpContent, JsonObject, JsonValue } from '../types.ts';
 import { HelpButton } from './Common.tsx';
 import { Icon } from './Icon.tsx';
@@ -9,6 +11,7 @@ interface FieldProps {
   draft: JsonObject;
   context?: FieldContext;
   contextFresh?: boolean;
+  pathPicker: ProjectPathControls;
   onChange: (path: string, value: JsonValue | undefined) => void;
   onHelp: (help: HelpContent) => void;
 }
@@ -30,12 +33,15 @@ function hasInputShape(field: FieldHelp, value: JsonValue | undefined): boolean 
   return typeof value === 'string';
 }
 
-export function DraftField({ field, draft, context, contextFresh = false, onChange, onHelp }: FieldProps) {
+export function DraftField({ field, draft, context, contextFresh = false, pathPicker, onChange, onHelp }: FieldProps) {
   const id = useId();
   const descriptionId = `${id}-description`;
   const value = getValue(draft, field.path);
   const parent = blockingAncestor(draft, field.path);
   const invalidShape = !hasInputShape(field, value);
+  const pathField = isProjectPathField(field.path) ? field.path : null;
+  const browseReason = pathField ? field.input !== 'text' ? 'The catalogue does not describe a text path control.'
+    : projectPathDraftReason(draft, pathField) ?? pathPicker.reason : null;
   const update = (next: JsonValue | undefined) => onChange(field.path, next);
   const showClear = value !== undefined;
   const isList = ['string-list', 'argv', 'commands'].includes(field.input);
@@ -59,8 +65,11 @@ export function DraftField({ field, draft, context, contextFresh = false, onChan
     control = <input id={id} type={field.input === 'number' ? 'number' : 'text'} value={typeof value === 'string' || typeof value === 'number' ? value : ''} autoComplete="off" spellCheck={false} aria-describedby={descriptionId} placeholder={typeof field.example === 'string' ? `e.g. ${field.example}` : 'Not configured'} onChange={(event) => update(field.input === 'number' ? event.target.value === '' ? undefined : Number(event.target.value) : event.target.value)} />;
   }
   return <div className={`form-field${isList ? ' full-width' : ''}`} role={isList ? 'group' : undefined} aria-labelledby={isList ? `${id}-label` : undefined} aria-describedby={isList ? descriptionId : undefined}>
-    <div className="field-label-row"><label id={`${id}-label`} htmlFor={isList ? undefined : id}>{field.label}</label><HelpButton content={field} onHelp={onHelp} /><span className={`requiredness ${contextFresh && context ? context.state : 'unreviewed'}`}>{contextLabel}</span></div>
-    {control}
+    <div className="field-label-row"><label id={`${id}-label`} htmlFor={isList ? undefined : id}>{field.label}</label><HelpButton content={projectPathHelp(field)} onHelp={onHelp} /><span className={`requiredness ${contextFresh && context ? context.state : 'unreviewed'}`}>{contextLabel}</span></div>
+    {pathField ? <div className="list-editor-row">{control}<button type="button" className="button small secondary" disabled={browseReason !== null}
+      aria-label={`Browse existing ${field.label}`} aria-describedby={`${id}-browse-reason`} onClick={() => pathPicker.onBrowse(pathField)}>
+      {pathPicker.pendingField === pathField ? 'Browsing…' : 'Browse existing…'}</button></div> : control}
+    {pathField && <p id={`${id}-browse-reason`} className="toolbar-reason">{browseReason ?? 'Optional: select an existing item inside this project. Only this draft field changes; saving remains separate.'}</p>}
     <div className="field-bottom"><p id={descriptionId}>{field.what}</p>{showClear && <button type="button" className="clear-field" aria-label={`Unset ${field.label} in this draft and retain an undo copy`} onClick={() => update(undefined)}>Unset</button>}</div>
     <div className="field-context"><span className="field-presence">{parent ? 'Parent needs review' : presence}</span>{contextFresh && context && <p className={context.state === 'forbidden' && context.present || context.state === 'unknown' ? 'context-warning' : ''}>{context.reason}{context.state === 'forbidden' && context.present ? ' Your value is retained until you explicitly unset it.' : ''}</p>}</div>
   </div>;

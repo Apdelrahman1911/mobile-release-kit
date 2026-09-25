@@ -21,6 +21,21 @@ fn main() {
     // here and thereby silently promote unreviewed runtime bytes to authority.
     anchor("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
     anchor("MRK_BUNDLED_PROTOCOL_SHA256");
+    anchor("MRK_MACOS_INSTALL_INVENTORY_SHA256");
+    println!("cargo:rerun-if-env-changed=MRK_MACOS_INSTALL_SOURCE_COMMIT");
+    match env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT") {
+        Ok(value) => {
+            if value.len() != 40 || !value.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+                panic!("MRK_MACOS_INSTALL_SOURCE_COMMIT must be an explicit lowercase source commit");
+            }
+            println!("cargo:rustc-env=MRK_MACOS_INSTALL_SOURCE_COMMIT={value}");
+        }
+        Err(_) if cfg!(feature = "macos-installed-installer") => panic!("Installer builds require the explicit source commit"),
+        Err(_) => {},
+    }
+    if cfg!(feature = "macos-installed-installer-fixture") && cfg!(feature = "desktop-shell") {
+        panic!("The fixed Installer fixture cannot be combined with the application shell");
+    }
     // The two synthetic TLS manifests are explicit inputs to the SAME libtest
     // artifact. Neither is discovered or promoted to authority by this build.
     anchor("MRK_GITHUB_TLS_INPUTS_SHA256");
@@ -32,7 +47,7 @@ fn main() {
     #[cfg(feature = "desktop-shell")]
     {
         const COMMANDS: &[&str] = &[
-            "app_info", "choose_project", "project_snapshot", "catalog",
+            "app_info", "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
@@ -45,6 +60,8 @@ fn main() {
             "github_workflow_edit_close", "github_workflow_edit_status",
             "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
             "metadata_text_edit_apply", "metadata_text_edit_close", "metadata_text_edit_status",
+            "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
+            "release_version_edit_close", "release_version_edit_status",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
             "vault_status", "vault_open", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
@@ -53,6 +70,14 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
         if let Err(error) = tauri_build::try_build(attributes) {
             panic!("Tauri context generation failed: {error}");
+        }
+        // tauri-build 2.6.3 -> tauri-winres 0.3.6 -> embed-resource 3.0.11
+        // generates OUT_DIR/resource.lib for MSVC but links only Cargo bins.
+        // Reuse that same resource for the harness=false observation test.
+        if target == "x86_64-pc-windows-msvc" && cfg!(feature = "windows-installed-observation") {
+            let out_dir = env::var_os("OUT_DIR").expect("Windows observation resource linking requires OUT_DIR");
+            let resource = std::path::PathBuf::from(out_dir).join("resource.lib");
+            println!("cargo:rustc-link-arg-tests={}", resource.display());
         }
     }
 }

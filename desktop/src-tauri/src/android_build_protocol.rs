@@ -342,7 +342,7 @@ pub(crate) fn request(operation: &str, generation: &str, context: &Context, prof
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding) -> Result<Vec<u8>, BridgeError> {
     if !token(operation) || !token(generation) || !context.valid() || !toolchain.valid() { return Err(invalid()); }
     // Existing native identity projection is DATA; no offline permit is reused.
-    let observed = project.identity.preflight_identity();
+    let observed = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
     let identity = RootIdentity { device: observed.device, inode: observed.inode, mode: observed.mode,
         uid: observed.uid, gid: observed.gid };
     if !identity.valid() { return Err(invalid()); }
@@ -1033,7 +1033,7 @@ pub(crate) mod tests {
         // Existing synthetic identity is used ONLY as a serialization predicate;
         // no fixture registration, permit, native open or launch is invoked.
         let project = RegisteredRoot { path: "/PRIVATE_PROJECT".into(),
-            identity: crate::asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+            identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
         let bytes = request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
             &project, Path::new("/PRIVATE_CWD"), &tool).unwrap();
         let value = strict_data(&bytes, REQUEST_LIMIT, true).unwrap();
@@ -1044,6 +1044,10 @@ pub(crate) mod tests {
             "inventorySha256":"e".repeat(64)}));
         assert!(bytes.len() <= REQUEST_LIMIT && bytes.ends_with(b"\n"));
         assert!(!value["native"].as_object().unwrap().contains_key("qualified"));
+        let mut windows = project.clone();
+        windows.identity = crate::asset_source::ProjectIdentity::Windows { volume: u64::MAX, file_id: [0xff; 16] };
+        assert!(request(&"a".repeat(32), &"b".repeat(32), &context(), Profile::LinuxX64,
+            &windows, Path::new("/PRIVATE_CWD"), &tool).is_err());
         assert!(ToolchainBinding::new_data(Path::new("../PRIVATE"), identity.clone(), &"e".repeat(64)).is_err());
         for path in ["/a//b", "/a/../b", "/a/./b", "/a\\b", "/a:b", "/a\nb"] {
             assert!(ToolchainBinding::new_data(Path::new(path), identity.clone(), &"e".repeat(64)).is_err());

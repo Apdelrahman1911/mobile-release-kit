@@ -5,8 +5,11 @@ import hashlib, json, os, re, stat, sys
 # startup/stdlib/loader attestation or permission to run the compiler.
 PATH = '/usr/bin/python3.12'
 
-REF = 'refs/heads/verify/desktop-ubuntu-publication'
-ROUTE = (REF, 'publisher-helpers')
+METADATA_REF = 'refs/heads/verify/desktop-shell-host-metadata'
+SHELL_REF = 'refs/heads/verify/desktop-installed-shell'
+ROUTES = ((METADATA_REF, 'host-metadata-only', 'compile'),
+          (SHELL_REF, 'compile', 'compile'),
+          (SHELL_REF, 'observe', 'compile'))
 
 class Refused(Exception):
     pass
@@ -80,20 +83,21 @@ def context(e):
     need(e['GITHUB_ACTIONS'] == 'true' and e['RUNNER_ENVIRONMENT'] == 'github-hosted'
          and e['RUNNER_OS'] == 'Linux' and e['RUNNER_ARCH'] == 'X64'
          and e['GITHUB_EVENT_NAME'] == 'push' and e['GITHUB_REPOSITORY'] == repository
-         and (ref, e['GITHUB_JOB']) == ROUTE,
+         and (ref, e['MRK_INSTALLED_SHELL_CASE'], e['GITHUB_JOB']) in ROUTES,
          'provider-route')
     need(re.fullmatch(r'[0-9a-f]{40}', e['GITHUB_SHA']) is not None and e['GITHUB_SHA'] != '0' * 40
          and e['GITHUB_SHA'] == e['GITHUB_WORKFLOW_SHA'] == e['MRK_PUSH_EVENT_AFTER']
          and e['GITHUB_WORKFLOW_REF'] == repository + '/.github/workflows/desktop-ubuntu-publication.yml@' + ref
          and re.fullmatch(r'[1-9][0-9]{0,19}', e['GITHUB_RUN_ID']) is not None
-         and re.fullmatch(r'[1-9][0-9]{0,19}', e['GITHUB_RUN_ATTEMPT']) is not None, 'original-source-run')
+         and re.fullmatch(r'[1-9][0-9]{0,19}', e['GITHUB_RUN_ATTEMPT']) is not None
+         and (ref != METADATA_REF or e['GITHUB_RUN_ATTEMPT'] == '1'), 'original-source-run')
     need(e['ImageOS'] == 'ubuntu24'
          and re.fullmatch(r'[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}', e['ImageVersion']) is not None,
          'image-identity')
     return {key: e[key] for key in ('GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_WORKFLOW_SHA',
             'GITHUB_WORKFLOW_REF', 'GITHUB_REF', 'GITHUB_EVENT_NAME', 'GITHUB_RUN_ID',
             'GITHUB_RUN_ATTEMPT', 'RUNNER_ENVIRONMENT', 'ImageOS', 'ImageVersion',
-            'GITHUB_JOB')}
+            'GITHUB_JOB', 'MRK_INSTALLED_SHELL_CASE')}
 
 
 def main():

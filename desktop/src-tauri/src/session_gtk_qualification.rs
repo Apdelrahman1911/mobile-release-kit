@@ -1119,7 +1119,9 @@ pub(crate) fn main()->std::process::ExitCode {
     })();
     let context:Arc<Qualification>=match admitted {Ok(q)=>q,Err(_)=>{eprintln!("SG1 admission refused; no native qualification was run.");return std::process::ExitCode::FAILURE;}};
     let permit=FixtureAdmission {context:Some(context.clone())};
-    super::run_builder(super::builder().manage(context.clone()).manage(Mutex::new(Some(permit))));
+    if super::run_builder(super::builder().manage(context.clone()).manage(Mutex::new(Some(permit)))).is_err() {
+        return std::process::ExitCode::FAILURE;
+    }
     if context.phase.load(Ordering::SeqCst)==SPENT && context.wrote.load(Ordering::SeqCst) && !context.failed.load(Ordering::SeqCst) {
         std::process::ExitCode::SUCCESS
     } else {std::process::ExitCode::FAILURE}

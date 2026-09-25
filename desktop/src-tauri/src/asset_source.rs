@@ -1,8 +1,9 @@
-//! Original, read-only Linux credential custody. No pathname is renderer authority.
+//! Original read-only source custody. Linux credentials and the Mac/Windows
+//! project-only probes are separate; no pathname is renderer authority.
 //! The operation retains SourceBook outside its worker. A panic/uncertain close
 //! therefore cannot erase its original acquisition facts or authorize a retry.
 use std::{path::{Path, PathBuf}, sync::Arc};
-use crate::{asset_commands::Reason, credential_format::FileKind};
+use crate::{asset_commands::{ProjectPathField, Reason}, credential_format::FileKind};
 
 pub(crate) const PATH_LIMIT: usize = 4096;
 const COMPONENT_LIMIT: usize = 128;
@@ -43,8 +44,20 @@ impl DirectoryIdentity {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity { common: DirectoryIdentity, nlink: u64, size: u64, mtime: (i64, i64), ctime: (i64, i64) }
+/// A completed native selection, not a continuing directory lease or write
+/// authority. Windows keeps its full native ID; it never invents POSIX facts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectIdentity {
+    Posix(DirectoryIdentity),
+    Windows { volume: u64, file_id: [u8; 16] },
+}
+impl ProjectIdentity {
+    pub(crate) fn posix(self) -> Result<DirectoryIdentity, Reason> {
+        match self { Self::Posix(identity) => Ok(identity), Self::Windows { .. } => Err(Reason::UnsupportedPlatform) }
+    }
+}
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: DirectoryIdentity }
+pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: ProjectIdentity }
 
 /// Test-only registration from an actually held fixture directory. This is not
 /// a ProjectProbe or a picker/asset qualification, and no synthetic identity is
@@ -60,19 +73,67 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
             != (named.dev(), named.ino(), named.mode(), named.uid(), named.gid()) {
         return Err(Reason::SourceRefused);
     }
-    Ok(RegisteredRoot { path: path.to_path_buf(), identity: DirectoryIdentity {
+    Ok(RegisteredRoot { path: path.to_path_buf(), identity: ProjectIdentity::Posix(DirectoryIdentity {
         dev: actual.dev(), ino: actual.ino(), mode: actual.mode(), uid: actual.uid(), gid: actual.gid(),
-    } })
+    }) })
 }
 
 // Native-only metadata hint. Not serialized, hashed into an ID, or a capability
 // to recapture bytes. Every later registration probe must match fresh originals.
 pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity }
 pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin: Arc<OriginWitness> }
-pub(crate) struct ProjectProbe { path: PathBuf, identity: DirectoryIdentity }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl OriginWitness {
+    // Pure retained DATA accounting; this neither reopens nor qualifies a path.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        std::mem::size_of::<Self>().checked_add(self.path.capacity())?
+            .checked_add(self.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)
+    }
+}
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl CapturedSource {
+    pub(crate) fn memory_data(bytes: Vec<u8>) -> Self {
+        // Inert census DATA, not source-custody/identity or native test evidence.
+        let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100600, uid: 123, gid: 123 };
+        Self { bytes, origin: Arc::new(OriginWitness { path: "/inert/census".into(), ancestry: Vec::new(),
+            leaf: FileIdentity { common, nlink: 1, size: 0, mtime: (0, 0), ctime: (0, 0) } }) }
+    }
+}
+pub(crate) struct ProjectProbe { path: PathBuf, identity: ProjectIdentity }
 impl ProjectProbe {
     pub(crate) fn path(&self) -> &Path { &self.path }
-    pub(crate) fn identity(&self) -> DirectoryIdentity { self.identity }
+    pub(crate) fn identity(&self) -> ProjectIdentity { self.identity }
+}
+// Metadata-only, point-in-time descendant proof. No native absolute path,
+// payload, source witness or reusable file/write authority reaches the DTO.
+pub(crate) struct ProjectPathProbe { relative_path: String }
+impl ProjectPathProbe { pub(crate) fn into_relative_path(self) -> String { self.relative_path } }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Default)]
+pub(crate) struct InstalledCaptureCheckpoint {
+    reached: std::sync::atomic::AtomicBool, released: std::sync::atomic::AtomicBool,
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl InstalledCaptureCheckpoint {
+    pub(crate) fn reached(&self) -> bool { self.reached.load(std::sync::atomic::Ordering::SeqCst) }
+    pub(crate) fn release(&self) -> bool { !self.released.swap(true, std::sync::atomic::Ordering::SeqCst) }
+    fn wait(&self, stop: &mut dyn FnMut() -> bool) {
+        self.reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        while !self.released.load(std::sync::atomic::Ordering::SeqCst) && !stop() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct InstalledSourceFacts {
+    pub(crate) begun: bool, pub(crate) originals: usize, pub(crate) closes: usize, pub(crate) no_handle: usize,
+    pub(crate) reads: u32, pub(crate) eof: bool, pub(crate) bytes: usize,
+    pub(crate) terminal_checked: bool, pub(crate) terminal_matched: bool, pub(crate) settled: bool,
 }
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
@@ -124,16 +185,54 @@ mod linux {
         slots: Vec<Descriptor>, probes: Vec<LeafProbe>, begun: bool, terminal: bool,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
         trace: FixtureTrace,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        installed: InstalledSourceFacts,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        installed_checkpoint: Option<Arc<InstalledCaptureCheckpoint>>,
     }
     impl SourceBook {
         pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), begun: false, terminal: false,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
             trace: FixtureTrace::default(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            installed: InstalledSourceFacts::default(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            installed_checkpoint: None,
         } }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        pub(crate) fn installed_checkpoint(&mut self, checkpoint: Arc<InstalledCaptureCheckpoint>) -> bool {
+            if self.begun || self.installed_checkpoint.is_some() { return false; }
+            self.installed_checkpoint = Some(checkpoint); true
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        pub(crate) fn installed_facts(&self) -> InstalledSourceFacts {
+            // Closed states are written only by the one consuming close. A
+            // failed/no-handle acquisition is distinct, never counted a close.
+            InstalledSourceFacts { begun: self.begun, originals: self.slots.len(),
+                closes: self.slots.iter().filter(|slot| slot.state == OriginalState::Closed && slot.fd.is_none()).count(),
+                no_handle: self.slots.iter().filter(|slot| slot.state == OriginalState::NoHandle && slot.fd.is_none()).count(),
+                settled: self.not_started() || self.settled(), ..self.installed }
+        }
         pub(crate) fn settled(&self) -> bool {
             self.terminal && self.slots.iter().all(|slot| matches!(slot.state, OriginalState::Closed | OriginalState::NoHandle) && slot.fd.is_none())
         }
         pub(crate) fn not_started(&self) -> bool { !self.begun && self.slots.is_empty() }
+        // Heap backing only; the census separately includes this fixed book,
+        // mutex and Arc cells. settled()/not_started() NEVER imply zero capacity.
+        pub(crate) fn retained_bytes(&self) -> Option<usize> {
+            let slots = self.slots.capacity().checked_mul(std::mem::size_of::<Descriptor>())?;
+            let probes = self.probes.capacity().checked_mul(std::mem::size_of::<LeafProbe>())?;
+            let mut bytes = slots.checked_add(probes)?;
+            for slot in &self.slots { bytes = bytes.checked_add(slot.name.capacity())?; }
+            for probe in &self.probes { bytes = bytes.checked_add(probe.name.capacity())?; }
+            Some(bytes)
+        }
+        #[cfg(test)]
+        pub(crate) fn unstarted_backing_data() -> Self {
+            // Model the capacity retained if the second reservation refuses.
+            // No original descriptor, native call or settlement is fabricated.
+            let mut book = Self::new(); book.slots.try_reserve_exact(4).unwrap(); book
+        }
         fn begin(&mut self, capacity: usize, probes: usize) -> Result<(), Reason> {
             if self.begun || !self.slots.is_empty() { return Err(Reason::CleanupUnknown); }
             if capacity > DESCRIPTOR_LIMIT || probes > 32 { return Err(Reason::Capacity); }
@@ -267,7 +366,12 @@ mod linux {
             known && self.settled()
         }
         fn finish<T>(&mut self, result: Result<T, Reason>, stop: &mut dyn FnMut() -> bool) -> Result<T, Reason> {
-            let result = result.and_then(|value| { self.terminal_check(stop)?; Ok(value) });
+            let result = result.and_then(|value| {
+                let terminal = self.terminal_check(stop);
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                { self.installed.terminal_checked = true; self.installed.terminal_matched = terminal.is_ok(); }
+                terminal?; Ok(value)
+            });
             // Independent original closes run despite another close's failure.
             if !self.close_all() { return Err(Reason::CleanupUnknown); }
             checkpoint(stop)?; result
@@ -351,7 +455,7 @@ mod linux {
         let source = parts(&path)?;
         let (leaf_name, parents) = source.split_last().ok_or(Reason::SourceRefused)?;
         let mut root_parts = Vec::new(); root_parts.try_reserve_exact(roots.len()).map_err(|_| Reason::Capacity)?;
-        for root in roots { root_parts.push(parts(&root.path)?); }
+        for root in roots { root.identity.posix()?; root_parts.push(parts(&root.path)?); }
         let capacity = roster_limit(root_parts.iter().map(Vec::len).chain(std::iter::once(parents.len())), 1)?;
         book.begin(capacity, 0)?;
         let result = (|| {
@@ -360,7 +464,7 @@ mod linux {
             for (root, components) in roots.iter().zip(&root_parts) {
                 let chain = book.chain(components, stop)?;
                 let id = book.directory(*chain.last().ok_or(Reason::SourceRefused)?)?;
-                if id != root.identity { return Err(Reason::SourceChanged); } root_ids.push(id);
+                if ProjectIdentity::Posix(id) != root.identity { return Err(Reason::SourceChanged); } root_ids.push(id);
             }
             let ancestry_indices = book.chain(parents, stop)?;
             let mut ancestry = Vec::new(); ancestry.try_reserve_exact(ancestry_indices.len()).map_err(|_| Reason::Capacity)?;
@@ -381,6 +485,11 @@ mod linux {
                 checkpoint(stop)?;
                 let end = capacity.min(used.saturating_add(1024 * 1024));
                 let read = unistd::read(book.fd(leaf)?, &mut bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+                {
+                    book.installed.reads = book.installed.reads.checked_add(1).ok_or(Reason::Capacity)?;
+                    if read == 0 { book.installed.eof = true; book.installed.bytes = used; }
+                }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
                 {
                     let reads = book.trace.reads.get().checked_add(1).filter(|n| *n <= 4096);
@@ -396,6 +505,12 @@ mod linux {
                 if used > size { return Err(Reason::SourceChanged); }
             }
             bytes.truncate(size); // Capacity still charges size+1; no whole-file clone.
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            if let Some(checkpoint) = &book.installed_checkpoint {
+                // After this ORIGINAL EOF, before its terminal identity check.
+                // Receipt/relay loss cannot prevent STOP releasing the borrower.
+                checkpoint.wait(stop);
+            }
             Ok(CapturedSource { bytes, origin: Arc::new(OriginWitness { path: path.clone(), ancestry, leaf: file }) })
         })();
         book.finish(result, stop)
@@ -429,14 +544,175 @@ mod linux {
                 if file_identity(&metadata)? != origin.leaf { return Err(Reason::ExclusionUnconfirmed); }
                 book.probes.push(LeafProbe { parent, name: copy_bytes(leaf_name)?, identity: origin.leaf });
             }
-            Ok(ProjectProbe { path: path.clone(), identity: project })
+            Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project) })
         })();
         book.finish(result, stop)
+    }
+
+    struct ProjectPathSpelling<'a> { components: Vec<&'a [u8]>, root_depth: usize, relative_path: String }
+    fn project_path_spelling<'a>(root: &Path, path: &'a Path, field: ProjectPathField) -> Result<ProjectPathSpelling<'a>, Reason> {
+        // Compare exact admitted component bytes BEFORE any SourceBook effect.
+        // Path::components/strip_prefix/canonicalize would normalize spellings
+        // this route must refuse. In particular /project2 is not /project.
+        let root_parts = parts(root)?;
+        let components = parts(path)?;
+        if root.to_str().is_none() || path.to_str().is_none() || components.len() <= root_parts.len()
+            || !components.starts_with(&root_parts) { return Err(Reason::SourceRefused); }
+        let start = root.as_os_str().as_bytes().len() + usize::from(!root_parts.is_empty());
+        let relative = std::str::from_utf8(&path.as_os_str().as_bytes()[start..]).map_err(|_| Reason::SourceRefused)?;
+        if !crate::release_version_protocol::relative_display_path(relative)
+            || !field.accepts_basename(relative.rsplit('/').next().ok_or(Reason::SourceRefused)?) { return Err(Reason::SourceRefused); }
+        let relative_path = crate::asset_commands::copy_text(relative).map_err(|error| error.reason)?;
+        Ok(ProjectPathSpelling { components, root_depth: root_parts.len(), relative_path })
+    }
+    fn project_path_file_leaf(file: FileIdentity, parent: DirectoryIdentity) -> bool {
+        file.common.mode & SFlag::S_IFMT.bits() == SFlag::S_IFREG.bits()
+            && file.nlink == 1 && file.common.dev == parent.dev
+    }
+    pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, path: PathBuf, field: ProjectPathField,
+        stop: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> {
+        let root_identity = root.identity.posix()?;
+        let spelling = project_path_spelling(&root.path, &path, field)?;
+        let file = !field.directory();
+        let capacity = roster_limit([spelling.components.len() - usize::from(file)], 0)?;
+        book.begin(capacity, usize::from(file))?;
+        let result = (|| {
+            book.root(stop)?;
+            let root_chain = book.chain(&spelling.components[..spelling.root_depth], stop)?;
+            let mut parent = *root_chain.last().ok_or(Reason::SourceRefused)?;
+            if book.directory(parent)? != root_identity { return Err(Reason::SourceChanged); }
+            let (leaf, parents) = spelling.components[spelling.root_depth..].split_last().ok_or(Reason::SourceRefused)?;
+            // Descendants continue from the SAME checked registered-root
+            // descriptor, never a second pathname traversal or fresh parent.
+            for name in parents { parent = book.child(parent, name, false, stop)?; }
+            if field.directory() {
+                book.child(parent, leaf, false, stop)?;
+            } else {
+                let name = copy_bytes(leaf)?;
+                let parent_identity = book.directory(parent)?;
+                checkpoint(stop)?;
+                // No child(..., true), open/read/hash, extension requirement or
+                // credential private_file change. Only no-follow leaf metadata.
+                let metadata = stat::fstatat(book.fd(parent)?, OsStr::from_bytes(leaf), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_| Reason::SourceRefused)?;
+                checkpoint(stop)?;
+                let identity = file_identity(&metadata)?;
+                if !project_path_file_leaf(identity, parent_identity) { return Err(Reason::SourceRefused); }
+                book.probes.push(LeafProbe { parent, name, identity });
+            }
+            Ok(ProjectPathProbe { relative_path: spelling.relative_path })
+        })();
+        // Includes the original no-follow leaf probe and directory checks,
+        // then every original consuming close, even after refusal/STOP.
+        book.finish(result, stop)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_project_path_source_contracts() {
+        // Pure spelling, policy and custody-model contracts only. No stat,
+        // descriptor, real filesystem proof or native qualification is created.
+        let root = Path::new("/inert/project");
+        for (path, field, relative) in [
+            ("/inert/project/VERSION", ProjectPathField::VersionSource, "VERSION"),
+            ("/inert/project/config/release.json", ProjectPathField::VersionSource, "config/release.json"),
+            ("/inert/project/ios/App.xcodeproj", ProjectPathField::IosProject, "ios/App.xcodeproj"),
+            ("/inert/project/ios/App.xcworkspace", ProjectPathField::IosWorkspace, "ios/App.xcworkspace"),
+            ("/inert/project/metadata/en-US", ProjectPathField::MetadataRoot, "metadata/en-US"),
+        ] {
+            let spelling = project_path_spelling(root, Path::new(path), field).expect("contained spelling");
+            assert_eq!(spelling.relative_path, relative); assert_eq!(spelling.root_depth, 2);
+            assert_eq!(spelling.components[spelling.root_depth..].join(&b'/'), relative.as_bytes());
+        }
+        assert_eq!(project_path_spelling(Path::new("/"), Path::new("/release/VERSION"), ProjectPathField::VersionSource)
+            .expect("root descendant").relative_path, "release/VERSION");
+        assert_eq!(project_path_spelling(Path::new("/inert/prøject"), Path::new("/inert/prøject/versión"), ProjectPathField::VersionSource)
+            .expect("exact UTF-8").relative_path, "versión");
+        for path in ["/inert/project", "/inert/project2/VERSION", "/inert/other/VERSION", "/VERSION", "relative/VERSION",
+            "/inert/project//VERSION", "/inert/project/./VERSION", "/inert/project/../VERSION", "/inert/project/VERSION/",
+            "/inert/project/.hidden", "/inert/project/PrIvAtE/VERSION", "/inert/project/secrets/VERSION",
+            "/inert/project/dir/a\0b", "/inert/project/dir/a\nb", "/inert/project/dir/name ", "/inert/project/dir/name.",
+            "/inert/project/dir/NUL.txt", "/inert/project/dir/a\\b", "/inert/project/dir/a:b"] {
+            assert!(project_path_spelling(root, Path::new(path), ProjectPathField::VersionSource).is_err());
+        }
+        for bad_root in ["relative", "/inert//project", "/inert/./project", "/inert/project/"] {
+            assert!(project_path_spelling(Path::new(bad_root), Path::new("/inert/project/VERSION"), ProjectPathField::VersionSource).is_err());
+        }
+        assert!(project_path_spelling(root, Path::new(OsStr::from_bytes(b"/inert/project/bad\xff")), ProjectPathField::VersionSource).is_err());
+        assert!(project_path_spelling(Path::new(OsStr::from_bytes(b"/inert/pr\xffject")),
+            Path::new(OsStr::from_bytes(b"/inert/pr\xffject/VERSION")), ProjectPathField::VersionSource).is_err());
+        let twelve = format!("/inert/project/{}", vec!["a"; 12].join("/"));
+        assert!(project_path_spelling(root, Path::new(&twelve), ProjectPathField::MetadataRoot).is_ok());
+        assert!(project_path_spelling(root, Path::new(&format!("{twelve}/a")), ProjectPathField::MetadataRoot).is_err());
+        let exactly_512 = format!("{}/{}/c", "a".repeat(255), "b".repeat(254));
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{exactly_512}")), ProjectPathField::VersionSource).is_ok());
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{exactly_512}d")), ProjectPathField::VersionSource).is_err());
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{}", "é".repeat(128))), ProjectPathField::VersionSource).is_err());
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{}", "a".repeat(PATH_LIMIT))), ProjectPathField::VersionSource).is_err());
+        for (field, path) in [(ProjectPathField::IosProject, "/inert/project/App.XCODEPROJ"),
+            (ProjectPathField::IosWorkspace, "/inert/project/App.xcodeproj"),
+            (ProjectPathField::IosProject, "/inert/project/App.xcodeproj/child")] {
+            assert!(project_path_spelling(root, Path::new(path), field).is_err());
+        }
+
+        let parent = DirectoryIdentity { dev: 1, ino: 2, mode: 0o40755, uid: 123, gid: 456 };
+        let file = FileIdentity { common: DirectoryIdentity { ino: 3, mode: 0o100644, ..parent }, nlink: 1, size: 0, mtime: (1, 2), ctime: (3, 4) };
+        assert!(project_path_file_leaf(file, parent));
+        assert!(!private_file(file.common.mode)); // Version metadata is not a weakening of credential capture.
+        for nlink in [0, 2, u64::MAX] { assert!(!project_path_file_leaf(FileIdentity { nlink, ..file }, parent)); }
+        assert!(!project_path_file_leaf(FileIdentity { common: DirectoryIdentity { dev: 2, ..file.common }, ..file }, parent));
+        for mode in [0o040755, 0o120777, 0o010600, 0o020600, 0o060600, 0o140600] {
+            assert!(!project_path_file_leaf(FileIdentity { common: DirectoryIdentity { mode, ..file.common }, ..file }, parent));
+        }
+        assert!(project_path_file_leaf(FileIdentity { size: u64::MAX, ..file }, parent)); // No invented content/size policy.
+        for changed in [FileIdentity { nlink: 2, ..file }, FileIdentity { size: 1, ..file },
+            FileIdentity { mtime: (2, 2), ..file }, FileIdentity { ctime: (3, 5), ..file },
+            FileIdentity { common: DirectoryIdentity { ino: 4, ..file.common }, ..file }] { assert!(changed != file); }
+        for changed in [DirectoryIdentity { dev: 2, ..parent }, DirectoryIdentity { ino: 3, ..parent },
+            DirectoryIdentity { mode: 0o40700, ..parent }, DirectoryIdentity { uid: 456, ..parent },
+            DirectoryIdentity { gid: 123, ..parent }] { assert!(changed != parent); }
+
+        // The real probe rejects these before even SourceBook::begin. A
+        // permanently-STOPped callback additionally forbids any native effect
+        // if that lexical barrier regresses; this test never issues a syscall.
+        let registered = RegisteredRoot { path: root.to_path_buf(), identity: ProjectIdentity::Posix(parent) };
+        for (path, field) in [("/inert/outside/VERSION", ProjectPathField::VersionSource),
+            ("/inert/project2/VERSION", ProjectPathField::VersionSource), ("/inert/project", ProjectPathField::MetadataRoot),
+            ("/inert/project/App.XCODEPROJ", ProjectPathField::IosProject)] {
+            let mut book = SourceBook::new();
+            let result = probe_project_path(&mut book, &registered, PathBuf::from(path), field, &mut || true);
+            assert!(matches!(result, Err(Reason::SourceRefused))); assert!(book.not_started() && !book.settled());
+        }
+        let mut book = SourceBook::new(); book.begin(1, 1).expect("bounded model reservation");
+        book.reserve(None, b"/").expect("model slot"); book.slots[0].state = OriginalState::Acquiring; book.terminal = true;
+        assert!(!book.settled()); book.slots[0].state = OriginalState::Unknown; assert!(!book.settled());
+        // A spent/uncertain close is never retried or changed to a known receipt.
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn lookup_source_charge_includes_refused_and_closed_retained_names() {
+            let mut book = SourceBook::unstarted_backing_data();
+            assert!(book.not_started() && !book.settled());
+            let cells = book.slots.capacity() * std::mem::size_of::<Descriptor>();
+            assert_eq!(book.retained_bytes(), Some(cells)); assert!(cells > 0);
+            book.begin(4, 1).unwrap(); book.reserve(None, b"/inert").unwrap();
+            let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100600, uid: 123, gid: 123 };
+            let mut name = Vec::with_capacity(91); name.extend_from_slice(b"data"); name.clear();
+            book.probes.push(LeafProbe { parent: 0, name,
+                identity: FileIdentity { common, nlink: 1, size: 0, mtime: (0, 0), ctime: (0, 0) } });
+            let retained = book.slots.capacity() * std::mem::size_of::<Descriptor>()
+                + book.probes.capacity() * std::mem::size_of::<LeafProbe>()
+                + book.slots[0].name.capacity() + book.probes[0].name.capacity();
+            // Closed/NoHandle are in-memory predicate inputs, NOT close receipts.
+            book.slots[0].state = OriginalState::NoHandle; book.terminal = true;
+            assert!(book.settled()); assert_eq!(book.retained_bytes(), Some(retained));
+            assert!(book.retained_bytes().unwrap() > cells);
+            book.slots.clear(); book.probes.clear();
+            assert!(book.retained_bytes().unwrap() >= cells); // Vec capacity remains.
+        }
+        #[test]
+        fn project_path_containment_type_and_original_custody_are_conservative() { assert_project_path_source_contracts(); }
         #[test]
         fn native_spelling_subset_is_byte_exact_without_resolving_anything() {
             for bad in ["relative/a.jks", "/tmp//a.jks", "/tmp/./a.jks", "/tmp/../a.jks", "/tmp/a.jks/", "/tmp/a\0.jks"] { assert!(parts(Path::new(bad)).is_err()); }
@@ -460,9 +736,24 @@ mod linux {
     }
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-pub(crate) use linux::{SourceBook, capture, probe_project, suffix, path_hint};
+pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use linux::assert_project_path_source_contracts;
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "asset_source_macos.rs"]
+mod macos;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[path = "asset_source_windows.rs"]
+mod windows;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) use windows::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 mod unsupported {
     use super::*;
     pub(crate) struct SourceBook;
@@ -471,9 +762,11 @@ mod unsupported {
     pub(crate) fn path_hint(_: &Path) -> Result<(), Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn capture(_: &mut SourceBook, _: PathBuf, _: &[RegisteredRoot], _: FileKind, _: &mut dyn FnMut() -> bool) -> Result<CapturedSource, Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn probe_project(_: &mut SourceBook, _: PathBuf, _: &[Arc<OriginWitness>], _: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> { Err(Reason::UnsupportedPlatform) }
+    pub(crate) fn probe_project_path(_: &mut SourceBook, _: &RegisteredRoot, _: PathBuf, _: ProjectPathField, _: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> { Err(Reason::UnsupportedPlatform) }
 }
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-pub(crate) use unsupported::{SourceBook, capture, probe_project, suffix, path_hint};
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
 #[cfg(test)]
 mod tests {
@@ -504,14 +797,32 @@ mod tests {
         let wire = identity.workflow_identity();
         assert_eq!(wire.device,u64::MAX.to_string()); assert_eq!(wire.inode,u64::MAX.to_string());
         assert_eq!((wire.mode,wire.uid,wire.gid),(0o40750,u32::MAX,u32::MAX-1));
-        let original = WorkflowRegistration { generation:7,root:RegisteredRoot { path:PathBuf::from("/inert/project"),identity } };
+        let original = WorkflowRegistration { generation:7,root:RegisteredRoot { path:PathBuf::from("/inert/project"),identity: ProjectIdentity::Posix(identity) } };
         assert!(original == original.clone());
         for altered in [DirectoryIdentity { dev:1,..identity },DirectoryIdentity { ino:1,..identity },
             DirectoryIdentity { mode:0o40700,..identity },DirectoryIdentity { uid:1,..identity },DirectoryIdentity { gid:1,..identity }] {
-            let mut changed = original.clone(); changed.root.identity = altered; assert!(original != changed);
+            let mut changed = original.clone(); changed.root.identity = ProjectIdentity::Posix(altered); assert!(original != changed);
         }
         let mut changed = original.clone(); changed.root.path = PathBuf::from("/inert/other"); assert!(original != changed);
         let mut changed = original.clone(); changed.generation += 1; assert!(original != changed);
         // Value comparisons only: no stat/open, filesystem or registration.
+    }
+    #[test]
+    fn windows_project_ids_preserve_all_bits_and_cannot_project_posix_authority() {
+        let original = ProjectIdentity::Windows { volume: u64::MAX, file_id: [0xff; 16] };
+        assert!(original.posix().is_err());
+        for byte in 0..16 {
+            let mut changed = [0xff; 16]; changed[byte] = 0xfe;
+            assert!(original != ProjectIdentity::Windows { volume: u64::MAX, file_id: changed });
+        }
+        assert!(original != ProjectIdentity::Windows { volume: u64::MAX - 1, file_id: [0xff; 16] });
+        let posix = DirectoryIdentity::synthetic_evidence_identity();
+        assert!(ProjectIdentity::Posix(posix).posix().is_ok_and(|actual| actual == posix));
+        assert!(original != ProjectIdentity::Posix(posix));
+        let mut root = RegisteredRoot { path: PathBuf::from(if cfg!(windows) { r"C:\inert-project" } else { "/inert-project" }),
+            identity: ProjectIdentity::Posix(posix) };
+        assert!(crate::candidate_evidence_protocol::params(&root).is_ok());
+        root.identity = original;
+        assert!(crate::candidate_evidence_protocol::params(&root).is_err());
     }
 }

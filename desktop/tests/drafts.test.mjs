@@ -1,6 +1,9 @@
-// Inert UI state checks only. No DOM, filesystem fixtures, network, or child tools.
+// Inert UI state and observation-script checks. No real DOM, filesystem fixtures,
+// network, or child tools; the native observer expression is read as source DATA.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { Script } from 'node:vm';
 import { initialWorkspace, isDirty, retainedEditAttention, validationFresh, workspaceReducer as reduce } from '../src/drafts.ts';
 import { configurationStatus, draftStatus } from '../src/certainty.ts';
 
@@ -148,4 +151,61 @@ test('format-valid is informational only; preview never claims a real observatio
   state = reduce(state, { type: 'validate-done', projectId: 'a', requestId: 2, result: validation });
   assert.deepEqual(draftStatus(state.projects.a), { label: 'Format-valid · not saved', tone: 'info' });
   assert.equal(state.projects.a.validation.assurance.releaseReadiness, 'unknown');
+});
+
+// Exercise the exact production observer expression, not a second implementation
+// of its publication gate. Native WebView/IPC behavior still requires Windows.
+const windowsObservation = readFileSync(new URL('../src-tauri/src/installed_shell_observation_windows.rs', import.meta.url), 'utf8');
+const refreshedBodies = [...windowsObservation.matchAll(/Step::Refreshed => r#"([\s\S]*?)"#,/g)];
+assert.equal(refreshedBodies.length, 1);
+const refreshedScript = new Script(`(() => {${refreshedBodies[0][1]}})()`);
+function refreshedSample({ configuration = 'Format-valid only', label = 'Refresh static view', disabled = false,
+  name = 'project', facts = true, dashboard = true, buttons = 1, error = false } = {}) {
+  const node = (textContent) => ({ textContent });
+  const refresh = { textContent: label, disabled, click() { throw new Error('Readback must never repeat Refresh'); } };
+  return refreshedScript.runInNewContext({
+    document: {
+      querySelector(selector) {
+        switch (selector) {
+          case '.observation-facts': return facts ? node('retained facts') : null;
+          case '.project-identity h2': return node(name);
+          case '.project-badges .badge': return node(configuration);
+          default: throw new Error(`Unexpected selector: ${selector}`);
+        }
+      },
+      querySelectorAll(selector) {
+        switch (selector) {
+          case '.observation-card > .section-heading button': return Array.from({ length: buttons }, () => refresh);
+          case '[role="alert"] strong': return error ? [node('Static observation unavailable')] : [];
+          default: throw new Error(`Unexpected selector: ${selector}`);
+        }
+      },
+    },
+    selected: (page) => page === 'Dashboard' && dashboard,
+    text: (element) => (element?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    show: (element) => assert.ok(element),
+    wait: () => ({ state: 'wait' }),
+  }, { timeout: 100 });
+}
+
+test('Windows refresh observation waits for actual renderer publication without repeating effects', () => {
+  for (const sample of [
+    { configuration: 'Not configured' },
+    { configuration: 'Not configured', label: 'Reading…', disabled: true },
+    { configuration: 'Format-valid only', label: 'Reading…', disabled: true },
+    { facts: false }, { dashboard: false },
+  ]) assert.equal(refreshedSample(sample).state, 'wait', JSON.stringify(sample));
+  const actual = refreshedSample();
+  assert.equal(actual.state, 'ready');
+  assert.equal(actual.name, 'project');
+  assert.equal(actual.configuration, 'Format-valid only');
+});
+
+test('Windows refresh observation refuses errors and inconsistent DOM instead of waiting or passing', () => {
+  for (const sample of [
+    { configuration: 'Stale observation' }, { configuration: 'Needs attention' }, { configuration: 'Unavailable' },
+    { label: 'Reading…', disabled: false }, { disabled: true }, { label: 'Unexpected' },
+    { error: true }, { error: true, configuration: 'Not configured' },
+    { name: 'another project' }, { buttons: 0 }, { buttons: 2 },
+  ]) assert.throws(() => refreshedSample(sample), undefined, JSON.stringify(sample));
 });

@@ -1,4 +1,4 @@
-"""One disposable Ubuntu P0/F1 package lifecycle, never product qualification.
+"""Fixed Ubuntu P0/F1 lifecycle and installed candidate, never qualification.
 
 The system manager owns the root service before its first input copy. Inside it
 the protected current core owns ordinary commands. The nonroot systemd client
@@ -7,6 +7,7 @@ No accounts, namespace/mount changes, general commands, retry or published-runti
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import errno
 import fcntl
 import hashlib
@@ -16,27 +17,1546 @@ import math
 import os
 from pathlib import Path
 import re
+import resource
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 
 ENTRY = "desktop/tools/ubuntu_publication_lifecycle.py"
 TARGET = "x86_64-unknown-linux-gnu"
 PACKAGE = "mobile-release-kit-desktop"
-M = "e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"
-F1 = "3a075688d6bc7f69dbdaa017b5327d8ca892e12b49b0c2012a6cbea1f79a6061"
+M = "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"
+F1 = "1270d1d7d9427fff260bb1e79f51c1c3c14145651db87014b0ee9d08d601c112"
 Q = "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"
 USER_TEST = "installed_runtime::platform_native_tests::nonroot_exact_ubuntu_platform"
+INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for key, suffix in (
+    ("positive", "capabilities_and_catalog_retire_originals"),
+    ("refuse-writable", "writable_ancestor_refuses_and_retires"),
+    ("refuse-pth", "extra_startup_refuses_and_retires"),
+    ("deadline", "deadline_before_claim_retires"),
+    ("shutdown", "shutdown_with_child_retires"),
+    ("emfile", "creation_emfile_retains_unknown"),
+    ("overlap", "child_spans_f1_publication"))}
+CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
+EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
+SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
+SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
+                           "offline-drift", "offline-cancel", "offline-settlement")
+# Preserve all eighteen existing cases; the last case expects one exact raw failure.
+SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
+               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure")
+SHELL_PUBLIC_FILE_LIMIT = 160  # Exact nineteen-case roster:158; non-shell remains128.
+SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
+SHELL_FAILURE_LABEL_LIMIT = 512
+SHELL_PATH_FAILURE_FRAME_BOUND = 256
+SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission stays unchanged.
+SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
+SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
+# Literal observer labels only; never a prefix parser or raw-output escape.
+SHELL_FAILURE_STEPS = (
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Environment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Dashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Selected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSnapshot\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Settings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Suggest\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSuggestion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Adopt\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterRepository\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterSha\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProposeGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadProposal\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRetainedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaveReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=KeepReviewing\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadKeptReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReopenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReopenedConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Acknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Apply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedDashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Refresh\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersionCard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Metadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterTitle\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterShortDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterFullDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ValidateMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataValidation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSavedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Artifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CancelEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=InspectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CandidateSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCandidateDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareNoop\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadNoopReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Close\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Quit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathPreview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathBrowse\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSet\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathField\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathNavigation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowPin\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadPin\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowStart\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowOpenText\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadKept\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReconfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadReconfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowAcknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadResult\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=WorkflowReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionNavigate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionOpen\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionContext\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionConfigure\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionChoose\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionSetFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionActivateFile\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionCapture\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFields\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionPrepare\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionKeep\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionAssign\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRecord\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionRemove\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionStaleAction\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDiscard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReload\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionLoss\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionDeadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionQuitPreserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionFinality\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataNavigate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataLoad\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadLoaded\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataShort\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataFull\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataValidate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadValidation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataOpenText\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataCloseReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadClosed\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataConfirm\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataCheck\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadChecked\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataType\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadTyped\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataApply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataRefresh\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+)
+SHELL_FAILURE_BOUNDARIES = (
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=result\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
+)
+SHELL_BOOTSTRAP_PROGRESS = (
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=not-sampled\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=attachment\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=page-load\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=original-registry-sample\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-catalog\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=held-app-info\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n",
+    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n",
+)
+# Only public observer categories; these do not establish native state/finality.
+SHELL_PATH_REJECTIONS = (
+    b"not-recorded", b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding",
+    b"gtk-owner-interrupted", b"gtk-owner-facts", b"gtk-dialog-properties", b"gtk-initial-folder", b"gtk-target",
+    b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-observer-endpoint", b"gtk-dialog-record",
+    b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent", b"gtk-filename-different",
+    b"gtk-fixture-transition", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-state", b"gtk-dispatch",
+    b"gtk-destroy-state", b"gtk-release-state",
+)
+SHELL_SESSION_REJECTIONS = (
+    b"not-recorded", b"unknown-native-snapshot", b"native-readiness-invariant", b"evaluation-budget",
+    b"unavailable-projection-script", b"evaluation-dispatch", b"step-pending-invariant",
+    b"gtk-thread", b"gtk-dialog-book", b"gtk-dialog-original", b"gtk-owner-binding", b"gtk-owner-interrupted", b"gtk-owner-facts",
+    b"gtk-dialog-properties", b"gtk-selection-setter", b"gtk-response-widget", b"gtk-action-widget", b"gtk-dialog-record",
+    b"gtk-observer-endpoint", b"gtk-selection-state", b"gtk-activation-state", b"gtk-filename-state", b"gtk-filename-absent",
+    b"gtk-filename-different", b"gtk-response-state", b"gtk-response-contract", b"gtk-return-role", b"gtk-return-state",
+    b"gtk-destroy-state", b"gtk-release-state",
+    b"lost-native-snapshot",
+    b"unbound-native-snapshot",
+    b"request-counter-underflow",
+    b"request-counter-surplus",
+    b"stale-reply-contract",
+    b"capability-cleanup-unknown",
+    b"capability-shutdown",
+    b"capability-document-lost",
+    b"capability-unsupported-platform",
+    b"capability-unqualified",
+    b"capability-closed",
+    b"capability-unavailable",
+    b"reply-asset-invalid-request",
+    b"reply-asset-closed",
+    b"reply-asset-unqualified",
+    b"reply-asset-unsupported-platform",
+    b"reply-asset-unsupported-fs",
+    b"reply-asset-unsupported-format",
+    b"reply-asset-busy",
+    b"reply-asset-source-refused",
+    b"reply-asset-source-changed",
+    b"reply-asset-material-limit",
+    b"reply-asset-parser-limit",
+    b"reply-asset-project-overlap",
+    b"reply-asset-excl-unconfirmed",
+    b"reply-asset-capacity",
+    b"reply-assessment-context-stale",
+    b"reply-asset-user-cancelled",
+    b"reply-asset-review-expired",
+    b"reply-asset-deadline",
+    b"reply-asset-document-lost",
+    b"reply-asset-shutdown",
+    b"reply-asset-cleanup-unknown",
+    b"reply-assessment-invalid-request",
+    b"reply-assessment-limit",
+    b"reply-assessment-version",
+    b"reply-assessment-policy-stale",
+    b"reply-assessment-context-invalid",
+    b"reply-assessment-unavailable",
+    b"reply-busy",
+    b"reply-shutting-down",
+    b"reply-query-timeout",
+    b"reply-cleanup-unknown",
+    b"reply-code-unavailable",
+)
+SHELL_SESSION_WAITS = (
+    b"not-sampled", b"request-not-yet-seen", b"native-reply-pending", b"original-owner-unsettled",
+    b"native-phase-not-ready", b"rendered-display-mismatch", b"rendered-control-mismatch",
+    b"gtk-dialog-absent", b"gtk-action-insensitive", b"gtk-selection-pending",
+)
+# v2 first document transition, plus a single later cached original R1 sample.
+# Neither association nor none-recorded establishes causation or settlement.
+SHELL_SESSION_ORIGINS = (
+    b"not-recorded", b"op-cleanup", b"registry", b"coord-lock", b"coord-join", b"supervisor-disabled",
+    b"staged-collision", b"install-retire", b"retain-retire", b"drain-retire", b"staged-refusal", b"gate-poisoned", b"exhausted",
+)
+SHELL_SESSION_DETAILS = (
+    b"none", b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown",
+    b"document-lost", b"other", b"new", b"pending", b"returned", b"failed", b"unavailable",
+)
+SHELL_SESSION_ASSOCIATIONS = (b"bound", b"unassociated")
+SHELL_SESSION_QUERY_ERRORS = (b"none", b"timeout", b"cleanup", b"shutdown", b"protocol", b"engine", b"io", b"busy", b"unavailable", b"other")
+SHELL_SESSION_QUERY_CAUSES = (
+    b"none", b"sel-profile", b"sel-compile", b"sel-method", b"inspection", b"acq-entry", b"acq-custody", b"acq-lock",
+    b"capability", b"prepare", b"final-gate", b"final-claim", b"spawn-pfd", b"spawn-sfd", b"spawn-mem", b"spawn-res",
+    b"spawn-deny", b"spawn-miss", b"spawn-exec", b"spawn-other", b"response",
+)
+# v5's immutable first Unknown edge, not a worker or document failure cause.
+SHELL_SESSION_UNKNOWN_BOUNDARIES = (
+    b"na", b"unavailable", b"not-recorded", b"unspecified", b"transfer", b"inspection", b"acquisition",
+    b"native-observe", b"settlement", b"management", b"observer-loss", b"reply-loss", b"clock",
+    b"retire-clock", b"child-missing", b"child-wait", b"io", b"restore-limit", b"dev-observe",
+)
+# v3 original Prepare error provenance, independent of firstOrigin/Q/K.
+SHELL_SESSION_ASSESSMENT_ORIGINS = (b"none", b"request", b"bridge", b"result")
+SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES = (
+    b"runtime-unavailable", b"protocol", b"engine", b"io", b"output-limit", b"assessment-unavailable",
+    b"known-assessment", b"busy", b"shutdown", b"timeout", b"cleanup", b"retryable", b"other",
+)
+SHELL_SESSION_ASSESSMENT_RESULT_CLASSES = (b"value", b"bound", b"shape", b"dto", b"semantics")
+# v4 preserves the same original AdmissionFailure, never infers native state.
+SHELL_SESSION_ASSESSMENT_ADMISSIONS = (
+    b"na", b"unsupported-platform", b"missing-compile-anchor", b"stopped", b"deadline",
+    b"native-unavailable", b"native-denied", b"namespace", b"mount", b"ownership",
+    b"extended-attributes", b"identity-changed", b"manifest", b"inventory", b"bounds",
+    b"already-used", b"interrupted", b"close-uncertain", b"ledger-invariant",
+    b"transfer-unavailable", b"destination-occupied",
+)
+SHELL_SESSION_MANAGEMENT_JOINS = b"prmcxfi"
+# Exact refused public-spelling IDs only; not a prefix/grammar or object/cause claim.
+# Canonical roster body SHA-256: bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710
+SHELL_SESSION_PUBLIC_MAP_WORKERS = (
+    b"map-x-aa", b"map-x-ab", b"map-x-ac", b"map-x-ad", b"map-x-ae", b"map-x-af", b"map-x-ag", b"map-x-ah", b"map-x-ai",
+    b"map-x-aj", b"map-x-ak", b"map-x-al", b"map-x-am", b"map-x-an", b"map-x-ao", b"map-x-ap", b"map-x-aq", b"map-x-ar",
+    b"map-x-as", b"map-x-at", b"map-x-au", b"map-x-av", b"map-x-aw", b"map-x-ax", b"map-x-ay", b"map-x-az", b"map-x-ba",
+    b"map-x-bb", b"map-x-bc", b"map-x-bd", b"map-x-be", b"map-x-bf", b"map-x-bg", b"map-x-bh", b"map-x-bi", b"map-x-bj",
+    b"map-x-bk", b"map-x-bl", b"map-x-bm", b"map-x-bn", b"map-x-bo", b"map-x-bp", b"map-x-bq", b"map-x-br", b"map-x-bs",
+    b"map-x-bt", b"map-x-bu", b"map-x-bv", b"map-x-bw", b"map-x-bx", b"map-x-by", b"map-x-bz", b"map-x-ca", b"map-x-cb",
+    b"map-x-cc", b"map-x-cd", b"map-x-ce", b"map-x-cf", b"map-x-cg", b"map-x-ch", b"map-x-ci", b"map-x-cj", b"map-x-ck",
+    b"map-x-cl", b"map-x-cm", b"map-x-cn", b"map-x-co", b"map-x-cp", b"map-x-cq", b"map-x-cr", b"map-x-cs", b"map-x-ct",
+    b"map-x-cu", b"map-x-cv", b"map-x-cw", b"map-x-cx", b"map-x-cy", b"map-x-cz", b"map-x-da", b"map-x-db", b"map-x-dc",
+    b"map-x-dd", b"map-x-de", b"map-x-df", b"map-x-dg", b"map-x-dh", b"map-x-di", b"map-x-dj", b"map-x-dk", b"map-x-dl",
+    b"map-x-dm", b"map-x-dn", b"map-x-do", b"map-x-dp", b"map-x-dq", b"map-x-dr", b"map-x-ds", b"map-x-dt", b"map-x-du",
+    b"map-x-dv", b"map-x-dw", b"map-x-dx", b"map-x-dy", b"map-x-dz", b"map-x-ea", b"map-x-eb", b"map-x-ec", b"map-x-ed",
+    b"map-x-ee", b"map-x-ef", b"map-x-eg", b"map-x-eh", b"map-x-ei", b"map-x-ej", b"map-x-ek", b"map-x-el", b"map-x-em",
+    b"map-x-en", b"map-x-eo", b"map-x-ep", b"map-x-eq", b"map-x-er", b"map-x-es", b"map-x-et", b"map-x-eu", b"map-x-ev",
+    b"map-x-ew", b"map-x-ex", b"map-x-ey", b"map-x-ez", b"map-x-fa", b"map-x-fb", b"map-x-fc", b"map-x-fd", b"map-x-fe",
+    b"map-x-ff", b"map-x-fg", b"map-x-fh", b"map-x-fi", b"map-x-fj", b"map-x-fk", b"map-x-fl", b"map-x-fm", b"map-x-fn",
+    b"map-x-fo", b"map-x-fp", b"map-x-fq", b"map-x-fr", b"map-x-fs", b"map-x-ft", b"map-x-fu", b"map-x-fv", b"map-x-fw",
+    b"map-x-fx", b"map-x-fy", b"map-x-fz", b"map-x-ga", b"map-x-gb", b"map-x-gc", b"map-x-gd", b"map-x-ge", b"map-x-gf",
+    b"map-x-gg", b"map-x-gh", b"map-x-gi", b"map-x-gj", b"map-x-gk", b"map-x-gl", b"map-x-gm", b"map-x-gn", b"map-x-go",
+    b"map-x-gp", b"map-x-gq", b"map-x-gr", b"map-x-gs", b"map-x-gt", b"map-x-gu", b"map-x-gv", b"map-x-gw", b"map-x-gx",
+    b"map-x-gy", b"map-x-gz", b"map-x-ha", b"map-x-hb", b"map-x-hc", b"map-x-hd", b"map-x-he", b"map-x-hf", b"map-x-hg",
+    b"map-x-hh", b"map-x-hi", b"map-x-hj", b"map-x-hk", b"map-x-hl", b"map-x-hm", b"map-x-hn", b"map-x-ho", b"map-x-hp",
+    b"map-x-hq", b"map-x-hr", b"map-x-hs", b"map-x-ht", b"map-x-hu", b"map-x-hv", b"map-x-hw", b"map-x-hx", b"map-x-hy",
+    b"map-x-hz", b"map-x-ia", b"map-x-ib", b"map-x-ic", b"map-x-id", b"map-x-ie", b"map-x-if", b"map-x-ig", b"map-x-ih",
+    b"map-x-ii", b"map-x-ij", b"map-x-ik", b"map-x-il", b"map-x-im", b"map-x-in", b"map-x-io", b"map-x-ip", b"map-x-iq",
+    b"map-x-ir", b"map-x-is", b"map-x-it", b"map-x-iu", b"map-x-iv", b"map-x-iw", b"map-x-ix", b"map-x-iy", b"map-x-iz",
+    b"map-x-ja", b"map-x-jb", b"map-x-jc", b"map-x-jd", b"map-x-je", b"map-x-jf", b"map-x-jg", b"map-x-jh", b"map-x-ji",
+    b"map-x-jj", b"map-x-jk", b"map-x-jl", b"map-x-jm", b"map-x-jn", b"map-x-jo", b"map-x-jp", b"map-x-jq", b"map-x-jr",
+    b"map-x-js", b"map-x-jt", b"map-x-ju", b"map-x-jv", b"map-x-jw", b"map-x-jx", b"map-x-jy", b"map-x-jz", b"map-x-ka",
+    b"map-x-kb", b"map-x-kc", b"map-x-kd", b"map-x-ke", b"map-x-kf", b"map-x-kg", b"map-x-kh", b"map-x-ki", b"map-x-kj",
+    b"map-x-kk", b"map-x-kl", b"map-x-km", b"map-x-kn", b"map-x-ko", b"map-x-kp", b"map-x-kq", b"map-x-kr", b"map-x-ks",
+    b"map-x-kt", b"map-x-ku", b"map-x-kv", b"map-x-kw", b"map-x-kx", b"map-x-ky", b"map-x-kz", b"map-x-la", b"map-x-lb",
+    b"map-x-lc", b"map-x-ld", b"map-x-le", b"map-x-lf", b"map-x-lg", b"map-x-lh", b"map-x-li", b"map-x-lj", b"map-x-lk",
+    b"map-x-ll", b"map-x-lm", b"map-x-ln", b"map-x-lo", b"map-x-lp", b"map-x-lq", b"map-x-lr", b"map-x-ls", b"map-x-lt",
+    b"map-x-lu", b"map-x-lv", b"map-x-lw", b"map-x-lx", b"map-x-ly", b"map-x-lz", b"map-x-ma", b"map-x-mb", b"map-x-mc",
+    b"map-x-md", b"map-x-me", b"map-x-mf", b"map-x-mg", b"map-x-mh", b"map-x-mi", b"map-x-mj", b"map-x-mk", b"map-x-ml",
+    b"map-x-mm", b"map-x-mn", b"map-x-mo", b"map-x-mp", b"map-x-mq", b"map-x-mr", b"map-x-ms", b"map-x-mt", b"map-x-mu",
+    b"map-x-mv", b"map-x-mw", b"map-x-mx", b"map-x-my", b"map-x-mz", b"map-x-na", b"map-x-nb", b"map-x-nc", b"map-x-nd",
+    b"map-x-ne", b"map-x-nf", b"map-x-ng", b"map-x-nh", b"map-x-ni", b"map-x-nj", b"map-x-nk", b"map-x-nl", b"map-x-nm",
+    b"map-x-nn", b"map-x-no", b"map-x-np", b"map-x-nq", b"map-x-nr", b"map-x-ns", b"map-x-nt", b"map-x-nu", b"map-x-nv",
+    b"map-x-nw", b"map-x-nx", b"map-x-ny", b"map-x-nz", b"map-x-oa", b"map-x-ob", b"map-x-oc", b"map-x-od", b"map-x-oe",
+    b"map-x-of", b"map-x-og", b"map-x-oh", b"map-x-oi", b"map-x-oj", b"map-x-ok", b"map-x-ol", b"map-x-om", b"map-x-on",
+    b"map-x-oo", b"map-x-op", b"map-x-oq", b"map-x-or", b"map-x-os", b"map-x-ot", b"map-x-ou", b"map-x-ov", b"map-x-ow",
+    b"map-x-ox", b"map-x-oy", b"map-x-oz", b"map-x-pa", b"map-x-pb", b"map-x-pc", b"map-x-pd", b"map-x-pe", b"map-x-pf",
+    b"map-x-pg", b"map-x-ph", b"map-x-pi", b"map-x-pj", b"map-x-pk", b"map-x-pl", b"map-x-pm", b"map-x-pn", b"map-x-po",
+    b"map-x-pp", b"map-x-pq", b"map-x-pr", b"map-x-ps", b"map-x-pt", b"map-x-pu", b"map-x-pv", b"map-x-pw", b"map-x-px",
+    b"map-x-py", b"map-x-pz", b"map-x-qa", b"map-x-qb", b"map-x-qc", b"map-x-qd", b"map-x-qe", b"map-x-qf", b"map-x-qg",
+    b"map-x-qh", b"map-x-qi", b"map-x-qj", b"map-x-qk", b"map-x-ql", b"map-x-qm", b"map-x-qn", b"map-x-qo", b"map-x-qp",
+    b"map-x-qq", b"map-x-qr", b"map-x-qs", b"map-x-qt", b"map-x-qu", b"map-x-qv", b"map-x-qw", b"map-x-qx", b"map-x-qy",
+    b"map-x-qz", b"map-x-ra", b"map-x-rb", b"map-x-rc", b"map-x-rd", b"map-x-re", b"map-x-rf", b"map-x-rg", b"map-x-rh",
+    b"map-x-ri", b"map-x-rj", b"map-x-rk", b"map-x-rl", b"map-x-rm", b"map-x-rn", b"map-x-ro", b"map-x-rp", b"map-x-rq",
+    b"map-x-rr", b"map-x-rs", b"map-x-rt", b"map-x-ru", b"map-x-rv", b"map-x-rw", b"map-x-rx", b"map-x-ry", b"map-x-rz",
+    b"map-x-sa", b"map-x-sb", b"map-x-sc", b"map-x-sd", b"map-x-se", b"map-x-sf", b"map-x-sg", b"map-x-sh", b"map-x-si",
+    b"map-x-sj", b"map-x-sk", b"map-x-sl", b"map-x-sm", b"map-x-sn", b"map-x-so", b"map-x-sp", b"map-x-sq", b"map-x-sr",
+    b"map-x-ss", b"map-x-st", b"map-x-su", b"map-x-sv", b"map-x-sw", b"map-x-sx", b"map-x-sy", b"map-x-sz", b"map-x-ta",
+    b"map-x-tb", b"map-x-tc", b"map-x-td", b"map-x-te", b"map-x-tf", b"map-x-tg", b"map-x-th", b"map-x-ti", b"map-x-tj",
+    b"map-x-tk", b"map-x-tl", b"map-x-tm", b"map-x-tn", b"map-x-to", b"map-x-tp", b"map-x-tq", b"map-x-tr", b"map-x-ts",
+    b"map-x-tt", b"map-x-tu", b"map-x-tv", b"map-x-tw", b"map-x-tx", b"map-x-ty", b"map-x-tz", b"map-x-ua", b"map-x-ub",
+    b"map-x-uc", b"map-x-ud", b"map-x-ue", b"map-x-uf", b"map-x-ug", b"map-x-uh", b"map-x-ui", b"map-x-uj", b"map-x-uk",
+    b"map-x-ul", b"map-x-um", b"map-x-un", b"map-x-uo", b"map-x-up", b"map-x-uq", b"map-x-ur", b"map-x-us", b"map-x-ut",
+    b"map-x-uu", b"map-x-uv", b"map-x-uw", b"map-x-ux", b"map-x-uy", b"map-x-uz", b"map-x-va", b"map-x-vb", b"map-x-vc",
+    b"map-x-vd", b"map-x-ve", b"map-x-vf", b"map-x-vg", b"map-x-vh", b"map-x-vi", b"map-x-vj", b"map-x-vk", b"map-x-vl",
+    b"map-x-vm", b"map-x-vn", b"map-x-vo", b"map-x-vp", b"map-x-vq", b"map-x-vr", b"map-x-vs", b"map-x-vt", b"map-x-vu",
+    b"map-x-vv", b"map-x-vw", b"map-x-vx", b"map-x-vy", b"map-x-vz", b"map-x-wa", b"map-x-wb", b"map-x-wc", b"map-x-wd",
+    b"map-x-we", b"map-x-wf", b"map-x-wg", b"map-x-wh", b"map-x-wi", b"map-x-wj", b"map-x-wk", b"map-x-wl", b"map-x-wm",
+    b"map-x-wn", b"map-x-wo", b"map-x-wp", b"map-x-wq", b"map-x-wr", b"map-x-ws", b"map-x-wt", b"map-x-wu", b"map-x-wv",
+    b"map-x-ww", b"map-x-wx", b"map-x-wy", b"map-x-wz", b"map-x-xa", b"map-x-xb", b"map-x-xc", b"map-x-xd", b"map-x-xe",
+    b"map-x-xf", b"map-x-xg", b"map-x-xh", b"map-x-xi", b"map-x-xj", b"map-x-xk", b"map-x-xl", b"map-x-xm", b"map-x-xn",
+    b"map-x-xo", b"map-x-xp", b"map-x-xq", b"map-x-xr", b"map-x-xs", b"map-x-xt", b"map-x-xu", b"map-x-xv", b"map-x-xw",
+    b"map-x-xx", b"map-x-xy", b"map-x-xz", b"map-x-ya", b"map-x-yb", b"map-x-yc", b"map-x-yd", b"map-x-ye", b"map-x-yf",
+    b"map-x-yg", b"map-x-yh", b"map-x-yi", b"map-x-yj", b"map-x-yk", b"map-x-yl", b"map-x-ym", b"map-x-yn", b"map-x-yo",
+    b"map-x-yp", b"map-x-yq", b"map-x-yr", b"map-x-ys", b"map-x-yt", b"map-x-yu", b"map-x-yv", b"map-x-yw", b"map-x-yx",
+)
+# K's accepted fail-only spelling/history partition. These static labels do not
+# admit a mapping, identify a path or change the14/412/512-byte failure bounds.
+SHELL_SESSION_GENERIC_MAP_WORKERS = (
+    b"map-x-v-na", b"map-x-v-np", b"map-x-v-da", b"map-x-v-dp",
+    b"map-x-l-na", b"map-x-l-np", b"map-x-l-da", b"map-x-l-dp",
+    b"map-x-c-na", b"map-x-c-np", b"map-x-c-da", b"map-x-c-dp",
+    b"map-x-h-na", b"map-x-h-np", b"map-x-h-da", b"map-x-h-dp",
+    b"map-x-m-na", b"map-x-m-np", b"map-x-m-da", b"map-x-m-dp",
+    b"map-x-o-na", b"map-x-o-np", b"map-x-o-da", b"map-x-o-dp",
+)
+# Same refused Hosted row only: twelve lexical spellings, eight numeric
+# relations. Neither field is identity/admission; the original bounds stay fixed.
+SHELL_SESSION_HOSTED_MAP_WORKERS = (
+    b"map-xh-sz", b"map-xh-sa", b"map-xh-sp", b"map-xh-ss", b"map-xh-sc", b"map-xh-sm", b"map-xh-sd", b"map-xh-sx",
+    b"map-xh-nz", b"map-xh-na", b"map-xh-np", b"map-xh-ns", b"map-xh-nc", b"map-xh-nm", b"map-xh-nd", b"map-xh-nx",
+    b"map-xh-tz", b"map-xh-ta", b"map-xh-tp", b"map-xh-ts", b"map-xh-tc", b"map-xh-tm", b"map-xh-td", b"map-xh-tx",
+    b"map-xh-iz", b"map-xh-ia", b"map-xh-ip", b"map-xh-is", b"map-xh-ic", b"map-xh-im", b"map-xh-id", b"map-xh-ix",
+    b"map-xh-pz", b"map-xh-pa", b"map-xh-pp", b"map-xh-ps", b"map-xh-pc", b"map-xh-pm", b"map-xh-pd", b"map-xh-px",
+    b"map-xh-lz", b"map-xh-la", b"map-xh-lp", b"map-xh-ls", b"map-xh-lc", b"map-xh-lm", b"map-xh-ld", b"map-xh-lx",
+    b"map-xh-cz", b"map-xh-ca", b"map-xh-cp", b"map-xh-cs", b"map-xh-cc", b"map-xh-cm", b"map-xh-cd", b"map-xh-cx",
+    b"map-xh-qz", b"map-xh-qa", b"map-xh-qp", b"map-xh-qs", b"map-xh-qc", b"map-xh-qm", b"map-xh-qd", b"map-xh-qx",
+    b"map-xh-rz", b"map-xh-ra", b"map-xh-rp", b"map-xh-rs", b"map-xh-rc", b"map-xh-rm", b"map-xh-rd", b"map-xh-rx",
+    b"map-xh-gz", b"map-xh-ga", b"map-xh-gp", b"map-xh-gs", b"map-xh-gc", b"map-xh-gm", b"map-xh-gd", b"map-xh-gx",
+    b"map-xh-uz", b"map-xh-ua", b"map-xh-up", b"map-xh-us", b"map-xh-uc", b"map-xh-um", b"map-xh-ud", b"map-xh-ux",
+    b"map-xh-fz", b"map-xh-fa", b"map-xh-fp", b"map-xh-fs", b"map-xh-fc", b"map-xh-fm", b"map-xh-fd", b"map-xh-fx",
+)
+SHELL_SESSION_WORKERS = (
+    b"na", b"unavailable", b"none-recorded", b"child-id", b"observe-entry", b"maps-read", b"maps-check", b"env-read", b"env-check",
+    b"hold-refused", b"settle-unknown", b"exec-read", b"exec-check",
+    # Same-read refusal categories, not raw values or an inferred root cause.
+    # Historical maps-check above remains generic and distinguishable.
+    b"map-p-utf", b"map-p-nl", b"map-p-row", b"map-p-cols", b"map-p-addr", b"map-p-order", b"map-p-perm", b"map-p-offset", b"map-p-dev", b"map-p-inode",
+    b"map-x-anon", b"map-x-pseudo", b"map-x-file",
+    # Same refused row matches a historical admission tuple, NOT live content.
+    b"map-x-hist-py", b"map-x-hist-ss", b"map-x-hist-cr",
+    b"map-m-stat-py", b"map-m-type-py", b"map-m-owner-py", b"map-m-links-py", b"map-m-mode-py", b"map-m-inode-py", b"map-m-dev-py", b"map-dup-py",
+    b"map-m-stat-ss", b"map-m-type-ss", b"map-m-owner-ss", b"map-m-links-ss", b"map-m-mode-ss", b"map-m-inode-ss", b"map-m-dev-ss", b"map-dup-ss",
+    b"map-m-stat-cr", b"map-m-type-cr", b"map-m-owner-cr", b"map-m-links-cr", b"map-m-mode-cr", b"map-m-inode-cr", b"map-m-dev-cr", b"map-dup-cr",
+    b"map-m-stat-ld", b"map-m-type-ld", b"map-m-owner-ld", b"map-m-links-ld", b"map-m-mode-ld", b"map-m-inode-ld", b"map-m-dev-ld", b"map-dup-ld",
+    b"map-m-stat-lc", b"map-m-type-lc", b"map-m-owner-lc", b"map-m-links-lc", b"map-m-mode-lc", b"map-m-inode-lc", b"map-m-dev-lc", b"map-dup-lc",
+    b"map-m-stat-lm", b"map-m-type-lm", b"map-m-owner-lm", b"map-m-links-lm", b"map-m-mode-lm", b"map-m-inode-lm", b"map-m-dev-lm", b"map-dup-lm",
+    *SHELL_SESSION_GENERIC_MAP_WORKERS, *SHELL_SESSION_PUBLIC_MAP_WORKERS, *SHELL_SESSION_HOSTED_MAP_WORKERS,
+)
+SHELL_SESSION_WORKER_STAGES = (b"inspect", b"acquire", b"observe", b"write", b"stdout", b"stderr", b"settle")
+SHELL_SESSION_WORKER_JOINS = b"cxf"
+SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
+SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
+ 'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
+ 'draft': {'baselineUnchanged': True,
+           'positivePatchMatched': True,
+           'previews': 3,
+           'refusalsUnchanged': True,
+           'xcodePairRetained': True},
+ 'fixture': 'project-paths-v1',
+ 'fixtureMutations': {'actorReturned': 4, 'newWorker': False},
+ 'gate': 'installed-project-profile',
+ 'originals': {'childNew': 2,
+               'childReturned': 9,
+               'coordinatorReturned': 11,
+               'failedJoins': 0,
+               'filenameReads': 9,
+               'guiSettled': 11,
+               'sourceClosed': 8,
+               'sourceUnstarted': 3},
+ 'projectOriginalsSettled': True,
+ 'quit': {'exit': True, 'operation': 14, 'originalsSettled': True, 'relayJoined': True},
+ 'refused': [{'case': 'outside', 'code': 'project_path_unsafe', 'operation': 9},
+             {'case': 'post-selection-symlink', 'code': 'project_path_unsafe', 'operation': 10},
+             {'case': 'post-selection-directory-for-file', 'code': 'project_path_unsafe', 'operation': 11},
+             {'case': 'post-selection-file-for-directory', 'code': 'project_path_unsafe', 'operation': 12},
+             {'case': 'changed-root-mode', 'code': 'project_path_changed', 'operation': 13}],
+ 'registryUnchanged': True,
+ 'requestResultDomMatched': 11,
+ 'saveRequests': 0,
+ 'schemaVersion': 1,
+ 'scope': 'point-in-time-path-metadata-only',
+ 'select': [{'field': 'version.source', 'operation': 4, 'relativePath': 'inputs/VERSION'},
+            {'field': 'ios.project', 'operation': 5, 'relativePath': 'ios/Example.xcodeproj'},
+            {'field': 'ios.workspace', 'operation': 6, 'relativePath': 'ios/Example.xcworkspace'},
+            {'field': 'metadata.root', 'operation': 8, 'relativePath': 'metadata'}]}
+
+SHELL_PATH_BYTES = b"inert path-picker fixture\n"
+SHELL_PATH_NODES = (
+    ("path-project", "directory"), ("path-project/inputs", "directory"), ("path-project/inputs/VERSION", "file"),
+    ("path-project/inputs/link-input", "file"), ("path-project/inputs/kind-input", "file"), ("path-project/inputs/kind-directory", "directory"),
+    ("path-project/ios", "directory"), ("path-project/ios/Example.xcodeproj", "directory"), ("path-project/ios/Example.xcworkspace", "directory"),
+    ("path-project/ios/Kind.xcodeproj", "directory"), ("path-project/ios/Kind.file", "file"), ("path-project/metadata", "directory"),
+    ("path-outside", "directory"), ("path-outside/VERSION", "file"),
+)
+SHELL_PATH_MOVES = {
+    "path-project/inputs/link-input": "path-project/inputs/link-original",
+    "path-project/inputs/kind-input": "path-project/inputs/kind-original",
+    "path-project/inputs/kind-directory": "path-project/inputs/kind-input",
+    "path-project/ios/Kind.xcodeproj": "path-project/ios/Kind.original",
+    "path-project/ios/Kind.file": "path-project/ios/Kind.xcodeproj",
+}
+SHELL_PATH_ABSENT = ("path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
+    "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
+    "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
+    "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup")
+
+SHELL_WORKFLOW_MARKER = b"MRK_INSTALLED_SHELL_WORKFLOW_APPLY="
+SHELL_WORKFLOW_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-workflow-apply-v1", "gate": "installed-workflow-profile",
+    "project": {"cancelSettled": True, "registered": True, "snapshot": True, "adopted": True},
+    "requests": {"open": 4, "prepare": 4, "apply": 2, "close": 0, "configuration": [0, 0, 0, 0]},
+    "draft": {"wholeMatched": True, "revision": 1, "baselineGeneration": 1, "unsavedReads": 4, "neverSaved": True},
+    "pins": {"explicit": True, "changed": True, "restored": True, "browserEdit": "insertText"},
+    "reviews": {"fullText": True, "conflictNoToken": True, "conflictReason": "existing_workflow_differs", "configBlocked": 4},
+    "confirmation": {"opened": [2, 0, 1, 0], "keepReviewing": True, "acknowledged": 2},
+    "outcomes": [["committed", "clean", "settled", "none"], ["not_started", "not_created", "settled", "none"],
+                 ["unchanged", "not_created", "settled", "none"], ["not_started", "not_created", "settled", "cancelled"]],
+    "nativeReasons": ["none", "none", "none", "shutdown"],
+    "originals": {"sessions": 4, "writerFrames": [3, 2, 3, 2], "stdoutFrames": [3, 2, 3, 3],
+                  "startupJoined": 4, "childWaited": 4, "ioSettled": 4, "ownersJoined": 4,
+                  "runtimeLedgerSettled": 4, "runtimeSettlementJoined": 4},
+    "quit": {"operation": 3, "pendingReview": True, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+}
+# Private, entirely fictional DATA for the existing installed observer. These
+# headers establish format recognition only, never usable signing keys. Scalar
+# input stays in the original write-only controls, not in fixture files.
+SHELL_SESSION_JKS = b"\xfe\xed\xfe\xed\0\0\0\2\0\0\0\0"
+SHELL_SESSION_REPLACEMENT_JKS = b"\xfe\xed\xfe\xed\0\0\0\1\0\0\0\0"
+SHELL_SESSION_FIREBASE = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.fixture"}}}]}\n'
+SHELL_SESSION_FIREBASE_MISMATCH = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.assessment.other"}}}]}\n'
+SHELL_SESSION_CONFIG = b'''{
+  "android": {"applicationId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "ios": {"enabled": false},
+  "metadata": {"androidLocales": ["en-US"], "iosLocales": [], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "required", "iosFirebase": "disabled"},
+  "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": true},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+SHELL_SESSION_ABSENT = ("project/.gitignore", "project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/release/store")
+SHELL_SESSION_MARKER = b"MRK_INSTALLED_SHELL_SESSION_INPUTS="
+SHELL_SESSION_INVENTORY_LIMIT = 8192
+SHELL_SESSION_RECEIPT_LIMIT = 4096
+SHELL_SESSION_R1_LIMIT = 16
+SHELL_SESSION_RECEIPTS = {case: {
+    "schemaVersion": 1, "case": case, "profile": "installed-linux-session-inputs",
+    "methods": "thirteen-passive-including-supplied-input-assessment",
+    "project": {"cancelSettled": True, "selectedSettled": True, "snapshotMatched": True},
+    "safety": {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False},
+    "originals": {"assetJoined": True, "sourceClosed": True, "r1Joined": True, "guiSettled": True, "relayJoined": True, "exit": True},
+    "behavior": behavior,
+} for case, behavior in (
+    ("session-inputs", {
+        "kinds": ["android-keystore", "android-firebase", "google-wif", "project-read-token"],
+        "assessments": 7, "fileChoosers": 3, "capturedFiles": 3, "kept": 5, "assigned": 6,
+        "reassessedWithoutRecapture": True, "contextRevoked": True, "replacementSameIdNextRevision": True,
+        "removed": 1, "quitCancelPreserved": True,
+    }),
+    ("session-refusals", {
+        "assessments": 6, "fileChoosers": 9, "capturesClosed": 8,
+        "sourceRefusals": ["project-overlap", "source-refused", "source-refused", "source-changed"],
+        "missingCompanionRefused": True, "firebaseMismatchRefused": True, "staleKeepRefused": True,
+        "staleAssignRefused": True, "cancelledReplacementPreservedBytes": True,
+        "cancelledReplacementRevokedAssignment": True, "discardReopenEmpty": True,
+    }),
+    ("session-loss", {
+        "assessments": 1, "fileChoosers": 1, "navigationDenied": True, "lostStatusRedacted": True,
+        "oldCallbacksRefused": True, "noRebind": True, "noLateSuccess": True, "lossHoldReleasedByOriginalStop": True,
+    }),
+    ("session-deadline", {
+        "assessments": 1, "fileChoosers": 1, "originalDeadline": True, "firstCleanupPreserved": True,
+        "noPreview": True, "queryResult": "query_timeout", "assetReason": "deadline",
+    }),
+)}
+# Closed synthetic project DATA from the PF01/PF02/PF06 fixture recipes.
+# The configured interpreter is already an original lifecycle TOOLS input.
+# check.py is trusted project code, not a bootstrap, Gradle shim or isolation.
+SHELL_TOOLS_OFFLINE_MARKER = b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE="
+SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT = 64 << 10
+SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT = 16 << 10
+SHELL_TOOLS_OFFLINE_SCRIPT = br'''import os
+import sys
+import time
+
+# Fixed configured project DATA, not an alternate bootstrap or process owner.
+mode = sys.argv[1]
+if mode not in ('pass', 'nonzero', 'active', 'later'):
+    raise SystemExit(91)
+path = 'later.trace' if mode == 'later' else 'script.trace'
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    marker = {'pass': b'pass\n', 'nonzero': b'exit-7\n', 'active': b'active\n', 'later': b'forbidden-later\n'}[mode]
+    if os.write(fd, marker) != len(marker):
+        raise SystemExit(92)
+finally:
+    os.close(fd)
+print('OFFLINE_FIXTURE_PRIVATE_OUTPUT ' + os.getcwd(), flush=True)
+print('OFFLINE_FIXTURE_PRIVATE_ERROR ' + os.getcwd(), file=sys.stderr, flush=True)
+if mode == 'active':
+    while True:
+        time.sleep(0.05)
+raise SystemExit(7 if mode == 'nonzero' else 0)
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_PASS = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "pass"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_NEGATIVE = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "nonzero"
+      ],
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "later"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIG_CANCEL = b'''{
+  "android": {
+    "applicationId": "com.example.reader",
+    "enabled": true,
+    "externalTrack": {
+      "kind": "closed",
+      "name": "closed-testing"
+    },
+    "identityStatus": "approved",
+    "module": ":app",
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "variant": "release"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": [
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "active"
+      ],
+      [
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        "-B",
+        "check.py",
+        "later"
+      ]
+    ]
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_TOOLS_OFFLINE_CONFIGS = {case: (
+    SHELL_TOOLS_OFFLINE_CONFIG_NEGATIVE if case == "offline-negative" else
+    SHELL_TOOLS_OFFLINE_CONFIG_CANCEL if case == "offline-cancel" else SHELL_TOOLS_OFFLINE_CONFIG_PASS)
+    for case in SHELL_TOOLS_OFFLINE_CASES}
+SHELL_TOOLS_OFFLINE_TRACES = {case: (
+    b"pass\n" if case in ("offline-pass", "offline-settlement") else b"exit-7\n" if case == "offline-negative"
+    else b"active\n" if case == "offline-cancel" else b"") for case in SHELL_TOOLS_OFFLINE_CASES}
+SHELL_TOOLS_OFFLINE_FILES = {
+    "project/.gitignore": b"/.mobile-release/\n",
+    "project/release/version.properties": b"VERSION_NAME=1.2.3\nBUILD_NUMBER=42\n",
+    "project/app/build.gradle.kts": (b'plugins { id("com.android.application") }\n'
+        b'android { namespace = "com.example.reader"; defaultConfig { applicationId = "com.example.reader" }; '
+        b'buildTypes { debug { applicationIdSuffix = ".debug" } } }\n'),
+    "project/gradlew": b"#!/bin/sh\nexit 93\n",  # Presence sentinel only; MUST NOT execute.
+    "project/release/store/android/en-US/title.txt": b"Reader\n",
+    "project/release/store/android/en-US/short_description.txt": b"Read safely on every device.\n",
+    "project/release/store/android/en-US/full_description.txt": b"A real application description.\n",
+    "project/release/store/android/en-US/changelogs/default.txt": b"Reliability improvements.\n",
+    "project/check.py": SHELL_TOOLS_OFFLINE_SCRIPT,
+}
+SHELL_TOOLS_OFFLINE_ABSENT = ("project/.mobile-release", "project/.mobile-release-init-prepare",
+    "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/.mobile-release-metadata-text-prepare",
+    "project/.mobile-release-metadata-text", "project/.mobile-release-metadata-text-cleanup")
+SHELL_TOOLS_OFFLINE_STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
+SHELL_TOOLS_OFFLINE_CHECKS = ("version-source", "platform-selection", "android-module", "android-gradle-wrapper",
+    "android-debug-identity", "workspace-private-output", "android-artifact", "preflight-early-exit", "configuration-policy",
+    "metadata-policy", "configured-project-check", "core-lifecycle", "other-core-finding")
+SHELL_TOOLS_OFFLINE_LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+    "core-builds-disabled", "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested",
+    "release-readiness-not-assessed"]
+
+SHELL_METADATA_MARKER = b"MRK_INSTALLED_SHELL_METADATA_SAVE="
+SHELL_METADATA_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-metadata-save-v1", "gate": "installed-metadata-profile",
+    "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+    "requests": {"observe": 2, "validate": 1, "open": 2, "prepare": 2, "apply": 1, "close": 1,
+                 "configuration": [0, 0, 0, 0], "workflow": [0, 0, 0, 0]},
+    "draft": {"revision": 2, "baselineGeneration": 0, "wholeMatched": True,
+              "retainedAfterClose": True, "browserEdit": "insertText"},
+    "reviews": {"fullText": 2, "actions": [1, 1, 1], "distinctOriginals": True, "configBlocked": 2},
+    "confirmation": {"opened": 1, "initiallyDisabled": True, "checkboxOnlyDisabled": True,
+                     "typedSave": True, "acknowledged": True},
+    "outcomes": [["not_started", "not_created", "settled", "cancelled"], ["committed", "clean", "settled", "none"]],
+    "nativeReasons": ["discarded", "none"],
+    "originals": {"sessions": 2, "writerFrames": [2, 3], "stdoutFrames": [3, 3],
+                  "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                  "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
+    "readback": {"planMatched": True, "savedBaseline": True, "originalObservation": True},
+    "quit": {"operation": 3, "gtkSettled": True, "originalsSettled": True, "relayJoined": True, "exit": True},
+}
+# Reviewed literal caller DATA, never a second runtime generator. The existing
+# focused fixture contract compares every byte with the shared core proposal and
+# shipped template resource before this source may be qualified.
+SHELL_WORKFLOW_CALLERS = {
+    '.github/workflows/mobile-preflight.yml': b'''name: Mobile release preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to validate
+        required: true
+        default: both
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    uses: example/toolkit/.github/workflows/reusable-preflight.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+''',
+    '.github/workflows/mobile-candidate.yml': b'''name: Mobile internal candidate
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build once and upload to internal testing
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+        - both
+      confirmation:
+        description: candidate:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  candidate:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-candidate.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+''',
+    '.github/workflows/mobile-external-testing.yml': b'''name: Mobile external testing
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform whose exact internal build should be promoted
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+        - both
+      candidate_run_id:
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      confirmation:
+        description: external-testing:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  external-testing:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-external-testing.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+''',
+    '.github/workflows/mobile-production-submit.yml': b'''name: Mobile production submission
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Exactly one platform to prepare for production review
+        required: true
+        type: choice
+        options:
+        - android
+        - ios
+      candidate_run_id:
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      external_run_id:
+        description: Common external evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
+        type: string
+      confirmation:
+        description: production-submit:<platform>:<version>:<build>
+        required: true
+        type: string
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_android_run_id:
+        description: android external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_ios_run_id:
+        description: ios external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+permissions: {}
+jobs:
+  production-submit:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: example/toolkit/.github/workflows/reusable-production-submit.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    with:
+      tooling_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      external_run_id: ${{ inputs.external_run_id }}
+      confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+      external_android_run_id: ${{ inputs.external_android_run_id }}
+      external_ios_run_id: ${{ inputs.external_ios_run_id }}
+''',
+}
+
+SHELL_WORKFLOW_IGNORE = b"# workflow fixture sentinel; not a configuration save\n"
+SHELL_WORKFLOW_SIBLING = b"# unrelated caller sentinel; never part of this bundle\n"
+SHELL_WORKFLOW_ABSENT = ("release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
+    ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
+    ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup")
+
+SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
+SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
+                        b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
+SHELL_PROJECT_VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
+# Fixed synthetic output DATA, not a second configuration serializer. The
+# focused contract compares these bytes with the actual pure core suggestion
+# and payload builders after the native Value wire's sorted-key round trip.
+# Keeping DATA here avoids executing extra core modules in the root lifecycle.
+SHELL_PROJECT_CONFIG = b'''{
+  "android": {
+    "applicationId": "org.example.mrk.observed",
+    "enabled": true,
+    "identityStatus": "unverified"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": []
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "version.properties"
+  }
+}
+'''
+SHELL_PROJECT_IGNORE = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n"
+                        b".mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n"
+                        b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n"
+    b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n")
+SHELL_METADATA_LOCALE = "release/store/android/en-US"
+# Public fixed DATA, not a serializer or an alternate metadata writer.
+SHELL_METADATA_TITLE = b"Public title"
+SHELL_METADATA_SHORT_BEFORE = b"Old summary"
+SHELL_METADATA_SHORT_AFTER = b"Public summary"
+SHELL_METADATA_FULL = b"Public description"
+SHELL_METADATA_KEEP = b"untouched\n"
+SHELL_METADATA_ABSENT = (".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init",
+    ".mobile-release-init-cleanup", ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text",
+    ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup")
+SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
+SHELL_PROJECT_RECEIPT = {
+    "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+    "methods": "twelve-passive", "passiveActions": False,
+    "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
+    "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
+    "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
+    "suggestion": {"coreProvenance": True, "explicitAdoption": True},
+    "save": {"capability": True, "requests": {"open": 2, "prepare": 2, "apply": 1, "close": 0},
+             "bindingsMatched": True, "draftRevisions": [1, 1], "baselineGenerations": [1, 2],
+             "reviewMatched": True, "confirmation": {"opened": 2, "keepReviewing": True, "applyBeforeAck": 0, "acknowledged": True},
+             "outcome": ["committed", "clean", "settled", "none"], "nativeFinality": "settled",
+             "savedVisible": True, "baselineAdvanced": True, "createReleaseDirectory": True},
+    "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 684,
+                 "sha256": "0c47aaffe3971b122f21ebddf8070ab29014c4b7c79a56e23335ed110f1e6acc"},
+    "noop": {"reviewMatched": True, "apply": 0, "quitOutstanding": True,
+             "outcome": ["not_started", "not_created", "settled", "cancelled"], "nativeReason": "shutdown"},
+    "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
+                  "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                  "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
+    "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
+    "guidance": {
+        "draftUnchanged": True,
+        "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
+        "github": {"requestResultDomMatched": True, "explicitInputs": True, "browserEdit": "insertText",
+                   "workflowCount": 4},
+        "assuranceActions": False, "releaseReadiness": "unknown",
+    },
+    "savedReads": {
+        "version": {"requestResultDomMatched": True, "pairMatched": True, "name": "1.2.3", "build": 7},
+        "metadata": {"observeRequestResultDomMatched": True, "absent": 3, "validateRequestResultDomMatched": True,
+                     "browserEdit": "insertText", "draftRetained": True},
+        "scope": "single-request-non-atomic",
+    },
+}
+# Fixed public synthetic document DATA. Never import core serializers/sealers
+# here or open any declared artifact payload. Focused DATA contracts bind these
+# exact literals to the existing repository fixtures and Android result DTO.
+SHELL_CANDIDATE_DOCUMENTS = {
+    "candidate-manifest.json": b'''{
+  "schemaVersion": 2,
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "platforms": {
+    "android": {
+      "applicationId": "com.example.reader"
+    }
+  },
+  "artifacts": [
+    {
+      "logicalName": "android-aab",
+      "platform": "android",
+      "kind": "aab",
+      "fileName": "reader-1.2.3-42.aab",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata-1.2.3-42.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report-1.2.3-42.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    }
+  ],
+  "signing": [
+    {
+      "platform": "android",
+      "kind": "android-upload",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "storeReceipts": [
+    {
+      "provider": "google-play",
+      "applicationId": "com.example.reader",
+      "storeBuildId": "42",
+      "marketingVersion": "1.2.3",
+      "build": 42,
+      "channel": "internal",
+      "state": "available-to-testers",
+      "observedAt": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "createdAt": "2026-01-01T00:00:00Z",
+  "documentType": "candidate-manifest",
+  "operationIntentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "executedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "producedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16"
+  }
+}
+''',
+    "candidate-receipt.json": b'''{
+  "schemaVersion": 3,
+  "stage": "candidate",
+  "candidateManifestSha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333"
+  },
+  "platform": "android",
+  "provider": "google-play",
+  "applicationId": "com.example.reader",
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "storeBuildId": "42",
+  "operation": "uploaded",
+  "destination": {
+    "channel": "internal",
+    "releaseStatus": "completed"
+  },
+  "readback": {
+    "state": "available-to-testers",
+    "observedAt": "2026-01-01T00:00:00Z"
+  },
+  "createdAt": "2026-01-01T00:00:00Z",
+  "outcome": "mutated",
+  "storeState": {
+    "canonicalization": "mrk-play-track-state-v2",
+    "mode": "mutation",
+    "mutationEditId": "mutation-edit",
+    "readbackEditId": "readback-edit",
+    "destinationBeforeSha256": "ada011349b750526e1d4a7ac17913384d14fea9c0d67f2c49e4ddb7ad801475d",
+    "destinationExpectedSha256": "0c2ae4a70510eb9e1db11f922c983bdd5fb28116b46b602614db017dd361f85d",
+    "destinationCommittedSha256": "0c2ae4a70510eb9e1db11f922c983bdd5fb28116b46b602614db017dd361f85d",
+    "unrelatedBeforeSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "unrelatedCommittedSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "targetReleaseSha256": "6f2ad47688bd1cee19c3929489f3840095ded8f373fa0cf2a7a8a3b286ccb0cf"
+  },
+  "documentType": "store-receipt",
+  "operationIntentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "executedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "producedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
+  }
+}
+''',
+    "operation/candidate-operation-intent.json": b'''{
+  "documentType": "store-operation-intent",
+  "schemaVersion": 1,
+  "stage": "candidate",
+  "platform": "android",
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "candidateSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "operationSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "confirmation": "candidate:android:1.2.3:42",
+  "application": {
+    "id": "com.example.reader"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "destination": {
+    "channel": "internal",
+    "releaseStatus": "completed"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "artifacts": [
+    {
+      "logicalName": "android-aab",
+      "platform": "android",
+      "kind": "aab",
+      "fileName": "reader-1.2.3-42.aab",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata-1.2.3-42.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report-1.2.3-42.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    }
+  ],
+  "signing": [
+    {
+      "platform": "android",
+      "kind": "android-upload",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "predecessors": {},
+  "storePrecondition": {
+    "schemaVersion": 1,
+    "documentType": "store-precondition",
+    "operation": "android_internal_upload",
+    "platform": "android",
+    "appIdentity": "com.example.reader",
+    "marketingVersion": "1.2.3",
+    "buildNumber": 42,
+    "observedAt": "2026-01-01T00:00:00Z",
+    "snapshot": {
+      "canonicalization": "mrk-play-operation-v1",
+      "destinationTrack": "internal",
+      "destinationState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "internal",
+        "releases": []
+      },
+      "sourceTrack": null,
+      "sourceState": null,
+      "bundles": [],
+      "targetPresent": false,
+      "targetRelease": {
+        "name": "1.2.3",
+        "status": "completed",
+        "versionCodes": [
+          "42"
+        ]
+      },
+      "destinationTargetState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "internal",
+        "releases": [
+          {
+            "name": "1.2.3",
+            "status": "completed",
+            "versionCodes": [
+              "42"
+            ]
+          }
+        ]
+      },
+      "sourceAllowedStates": []
+    }
+  },
+  "privateStateCommitments": {},
+  "createdAt": "2026-01-01T00:00:00Z",
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+  }
+}
+''',
+}
+SHELL_CANDIDATE_ARTIFACT_TARGETS = (
+    "reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json",
+)
+SHELL_CANDIDATE_MARKER = b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS="
+SHELL_CANDIDATE_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
+    "gate": "installed-project-profile+candidate-passive", "privacy": "independent-predicate+gtk-readback",
+    "cancel": {"operation": 3, "requestMatched": True, "gtkSettled": True, "tokenJoined": True,
+               "probeUnstarted": True, "coordinatorJoined": True, "noRegistration": True},
+    "select": {"operation": 4, "requestMatched": True, "gtkSettled": True, "filenameMatched": True,
+               "tokenJoined": True, "probeJoined": True, "coordinatorJoined": True, "selectionMatched": True},
+    "observe": {"operation": 5, "requests": 1, "requestResultDomMatched": True, "bindingMatched": True,
+                "coordinatorJoined": True, "supervisorIdle": True, "knownIdle": True},
+    "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
+    "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
+              "sourceCompared": False, "signingVerified": False, "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+    "quit": {"operation": 6, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
+}
+OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
+              "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}
+PRIVATE_SONAMES = {"libssl.so.3", "libcrypto.so.3"}
+DEFAULT_LIBRARY_DIRS = ("/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib", "/usr/lib")
+HWCAPS = ("x86-64-v4", "x86-64-v3", "x86-64-v2")
 PREFIX = Path("/var/lib/mobile-release-kit/versions") / TARGET
 INPUT = Path("/usr/lib/mobile-release-kit/runtime-input") / TARGET
 HELPER = "/usr/lib/mobile-release-kit/mrk-runtime-publish"
 HOST_PATH = "/usr/bin:/bin"
 DPKG_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 LIMIT, JSON_LIMIT, FILE_LIMIT, TOTAL_LIMIT = 2 << 20, 1 << 20, 512 << 20, 32 << 20
+# GUI shared-memory working files are not captured output. This finite per-file
+# headroom is independent of the unchanged combined capture/evidence bounds.
+SHELL_WORK_FILE_LIMIT = 64 << 20
 CLIENT_RESERVATION = 40  # start10 + stop10 + StopPost10 + original-client10
 PROPERTIES = {
     "User": "root", "Group": "root", "WorkingDirectory": "/", "UMask": "0077",
@@ -242,8 +1762,11 @@ def handoff(path, digest):
     raw = read(path)
     need(hashlib.sha256(raw).hexdigest() == digest, "Handoff bytes differ")
     value = decode(raw)
-    need(type(value) is dict and set(value) == {"sourceSha", "runId", "attempt", "deadline", "runnerUid", "runnerGid",
-         "source", "taskRoot", "library", "packages", "compilerRecords"}, "Fixed handoff fields differ")
+    need(type(value) is dict and not ("installed" in value and "shell" in value)
+         and set(value) == {"sourceSha", "runId", "attempt", "deadline", "runnerUid", "runnerGid",
+         "source", "taskRoot", "library", "packages", "compilerRecords"}
+         | ({"installed"} if "installed" in value else {"shell"} if "shell" in value else set()),
+         "Fixed handoff fields differ")
     need(re.fullmatch(r"[0-9a-f]{40}", value["sourceSha"]) is not None and value["sourceSha"] != "0" * 40,
          "Missing source binding")
     for key in ("runId", "attempt"):
@@ -265,11 +1788,87 @@ def handoff(path, digest):
             need((row["manifestSha256"], row["version"]) == VERSIONS[label], "Fixture package anchor/version differs")
     paths = [value["library"]["path"], *(row["path"] for row in value["packages"].values())]
     need(len(set(paths)) == 3, "Artifact path alias")
+    if "installed" in value:
+        installed = value["installed"]
+        need(type(installed) is dict and set(installed) == {"case", "candidate", "candidateCompiler", "candidateRosterSha256",
+                                                         "candidateProducerAttempt", "candidateArtifactId", "acceptedU", "loaderPolicy"}
+             and installed["case"] in {"positive", "refuse-writable", "refuse-pth"}, "Fixed installed handoff fields/case differ")
+        need(type(installed["candidateProducerAttempt"]) is str
+             and re.fullmatch(r"[1-9][0-9]{0,19}", installed["candidateProducerAttempt"]) is not None
+             and type(installed["candidateArtifactId"]) is str
+             and re.fullmatch(r"[1-9][0-9]{0,19}", installed["candidateArtifactId"]) is not None
+             and int(installed["candidateProducerAttempt"]) <= int(value["attempt"]), "Original candidate producer attempt differs")
+        row, compiler, accepted = installed["candidate"], installed["candidateCompiler"], installed["acceptedU"]
+        need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["size"]) is int and 0 < row["size"] <= FILE_LIMIT
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+             and absolute(row["path"]).is_relative_to(task) and row["path"] not in paths, "Installed candidate artifact differs")
+        need(type(compiler) is dict and compiler["sourceSha"] == value["sourceSha"] and compiler["features"] == []
+             and (compiler["runId"], compiler["attempt"]) == (value["runId"], installed["candidateProducerAttempt"])
+             and compiler["manifestSha256"] == M and compiler["protocolSha256"] == Q
+             and all(compiler["exportedArtifacts"]["candidate"][key] == row[key] for key in ("size", "sha256"))
+             and type(installed["candidateRosterSha256"]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", installed["candidateRosterSha256"]) is not None, "Fresh candidate compiler/source profile differs")
+        need(type(accepted) is dict and set(accepted) == {"sourceSha", "runId", "attempt", "artifactId"}
+             and accepted["sourceSha"] == value["compilerRecords"]["sourceSha"]
+             and re.fullmatch(r"[0-9a-f]{40}", accepted["sourceSha"]) is not None
+             and all(type(accepted[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", accepted[key]) is not None
+                     for key in ("runId", "attempt", "artifactId")), "Original accepted U provenance was relabelled or omitted")
+    if "shell" in value:
+        shell_handoff(value, paths)
     return value
+
+
+def shell_handoff(value, original_paths):
+    """The fixed connection is neither J's libtest nor a new package source."""
+    shell = value["shell"]
+    need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
+         "artifactId", "acceptedU", "loaderPolicy"}, "Fixed shell handoff fields differ")
+    need(all(type(shell[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", shell[key]) is not None
+             for key in ("producerAttempt", "artifactId")) and int(shell["producerAttempt"]) <= int(value["attempt"])
+         and type(shell["rosterSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", shell["rosterSha256"]) is not None,
+         "Original shell producer/roster binding differs")
+    binaries, compiler, accepted = shell["binaries"], shell["compiler"], shell["acceptedU"]
+    need(type(binaries) is dict and set(binaries) == {"normal", "observer"}, "Normal/observer shell pair missing")
+    paths = list(original_paths)
+    for role, row in binaries.items():
+        need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["size"]) is int
+             and 0 < row["size"] <= FILE_LIMIT and type(row["sha256"]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+             and absolute(row["path"]).is_relative_to(absolute(value["taskRoot"])) and row["path"] not in paths,
+             "Original shell artifact differs: " + role)
+        paths.append(row["path"])
+    need(type(compiler) is dict and compiler.get("sourceSha") == value["sourceSha"]
+         and compiler.get("features") == SHELL_FEATURES
+         and (compiler.get("runId"), compiler.get("attempt")) == (value["runId"], shell["producerAttempt"])
+         and compiler.get("manifestSha256") == M and compiler.get("protocolSha256") == Q
+         and type(compiler.get("exportedArtifacts")) is dict
+         and set(compiler["exportedArtifacts"]) == set(binaries)
+         and all(compiler["exportedArtifacts"][role][key] == row[key]
+                 for role, row in binaries.items() for key in ("size", "sha256")),
+         "Original normal/observer source, features or output bytes differ")
+    need(type(accepted) is dict and set(accepted) == {"sourceSha", "runId", "attempt", "artifactId"}
+         and accepted["sourceSha"] == value["compilerRecords"]["sourceSha"]
+         and re.fullmatch(r"[0-9a-f]{40}", accepted["sourceSha"]) is not None
+         and all(type(accepted[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", accepted[key]) is not None
+                 for key in ("runId", "attempt", "artifactId")), "Shell reused U provenance was relabelled")
 
 
 def root_path(value):
     return Path("/var/lib/mrk-ubuntu-native-" + value["runId"] + "-" + value["attempt"])
+
+
+def shell_fixture_root(value):
+    need(all(type(value.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) is not None
+             for key in ("runId", "attempt")), "Original shell fixture run identity differs")
+    return Path("/var/lib/mrk-ubuntu-shell-fixtures-" + value["runId"] + "-" + value["attempt"])
+
+
+def service_task_limit(value):
+    # The validated shell handoff includes GTK/WebKit threads, Xvfb, private
+    # D-Bus and the original command controllers in this same bounded domain.
+    # Its observed task denial at 64 needs headroom, not an unlimited budget
+    # or a change to the package/passive lifecycles' existing limit.
+    return "256" if "shell" in value else PROPERTIES["TasksMax"]
 
 
 def service_properties(deadline, now=None):
@@ -290,7 +1889,7 @@ def service_argv(handoff_path, handoff_sha256, entry_sha256):
     entry = absolute(value["source"]) / ENTRY
     need(type(entry_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", entry_sha256) is not None
          and record(entry, JSON_LIMIT)["sha256"] == entry_sha256, "Workflow entry pin differs")
-    properties = service_properties(value["deadline"])
+    properties = {**service_properties(value["deadline"]), "TasksMax": service_task_limit(value)}
     return _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties)
 
 
@@ -420,7 +2019,10 @@ def _context(*, copying=False):
         relative = "desktop/tools/conventional_runtime_data.py"
         copy_pinned(source / relative, root / "source" / relative,
                     {"path": str(source / relative), "size": DATA_PIN[0], "sha256": DATA_PIN[1]})
-        for label, row, target, mode in [("library", value["library"], root / "platform-tests", 0o555),
+        candidates = [("candidate", value["installed"]["candidate"], root / "installed-tests", 0o555)] if "installed" in value else []
+        if "shell" in value:
+            candidates = [(role, row, root / ("shell-" + role), 0o555) for role, row in value["shell"]["binaries"].items()]
+        for label, row, target, mode in [("library", value["library"], root / "platform-tests", 0o555), *candidates,
              *((key, row, root / "private" / (key + ".deb"), 0o400) for key, row in value["packages"].items())]:
             before = absolute(row["path"]).lstat()
             need(before.st_uid == value["runnerUid"] and before.st_gid == value["runnerGid"], "Original artifact owner differs")
@@ -443,11 +2045,38 @@ def _capacity(value):
         need(type(rows) is dict and set(rows) == set(VERSIONS)
              and all(type(n) is int and 0 < n <= maximum for n in rows.values()), "Package capacity DATA differs")
     required = (sum(row["size"] for row in value["packages"].values()) + value["library"]["size"]
+                + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
+                + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
-    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
+    # The original Xvfb logs share the GUI per-file ceiling. Account for
+    # those private files in addition to retained output. This free-space check
+    # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
+    if "shell" in value:
+        # One write-only failure leaf per observer. The512-byte emitter/read
+        # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
+        required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
+        required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
+            + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
+        required += sum(len(data) for _, mode, _, data in _shell_metadata_roster(value, True) if stat.S_ISREG(mode)) \
+            + len(SHELL_METADATA_SHORT_BEFORE)
+        session_nodes = [row for case in SHELL_SESSION_CASES for row in _shell_session_roster(value, case)]
+        required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
+        tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
+        required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
+        # Each added existing GUI route creates eight directories, auth and
+        # bus-config files, its log, and a bus socket. The shell-only160 output
+        # slots cover the158 originals; TOTAL_LIMIT is unchanged. The last
+        # settled-failure route is outside both fixture groups but needs its
+        # own same twelve-node GUI environment in both block/inode accounting.
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 1)
+    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128)
+    if "shell" in value:
+        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
+    if "shell" in value:
+        required += (27 + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
@@ -464,33 +2093,124 @@ def _environment():
     return {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "HOME": str(_ROOT / "private/home")}
 
 
-def command(label, argv, *, maximum=120, codes=(0,), env=None):
-    global _FAILED, _PHASE
-    _PHASE = label
-    need(not _FAILED and _OWNER is not None, "Prior root command failed or owner missing")
-    _root_ids()
-    seconds = min(maximum, math.floor(_END - time.monotonic()))
-    need(seconds > 0, "Original root command endpoint exhausted")
-    _FAILED = True
-    result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
-        capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
+def _command_capture(label, argv, result, seconds):
     need(type(result) is subprocess.CompletedProcess and result.args == argv and type(result.returncode) is int
          and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= LIMIT,
          "Original root command result incomplete")
     _retain(label + ".stdout", result.stdout)
     _retain(label + ".stderr", result.stderr)
     _COMMANDS.append({"phase": label, "argv": argv, "exitCode": result.returncode, "timeoutSeconds": seconds})
-    accepted = result.returncode in codes and time.monotonic() < _END
-    if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
-                                 "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
-        # Only these fixed credential-free fixtures may expose bounded DATA
-        # from the SAME returned capture. This is not another read or receipt.
-        diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
-            "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
-            "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
-            "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
-        sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
-    need(accepted, "Original root command failed or completed late")
+
+
+def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, shell_log=None):
+    global _FAILED, _PHASE
+    _PHASE = label
+    need(not _FAILED and _OWNER is not None, "Prior root command failed or owner missing")
+    _root_ids()
+    if shell_log is not None:
+        need(type(shell_log) is tuple and len(shell_log) == 3
+             and shell_log[1] in SHELL_CASES[1:] and label == "shell-" + shell_log[1]
+             and argv == shell_argv(shell_log[0], shell_log[1]), "Different fixed shell log route")
+    settled_failure = label == "shell-settled-failure"
+    need(not settled_failure or shell_log is not None and codes == (0,),
+         "Settled-failure requires its original shell route, not an exit-code override")
+    # The fixed overlap configure may only SHORTEN this original endpoint.
+    need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
+    bound = _END if endpoint is None else min(_END, endpoint)
+    _FAILED = True
+    failure_sink, result = None, None
+    try:
+        if shell_log is not None:
+            failure_sink = _shell_labels_prepare(shell_log[0], shell_log[1])
+        started = time.monotonic()
+        seconds = min(maximum, math.floor(bound - started))
+        need(seconds > 0, "Original root command endpoint exhausted")
+        call = _shell_call_started(seconds) if shell_log is not None else None
+        try:
+            result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
+                capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
+        except BaseException as error:
+            if shell_log is not None:
+                try:
+                    _shell_owner_failure(shell_log[1], error, failure_sink, call)
+                except BaseException:
+                    pass
+            raise  # Same original object; diagnosis supplies no continuation authority.
+        if shell_log is not None:
+            try:
+                _shell_call_finished(call, True)
+            except BaseException:
+                pass  # Return DATA is recorded before its optional diagnostic clock.
+        _command_capture(label, argv, result, seconds)
+        if endpoint is not None:
+            _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
+        accepted = not settled_failure and result.returncode in codes and time.monotonic() < bound
+        display_log, log_error = None, None
+        if shell_log is not None:
+            try:
+                display_log = _shell_log_capture(*shell_log, result)
+            except BaseException as error:
+                log_error = error
+            label_data = None
+            if settled_failure and result.returncode == 1 and log_error is None and time.monotonic() < bound:
+                # Mark this original read as attempted BEFORE entering it. Even
+                # a read/parse/export error must not let diagnostics read again.
+                label_data = (None, None)
+                try:
+                    label_data = _shell_labels_read(failure_sink, with_raw=True)
+                    _shell_settled_failure_result(result.stdout, result.stderr, shell_log[1], result.returncode, label_data[0])
+                    _retain("shell-settled-failure-failure.labels", label_data[0])
+                    accepted = True  # Still _FAILED until checked close and the final endpoint check below.
+                except BaseException as error:
+                    log_error = error
+            if not accepted or log_error is not None:
+                try:
+                    _shell_command_failure(argv, result, shell_log[1], display_log, log_error, failure_sink, call,
+                                           label_data=label_data)
+                except BaseException:
+                    pass  # Diagnosis cannot replace the pending refusal/original log error.
+            if not accepted:
+                # The settled original command's failure remains primary. Preserve
+                # a later read/retention/interruption error as its explicit cause;
+                # neither branch can resume or claim cleanup/success.
+                raise Refused("Original root command failed or completed late") from log_error
+            if log_error is not None:
+                raise log_error
+            need(time.monotonic() < bound, "Original root command failed or completed late" if settled_failure
+                 else "Original shell log captured after endpoint")
+        if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
+                                     "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
+            # Only these fixed credential-free fixtures may expose bounded DATA
+            # from the SAME returned capture. This is not another read or receipt.
+            diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
+                "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
+                "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
+                "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
+            sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
+        need(accepted, "Original root command failed or completed late")
+    except BaseException as error:
+        if settled_failure and type(result) is subprocess.CompletedProcess and not isinstance(error, Refused):
+            # The returned expected-negative is not yet accepted. Retention,
+            # clock and classification errors cannot replace that failed outcome.
+            raise Refused("Original root command failed or completed late") from error
+        raise
+    finally:
+        if failure_sink is not None:
+            active_failure = sys.exc_info()[0] is not None
+            try:
+                os.close(failure_sink[0])  # This exact retained original, once; no reopen/unlink.
+            except BaseException as error:
+                if not active_failure:
+                    if settled_failure:
+                        raise Refused("Original root command failed or completed late") from error
+                    raise  # _FAILED remains True; a lost close cannot qualify.
+    if settled_failure:
+        try:
+            need(time.monotonic() < bound, "Original root command failed or completed late")
+        except BaseException as error:
+            if isinstance(error, Refused):
+                raise
+            raise Refused("Original root command failed or completed late") from error
     _FAILED = False
     return result
 
@@ -527,7 +2247,8 @@ def _domain(value, label):
     need(_kernel(cgroup / "cgroup.type") == "domain\n", "Original cgroup is not an aggregate domain")
     effective = {name: _kernel(cgroup / name).strip() for name in ("memory.max", "memory.swap.max", "memory.oom.group", "pids.max", "cpu.max")}
     need(props["MemoryMax"] == effective["memory.max"] == str(6 << 30) and props["MemorySwapMax"] == effective["memory.swap.max"] == "0"
-         and props["TasksMax"] == effective["pids.max"] == "64" and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
+         and props["TasksMax"] == effective["pids.max"] == service_task_limit(value)
+         and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
     quota, period = effective["cpu.max"].split()
     need(quota.isdecimal() and period.isdecimal() and int(period) > 0 and int(quota) == 2 * int(period), "Effective CPU ceiling differs")
     events = {name: {key: int(number) for key, number in (line.split() for line in _kernel(cgroup / name).splitlines())}
@@ -782,13 +2503,36 @@ def denied(error):
 
 
 def _xattrs(path, is_directory):
+    def refusal(name, result, number=None):
+        # Diagnose only the observation already made below. Never resolve or
+        # reopen a refused path, disclose private names, or print xattr bytes.
+        text = str(path)
+        public = ("/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64", "/usr/share", "/usr/local/share",
+                  "/lib", "/lib64", "/bin", "/sbin", str(PREFIX))
+        fixed = {"/", "/usr", "/usr/local", "/opt", "/var", "/var/lib", "/var/cache",
+                 "/var/lib/mobile-release-kit", "/var/lib/mobile-release-kit/versions", "/etc", "/etc/glvnd",
+                 "/etc/ld.so.cache", "/etc/alternatives", "/run", "/run/needrestart",
+                 "/run/needrestart/unpacked", "/run/needrestart/errored", "/dev", "/dev/null"}
+        scoped = (text in fixed or any(text == root or text.startswith(root + "/") for root in public)
+                  or any(text == root or kind == "directory" and text.startswith(root + "/")
+                         for root, kind in SHELL_DATA_ROOTS))
+        grammar = (text == "/" or 0 < len(text) <= 4096 and re.fullmatch(r"/[A-Za-z0-9_./+@\-]+", text)
+                   and all(part not in {"", ".", ".."} for part in text.split("/")[1:]))
+        shown = text if scoped and grammar else "<redacted>"
+        truncated = len(shown) > 256
+        number = str(number) if type(number) is int and 0 <= number <= 4095 else "unknown"
+        return ("Extended attribute refused: path=" + shown[:256] + " pathTruncated=" + str(truncated).lower()
+                + " kind=" + ("directory" if is_directory else "non-directory") + " attribute=" + name
+                + " result=" + result + " errno=" + (number if result == "errno" else "none"))
+
     for name in ("system.posix_acl_access", "system.posix_acl_default" if is_directory else "security.capability"):
         try:
             os.getxattr(path, name, follow_symlinks=False)
         except OSError as error:
-            need(error.errno == errno.ENODATA, "Extended-attribute absence is unproven")
+            if error.errno != errno.ENODATA:
+                raise Refused(refusal(name, "errno", error.errno)) from None
         else:
-            raise Refused("Published object grants extra mutation/execution authority")
+            raise Refused(refusal(name, "present"))
 
 
 def _tree(root, manifest, *, published):
@@ -996,6 +2740,69 @@ ROOT_PHASES = ("start-unit-show", "native-root", "native-user", "state-initial",
                "remove", "state-remove", "observe-remove", "purge", "state-purge", "observe-purge")
 
 
+def root_phases(value):
+    if "shell" in value:
+        return (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
+                *("shell-" + case for case in SHELL_CASES), "state-shell-finished")
+    if "installed" not in value:
+        return ROOT_PHASES
+    case = value["installed"]["case"]
+    initial = (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:8])
+    if case != "positive":
+        return (*initial, "installed-" + case, "state-refusal")
+    return (*initial, *ROOT_PHASES[8:11], "installed-positive", "installed-deadline", "installed-shutdown", "installed-emfile",
+            "upgrade-unpack", "state-upgrade-unpacked", "upgrade-configure", "installed-overlap", *ROOT_PHASES[12:])
+
+
+def result_state(value):
+    if "shell" in value:
+        return "normal-shell-installed-runtime-connection-observed"
+    if "installed" not in value:
+        return "p0-f1-lifecycle-observed"
+    return "installed-passive-positive-and-lifecycle-observed" if value["installed"]["case"] == "positive" else "installed-passive-refusal-observed"
+
+
+def public_files(value):
+    fixed = {phase + "." + suffix for phase in (*root_phases(value), "stop-unit-show") for suffix in ("stdout", "stderr")}
+    fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "scripts-unpacked.json", "binaries-unpacked.json"}
+    if "shell" in value:
+        return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
+                        "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
+                        "shell-positive-candidate-before.json", "shell-positive-candidate-after.json",
+                        "shell-project-paths-before.json", "shell-project-paths-after.json",
+                        "shell-workflow-apply-before.json", "shell-workflow-apply-after.json",
+                        "shell-metadata-save-before.json", "shell-metadata-save-after.json",
+                        "published-before-upgrade.txt", "mutation-denials.txt", "shell-settled-failure-failure.labels"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")} \
+            | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
+    installed = value.get("installed")
+    if installed is not None:
+        fixed |= {"loader-entry.json", "loader-final.json", "installed-cases.json"}
+        if installed["case"] != "positive":
+            return fixed | {"refusal-fixture-before.json", "refusal-fixture-after.json"}
+        fixed |= {"loader-runtime.json", "installed-overlap-join.json", "scripts-upgrade-unpacked.json", "binaries-upgrade-unpacked.json"}
+    fixed |= {"mutation-denials.txt", "binaries-upgrade.json"}
+    fixed |= {"scripts-" + phase + ".json" for phase in ("before-upgrade", "upgrade", "duplicate", "remove", "purge")}
+    fixed |= {"published-" + phase + ".txt" for phase in ("before-upgrade", "after-upgrade", "after-duplicate", "after-remove", "after-purge")}
+    return fixed
+
+
+def lifecycle_states(value):
+    rows = [("initial", "absent", None), ("unpacked", "install ok unpacked", "P0")]
+    if "shell" in value:
+        rows += [("p0", "install ok installed", "P0"), ("shell-finished", "install ok installed", "P0")]
+    elif "installed" in value and value["installed"]["case"] != "positive":
+        rows.append(("refusal", "install ok unpacked", "P0"))
+    else:
+        rows += [("p0", "install ok installed", "P0"), ("upgrade", "install ok installed", "F1"),
+                 ("duplicate", "install ok half-configured", "F1"), ("remove", "deinstall ok config-files", "F1"), ("purge", "absent", None)]
+        if "installed" in value:
+            rows.append(("upgrade-unpacked", "install ok unpacked", "F1"))
+    return {phase: {"status": status, "version": VERSIONS[variant][1] if variant else ""} for phase, status, variant in rows}
+
+
 def _no_package_data():
     for path in PRODUCT_PATHS:
         _absent(path)
@@ -1022,6 +2829,3484 @@ def _binaries(value, phase, label):
     _retain("binaries-" + phase + ".json", canonical(rows))
 
 
+def loader_diagnostics(raw):
+    """Bounded DATA from the already-bound OS loader; never a resolver."""
+    need(type(raw) is bytes and 0 < len(raw) <= LIMIT and raw.endswith(b"\n"), "Loader diagnostic capture bound differs")
+    rows = {}
+    component = r"[A-Za-z_][A-Za-z0-9_]*(?:\[0x[0-9a-f]{1,8}\])?"
+    for line in raw.decode("ascii").splitlines():
+        key, separator, value = line.partition("=")
+        need(separator and len(rows) < 4096 and len(key) <= 256 and key not in rows
+             and re.fullmatch(component + r"(?:\." + component + r")*", key) is not None
+             and len(value) <= 8192 and re.fullmatch(r'0x[0-9a-f]{1,16}|"(?:[^"\\\x00-\x1f]|\\[0-7]{3}|\\["\\])*"', value) is not None,
+             "Loader diagnostic grammar/duplicate differs")
+        rows[key] = value
+    fixed = {"dl_dst_lib": '"lib/x86_64-linux-gnu"', "dso.ld": '"ld-linux-x86-64.so.2"',
+             "dso.libc": '"libc.so.6"', "path.rtld": '"/lib64/ld-linux-x86-64.so.2"',
+             "version.version": '"2.39"', "dl_hwcaps_subdirs": '"' + ":".join(HWCAPS) + '"'}
+    need(all(rows.get(key) == value for key, value in fixed.items()), "Fixed OS loader profile differs")
+    directories = {"path.system_dirs[0x" + format(index, "x") + "]": '"' + path + '/"'
+                   for index, path in enumerate(DEFAULT_LIBRARY_DIRS)}
+    need({key: value for key, value in rows.items() if key.startswith("path.system_dirs")} == directories,
+         "Compiled OS default library directories differ")
+    active = rows.get("dl_hwcaps_subdirs_active", "")
+    need(re.fullmatch(r"0x[0-7]", active) is not None, "Unknown active OS hwcaps mask")
+    return {"defaultDirectories": list(DEFAULT_LIBRARY_DIRS), "hwcaps": list(HWCAPS), "activeMask": int(active, 16),
+            "checkedTiers": list(HWCAPS), "policy": "Conservatively check all three tiers, including inactive tiers."}
+
+
+def loader_cache(raw, version, *, shell_names=None):
+    relevant = OS_SONAMES | PRIVATE_SONAMES
+    if shell_names is not None:
+        need(type(shell_names) is list and shell_names == sorted(set(shell_names)) and 1 <= len(shell_names) <= 256
+             and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,255}", name) is not None
+                     for name in shell_names), "Bounded explicit shell cache roster differs")
+        relevant = set(shell_names) | PRIVATE_SONAMES
+    need(type(raw) is bytes and 0 < len(raw) <= LIMIT and raw.endswith(b"\n"), "Loader cache listing bound differs")
+    lines = raw.decode("ascii").splitlines()
+    header = re.fullmatch(r"([0-9]{1,5}) libs found in cache `/etc/ld\.so\.cache'", lines[0])
+    need(header is not None and 0 < int(header[1]) <= 8192, "Fixed loader cache header differs")
+    count = int(header[1])
+    footer = "Cache generated by: ldconfig (Ubuntu GLIBC " + version + ") stable release version 2.39"
+    need(len(lines) in {count + 1, count + 2} and (len(lines) == count + 1 or lines[-1] == footer),
+         "Loader cache row count/generator differs")
+    result = []
+    for line in lines[1:count + 1]:
+        found = re.fullmatch(r"\t([A-Za-z0-9][A-Za-z0-9_.+\-]{0,255}) \(([A-Za-z0-9_., :\"\-]{1,128})\) => (/[A-Za-z0-9_./+\-]{1,4095})", line)
+        need(found is not None, "Loader cache row grammar differs")
+        name, flags, path = found.groups()
+        absolute(path)
+        eligible = False
+        if name in relevant:
+            # Relevant foreign ABI rows are explicit, never mistaken for this
+            # x86-64 ABI. Unknown flag/hwcap semantics refuse rather than guess.
+            need(flags == "libc6" or re.fullmatch(r'libc6,x86-64(?:, hwcap: "x86-64-v[234]")?', flags) is not None,
+                 "Relevant loader cache ABI/hwcap flags differ")
+            eligible = flags != "libc6"
+        result.append({"soname": name, "flags": flags, "path": path, "eligibleX86_64": eligible})
+    return result
+
+
+def loader_candidates(names, rows):
+    need(type(names) is list and names == sorted(set(names)) and set(names) <= OS_SONAMES | PRIVATE_SONAMES,
+         "Fixed SONAME candidate roster differs")
+    choices = {(row["soname"], row["path"]) for row in rows if row["soname"] in names and row["eligibleX86_64"]}
+    choices |= {(name, directory + "/" + suffix + name) for name in names for directory in DEFAULT_LIBRARY_DIRS
+                for suffix in ("", *("glibc-hwcaps/" + tier + "/" for tier in HWCAPS))}
+    return sorted(choices)
+
+
+def loader_selected(row, admitted):
+    need(row.get("absent") is True or row["path"] == admitted["path"] and row["identity"] == admitted["identity"]
+         and all(row[key] == admitted[key] for key in ("size", "sha256")),
+         "Eligible cache/default/hwcaps dependency is an alternative object")
+
+
+def shell_loader_candidates(names, rows, tiers):
+    """An absent tier directory excludes every child, without thousands of duplicate proofs."""
+    need(type(names) is list and names == sorted(set(names)) and 1 <= len(names) <= 256
+         and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,255}", name) for name in names),
+         "Bounded shell global provider roster differs")
+    fixed = {directory + "/glibc-hwcaps/" + tier for directory in DEFAULT_LIBRARY_DIRS for tier in HWCAPS}
+    need(type(tiers) is dict and set(tiers) == fixed and all(type(present) is bool for present in tiers.values()),
+         "Complete original shell hwcaps directory presence missing")
+    choices = {(row["soname"], row["path"]) for row in rows if row["soname"] in names and row["eligibleX86_64"]}
+    choices |= {(name, directory + "/" + name) for name in names for directory in DEFAULT_LIBRARY_DIRS}
+    choices |= {(name, directory + "/" + name) for directory, present in tiers.items() if present for name in names}
+    return sorted(choices)
+
+
+def shell_global_names(libraries):
+    # A global SONAME selector may canonically resolve through alternatives.
+    # Only these two fixed RUNPATH selectors are outside the global search;
+    # canonical subdirectories never confer that exemption.
+    private = {"libpxbackend-1.0.so": "/usr/lib/x86_64-linux-gnu/libproxy/libpxbackend-1.0.so",
+               "libpulsecommon-16.1.so": "/usr/lib/x86_64-linux-gnu/pulseaudio/libpulsecommon-16.1.so"}
+    names = []
+    for name, row in libraries.items():
+        selected = row["file"]["selectedPath"]
+        if selected == "/usr/lib/x86_64-linux-gnu/" + name:
+            names.append(name)
+        else:
+            need(name in private and selected == private[name], "Unadmitted nonglobal shell provider selector")
+    return sorted(names)
+
+
+def mount_scope(raw, initial, device):
+    need(type(raw) is str and raw == initial and 0 < len(raw) <= JSON_LIMIT and raw.endswith("\n") and "\0" not in raw,
+         "Original initial mount table differs/unbounded")
+    roots, ids, points = [], set(), set()
+    for line in raw.splitlines():
+        fields = line.split(" ")
+        need(len(ids) < 4096 and all(fields) and fields.count("-") == 1, "Mount table grammar/bound differs")
+        at = fields.index("-")
+        need(at >= 6 and len(fields) == at + 4 and re.fullmatch(r"[1-9][0-9]{0,9}", fields[0]) is not None
+             and fields[0] not in ids and re.fullmatch(r"[1-9][0-9]{0,9}", fields[1]) is not None
+             and re.fullmatch(r"[0-9]{1,10}:[0-9]{1,10}", fields[2]) is not None
+             and fields[5].split(",")[0] in {"ro", "rw"}, "Mount table identity/options differ")
+        ids.add(fields[0])
+        decoded = []
+        for path in fields[3:5]:
+            need(path.startswith("/") and re.fullmatch(r"(?:[^\\\x00-\x20]|\\(?:040|011|012|134))+", path) is not None,
+                 "Mount table path escapes differ")
+            decoded.append(re.sub(r"\\(040|011|012|134)", lambda found: chr(int(found[1], 8)), path))
+        points.add(decoded[1])
+        tags = set()
+        for option in fields[6:at]:
+            tag, separator, number = option.partition(":")
+            need(tag not in tags and ((tag == "unbindable" and not separator)
+                 or (tag in {"shared", "master", "propagate_from"} and re.fullmatch(r"[1-9][0-9]{0,9}", number))),
+                 "Unknown/duplicate mount propagation or ID-map option")
+            tags.add(tag)
+        if decoded[1] == "/":
+            need(decoded[0] == "/" and fields[at + 1] in {"ext4", "xfs"}, "Root is not the admitted complete native filesystem")
+            major, minor = (int(part) for part in fields[2].split(":"))
+            need((major, minor) == (os.major(device), os.minor(device)), "Root mount device differs")
+            roots.append({"mountId": int(fields[0]), "device": device, "filesystem": fields[at + 1]})
+    need(len(roots) == 1, "Initial full root mount is missing/ambiguous")
+    return {"sha256": hashlib.sha256(raw.encode("ascii")).hexdigest(), "root": roots[0], "mountpoints": sorted(points)}
+
+
+def _mount_scope():
+    return mount_scope(_kernel("/proc/self/mountinfo", JSON_LIMIT), _kernel("/proc/1/mountinfo", JSON_LIMIT), Path("/").stat().st_dev)
+
+
+def _mount_path(scope, path):
+    need(not any(point != "/" and (str(path) == point or str(path).startswith(point + "/")) for point in scope["mountpoints"]),
+         "Loader path crosses an unadmitted nested mount")
+
+
+def _data_identity(item):
+    return [item.st_dev, item.st_ino, item.st_mode, item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns]
+
+
+def _loader_binding(path, scope, *, directory_only=False, absent=False, limit=FILE_LIMIT):
+    """Finite OS/A names only: original root link ancestry, ACLs and mount scope.
+
+    Matches CI's file DATA shape but adds actual root ACL/mount observations.
+    Directory mtime/ctime is not frozen across legitimate package installs.
+    """
+    path = absolute(str(path))
+    pending, resolved, links, ancestry = list(path.parts[1:]), Path("/"), [], {}
+
+    def ancestor(name, item):
+        need(stat.S_ISDIR(item.st_mode) and item.st_uid == item.st_gid == 0 and not item.st_mode & 0o7022
+             and item.st_dev == scope["root"]["device"], "Unprotected/wrong-mount loader ancestor")
+        _xattrs(name, True)
+        ancestry[str(name)] = [item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid]
+
+    ancestor(resolved, resolved.lstat())
+    steps, missing = 0, None
+    while pending:
+        steps += 1
+        need(steps <= 256, "Loader original ancestry/link bound exceeded")
+        part = pending.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            resolved = resolved.parent
+            continue
+        candidate = resolved / part
+        _mount_path(scope, candidate)
+        try:
+            item = candidate.lstat()
+        except FileNotFoundError:
+            need(absent, "Required loader object absent")
+            missing = str(candidate)
+            resolved = candidate.joinpath(*pending)
+            break
+        need(item.st_uid == item.st_gid == 0 and item.st_dev == scope["root"]["device"], "Loader object owner/mount differs")
+        if stat.S_ISLNK(item.st_mode):
+            target = os.readlink(candidate)
+            need(item.st_nlink == 1 and len(links) < 40 and len(target) <= 4096
+                 and re.fullmatch(r"[A-Za-z0-9_./+\-]+", target) is not None
+                 and identity(candidate.lstat()) == identity(item), "Loader original link differs")
+            links.append([str(candidate), _data_identity(item), target])
+            target = Path(target)
+            if target.is_absolute():
+                resolved, parts = Path("/"), target.parts[1:]
+            else:
+                parts = target.parts
+            pending = [*parts, *pending]
+        else:
+            need(not item.st_mode & 0o7022, "Loader object writable/special mode")
+            resolved = candidate
+            if pending or directory_only:
+                ancestor(resolved, item)
+            else:
+                need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1, "Loader object is not an ordinary file")
+                _xattrs(resolved, False)
+    result = {"path": str(resolved), "selectedPath": str(path), "links": links, "ancestry": ancestry}
+    if missing is not None:
+        result.update(absent=True, absentAt=missing)
+    elif directory_only:
+        result["directory"] = ancestry[str(resolved)]
+    else:
+        before = resolved.lstat()
+        result.update(record(resolved, limit), identity=_data_identity(before))
+        need(identity(resolved.lstat()) == identity(before), "Original loader file changed during readback")
+    for name, expected in ancestry.items():
+        item = Path(name).lstat()
+        need([item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid] == expected, "Original loader ancestry changed")
+        _xattrs(Path(name), True)
+    for name, expected, target in links:
+        need(_data_identity(Path(name).lstat()) == expected and os.readlink(name) == target, "Original loader link changed")
+    if missing is None:
+        need(path.resolve(strict=True) == resolved, "Original loader canonical path changed")
+    else:
+        _absent(Path(missing))
+    return result
+
+
+def _installed_loader_start(value, namespaces):
+    policy = value["installed"]["loaderPolicy"]
+    need(type(policy) is dict and set(policy) == {"libraries", "loader", "ldconfig", "cache", "packages", "osNames", "graph", "externalPrerequisites"},
+         "Fixed installed loader policy fields differ")
+    names, graph = policy["osNames"], policy["graph"]
+    candidate = value["installed"]["candidateCompiler"]["nativeInputs"]
+    old = value["compilerRecords"]["nativeInputs"]
+    need(type(names) is list and names == sorted(set(names)) and set(names) <= OS_SONAMES
+         and set(names) == set(graph["osNames"]) | set(old["outputs"]["libtest"]["objects"])
+         and {"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2"} <= set(names)
+         and set(policy["libraries"]) == set(names) and graph["candidate"] == candidate["outputs"]["candidate"]
+         and not set(graph["candidate"]["objects"]) & PRIVATE_SONAMES
+         and graph["manifestSha256"] == M and graph["protocolSha256"] == Q, "Complete original candidate/U/A OS closure differs")
+    scope, bindings = _mount_scope(), {}
+    for name, row in policy["libraries"].items():
+        need(row["elf"] == candidate["sharedObjects"][name]["elf"] == old["sharedObjects"][name]["elf"]
+             and all(row["file"][key] == candidate["sharedObjects"][name]["file"][key] == old["sharedObjects"][name]["file"][key]
+                     for key in ("size", "sha256")), "OS file differs from either original compiler record")
+    for row in [*(row["file"] for row in policy["libraries"].values()), policy["loader"], policy["ldconfig"], policy["cache"]]:
+        current = _loader_binding(Path(row["selectedPath"]), scope)
+        need(current == row, "Root loader input differs from the original current-VM binding")
+        bindings[row["selectedPath"]] = current
+    need(policy["loader"]["path"] == policy["libraries"]["ld-linux-x86-64.so.2"]["file"]["path"]
+         and policy["loader"]["selectedPath"] == "/lib64/ld-linux-x86-64.so.2"
+         and policy["ldconfig"]["selectedPath"] == "/usr/sbin/ldconfig.real" and policy["cache"]["selectedPath"] == "/etc/ld.so.cache",
+         "Fixed admitted loader/cache/static-tool names differ")
+    for leaf, expected in (("platform-tests", value["library"]), ("installed-tests", value["installed"]["candidate"])):
+        row = _loader_binding(_ROOT / leaf, scope)
+        need(all(row[key] == expected[key] for key in ("size", "sha256")), "Fresh protected native test copy differs")
+        bindings[str(_ROOT / leaf)] = row
+    preload = _loader_binding(Path("/etc/ld.so.preload"), scope, absent=True)
+    need(preload.get("absent") is True, "Ambient loader preload is present")
+    bindings["/etc/ld.so.preload"] = preload
+    diagnostics = command("loader-diagnostics", ["/lib64/ld-linux-x86-64.so.2", "--list-diagnostics"], maximum=15, env={"LANG": "C", "LC_ALL": "C"})
+    need(diagnostics.stderr == b"", "OS loader emitted a diagnostic failure")
+    profile = loader_diagnostics(diagnostics.stdout)
+    cache = command("loader-cache", ["/usr/sbin/ldconfig.real", "-p"], maximum=15, env={"LANG": "C", "LC_ALL": "C"})
+    need(cache.stderr == b"", "Static ldconfig emitted a diagnostic failure")
+    cache_rows = loader_cache(cache.stdout, policy["packages"]["libc-bin"][2])
+    for directory_name in DEFAULT_LIBRARY_DIRS:
+        bindings[directory_name] = _loader_binding(Path(directory_name), scope, directory_only=True)
+    for name, path in loader_candidates(names, cache_rows):
+        row = _loader_binding(Path(path), scope, absent=True)
+        loader_selected(row, policy["libraries"][name]["file"])
+        bindings[path] = row
+    proof = {"scope": scope, "namespaces": namespaces, "bindings": bindings, "diagnostics": profile,
+             "cacheRows": [row for row in cache_rows if row["soname"] in set(names) | PRIVATE_SONAMES],
+             "entryObjects": names, "payloadAdmitted": False,
+             "externalPrerequisites": policy["externalPrerequisites"]}
+    _installed_loader_check(proof)
+    _retain("loader-entry.json", canonical(proof))
+    return proof
+
+
+def _installed_loader_check(proof):
+    need(_namespaces(True) == proof["namespaces"] and _mount_scope() == proof["scope"], "Original loader namespace/mount interval changed")
+    for path, expected in proof["bindings"].items():
+        row = _loader_binding(Path(path), proof["scope"], directory_only="directory" in expected, absent=expected.get("absent", False))
+        need(row == expected, "Original loader/preload/cache/search binding changed")
+    need(time.monotonic() < _END, "Original loader interval closed late")
+
+
+SHELL_DATA_ROOTS = (
+    ("/etc/gtk-3.0", "directory"), ("/etc/fonts", "directory"),
+    ("/usr/share/fontconfig", "directory"), ("/usr/share/fonts", "directory"),
+    ("/usr/local/share/fonts", "directory"), ("/var/cache/fontconfig", "directory"),
+    ("/usr/share/glib-2.0/schemas", "directory"),
+    ("/usr/share/glvnd/egl_vendor.d", "directory"), ("/etc/glvnd/egl_vendor.d", "directory"),
+    ("/usr/share/drirc.d", "directory"), ("/etc/drirc", "file"),
+    ("/usr/share/X11/xkb", "directory"), ("/usr/share/X11/locale", "directory"),
+    ("/usr/share/icons/Adwaita", "directory"), ("/usr/share/icons/hicolor", "directory"),
+    ("/usr/share/themes/Adwaita", "directory"), ("/usr/share/mime/mime.cache", "file"),
+    ("/usr/share/hunspell", "directory"), ("/usr/share/hyphen", "directory"),
+    ("/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache", "file"),
+    ("/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache", "file"),
+    ("/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache", "file"),
+)
+SHELL_MODULE_CACHES = {
+    "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache": "/usr/lib/x86_64-linux-gnu/gio/modules",
+    "/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache": "/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders",
+    "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache": "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules",
+}
+
+
+def shell_generated_data(path):
+    return (path in SHELL_MODULE_CACHES or path.startswith("/var/cache/fontconfig/")
+            or path == "/var/cache/fontconfig" or path == "/usr/share/glib-2.0/schemas/gschemas.compiled"
+            or path == "/usr/share/mime/mime.cache"
+            or path.startswith("/usr/share/icons/") and Path(path).name == "icon-theme.cache"
+            or path.startswith(("/usr/share/fonts/", "/usr/local/share/fonts/")) and Path(path).name == ".uuid")
+
+
+def shell_module_cache(path, raw):
+    """Only the module selectors in the three fixed generated DATA formats."""
+    need(path in SHELL_MODULE_CACHES and type(raw) is bytes and len(raw) <= 1 << 20 and b"\0" not in raw,
+         "Fixed shell module catalogue bound differs")
+    rows, root = [], SHELL_MODULE_CACHES[path]
+    if path.endswith("/giomodule.cache"):
+        for line in raw.decode("ascii").splitlines():
+            found = re.fullmatch(r"([A-Za-z0-9_+.-]+\.so): ([A-Za-z0-9_,; +.-]+)", line)
+            need(found is not None, "GIO module catalogue grammar differs")
+            rows.append(root + "/" + found[1])
+    else:
+        for block in re.split(r"\n[ \t]*\n", raw.decode("ascii")):
+            lines = [line.strip() for line in block.splitlines() if line.strip() and not line.startswith("#")]
+            if not lines:
+                continue
+            found = re.fullmatch(r'"(/[^"\\\x00-\x20]+\.so)"', lines[0])
+            need(found is not None and len(lines) >= 2 and len(lines) <= 512,
+                 "GTK/pixbuf module catalogue stanza differs")
+            selected = str(absolute(found[1]))
+            need(Path(selected).parent == Path(root), "Module catalogue selects another directory")
+            rows.append(selected)
+    need(len(rows) <= 512 and len(rows) == len(set(rows)), "Duplicate/oversized module catalogue selection")
+    return sorted(rows)
+
+
+def shell_data_snapshot(bind_path):
+    """Finite protected OS DATA only; no invocation, extraction or new owner.
+
+    bind_path accepts the existing directory_only/absent/limit flags. Compiler
+    and root use their own protected bindings; root additionally proves mounts
+    and ACLs. Supplier summaries are portable. Generated caches are separate
+    current-VM receipts, never purported package/compiler inputs. Full detail
+    is split only by these fixed roots, each within the old 2 MiB file bound.
+    """
+    details, suppliers, caches, selections, egl = {}, {}, {}, {}, {}
+    count, total, retained, unique = 0, 0, 0, {}
+    for root_name, kind in SHELL_DATA_ROOTS:
+        root = Path(root_name)
+        detail = {"entries": [], "files": {}, "links": {}, "ancestry": {}, "directories": {}, "absences": {}}
+        rows, generated, pending = [], [], [(root, kind)]
+
+        def merge(binding):
+            for name, value in binding["ancestry"].items():
+                need(name not in detail["ancestry"] or detail["ancestry"][name] == value, "Shell DATA ancestry drift")
+                detail["ancestry"][name] = value
+            for name, state, target in binding["links"]:
+                value = [state, target]
+                need(name not in detail["links"] or detail["links"][name] == value, "Shell DATA link drift")
+                detail["links"][name] = value
+
+        while pending:
+            path, selected_kind = pending.pop()
+            count += 1
+            need(count <= 32768 and len(path.parts) - len(root.parts) <= 16, "Shell DATA entry/depth bound")
+            binding = bind_path(path, directory_only=selected_kind == "directory", absent=True, limit=64 << 20)
+            merge(binding)
+            relative = str(path.relative_to(root))
+            row = {"path": relative, "kind": selected_kind, "present": not binding.get("absent", False)}
+            is_cache = shell_generated_data(str(path))
+            if not row["present"]:
+                need(path == root, "Shell DATA member disappeared during inventory")
+                detail["absences"][str(path)] = {key: binding[key] for key in ("path", "absentAt")}
+            elif selected_kind == "directory":
+                need(not path.is_symlink(), "Shell DATA directory alias is not a reviewed root")
+                before = identity(path.lstat())
+                children = sorted(child.name for child in path.iterdir())
+                need(len(children) <= 8192 and all(re.fullmatch(r"[A-Za-z0-9_.+@\-]+", name) for name in children),
+                     "Shell DATA directory membership bound/grammar")
+                row.update(canonical=binding["path"], mode=stat.S_IMODE(binding["directory"][2]),
+                           children=[name for name in children if not shell_generated_data(str(path / name))])
+                detail["directories"][str(path)] = {"path": binding["path"], "identity": binding["directory"], "children": children}
+                for name in reversed(children):
+                    child = path / name
+                    item = child.lstat()
+                    need(stat.S_ISREG(item.st_mode) or stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode),
+                         "Nonordinary shell DATA child")
+                    pending.append((child, "directory" if stat.S_ISDIR(item.st_mode) else "file"))
+                need(identity(path.lstat()) == before, "Shell DATA directory changed while listing")
+            else:
+                need(not binding["identity"][2] & 0o111, "Executable input cannot enter the shell DATA-only profile")
+                file = {key: binding[key] for key in ("size", "sha256", "identity")}
+                canonical_path = binding["path"]
+                need(canonical_path not in detail["files"] or detail["files"][canonical_path] == file, "Shell DATA file drift")
+                detail["files"][canonical_path] = file
+                row.update(canonical=canonical_path, size=file["size"], sha256=file["sha256"],
+                           mode=stat.S_IMODE(file["identity"][2]), links=[[name, target] for name, _, target in binding["links"]])
+                if canonical_path not in unique:
+                    unique[canonical_path] = file
+                    total += file["size"]
+                else:
+                    need(unique[canonical_path] == file, "Shell DATA alias changed its original target")
+                need(total <= 512 << 20, "Shell DATA canonical byte bound")
+                if str(path) in SHELL_MODULE_CACHES:
+                    raw = read(Path(canonical_path), 1 << 20)
+                    need(len(raw) == file["size"] and hashlib.sha256(raw).hexdigest() == file["sha256"], "Module cache changed while parsing")
+                    selections[str(path)] = shell_module_cache(str(path), raw)
+                if str(path.parent) in {"/usr/share/glvnd/egl_vendor.d", "/etc/glvnd/egl_vendor.d"}:
+                    need(path.suffix == ".json", "Unexpected EGL vendor DATA member")
+                    raw = read(Path(canonical_path), 64 << 10)
+                    need(len(raw) == file["size"] and hashlib.sha256(raw).hexdigest() == file["sha256"], "EGL selector changed while parsing")
+                    value = decode(raw, 64 << 10)
+                    need(type(value) is dict and set(value) == {"file_format_version", "ICD"}
+                         and value["file_format_version"] == "1.0.0" and type(value["ICD"]) is dict
+                         and set(value["ICD"]) == {"library_path"}, "Fixed EGL ICD format differs")
+                    library = value["ICD"]["library_path"]
+                    need(type(library) is str and re.fullmatch(r"(?:/usr/lib/x86_64-linux-gnu/)?libEGL_[A-Za-z0-9_.+-]+\.so(?:\.[0-9]+)*", library),
+                         "EGL vendor selects an unreviewed provider path")
+                    egl[str(path)] = str(Path("/usr/lib/x86_64-linux-gnu") / library)
+            detail["entries"].append(row)
+            (generated if is_cache else rows).append(row)
+        for name, item in detail["directories"].items():
+            current = bind_path(Path(name), directory_only=True)
+            need(current["directory"] == item["identity"] and sorted(child.name for child in Path(name).iterdir()) == item["children"],
+                 "Shell DATA directory membership changed after inventory")
+        for target, entries in ((suppliers, rows), (caches, generated)):
+            ordered = sorted(entries, key=lambda row: row["path"])
+            target[root_name] = {"kind": kind, "present": ordered[0]["present"] if ordered else None, "entryCount": len(ordered),
+                "fileCount": sum(row["kind"] == "file" and row["present"] for row in ordered),
+                "byteCount": sum(row.get("size", 0) for row in ordered), "sha256": hashlib.sha256(canonical(ordered)).hexdigest()}
+        detail["entries"].sort(key=lambda row: row["path"])
+        size = len(canonical(detail))
+        retained += size
+        need(size <= LIMIT and retained <= 16 << 20, "Fixed per-root shell DATA detail/total bound")
+        details[root_name] = detail
+    for path in SHELL_MODULE_CACHES:
+        selections.setdefault(path, [])
+    return {"suppliers": {"roots": suppliers, "sha256": hashlib.sha256(canonical(suppliers)).hexdigest()},
+            "caches": {"roots": caches, "sha256": hashlib.sha256(canonical(caches)).hexdigest()},
+            "moduleSelections": selections, "eglLibraries": egl, "details": details}
+
+
+SHELL_LOADER_RETAINED = ("graph", "osFiles", "moduleRoots", "runtimeData", "loader", "ldconfig", "cache", "osNames", "externalPrerequisites")
+SHELL_LOADER_OMITTED = ("libraries", "programs", "modules", "scripts", "packages")
+
+
+def expand_shell_loader_policy(compact, compiler):
+    """One lossless wire version; return a private view, never expand inputs.json."""
+    need(type(compact) is dict and set(compact) == {"schemaVersion", *SHELL_LOADER_RETAINED},
+         "Fixed compact shell loader policy fields differ")
+    need(type(compact["schemaVersion"]) is int and compact["schemaVersion"] == 1,
+         "Unsupported compact shell loader policy version")
+    need(all(type(compact[key]) is dict for key in SHELL_LOADER_RETAINED if key not in {"osNames", "externalPrerequisites"})
+         and type(compact["osNames"]) is list and type(compact["externalPrerequisites"]) is str,
+         "Compact shell loader policy shape differs")
+    pin = compiler.get("nativeRecord") if type(compiler) is dict else None
+    need(type(pin) is dict and set(pin) == {"path", "size", "sha256"}
+         and type(pin["size"]) is int and pin["size"] > 0 and type(pin["sha256"]) is str,
+         "Original shell native graph binding is missing")
+    raw = canonical(compact["graph"])
+    need(len(raw) == pin["size"] and hashlib.sha256(raw).hexdigest() == pin["sha256"],
+         "Shell native graph lost its original compiler binding")
+    policy = deepcopy({key: compact[key] for key in SHELL_LOADER_RETAINED})
+    graph = policy["graph"]
+    need(all(type(graph.get(key)) is dict for key in ("osFiles", "sharedObjects", "programs", "modules", "scripts", "osPackages"))
+         and set(policy["osFiles"]) == set(graph["osFiles"]), "Compact shell native reconstruction roster differs")
+    for selected, row in policy["osFiles"].items():
+        # protected_host_file/D.state and _loader_binding/_data_identity both
+        # use these seven fields, not the separate nine-field lifecycle identity.
+        need(type(row) is dict and {"path", "selectedPath", "size", "sha256", "identity"} <= set(row)
+             and row["selectedPath"] == selected and type(row["identity"]) is list and len(row["identity"]) == 7
+             and all(type(part) is int for part in row["identity"]), "Compact shell current file identity differs")
+        portable = {key: row[key] for key in ("path", "selectedPath", "size", "sha256")}
+        portable["mode"] = stat.S_IMODE(row["identity"][2])
+        need(canonical(portable) == canonical(graph["osFiles"][selected]),
+             "Compact shell current file differs from its compiler")
+    for kind, source in (("libraries", "sharedObjects"), ("programs", "programs"), ("modules", "modules"), ("scripts", "scripts")):
+        policy[kind] = {}
+        for name, original in graph[source].items():
+            fields = {"file", "package", "interpreter" if kind == "scripts" else "elf"}
+            need(type(original) is dict and set(original) == fields and type(original["file"]) is dict
+                 and set(original["file"]) == {"path", "selectedPath", "size", "sha256", "mode"},
+                 "Compact shell executable reconstruction shape differs")
+            selected = original["file"]["selectedPath"]
+            need(type(selected) is str and selected in policy["osFiles"]
+                 and canonical(original["file"]) == canonical(graph["osFiles"][selected]),
+                 "Compact shell executable lost its current file binding")
+            row = deepcopy(original)
+            row["file"]["identity"] = list(policy["osFiles"][selected]["identity"])
+            policy[kind][name] = row
+    policy["packages"] = deepcopy(graph["osPackages"])
+    return policy
+
+
+def compact_shell_loader_policy(policy, compiler):
+    """Omit duplicates only after comparison with the fully checked VM policy."""
+    need(type(policy) is dict and set(policy) == {*SHELL_LOADER_RETAINED, *SHELL_LOADER_OMITTED},
+         "Fixed full shell loader policy fields differ")
+    compact = {"schemaVersion": 1, **{key: policy[key] for key in SHELL_LOADER_RETAINED}}
+    expanded = expand_shell_loader_policy(compact, compiler)
+    need(canonical(expanded) == canonical(policy), "Compact shell loader reconstruction differs from the checked original")
+    return deepcopy(compact)
+
+
+def _shell_loader_start(value, namespaces):
+    """Separate GTK/WebKit entry policy; never widens the feature-off J gate."""
+    shell, old = value["shell"], value["compilerRecords"]["nativeInputs"]
+    policy = expand_shell_loader_policy(shell["loaderPolicy"], shell["compiler"])
+    graph = policy["graph"]
+    need(graph["manifestSha256"] == M and graph["protocolSha256"] == Q
+         and set(graph["outputs"]) == set(shell["binaries"]), "Shell native graph lost its original compiler binding")
+    names = policy["osNames"]
+    need(type(names) is list and names == sorted(set(names)) and 1 <= len(names) <= 256
+         and set(names) == set(policy["libraries"]) == set(graph["sharedObjects"])
+         and set(old["outputs"]["libtest"]["objects"]) <= set(names), "Shell/U complete entry closure differs")
+    scope, bindings = _mount_scope(), {}
+    for name, row in policy["libraries"].items():
+        original = graph["sharedObjects"][name]
+        need(row["elf"] == original["elf"] and all(row["file"][key] == original["file"][key] for key in ("size", "sha256")),
+             "Shell current provider differs from its compiler")
+        if name in old["sharedObjects"]:
+            prior = old["sharedObjects"][name]
+            need(row["elf"] == prior["elf"] and all(row["file"][key] == prior["file"][key] for key in ("size", "sha256")),
+                 "Common shell/U provider differs from accepted U")
+    for row in [*policy["osFiles"].values(), policy["loader"], policy["ldconfig"], policy["cache"]]:
+        current = _loader_binding(Path(row["selectedPath"]), scope)
+        need(current == row, "Root shell helper/module/data input differs from this VM's admitted binding")
+        bindings[row["selectedPath"]] = current
+    for kind, originals in (("libraries", graph["sharedObjects"]), ("programs", graph["programs"]),
+                             ("modules", graph["modules"]), ("scripts", graph["scripts"])):
+        need(set(policy[kind]) == set(originals), "Shell executable/module roster differs from compiler")
+        for name, row in policy[kind].items():
+            bound = bindings[row["file"]["selectedPath"]]
+            portable = {key: bound[key] for key in ("path", "selectedPath", "size", "sha256")}
+            portable["mode"] = stat.S_IMODE(bound["identity"][2])
+            need(portable == originals[name]["file"] and row["file"] == {**portable, "identity": bound["identity"]},
+                 "Shell executable/module provider lost its protected current binding")
+    modules = policy["moduleRoots"]
+    for path, row in modules.items():
+        binding = _loader_binding(Path(path), scope, directory_only=True, absent=True)
+        need(binding == row["binding"] and (row["children"] == [] if binding.get("absent") else
+             sorted(child.name for child in Path(path).iterdir()) == row["children"]),
+             "Shell module directory or membership differs from original admission")
+        bindings[path] = binding
+    shell_module_proof(graph, modules, bindings)
+    for row in graph["privateSearch"]:
+        binding = _loader_binding(Path(row["path"]), scope, absent=True)
+        shell_private_selected(row, binding, policy["libraries"][row["name"]]["file"])
+        need(row["path"] not in bindings or bindings[row["path"]] == binding, "Shell private search path changed")
+        bindings[row["path"]] = binding
+    need(policy["loader"]["path"] == policy["libraries"]["ld-linux-x86-64.so.2"]["file"]["path"]
+         and policy["loader"]["selectedPath"] == "/lib64/ld-linux-x86-64.so.2"
+         and policy["ldconfig"]["selectedPath"] == "/usr/sbin/ldconfig.real"
+         and policy["cache"]["selectedPath"] == "/etc/ld.so.cache", "Fixed shell loader/cache names differ")
+    copies = [("platform-tests", value["library"]), *(("shell-" + role, row) for role, row in shell["binaries"].items())]
+    for leaf, expected in copies:
+        row = _loader_binding(_ROOT / leaf, scope)
+        need(all(row[key] == expected[key] for key in ("size", "sha256")), "Protected normal/observer/U platform copy differs")
+        bindings[str(_ROOT / leaf)] = row
+    bindings["/etc/ld.so.preload"] = _loader_binding(Path("/etc/ld.so.preload"), scope, absent=True)
+    need(bindings["/etc/ld.so.preload"].get("absent") is True, "Ambient loader preload is present")
+    diagnostics = command("loader-diagnostics", ["/lib64/ld-linux-x86-64.so.2", "--list-diagnostics"], maximum=15,
+                          env={"LANG": "C", "LC_ALL": "C"})
+    need(diagnostics.stderr == b"", "Shell loader diagnostic command failed")
+    profile = loader_diagnostics(diagnostics.stdout)
+    cache = command("loader-cache", ["/usr/sbin/ldconfig.real", "-p"], maximum=15, env={"LANG": "C", "LC_ALL": "C"})
+    need(cache.stderr == b"", "Shell static loader-cache command failed")
+    libc = next(row for row in policy["packages"].values() if row["binaryPackage"].split(":")[0] == "libc6")
+    cache_rows = loader_cache(cache.stdout, libc["version"], shell_names=names)
+    for name in DEFAULT_LIBRARY_DIRS:
+        bindings[name] = _loader_binding(Path(name), scope, directory_only=True)
+    # Only ordinary global providers use the cache/default search policy.
+    # Private RUNPATH providers keep their exact per-requester static graph;
+    # they must not be relabelled as globally selected cache libraries.
+    global_names = shell_global_names(policy["libraries"])
+    tiers = {}
+    for directory in DEFAULT_LIBRARY_DIRS:
+        for tier in HWCAPS:
+            path = directory + "/glibc-hwcaps/" + tier
+            row = _loader_binding(Path(path), scope, directory_only=True, absent=True)
+            bindings[path] = row
+            tiers[path] = row.get("absent") is not True
+    for name, path in shell_loader_candidates(sorted(global_names), cache_rows, tiers):
+        row = _loader_binding(Path(path), scope, absent=True)
+        loader_selected(row, policy["libraries"][name]["file"])
+        bindings[path] = row
+    snapshot = shell_data_snapshot(lambda path, **options: _loader_binding(path, scope, **options))
+    data = shell_data_projection(snapshot)
+    need(data == {key: policy["runtimeData"][key] for key in data}
+         and data["suppliers"] == graph["runtimeData"]["suppliers"]
+         and data["eglLibraries"] == graph["runtimeData"]["eglLibraries"]
+         and all(set(paths) <= set(graph["modules"]) for paths in data["moduleSelections"].values()),
+         "Root supplier DATA, current cache or module selector differs")
+    need(type(policy["runtimeData"]["records"]) is list and len(policy["runtimeData"]["records"]) == len(SHELL_DATA_ROOTS),
+         "Original current-VM shell DATA detail roster missing")
+    data["records"] = []
+    for index, (path, _) in enumerate(SHELL_DATA_ROOTS):
+        leaf, raw = "shell-root-data-" + str(index) + ".json", canonical(snapshot["details"][path])
+        need(policy["runtimeData"]["records"][index] == {"path": "shell-consumer-data-" + str(index) + ".json",
+             "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+             "Root shell DATA identity differs from the original current-VM admission")
+        _retain(leaf, raw)
+        data["records"].append({"path": leaf, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    proof = {"scope": scope, "namespaces": namespaces, "bindings": bindings, "diagnostics": profile,
+             "cacheRows": [row for row in cache_rows if row["soname"] in set(names) | PRIVATE_SONAMES],
+             "entryObjects": names, "globalObjects": sorted(global_names), "hwcapsTiers": tiers,
+             "moduleRoots": modules, "privateSearch": graph["privateSearch"], "runtimeData": data, "runtimeDataRechecked": False,
+             "payloadAdmitted": False, "externalPrerequisites": policy["externalPrerequisites"]}
+    _installed_loader_check(proof)
+    _retain("loader-entry.json", canonical(proof))
+    return proof
+
+
+def shell_data_projection(snapshot):
+    return {key: snapshot[key] for key in ("suppliers", "caches", "moduleSelections", "eglLibraries")}
+
+
+def shell_module_proof(graph, roots, bindings):
+    """Finite module membership DATA, including absence; not a loader action."""
+    need(type(roots) is dict and set(roots) == set(graph["moduleRoots"]), "Original module-root roster differs")
+    selected = set()
+    for path, row in roots.items():
+        need(type(row) is dict and set(row) == {"binding", "children"} and bindings.get(path) == row["binding"]
+             and type(row["children"]) is list and row["children"] == sorted(set(row["children"]))
+             and len(row["children"]) <= 256, "Original module-directory proof is incomplete")
+        present = row["binding"].get("absent") is not True
+        need(present or not row["children"], "Absent module directory has children")
+        names = [name for name in row["children"] if path + "/" + name not in SHELL_MODULE_CACHES]
+        need(all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_.+\-]+\.so", name) for name in names)
+             and graph["moduleRoots"][path] == {"present": present, "modules": names},
+             "Module membership differs from the original compiled profile")
+        selected.update(path + "/" + name for name in names)
+    need(selected == set(graph["modules"]), "An original module was added or omitted")
+
+
+def shell_private_selected(candidate, binding, provider):
+    """Every per-requester alternative is checked, not just private providers."""
+    need(type(candidate) is dict and set(candidate) == {"requester", "runpath", "name", "path", "selected"}
+         and type(candidate["selected"]) is bool
+         and candidate["selected"] == (candidate["path"] == provider["selectedPath"]),
+         "Original private requester/candidate selection differs")
+    if candidate["selected"]:
+        need(binding.get("absent") is not True, "Selected private shell provider is absent")
+        loader_selected(binding, provider)
+    else:
+        need(binding.get("absent") is True, "Private shell search can shadow an admitted dependency")
+
+
+def _shell_data_check(proof):
+    # One final rewalk, not a fresh copy of the same large DATA evidence.
+    # Initial complete details remain retained; final hashes include actual
+    # inode/link/cache bytes and directory membership as well as summaries.
+    for path, row in proof["moduleRoots"].items():
+        current = _loader_binding(Path(path), proof["scope"], directory_only=True, absent=True)
+        need(current == row["binding"] and (row["children"] == [] if current.get("absent") else
+             sorted(child.name for child in Path(path).iterdir()) == row["children"]), "Original module membership changed")
+    snapshot = shell_data_snapshot(lambda path, **options: _loader_binding(path, proof["scope"], **options))
+    need(shell_data_projection(snapshot) == shell_data_projection(proof["runtimeData"]),
+         "Original shell supplier/cache/selector interval changed")
+    for index, (path, _) in enumerate(SHELL_DATA_ROOTS):
+        raw = canonical(snapshot["details"][path])
+        need(proof["runtimeData"]["records"][index] == {"path": "shell-root-data-" + str(index) + ".json",
+             "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}, "Original complete shell DATA binding changed")
+    need(time.monotonic() < _END, "Original shell DATA interval closed late")
+    proof["runtimeDataRechecked"] = True
+
+
+def _installed_payload(value, proof, original):
+    # NOT reached by either refusal. Their deliberately invalid M must reach
+    # real Rust inspection, after only the libtest/platform OS-entry gate.
+    profile = value["shell"] if "shell" in value else value["installed"]
+    need(("shell" in value or profile["case"] == "positive") and _tree(PREFIX / M, M, published=True) == original,
+         "Positive published A changed before payload admission")
+    policy = (expand_shell_loader_policy(profile["loaderPolicy"], profile["compiler"])
+              if "shell" in value else profile["loaderPolicy"])
+    graph = policy["graph"]
+    fixed = {"python/bin/python3": (None, "$ORIGIN/../lib"), "python/lib/libssl.so.3": ("libssl.so.3", "$ORIGIN"),
+             "python/lib/libcrypto.so.3": ("libcrypto.so.3", "$ORIGIN")}
+    need(set(graph["runtime"]) == set(fixed) and graph["runtimeObjects"] == sorted(PRIVATE_SONAMES | {"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2"}),
+         "Fixed complete A native graph differs")
+    expected = {}
+    for relative, (soname, runpath) in fixed.items():
+        row, admitted = original[relative], graph["runtime"][relative]
+        need(admitted["elf"]["soname"] == soname and admitted["elf"]["runpath"] == runpath
+             and all(row[key] == admitted["file"][key] for key in ("size", "sha256")), "Private A ELF/RUNPATH original differs")
+        path = PREFIX / M / relative
+        binding = _loader_binding(path, proof["scope"])
+        need(binding["identity"][:2] == row["identity"][:2], "Published A native inode differs")
+        proof["bindings"][str(path)] = binding
+        role = soname or "python"
+        expected[role] = {"paths": [str(path)], "deviceMajor": os.major(row["identity"][0]),
+                          "deviceMinor": os.minor(row["identity"][0]), "inode": row["identity"][1]}
+    for relative in ("python/lib/glibc-hwcaps", *("python/lib/" + name for name in proof["entryObjects"] if name not in PRIVATE_SONAMES),
+                     *(prefix + name for prefix in ("", "python/", "python/bin/") for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt"))):
+        path = PREFIX / M / relative
+        binding = _loader_binding(path, proof["scope"], absent=True)
+        need(binding.get("absent") is True, "Private A startup/hwcaps/OS override exists")
+        proof["bindings"][str(path)] = binding
+    for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"):
+        admitted = policy["libraries"][name]["file"]
+        paths = [prefix + name for prefix in ("/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/")]
+        if name == "ld-linux-x86-64.so.2":
+            paths.append("/lib64/" + name)
+        need(all(proof["bindings"][path].get("identity") == admitted["identity"] for path in paths), "Reported OS map alias is not independently bound")
+        expected[name] = {"paths": sorted(paths), "deviceMajor": os.major(admitted["identity"][0]),
+                          "deviceMinor": os.minor(admitted["identity"][0]), "inode": admitted["identity"][1]}
+    proof["payloadAdmitted"] = True
+    _installed_loader_check(proof)
+    result = {"expectedMaps": expected, "privateObjects": sorted(PRIVATE_SONAMES),
+              "shadowedCacheRows": [row for row in proof["cacheRows"] if row["soname"] in PRIVATE_SONAMES],
+              "shadowedDefaultNames": [directory + "/" + tier + name for directory in DEFAULT_LIBRARY_DIRS
+                   for tier in ("", *("glibc-hwcaps/" + tier + "/" for tier in HWCAPS)) for name in sorted(PRIVATE_SONAMES)],
+              "selection": "For each private SONAME, the exact protected A RUNPATH object precedes cache/default/hwcaps OS rows. "
+                           "All private hwcaps alternatives and OS-name overrides are absent in complete A. No private OS alternative is eligible.",
+              "manifestSha256": M, "protocolSha256": Q}
+    _retain("loader-runtime.json", canonical(result))
+    return expected
+
+
+def installed_result(stdout, stderr, case, code, expected):
+    need(case in INSTALLED_TESTS and type(stdout) is bytes and 0 < len(stdout) <= LIMIT and stderr == b""
+         and type(code) is int and code == (79 if case == "emfile" else 0), "Installed original carrier capture/exit differs")
+    lines = [line for line in stdout.decode("ascii").splitlines() if line]
+    prefix = "test " + INSTALLED_TESTS[case] + " ... "
+    count = {"positive": 2, "shutdown": 1, "overlap": 2}.get(case, 0)
+    if case == "emfile":
+        need(lines == ["running 1 test", prefix, EMFILE_MARKER], "Exact exit79 retained-Unknown marker/harness differs")
+        return {"case": case, "exitCode": 79, "libtestPassed": False, "nativeCleanupProven": False,
+                "originalCarrierComplete": True, "marker": EMFILE_MARKER, "maps": []}
+    need(len(lines) == (count + 4 if count else 3) and lines[0] == "running 1 test"
+         and re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", lines[-1]) is not None,
+         "Installed exact libtest roster differs")
+    observations = []
+    if count:
+        need(lines[1] == prefix and lines[-2] == "ok" and type(expected) is dict and len(expected) == 6,
+             "Installed nocapture harness or admitted mapping set differs")
+        for line in lines[2:-2]:
+            need(line.startswith(CHILD_MARKER) and len(line) <= 8192 + len(CHILD_MARKER), "Installed child marker is not standalone/bounded")
+            rows = decode(line[len(CHILD_MARKER):].encode("ascii"), 8192)
+            need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+                 and [row.get("role") for row in rows] == sorted(expected), "Installed child mapping roles differ")
+            for row in rows:
+                need(type(row) is dict and set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+                     and row["path"] in expected[row["role"]]["paths"]
+                     and all(type(row[key]) is int and row[key] == expected[row["role"]][key] for key in ("deviceMajor", "deviceMinor", "inode"))
+                     and 0 <= row["deviceMajor"] < 1 << 32 and 0 <= row["deviceMinor"] < 1 << 32 and 0 < row["inode"] < 1 << 64,
+                     "Actual retained-child mapping differs from independently admitted inode")
+            observations.append(rows)
+        need(case != "overlap" or observations[0] == observations[1], "Same original old child mappings changed across publication")
+    else:
+        need(lines[1] == prefix + "ok", "Installed refusal/deadline test emitted extra output")
+    return {"case": case, "exitCode": 0, "libtestPassed": True, "maps": observations}
+
+
+def _installed_environment(value):
+    return {"LANG": "C", "LC_ALL": "C", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+            "GITHUB_SHA": value["sourceSha"], "GITHUB_RUN_ID": value["runId"], "GITHUB_RUN_ATTEMPT": value["attempt"]}
+
+
+def _installed_argv(value, case):
+    need(case in INSTALLED_TESTS, "Only fixed candidate test selectors are permitted")
+    return _drop(value, [str(root_path(value) / "installed-tests"), INSTALLED_TESTS[case], "--exact", "--ignored", "--test-threads=1", "--nocapture"])
+
+
+def _installed_case(value, case, proof, expected=None):
+    _installed_loader_check(proof)
+    result = command("installed-" + case, _installed_argv(value, case), maximum=60 if case == "positive" else 30,
+                     codes=(79,) if case == "emfile" else (0,), env=_installed_environment(value))
+    observed = installed_result(result.stdout, result.stderr, case, result.returncode, expected)
+    _installed_loader_check(proof)
+    return observed
+
+
+def _refusal_fixture(value, proof):
+    case = value["installed"]["case"]
+    need(case in {"refuse-writable", "refuse-pth"}, "Only the two fixed never-published fixtures are permitted")
+    proof["bindings"]["/var/lib"] = _loader_binding(Path("/var/lib"), proof["scope"], directory_only=True)
+    original = _tree(INPUT / M, M, published=False)
+    app = Path("/var/lib/mobile-release-kit")
+    _absent(app)
+    prefixes = (app, app / "versions", PREFIX)
+    for path in prefixes:
+        path.mkdir(mode=0o700)
+    directories = sorted((name for name, row in original.items() if "sha256" not in row), key=lambda name: (len(Path(name).parts), name))
+    for name in directories:
+        (PREFIX / M / name).mkdir(mode=0o700)
+    for name, row in original.items():
+        if "sha256" in row:
+            path = INPUT / M / name
+            copy_pinned(path, PREFIX / M / name, {"path": str(path), "size": row["size"], "sha256": row["sha256"]},
+                        0o555 if name == "python/bin/python3" else 0o444)
+    for name in reversed(directories):
+        os.chmod(PREFIX / M / name, 0o555)
+    for path in reversed(prefixes):
+        os.chmod(path, 0o755)
+    fresh = _tree(PREFIX / M, M, published=True)
+    need(set(fresh) == set(original) and all(fresh[name]["identity"][:2] != row["identity"][:2] for name, row in original.items()),
+         "Never-published fixture adopted a package input inode")
+    if case == "refuse-writable":
+        # This application ancestor is newly created HERE and has never been
+        # published. No accepted/published M is modified, repaired or retried.
+        os.chmod(app, 0o777)
+    else:
+        path = PREFIX / M / "python/bin/python3._pth"
+        _D.write(path, b"# inert unlisted startup DATA; must never be executed\n", 0o444)
+        row = record(path, 128)
+        fresh["python/bin/python3._pth"] = {key: row[key] for key in ("size", "sha256")}
+        fresh["python/bin/python3._pth"]["identity"] = list(identity(path.lstat()))
+        fresh["python/bin"]["identity"] = list(identity(path.parent.lstat()))
+    fixture = {"case": case, "neverPublished": True, "manifestSha256": M,
+               "prefixes": {str(path): list(identity(path.lstat())) for path in (Path("/var"), Path("/var/lib"), *prefixes)}, "tree": fresh}
+    _refusal_fixture_check(fixture)
+    _retain("refusal-fixture-before.json", canonical(fixture))
+    return fixture
+
+
+def _refusal_fixture_check(fixture):
+    # Identity/byte readback of deliberately invalid DATA, NOT runtime admission.
+    # In particular, this does not call positive-only protected _tree on the
+    # writable fixture and accidentally short-circuit the real Rust refusal.
+    for name, expected in fixture["prefixes"].items():
+        path = Path(name)
+        need(list(identity(path.lstat())) == expected, "Never-published fixture prefix changed")
+        _xattrs(path, True)
+    rows = fixture["tree"]
+    need(0 < len(rows) <= 8192, "Fixed refusal fixture membership bound")
+    for name, row in rows.items():
+        path = PREFIX / M / name
+        item = path.lstat()
+        need(list(identity(item)) == row["identity"], "Never-published fixture identity changed")
+        if "sha256" in row:
+            observed = record(path, row["size"])
+            need(all(observed[key] == row[key] for key in ("size", "sha256")), "Never-published fixture bytes changed")
+        else:
+            prefix = name + "/" if name else ""
+            children = {other[len(prefix):] for other in rows if other.startswith(prefix) and other != name and "/" not in other[len(prefix):]}
+            need(stat.S_ISDIR(item.st_mode) and {child.name for child in path.iterdir()} == children,
+                 "Never-published fixture membership changed")
+        _xattrs(path, "sha256" not in row)
+        need(list(identity(path.lstat())) == row["identity"], "Never-published fixture readback drift")
+    for manifest in (M, F1):
+        _absent(PREFIX / (".publish-" + manifest))
+    _absent(PREFIX / F1)
+
+
+def overlap_endpoint(raw, started, service_endpoint):
+    need(type(raw) is bytes and 0 < len(raw) <= 32 and re.fullmatch(rb"[1-9][0-9]{0,19}\n", raw) is not None
+         and int(raw[:-1]) < 1 << 64 and all(type(value) in {float, int} and math.isfinite(value) for value in (started, service_endpoint)),
+         "Original old-child endpoint DATA is invalid")
+    # Round toward the past, never outward; this is only a conservative cap on
+    # scheduling. Neither the DATA nor a late return renews the Rust 10s clock.
+    decoded = math.nextafter(int(raw[:-1]) / 1_000_000_000, -math.inf)
+    return min(decoded, started + 10, service_endpoint)
+
+
+def _overlap_controls(value):
+    control = _ROOT / "control"
+    control.mkdir(mode=0o700)
+    os.chmod(control, 0o711)
+    _xattrs(control, True)
+    ready, release = control / "passive-ready", control / "passive-release"
+    fd = os.open(ready, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    item = ready.lstat()
+    need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and item.st_uid == 0 and item.st_gid == value["runnerGid"]
+         and stat.S_IMODE(item.st_mode) == 0o620 and item.st_size == 0, "Fresh fixed ready DATA differs")
+    _xattrs(ready, False)
+    _D.write(release, b"pending\n", 0o444)
+    return {"readyIdentity": list(identity(item)[:6]), "release": protected_record(release, 32),
+            "controlIdentity": list(identity(control.lstat())[:6])}
+
+
+def _overlap_worker(holder, argv, env, seconds, *, shell_diagnostic=False):
+    # This exact original thread owns its own cancellation installation and
+    # restoration. It never calls command(), _retain(), or global bookkeeping.
+    guard, errors = None, []
+    observation, origin = None, "guard-install"
+    if shell_diagnostic:
+        try:
+            observation = {"ownerCall": None, "errorOrigins": []}
+            holder["shellDiagnostic"] = observation
+        except BaseException:
+            observation = None
+
+    def note_error(label):
+        if observation is not None:
+            try:
+                observation["errorOrigins"].append(label)
+            except BaseException:
+                pass
+
+    try:
+        guard = _OWNER.DefaultCancellation(_OWNER.ProcessCleanupError, "overlap worker cancellation restoration unproven")
+        guard.install()
+        origin = "guard-activate"
+        guard.activate()
+        origin = "owner"
+        call = _shell_call_started(seconds) if shell_diagnostic else None
+        if shell_diagnostic:
+            _shell_note(observation, ownerCall=call)
+        returned = False
+        try:
+            result = _OWNER.run_owned(argv, environ=env, cwd=Path("/"), timeout=seconds, capture=True, text=False,
+                                      output_limit=LIMIT, cancellation=guard, execution_scope=None, journal_binding=None, cleanup=False)
+            returned = True
+            holder["result"] = result
+        finally:
+            if shell_diagnostic:
+                _shell_call_finished(call, returned)
+    except BaseException as error:
+        errors.append(error)
+        note_error(origin)
+    finally:
+        if guard is not None:
+            for label, operation in (("guard-restore", guard.restore), ("guard-check", guard.check)):
+                try:
+                    operation()
+                except BaseException as error:
+                    errors.append(error)
+                    note_error(label)
+            try:
+                holder["guardState"] = guard.handler_state
+            except BaseException as error:
+                errors.append(error)
+                note_error("guard-state")
+        holder["errors"] = errors
+
+
+def _overlap_ready_bytes(controls):
+    # This one ready file is intentionally mutable scheduling DATA. Bind the
+    # same original inode/authority and consume its original descriptor once,
+    # but permit its size/time to change during the one legitimate Rust write.
+    ready = _ROOT / "control/passive-ready"
+    need(list(identity(ready.lstat())[:6]) == controls["readyIdentity"], "Original scheduling ready inode changed")
+    fd = os.open(ready, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        need(list(identity(before)[:6]) == controls["readyIdentity"] and 0 <= before.st_size <= 32, "Original ready descriptor differs")
+        raw = os.read(fd, 33)
+        after = os.fstat(fd)
+        need(len(raw) <= 32 and list(identity(after)[:6]) == controls["readyIdentity"] and 0 <= after.st_size <= 32,
+             "Original ready descriptor bound/identity differs")
+    finally:
+        os.close(fd)
+    need(list(identity(ready.lstat())[:6]) == controls["readyIdentity"], "Original scheduling ready inode changed after close")
+    return raw
+
+
+def _overlap_ready(worker, controls, started, service_endpoint):
+    cap = min(started + 10, service_endpoint)
+    while time.monotonic() < cap:
+        raw = _overlap_ready_bytes(controls)
+        if raw.endswith(b"\n"):
+            return overlap_endpoint(raw, started, service_endpoint)
+        need(not raw or re.fullmatch(rb"[0-9]{1,20}", raw) is not None, "Scheduling ready DATA is invalid")
+        need(worker.is_alive(), "Original overlap worker returned before readiness")
+        time.sleep(0.005)
+    raise Refused("Original old-child ready endpoint expired")
+
+
+def _overlap_release(controls, endpoint):
+    control = _ROOT / "control"
+    release, fresh = control / "passive-release", control / "passive-release-next"
+    need(time.monotonic() < endpoint and list(identity(control.lstat())[:6]) == controls["controlIdentity"]
+         and protected_record(release, 32) == controls["release"] and read(release, 32) == b"pending\n",
+         "Original release DATA changed or configure window expired")
+    _D.write(fresh, b"release\n", 0o444)
+    row = protected_record(fresh, 32)
+    need(row["identity"][:2] != controls["release"]["identity"][:2] and time.monotonic() < endpoint,
+         "Fresh release inode aliases original or completed late")
+    os.replace(fresh, release)
+    observed = protected_record(release, 32)
+    need(all(observed[key] == row[key] for key in ("size", "sha256")) and observed["identity"][:8] == row["identity"][:8]
+         and time.monotonic() < endpoint,
+         "Atomic original release readback differs or is late")
+
+
+def _installed_overlap(value, policy, proof, expected):
+    global _FAILED, _PHASE
+    # Admission checks precede the old-child window. The package wrapper's
+    # final policy/marker checks still share its original configure endpoint.
+    need(not _FAILED and dpkg_policy() == policy, "Dpkg policy changed before fixed overlap")
+    _installed_loader_check(proof)
+    controls = _overlap_controls(value)
+    argv, env = _installed_argv(value, "overlap"), _installed_environment(value)
+    service_endpoint = _END - CLIENT_RESERVATION - 1  # Conservative original service work limit; never renewed.
+    seconds = min(30, math.floor(service_endpoint - time.monotonic()))
+    need(seconds > 0, "No original carrier work budget remains for overlap")
+    holder = {}
+    worker = threading.Thread(target=_overlap_worker, args=(holder, argv, env, seconds), name="mrk-installed-original-overlap", daemon=False)
+    failure, join_error, capture_error, joined, released = None, None, None, False, False
+    configure_trace, endpoint, started = None, None, time.monotonic()
+    _PHASE = "installed-overlap"
+    try:
+        worker.start()
+        endpoint = _overlap_ready(worker, controls, started, service_endpoint)
+        result = package_command("upgrade-configure", ["/usr/bin/dpkg", "--debug=2", "--no-triggers", "--configure", PACKAGE],
+                                 policy=policy, endpoint=endpoint)
+        configure_trace = script_trace(result.stderr, [("postinst", ("configure", VERSIONS["P0"][1]))])
+        need(result.stdout.splitlines(keepends=True).count(PUBLISHED) == 1 and b"Runtime publication refused:" not in result.stderr
+             and time.monotonic() < endpoint, "Timely real F1 configure publication not observed")
+        _overlap_release(controls, endpoint)
+        released = True
+    except BaseException as error:
+        failure = error
+    finally:
+        # Even failed start/readiness/configure/release must attempt the SAME
+        # original join. No late/failed worker is orphaned into a success path.
+        _FAILED = True
+        try:
+            worker.join(max(0.0, _END - time.monotonic()))
+            joined = not worker.is_alive()
+        except BaseException as error:
+            join_error = error
+        if joined and "result" in holder:
+            try:
+                _command_capture("installed-overlap", argv, holder["result"], seconds)
+            except BaseException as error:
+                capture_error = error
+    _PHASE = "installed-overlap"
+    _retain("installed-overlap-join.json", canonical({"joined": joined, "releaseWritten": released,
+        "workerGuardState": holder.get("guardState") if joined else None, "workerErrorCount": len(holder.get("errors", [])) if joined else None,
+        "startMonotonic": started, "configureEndpoint": endpoint, "originalServiceEndpoint": service_endpoint,
+        "originalDeadline": _END, "carrierTimeoutSeconds": seconds, "readyIdentity": controls["readyIdentity"]}))
+    for error in (failure, join_error, capture_error, *(holder.get("errors", []) if joined else [])):
+        if error is not None:
+            raise error
+    need(joined and released and holder.get("guardState") == "RESTORED" and "result" in holder and time.monotonic() < _END,
+         "Original overlap worker/guard/result was not completely joined")
+    result = holder["result"]
+    observed = installed_result(result.stdout, result.stderr, "overlap", result.returncode, expected)
+    _installed_loader_check(proof)
+    _FAILED = False
+    return observed, configure_trace
+
+
+def shell_environment(value, case):
+    need(case in SHELL_CASES, "Unknown fixed shell case")
+    home = root_path(value) / ("gui-" + case)
+    return {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+            "HOME": str(home / "home"), "TMPDIR": str(home / "tmp"), "XDG_RUNTIME_DIR": str(home / "runtime"),
+            "XDG_CONFIG_HOME": str(home / "config"), "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
+            "XDG_CONFIG_DIRS": str(home / "empty-config"), "XDG_DATA_DIRS": "/usr/share",
+            "GDK_BACKEND": "x11", "GSETTINGS_BACKEND": "memory", "GIO_USE_VFS": "local", "GTK_THEME": "Adwaita",
+            "DISPLAY": ":99", "XAUTHORITY": str(home / "Xauthority"),
+            "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=" + str(home / "runtime/absent-system-bus"),
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_SHA": value["sourceSha"],
+            **({"MRK_DESKTOP_HOSTED_CHECKS": "installed-shell-connection-v1"} if case != "normal" else {})}
+
+
+def shell_argv(value, case):
+    environment = shell_environment(value, case)
+    command = [str(root_path(value) / ("shell-normal" if case == "normal" else "shell-observer"))]
+    if case != "normal":
+        command.append(case)
+    return _drop(value, ["/usr/bin/prlimit", "--fsize=" + str(SHELL_WORK_FILE_LIMIT) + ":" + str(SHELL_WORK_FILE_LIMIT), "--",
+        "/usr/bin/dbus-run-session", "--dbus-daemon=/usr/bin/dbus-daemon",
+        "--config-file=" + str(root_path(value) / ("shell-" + case + "-bus.conf")), "--",
+        "/usr/bin/xvfb-run", "--server-num=99", "--auth-file=" + environment["XAUTHORITY"],
+        "--error-file=" + str(root_path(value) / ("shell-" + case + "-xvfb.log")),
+        "--server-args=-screen 0 1280x1024x24 -noreset", *command])
+
+
+def _shell_labels_prepare(value, case):
+    """One root-owned leaf and its original read FD; never an app-writable namespace."""
+    need(case in SHELL_CASES[1:] and _ROOT == root_path(value), "Different fixed shell label route")
+    directory(_ROOT, protected=True)
+    root = identity(_ROOT.lstat())
+    need(root[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Different protected shell label parent")
+    _xattrs(_ROOT, True)
+    path = _ROOT / ("shell-" + case + "-failure.labels")
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        original = identity(os.fstat(fd))
+        need(original[0] == root[0] and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0)
+             and identity(path.lstat()) == original and identity(_ROOT.lstat())[:6] == root[:6],
+             "Fresh shell label binding differs")
+        need(os.listxattr(fd) == [], "Shell label attributes are not empty")
+        need(identity(os.fstat(fd)) == original, "Fresh shell label changed before launch")
+        return fd, original[:6]
+    except BaseException:
+        try:
+            os.close(fd)
+        except BaseException:
+            pass  # No retry of an ambiguous close; the original refusal stays primary.
+        raise
+
+
+def _shell_session_first_origin(origin, detail, association, query, worker):
+    """Closed DATA only; no lookup or inference from the public step/current owner."""
+    if origin not in SHELL_SESSION_ORIGINS or detail not in SHELL_SESSION_DETAILS or association not in SHELL_SESSION_ASSOCIATIONS:
+        return None
+    details = {
+        b"op-cleanup": (b"deadline", b"review-expired", b"context-stale", b"cleanup-unknown", b"user-cancelled", b"shutdown", b"document-lost", b"other"),
+        b"coord-join": (b"failed",),
+        b"staged-refusal": (b"new", b"pending", b"returned", b"failed", b"unavailable"),
+    }.get(origin, (b"none",))
+    if detail not in details:
+        return None
+    if query not in (b"na", b"unregistered", b"unavailable"):
+        parts = query.split(b".")
+        if (len(parts) != 3 or parts[0] not in SHELL_SESSION_QUERY_ERRORS or parts[1] not in SHELL_SESSION_QUERY_CAUSES
+                or len(parts[2]) != 2 or any(join not in SHELL_SESSION_MANAGEMENT_JOINS for join in parts[2])
+                or parts[0] == b"none" and parts[1] != b"none"):
+            return None
+    if worker not in SHELL_SESSION_WORKERS:
+        parts = worker.rsplit(b"-", 1)
+        if (len(parts) != 2 or parts[0] not in SHELL_SESSION_WORKER_STAGES
+                or len(parts[1]) != 1 or parts[1][0] not in SHELL_SESSION_WORKER_JOINS):
+            return None
+    if (association == b"unassociated" and (query, worker) != (b"na", b"na")
+            or association == b"bound" and query == b"na"
+            or query == b"unregistered" and worker != b"na"
+            or origin == b"not-recorded" and (detail, association, query, worker) != (b"none", b"unassociated", b"na", b"na")):
+        return None
+    return {"origin": origin.decode("ascii"), "detail": detail.decode("ascii"), "association": association.decode("ascii"),
+            "query": query.decode("ascii"), "worker": worker.decode("ascii")}
+
+
+def _shell_session_unknown_boundary(association, query, worker, boundary):
+    """v5-only consistency after legacy first-origin validation; no native lookup."""
+    if boundary not in SHELL_SESSION_UNKNOWN_BOUNDARIES:
+        return None
+    if association == b"unassociated":
+        valid = (query, worker, boundary) == (b"na", b"na", b"na")
+    elif association != b"bound":
+        return None
+    elif query == b"unregistered":
+        valid = (worker, boundary) == (b"na", b"na")
+    elif query == b"unavailable":
+        valid = (worker, boundary) == (b"unavailable", b"unavailable")
+    else:
+        # A successful state snapshot may still have no Resources guard. A
+        # retained known edge with unavailable worker is legitimate, not a cause.
+        valid = query != b"na" and worker != b"na" and boundary not in (b"na", b"unavailable")
+    return boundary.decode("ascii") if valid else None
+
+
+def _shell_session_assessment_failure(rejection, origin, classification, cause):
+    """Closed original-return labels only, never current-owner or finality claims."""
+    if origin not in SHELL_SESSION_ASSESSMENT_ORIGINS:
+        return None
+    if origin == b"none":
+        valid = (classification, cause) == (b"na", b"none")
+    elif origin == b"request":
+        valid = (classification, cause) == (b"serialize", b"none")
+    elif origin == b"result":
+        valid = classification in SHELL_SESSION_ASSESSMENT_RESULT_CLASSES and cause == b"none"
+    else:
+        valid = classification in SHELL_SESSION_ASSESSMENT_BRIDGE_CLASSES and cause in SHELL_SESSION_QUERY_CAUSES
+    if not valid:
+        return None
+    # These are the unchanged public mappings of the captured original error,
+    # not inferences from a current owner, wait, firstOrigin or worker sample.
+    if origin != b"none":
+        compatible = {
+            b"known-assessment": (b"reply-assessment-invalid-request", b"reply-assessment-limit", b"reply-assessment-version",
+                                  b"reply-assessment-policy-stale", b"reply-assessment-context-invalid"),
+            b"busy": (b"reply-busy",), b"shutdown": (b"reply-shutting-down",),
+            b"timeout": (b"reply-query-timeout",), b"cleanup": (b"reply-cleanup-unknown",),
+        }.get(classification, (b"reply-assessment-unavailable",))
+        if rejection not in compatible:
+            return None
+    return {"origin": origin.decode("ascii"), "class": classification.decode("ascii"), "cause": cause.decode("ascii")}
+
+
+def _shell_label_pair(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
+        return None
+    lines = raw.splitlines(keepends=True)
+    path_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
+        # Prefix first, so no proper prefix of this new frame can masquerade
+        # as an old three-line Path result with the detail silently lost.
+        if len(lines) != 4 or len(raw) > SHELL_PATH_FAILURE_FRAME_BOUND:
+            return None
+        path_detail, lines = lines[0], lines[1:]
+    # Session traces require their complete fourth record. Historical v1/v2
+    # keep their prior shape, with no invented assessmentFailure metadata.
+    # Never admit a proper prefix of v3/v4/v5 as a complete historical frame.
+    if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
+            or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
+        return None
+    result = {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
+              "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
+              "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
+    if len(lines) != (4 if session else 3):
+        return None
+    if path_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=(none|0|[1-9]|10);reject=([a-z-]{1,22})\n", path_detail)
+        if match is None:
+            return None
+        index_raw, rejection = match.groups()
+        index = None if index_raw == b"none" else int(index_raw)
+        indexed = {"PathBrowse", "PathSet", "PathActivate", "PathSettlement", "PathField"}
+        unindexed = {"PathDraft", "PathPreview", "PathNavigation"}
+        if (rejection not in SHELL_PATH_REJECTIONS or result["step"] not in indexed | unindexed
+                or result["step"] in indexed and index is None or result["step"] in unindexed and index is not None):
+            return None
+        result["path"] = {"recipeIndex": index, "rejection": rejection.decode("ascii")}
+    if session:
+        if lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;"):
+            version = b"v1"
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v2;"):
+            version = b"v2"
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v3;"):
+            version = b"v3"
+            if len(raw) > SHELL_SESSION_FAILURE_FRAME_BOUND:
+                return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v4;"):
+            version = b"v4"
+            if len(raw) > SHELL_SESSION_FAILURE_V4_FRAME_BOUND:
+                return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v5;"):
+            version = b"v5"
+            if len(raw) > SHELL_SESSION_FAILURE_V5_FRAME_BOUND:
+                return None
+        else:
+            return None
+        suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
+        if version in (b"v3", b"v4", b"v5"):
+            suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
+        if version in (b"v4", b"v5"):
+            suffix += rb";af=([a-z-]{1,22})"
+        if version == b"v5":
+            suffix += rb";u=([a-z-]{1,14})"
+        suffix += rb"\n"
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
+                             rb"evaluations=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
+        if match is None:
+            return None
+        index_raw, evaluations_raw, rejection, wait = match.groups()[:4]
+        index = None if index_raw == b"none" else int(index_raw)
+        evaluations = int(evaluations_raw)
+        unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
+        mixed = {"SessionQuitCancel", "SessionFinality"}
+        if (index is not None and index >= 64 or evaluations > 128 or rejection not in SHELL_SESSION_REJECTIONS
+                or wait not in SHELL_SESSION_WAITS or rejection == b"evaluation-budget" and evaluations != 128
+                or result["step"] in unindexed and index is not None
+                or result["step"] not in unindexed | mixed and index is None):
+            return None
+        result["session"] = {"recipeIndex": index, "evaluations": evaluations,
+                             "rejection": rejection.decode("ascii"), "lastWait": wait.decode("ascii")}
+        if version != b"v1":
+            first_origin = _shell_session_first_origin(*match.groups()[4:9])
+            if first_origin is None:
+                return None
+            if version == b"v5":
+                unknown_boundary = _shell_session_unknown_boundary(
+                    match.groups()[6], match.groups()[7], match.groups()[8], match.groups()[13])
+                if unknown_boundary is None:
+                    return None
+                first_origin["unknownBoundary"] = unknown_boundary
+            result["session"]["firstOrigin"] = first_origin
+        if version in (b"v3", b"v4", b"v5"):
+            origin, classification, cause = match.groups()[9:12]
+            assessment_failure = _shell_session_assessment_failure(rejection, origin, classification, cause)
+            if assessment_failure is None:
+                return None
+            if version in (b"v4", b"v5"):
+                admission = match.groups()[12]
+                if (admission not in SHELL_SESSION_ASSESSMENT_ADMISSIONS
+                        or admission != b"na" and not (origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim"))
+                        or origin == b"bridge" and cause in (b"capability", b"prepare", b"final-claim") and admission == b"na"):
+                    return None
+                assessment_failure["admission"] = admission.decode("ascii")
+            result["session"]["assessmentFailure"] = assessment_failure
+    return result
+
+
+def _shell_labels_read(original, *, with_raw=False):
+    """Only the exact original read FD, after this call's strict typed settlement gate."""
+    fd, binding = original
+    before = identity(os.fstat(fd))
+    need(before[:6] == binding and 0 <= before[6] <= SHELL_FAILURE_LABEL_LIMIT,
+         "Original shell label identity or bound differs")
+    need(os.listxattr(fd) == [], "Original shell label attributes differ")
+    raw = os.read(fd, SHELL_FAILURE_LABEL_LIMIT + 1)  # One attempt; no seek, reopen or suffix retry.
+    need(type(raw) is bytes and len(raw) == before[6] and identity(os.fstat(fd)) == before,
+         "Original shell label read was incomplete or changed")
+    parsed = _shell_label_pair(raw)
+    # The one fixed negative case needs this SAME original read for its public
+    # raw frame and diagnosis. Neither consumer may reopen/reread the source.
+    return (raw, parsed) if with_raw else parsed
+
+
+def _shell_log_prepare(value, case):
+    """One original write-only-for-test-group log, never a writable namespace."""
+    need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
+    bounds = resource.getrlimit(resource.RLIMIT_FSIZE)
+    need(type(bounds) is tuple and len(bounds) == 2
+         and all(type(bound) is int and (bound == resource.RLIM_INFINITY or bound >= SHELL_WORK_FILE_LIMIT) for bound in bounds),
+         "Inherited file bound is stricter than the fixed shell profile")
+    directory(_ROOT, protected=True)
+    path = _ROOT / ("shell-" + case + "-xvfb.log")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        os.fsync(fd)
+        original = identity(os.fstat(fd))
+    finally:
+        os.close(fd)
+    need(original[2:6] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1) and original[6] == 0
+         and identity(path.lstat()) == original, "Fresh shell error log differs")
+    _xattrs(path, False)
+    need(identity(path.lstat()) == original, "Original shell error log changed before launch")
+    return original[:6]
+
+
+def _shell_log_capture(value, case, original, result):
+    """Caller owns a genuine settled return; normal additionally joins its worker."""
+    need(case in SHELL_CASES and _ROOT == root_path(value)
+         and type(original) is tuple and len(original) == 6
+         and all(type(number) is int for number in original)
+         and original[2:] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1),
+         "Original shell log binding differs")
+    need(type(result) is subprocess.CompletedProcess and result.args == shell_argv(value, case)
+         and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
+         and len(result.stdout) + len(result.stderr) <= LIMIT, "Original shell log result incomplete")
+    path = _ROOT / ("shell-" + case + "-xvfb.log")
+    directory(_ROOT, protected=True)
+    before = path.lstat()
+    need(identity(before)[:6] == original, "Original shell error log was replaced or changed")
+    _xattrs(path, False)
+    raw = read(path, LIMIT)
+    need(identity(path.lstat()) == identity(before), "Original shell error log changed during capture")
+    need(len(result.stdout) + len(result.stderr) + len(raw) <= LIMIT, "Combined shell output exceeds its bound")
+    _retain("shell-" + case + "-xvfb.stderr", raw)
+    return raw
+
+
+SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+    "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs",
+    "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "workflow-project")
+
+
+def _shell_session_roster(value, case, changed=False):
+    """Finite fictional DATA, not a supplied file plan or source selector."""
+    need(case in SHELL_SESSION_CASES and type(changed) is bool
+         and (not changed or case == "session-refusals"), "Different fixed session fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    files = {
+        "project/release/mobile-release.json": (0o600, SHELL_SESSION_CONFIG),
+        "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+        "sources/input.jks": (0o600, SHELL_SESSION_JKS),
+        "sources/replacement.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS),
+        "sources/firebase.json": (0o600, SHELL_SESSION_FIREBASE),
+    }
+    if case == "session-refusals":
+        files.update({
+            "project/overlap.jks": (0o600, SHELL_SESSION_JKS),
+            "sources/changed.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS if changed else SHELL_SESSION_JKS),
+            "sources/public.jks": (0o644, SHELL_SESSION_JKS),
+            "sources/firebase-mismatch.json": (0o600, SHELL_SESSION_FIREBASE_MISMATCH),
+        })
+        if not changed:
+            files["sources/changed-next.jks"] = (0o600, SHELL_SESSION_REPLACEMENT_JKS)
+    leaves = sorted([*files, *(["sources/link.jks"] if case == "session-refusals" else [])])
+    directories = (".", "project", "project/release", "sources")
+    nodes = [*directories[1:], *leaves]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    rows += [(name, stat.S_IFREG | files[name][0], owners, files[name][1]) for name in sorted(files)]
+    if case == "session-refusals":
+        rows.append(("sources/link.jks", stat.S_IFLNK | 0o777, owners, "input.jks"))
+    return tuple(rows)
+
+
+def _shell_session_absent(case, changed):
+    # These finite names are checked only before launch or after actual Exit.
+    return [*SHELL_SESSION_ABSENT, *(["sources/changed-next.jks"] if changed else [])]
+
+
+def _shell_session_fixtures_prepare(value, root):
+    """Create once beneath the fresh unpublished namespace; never adopt/repair."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh session fixture route")
+    for case in SHELL_SESSION_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_session_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            elif stat.S_ISLNK(mode):
+                os.symlink(expected, path)
+            else:
+                _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners, follow_symlinks=False)
+            if not stat.S_ISLNK(mode):
+                _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_session_inventory(value, namespace, case, *, changed=False):
+    """Exact private fixtures, only pre-launch or after original Exit/finality.
+
+    First admit every directory's complete child roster. No unknown subtree,
+    symlink target, private user input or failed/possibly-live case is read.
+    """
+    need(_ROOT == root_path(value), "Different original session service root")
+    roster = _shell_session_roster(value, case, changed)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Session fixture ownership or mode differs")
+        if not stat.S_ISLNK(mode):
+            _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected session fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Session fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        elif stat.S_ISLNK(mode):
+            need(before.st_nlink == 1 and before.st_size == len(expected) and os.readlink(path) == expected,
+                 "Session refusal symlink differs")
+            row = {"path": relative, "kind": "symlink", "identity": list(identity(before)), "target": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Session fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Session fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    absent = _shell_session_absent(case, changed)
+    for relative in absent:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Session fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case, "root": str(root),
+                "changed": changed, "entries": rows, "absent": absent, "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_SESSION_INVENTORY_LIMIT, "Session inventory exceeds its fixed bound")
+    return document
+
+
+def shell_session_fixture(value, case, before_raw, after_raw):
+    """Closed original DATA correspondence; never authority to scan live work."""
+    inventories, namespaces = [], []
+    for raw, changed in ((before_raw, False), (after_raw, case == "session-refusals")):
+        document = decode(raw, SHELL_SESSION_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "four-kind-session-v1" and document["case"] == case and document["changed"] is changed
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == _shell_session_absent(case, changed), "Session fixture inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_session_roster(value, case, changed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Session fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "symlink" if stat.S_ISLNK(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"target"} if kind == "symlink" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Session fixture node kind or path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Session fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Session fixture has unexpected or pending state")
+            elif kind == "symlink":
+                need(original[5] == 1 and original[6] == len(expected) and row["target"] == expected,
+                     "Session refusal symlink target differs")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Session fixture is not the exact fictional source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Session fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1], "Session fixture original namespace changed")
+    changed = case == "session-refusals"
+    if changed:
+        need(set(first) - set(last) == {"sources/changed-next.jks"} and not set(last) - set(first),
+             "Session mutation did not consume exactly its fixed source name")
+        for name, row in last.items():
+            if name == "sources":
+                need(first[name]["identity"][:6] == row["identity"][:6], "Session source directory was replaced or chmodded")
+            elif name == "sources/changed.jks":
+                old = first["sources/changed-next.jks"]
+                # Rename can change ctime, not the original byte/mode/mtime or
+                # dev/inode. Native evidence owns the displaced open original.
+                need(old["identity"][:8] == row["identity"][:8] and old["size"] == row["size"]
+                     and old["sha256"] == row["sha256"], "Session changed leaf is not its original prepared replacement")
+            else:
+                need(first[name] == row, "Session mutation changed an unrelated original")
+    else:
+        need(first == last and before_raw == after_raw, "Read-only session changed its original fixture")
+    return {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "beforeCount": len(first), "afterCount": len(last), "mutations": ["changed-leaf-rename"] if changed else [],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_tools_offline_roster(value, case, after=False):
+    """Twenty-one fixed, ordinary nodes per case; no supplied path or command."""
+    need(type(case) is str and case in SHELL_TOOLS_OFFLINE_CASES and type(after) is bool,
+         "Different fixed Tools/Offline fixture or phase")
+    owners = value["runnerUid"], value["runnerGid"]
+    files = {**SHELL_TOOLS_OFFLINE_FILES,
+        "project/release/mobile-release.json": SHELL_TOOLS_OFFLINE_CONFIGS[case] + (b"\n" if after and case == "offline-drift" else b""),
+        "project/script.trace": SHELL_TOOLS_OFFLINE_TRACES[case] if after else b"",
+        "project/later.trace": b""}
+    directories = (".", "project", "project/.git", "project/app", "project/release", "project/release/store",
+        "project/release/store/android", "project/release/store/android/en-US", "project/release/store/android/en-US/changelogs")
+    nodes = [*directories[1:], *files]
+    rows = [(name, stat.S_IFDIR | 0o700, owners,
+             sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)) for name in directories]
+    return tuple(rows + [(name, stat.S_IFREG | 0o600, owners, files[name]) for name in sorted(files)])
+
+
+def _shell_tools_offline_fixtures_prepare(value, root):
+    """Create only fresh synthetic fixtures, before namespace publication."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh Tools/Offline fixture route")
+    for case in SHELL_TOOLS_OFFLINE_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_tools_offline_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            else:
+                _D.write(path, expected, 0o600)
+            os.chown(path, *owners, follow_symlinks=False)
+            _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_tools_offline_inventory(value, namespace, case, *, after=False):
+    """Pre-launch or actual ordinary Exit only; never inspect failed/live work."""
+    need(_ROOT == root_path(value), "Different original Tools/Offline service root")
+    roster = _shell_tools_offline_roster(value, case, after)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    # Parent rosters are admitted completely before any descendant is read.
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners,
+             "Tools/Offline fixture ownership or mode differs")
+        _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected Tools/Offline fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected, "Tools/Offline fixture child roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Tools/Offline fixture bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(identity(before))}
+        need(identity(path.lstat()) == identity(before), "Tools/Offline fixture changed during inventory")
+        rows.append(row)
+        originals.append((path, identity(before)))
+    for relative in SHELL_TOOLS_OFFLINE_ABSENT:
+        _absent(root / relative)
+    need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Tools/Offline fixture aliases, device or original identity differs")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "installed-tools-offline-fixture-v1", "case": case, "root": str(root),
+                "changed": after and case.startswith("offline-"), "entries": rows,
+                "absent": list(SHELL_TOOLS_OFFLINE_ABSENT), "namespace": namespace}
+    need(len(canonical(document)) <= SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT, "Tools/Offline inventory exceeds its fixed bound")
+    return document
+
+
+def shell_tools_offline_fixture(value, case, before_raw, after_raw):
+    """Bind exact synthetic DATA and in-place changes to the same originals."""
+    inventories, namespaces = [], []
+    for raw, after in ((before_raw, False), (after_raw, True)):
+        roster = _shell_tools_offline_roster(value, case, after)
+        document = decode(raw, SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "installed-tools-offline-fixture-v1" and document["case"] == case
+             and document["changed"] is (after and case.startswith("offline-"))
+             and document["root"] == str(shell_fixture_root(value) / case)
+             and document["absent"] == list(SHELL_TOOLS_OFFLINE_ABSENT), "Tools/Offline inventory shape or phase differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster) == 21, "Tools/Offline fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            kind = "directory" if stat.S_ISDIR(mode) else "file"
+            fields = {"children"} if kind == "directory" else {"size", "sha256"}
+            need(type(row) is dict and set(row) == {"path", "kind", "identity"} | fields
+                 and row["path"] == relative and row["kind"] == kind, "Tools/Offline fixture node kind or path differs")
+            original = row["identity"]
+            need(row["path"] not in observed and type(original) is list and len(original) == 9
+                 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Tools/Offline fixture original identity differs")
+            if kind == "directory":
+                need(row["children"] == expected, "Tools/Offline fixture has unexpected or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Tools/Offline fixture is not the exact synthetic source DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Tools/Offline nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and set(first) == set(last), "Tools/Offline original namespace or roster changed")
+    mutations = (["project/release/mobile-release.json"] if case == "offline-drift" else
+                 ["project/script.trace"] if SHELL_TOOLS_OFFLINE_TRACES[case] else [])
+    for name, row in last.items():
+        if name in mutations:
+            need(first[name]["identity"][:6] == row["identity"][:6], "Tools/Offline changed leaf was replaced or chmodded")
+        else:
+            need(first[name] == row, "Tools/Offline changed an unrelated original")
+    if not mutations:
+        need(before_raw == after_raw, "Read-only Tools case changed its original fixture")
+    config = SHELL_TOOLS_OFFLINE_CONFIGS[case]
+    return {"fixture": "installed-tools-offline-fixture-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+            "noUnexpectedEntries": True, "noPendingState": True, "beforeCount": 21, "afterCount": 21, "mutations": mutations,
+            "scriptTrace": SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": case == "offline-drift",
+            "savedConfigBefore": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+            "savedConfigAfter": {"bytes": len(config) + (case == "offline-drift"),
+                                 "sha256": hashlib.sha256(config + (b"\n" if case == "offline-drift" else b"")).hexdigest()},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_fixture_ancestry(value):
+    """Metadata only; the search-only control root and private contents stay put."""
+    need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
+    rows = []
+    for path in (Path("/"), Path("/var"), Path("/var/lib"), _ROOT):
+        before = identity(path.lstat())[:5]
+        need(stat.S_ISDIR(before[2]) and before[3:5] == (0, 0) and before[2] & 0o022 == 0
+             and (before[2] == stat.S_IFDIR | 0o711 if path == _ROOT else before[2] & 0o005 == 0o005),
+             "Shell fixture ancestor is not protected/readable as required")
+        _xattrs(path, True)
+        need(identity(path.lstat())[:5] == before, "Shell fixture ancestor changed")
+        rows.append({"path": str(path), "identity": list(before)})
+    need(len({row["identity"][0] for row in rows}) == 1
+         and len({tuple(row["identity"][:2]) for row in rows}) == 4, "Shell fixture ancestors cross devices or alias")
+    private = _ROOT / "private"
+    before = identity(private.lstat())[:5]
+    need(before[0] == rows[0]["identity"][0] and before[2:] == (stat.S_IFDIR | 0o700, 0, 0), "Shell private control protection changed")
+    _xattrs(private, True)
+    need(identity(private.lstat())[:5] == before, "Shell private control identity changed")
+    return {"control": rows[-1], "ancestors": rows[:-1]}
+
+
+def _shell_namespace_data(value, namespace):
+    """Closed inert DATA; it is not permission to inspect a live/failed tree."""
+    need(type(namespace) is dict and set(namespace) == {"root", "identity", "children", "control", "ancestors"}
+         and namespace["root"] == str(shell_fixture_root(value)) and namespace["children"] == list(SHELL_FIXTURE_CHILDREN),
+         "Shell fixture namespace shape/root differs")
+    need(type(namespace["control"]) is dict and set(namespace["control"]) == {"path", "identity"}
+         and namespace["control"]["path"] == str(root_path(value)) and type(namespace["ancestors"]) is list
+         and len(namespace["ancestors"]) == 3, "Shell fixture control/ancestor binding differs")
+    identities = []
+    for row, path in zip(namespace["ancestors"], ("/", "/var", "/var/lib")):
+        need(type(row) is dict and set(row) == {"path", "identity"} and row["path"] == path,
+             "Shell fixture ancestor path differs")
+    rows = [(namespace["identity"], 9, stat.S_IFDIR | 0o755),
+            (namespace["control"]["identity"], 5, stat.S_IFDIR | 0o711)]
+    rows.extend((row["identity"], 5, None) for row in namespace["ancestors"])
+    for original, length, mode in rows:
+        need(type(original) is list and len(original) == length
+             and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0 and original[3:5] == [0, 0]
+             and original[2] <= 0o177777 and stat.S_ISDIR(original[2]) and original[2] & 0o022 == 0
+             and (original[2] == mode if mode is not None else original[2] & 0o005 == 0o005),
+             "Shell fixture namespace identity/mode differs")
+        if length == 9:
+            need(0 < original[5] <= len(SHELL_FIXTURE_CHILDREN) + 2 and original[6] <= 1 << 20,
+                 "Shell fixture namespace directory bound differs")
+        identities.append(tuple(original[:2]))
+    need(len(set(identities)) == 5 and len({pair[0] for pair in identities}) == 1
+         and len(canonical(namespace)) < SHELL_FIXTURE_NAMESPACE_LIMIT,
+         "Shell fixture namespace aliases, device or DATA bound differs")
+    return namespace
+
+
+def _shell_namespace_roster(root):
+    found = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            need(len(found) < len(SHELL_FIXTURE_CHILDREN) and entry.name in SHELL_FIXTURE_CHILDREN, "Unexpected shell fixture namespace entry")
+            found.append(entry.name)
+    need(sorted(found) == list(SHELL_FIXTURE_CHILDREN), "Shell fixture namespace roster differs")
+
+
+def _shell_namespace_check(value, binding):
+    # Immutable original bytes, never a new snapshot substituted as authority.
+    namespace = _shell_namespace_data(value, decode(binding, SHELL_FIXTURE_NAMESPACE_LIMIT))
+    need(canonical(namespace) == binding, "Original shell namespace binding is not canonical")
+    ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+    need(_shell_fixture_ancestry(value) == ancestry, "Original shell fixture ancestry changed")
+    root = shell_fixture_root(value)
+    need(list(identity(root.lstat())) == namespace["identity"], "Original shell fixture namespace changed")
+    _xattrs(root, True)
+    _shell_namespace_roster(root)  # Admit names before any fixture descendant read.
+    need(list(identity(root.lstat())) == namespace["identity"] and _shell_fixture_ancestry(value) == ancestry,
+         "Original shell fixture namespace changed during observation")
+    return namespace
+
+
+def _shell_fixtures_prepare(value):
+    """Create the eighteen fixed DATA trees once, retained on every failure.
+
+    The sibling follows the existing disposable-runner retention policy; there
+    is no deletion, cleanup scan, retry or permission repair of an old object.
+    """
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)  # Exclusive. Do not inspect/adopt an occupied name.
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+         and original[0] == ancestry["control"]["identity"][0]
+         and all(original[:2] != tuple(row["identity"][:2]) for row in [ancestry["control"], *ancestry["ancestors"]]),
+         "Fresh shell fixture namespace protection/device differs")
+    _xattrs(root, True)
+    need(identity(root.lstat()) == original, "Fresh shell fixture namespace changed")
+    project = root / "positive-project"
+    project.mkdir(mode=0o700)
+    (project / "app").mkdir(mode=0o700)
+    _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
+    _D.write(project / "version.properties", SHELL_PROJECT_VERSION, 0o600)
+    # release/.gitignore are created only by real Save; app stays read-only.
+    os.chmod(project / "app", 0o555)
+    os.chown(project / "version.properties", value["runnerUid"], value["runnerGid"])
+    os.chown(project, value["runnerUid"], value["runnerGid"])
+    evidence = root / "candidate-evidence"
+    evidence.mkdir(mode=0o700)
+    (evidence / "operation").mkdir(mode=0o700)
+    for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items():
+        _D.write(evidence / relative, raw, 0o600)
+        os.chown(evidence / relative, value["runnerUid"], value["runnerGid"])
+    for path in (evidence / "operation", evidence):
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    for name, kind in SHELL_PATH_NODES:
+        path = root / name
+        if kind == "directory":
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, SHELL_PATH_BYTES, 0o600)
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    workflow_root = root / "workflow-project"
+    workflow_nodes = [(workflow_root if name == "." else workflow_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_workflow_roster(value, False)]
+    for path, mode, owners, expected in workflow_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(workflow_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    metadata_root = root / "metadata-project"
+    metadata_nodes = [(metadata_root if name == "." else metadata_root / name, mode, owners, expected)
+                      for name, mode, owners, expected in _shell_metadata_roster(value, False)]
+    for path, mode, owners, expected in metadata_nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, expected, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(metadata_nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    _shell_session_fixtures_prepare(value, root)
+    _shell_tools_offline_fixtures_prepare(value, root)
+    _shell_namespace_roster(root)
+    for name, kind in (("positive-project", True), ("positive-project/app", True),
+                       ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
+                       ("candidate-evidence", True), ("candidate-evidence/operation", True),
+                       *(("candidate-evidence/" + name, False) for name in SHELL_CANDIDATE_DOCUMENTS),
+                       *((name, kind == "directory") for name, kind in SHELL_PATH_NODES)):
+        _xattrs(root / name, kind)
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "Fresh shell namespace or ancestry changed before publication")
+    _xattrs(root, True)
+    os.chmod(root, 0o755)  # Only this verified fresh original becomes readable.
+    published = identity(root.lstat())
+    need(published[:2] == original[:2] and published[2:5] == (stat.S_IFDIR | 0o755, 0, 0),
+         "Original shell fixture namespace publication differs")
+    binding = canonical({"root": str(root), "identity": list(published), "children": list(SHELL_FIXTURE_CHILDREN), **ancestry})
+    _shell_namespace_check(value, binding)
+    return binding
+
+
+def _shell_project_inventory(value, namespace, *, saved=False):
+    """Fixed fixture only, before launch or AFTER original exit and finality.
+
+    This never repairs/removes a pending transaction or scans an unexpected
+    subtree. Ordinary GUI caches are outside the project. Failed/Unknown work
+    cannot reach the saved observation through the original shell-result gate.
+    """
+    need(_ROOT == root_path(value) and type(saved) is bool, "Positive fixture differs from the original service root or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "positive-project"
+    owner = (value["runnerUid"], value["runnerGid"])
+    directories = [(".", [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"], 0o700, owner),
+                   ("app", ["build.gradle.kts"], 0o555, (0, 0))]
+    if saved:
+        directories.append(("release", ["mobile-release.json"], 0o755, owner))
+    rows, original_directories = [], []
+    for relative, expected, mode, owners in directories:
+        path = root if relative == "." else root / relative
+        directory(path)
+        before = path.lstat()
+        need(stat.S_IMODE(before.st_mode) == mode and (before.st_uid, before.st_gid) == owners,
+             "Positive fixture directory ownership or mode differs")
+        children = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                need(len(children) < len(expected) and entry.name in expected, "Unexpected positive fixture entry")
+                children.append(entry.name)
+        need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Positive fixture directory changed")
+        rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+        original_directories.append((path, identity(before)))
+    files = [("app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444, (0, 0)),
+             ("version.properties", SHELL_PROJECT_VERSION, 0o600, owner)]
+    if saved:
+        files.extend((("release/mobile-release.json", SHELL_PROJECT_CONFIG, 0o600, owner),
+                      (".gitignore", SHELL_PROJECT_IGNORE, 0o600, owner)))
+    for relative, expected, mode, owners in files:
+        path = root / relative
+        before = path.lstat()
+        need(stat.S_IMODE(before.st_mode) == mode and (before.st_uid, before.st_gid) == owners,
+             "Positive fixture file ownership or mode differs")
+        observed = record(path, len(expected))
+        need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+             and identity(path.lstat()) == identity(before), "Positive fixture file bytes or identity differ")
+        rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = ["release/store"] if saved else [".gitignore", "release"]
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in original_directories),
+         "Positive fixture parent changed during its bounded inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 3, "fixture": "android-saved-readonly-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_project_fixture(value, before_raw, after_raw):
+    """Closed DATA correspondence, never permission to inspect possible-live work."""
+    before, after = decode(before_raw, 8192), decode(after_raw, 8192)
+    owner = (value["runnerUid"], value["runnerGid"])
+    inventories = []
+    for document, raw, saved in ((before, before_raw, False), (after, after_raw, True)):
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 3
+             and document["fixture"] == "android-saved-readonly-v1" and document["saved"] is saved
+             and document["root"] == str(shell_fixture_root(value) / "positive-project")
+             and document["absent"] == (["release/store"] if saved else [".gitignore", "release"]),
+             "Positive fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        roster = [(".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"]),
+                  ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"])]
+        if saved:
+            roster.append(("release", stat.S_IFDIR | 0o755, owner, ["mobile-release.json"]))
+        roster.extend((("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+                       ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION)))
+        if saved:
+            roster.extend((("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
+                           (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE)))
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Positive fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Positive fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(number) is int and 0 <= number < 1 << 64 for number in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Positive fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Positive fixture has an unexpected child or pending transaction")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Positive fixture source or saved output does not match exact expected DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Positive fixture node aliases or cross-device entries differ")
+        inventories.append(observed)
+    first, last = inventories
+    # Save creates release and may change root timestamps/size/link count,
+    # never its dev/inode/type/mode/ownership. Both original hints stay exact.
+    need(before["namespace"] == after["namespace"] and first["."]["identity"][:5] == last["."]["identity"][:5]
+         and all(first[name] == last[name] for name in ("app", "app/build.gradle.kts", "version.properties")),
+         "Positive fixture root was replaced or an original hint changed")
+    return {"fixture": "android-saved-readonly-v1", "rootRetained": True, "hintUnchanged": True,
+            "savedOutputsMatched": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "entryCount": len(last), "sourceBytes": first["app/build.gradle.kts"]["size"] + first["version.properties"]["size"],
+            "releaseMode": stat.S_IMODE(last["release"]["identity"][2]),
+            "config": {"size": len(SHELL_PROJECT_CONFIG), "sha256": hashlib.sha256(SHELL_PROJECT_CONFIG).hexdigest(), "mode": 0o600},
+            "gitignore": {"size": len(SHELL_PROJECT_IGNORE), "sha256": hashlib.sha256(SHELL_PROJECT_IGNORE).hexdigest(), "mode": 0o600},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_workflow_roster(value, installed):
+    """Closed fixture DATA; never a caller renderer or a generic write plan."""
+    need(type(installed) is bool, "Workflow fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    callers = list(SHELL_WORKFLOW_CALLERS.items())
+    leaves = callers if installed else callers[:1]
+    return [
+        (".", stat.S_IFDIR | 0o700, owner, [".github", ".gitignore", "app", "version.properties"]),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"]),
+        (".github", stat.S_IFDIR | 0o700, owner, ["workflows"]),
+        (".github/workflows", stat.S_IFDIR | 0o700, owner, sorted([Path(name).name for name, _ in leaves] + ["unrelated.yml"])),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION),
+        (".gitignore", stat.S_IFREG | 0o640, owner, SHELL_WORKFLOW_IGNORE),
+        (".github/workflows/unrelated.yml", stat.S_IFREG | 0o600, owner, SHELL_WORKFLOW_SIBLING),
+        *((name, stat.S_IFREG | (0o640 if index == 0 else 0o600), owner, raw) for index, (name, raw) in enumerate(leaves)),
+    ]
+
+
+def _shell_workflow_absent(installed):
+    return list(SHELL_WORKFLOW_ABSENT) + ([] if installed else list(SHELL_WORKFLOW_CALLERS)[1:])
+
+
+def _shell_workflow_inventory(value, namespace, *, installed=False):
+    """Only before launch or AFTER original successful exit/finality.
+
+    Unexpected names refuse before descendant reads. Nothing repairs, removes,
+    reopens a live operation, follows a link or inspects an unknown journal.
+    """
+    need(_ROOT == root_path(value) and type(installed) is bool, "Different workflow fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "workflow-project"
+    roster = _shell_workflow_roster(value, installed)
+    rows, originals = [], []
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Workflow fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected workflow fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Workflow fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            originals.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Workflow fixture caller or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_workflow_absent(installed)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in originals), "Workflow fixture changed during its inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": str(root), "installed": installed,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_workflow_fixture(value, before_raw, after_raw):
+    """Type-sensitive, exact fixture correspondence; no possible-live I/O."""
+    inventories, namespaces = [], []
+    for raw, installed in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "installed", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "android-workflow-apply-v1" and document["installed"] is installed
+             and document["root"] == str(shell_fixture_root(value) / "workflow-project")
+             and document["absent"] == _shell_workflow_absent(installed), "Workflow fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_workflow_roster(value, installed), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Workflow fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Workflow fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Workflow fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Workflow fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Workflow fixture bytes differ from the fixed reviewed caller/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Workflow fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and len(first) == 9 and len(last) == 12
+         and set(last) - set(first) == set(list(SHELL_WORKFLOW_CALLERS)[1:]), "Workflow fixture does not contain exactly three new callers")
+    for name, old in first.items():
+        new = last[name]
+        if name in (".", ".github/workflows"):
+            # Only these original parents gained/removed entries. Identity,
+            # mode, owners and link counts remain original; timestamps may move.
+            need(old["identity"][:6] == new["identity"][:6], "Workflow fixture original parent was replaced or chmodded")
+        else:
+            need(old == new, "Workflow installation changed an exact-preserved original")
+    return {"fixture": "android-workflow-apply-v1", "rootRetained": True, "originalsRetained": True, "createdCount": 3,
+            "beforeCount": len(first), "afterCount": len(last), "configurationAbsent": True, "noUnexpectedEntries": True,
+            "noPendingState": True, "callers": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                "mode": stat.S_IMODE(last[name]["identity"][2])} for name, raw in SHELL_WORKFLOW_CALLERS.items()],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_metadata_roster(value, saved):
+    """Fixed public locale: one preserve, one replace, one create, plus a sentinel."""
+    need(type(saved) is bool, "Metadata fixture phase is not a boolean")
+    owner = (value["runnerUid"], value["runnerGid"])
+    names = ["keep.txt", "short_description.txt", "title.txt"]
+    if saved:
+        names.insert(0, "full_description.txt")
+    return [
+        (".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release", "version.properties"]),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"]),
+        ("release", stat.S_IFDIR | 0o700, owner, ["mobile-release.json", "store"]),
+        ("release/store", stat.S_IFDIR | 0o700, owner, ["android"]),
+        ("release/store/android", stat.S_IFDIR | 0o700, owner, ["en-US"]),
+        (SHELL_METADATA_LOCALE, stat.S_IFDIR | 0o700, owner, names),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION),
+        (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE),
+        ("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
+        (SHELL_METADATA_LOCALE + "/title.txt", stat.S_IFREG | 0o600, owner, SHELL_METADATA_TITLE),
+        (SHELL_METADATA_LOCALE + "/short_description.txt", stat.S_IFREG | 0o600, owner,
+         SHELL_METADATA_SHORT_AFTER if saved else SHELL_METADATA_SHORT_BEFORE),
+        (SHELL_METADATA_LOCALE + "/keep.txt", stat.S_IFREG | 0o600, owner, SHELL_METADATA_KEEP),
+        *([(SHELL_METADATA_LOCALE + "/full_description.txt", stat.S_IFREG | 0o600, owner, SHELL_METADATA_FULL)] if saved else []),
+    ]
+
+
+def _shell_metadata_absent(saved):
+    return list(SHELL_METADATA_ABSENT) + ([] if saved else [SHELL_METADATA_LOCALE + "/full_description.txt"])
+
+
+def _shell_metadata_inventory(value, namespace, *, saved=False):
+    """Only before launch or after original successful exit/finality; no repair."""
+    need(_ROOT == root_path(value) and type(saved) is bool, "Different metadata fixture route or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "metadata-project"
+    rows, parents = [], []
+    for relative, mode, owners, expected in _shell_metadata_roster(value, saved):
+        path = root if relative == "." else root / relative
+        before = path.lstat()
+        need(before.st_mode == mode and (before.st_uid, before.st_gid) == owners, "Metadata fixture mode or ownership differs")
+        if stat.S_ISDIR(mode):
+            directory(path)
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < len(expected) and entry.name in expected, "Unexpected metadata fixture entry")
+                    children.append(entry.name)
+            need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Metadata fixture parent changed")
+            rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+            parents.append((path, identity(before)))
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+                 and identity(path.lstat()) == identity(before), "Metadata fixture input, text or sentinel differs")
+            rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = _shell_metadata_absent(saved)
+    for relative in absent:
+        _absent(root / relative)
+    need(all(identity(path.lstat()) == original for path, original in parents), "Metadata fixture changed during its inventory")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent, "namespace": namespace}
+
+
+def shell_metadata_fixture(value, before_raw, after_raw):
+    """Exact original-to-final DATA correspondence, never possible-live I/O."""
+    inventories, namespaces = [], []
+    for raw, saved in ((before_raw, False), (after_raw, True)):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "android-metadata-save-v1" and document["saved"] is saved
+             and document["root"] == str(shell_fixture_root(value) / "metadata-project")
+             and document["absent"] == _shell_metadata_absent(saved), "Metadata fixture inventory is incomplete or out of phase")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        roster, rows = _shell_metadata_roster(value, saved), document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Metadata fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Metadata fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Metadata fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Metadata fixture has an unexpected child or pending state")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Metadata fixture bytes differ from the exact reviewed input/text/sentinel DATA")
+            observed[relative] = row
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Metadata fixture nodes alias or cross devices")
+        inventories.append(observed)
+    first, last = inventories
+    short = SHELL_METADATA_LOCALE + "/short_description.txt"
+    full = SHELL_METADATA_LOCALE + "/full_description.txt"
+    need(namespaces[0] == namespaces[1] and len(first) == 13 and len(last) == 14
+         and set(last) - set(first) == {full}, "Metadata fixture does not contain exactly one new text file")
+    for name, old in first.items():
+        new = last[name]
+        if name in (".", SHELL_METADATA_LOCALE):
+            # Journal staging and locale replacement may change timestamps,
+            # never the original directory, mode, owners or final link count.
+            need(old["identity"][:6] == new["identity"][:6], "Metadata fixture original parent was replaced or chmodded")
+        elif name != short:
+            need(old == new, "Metadata Save changed an exact-preserved original")
+    original_nodes = {tuple(row["identity"][:2]) for row in first.values()}
+    need(all(tuple(last[name]["identity"][:2]) not in original_nodes for name in (short, full)),
+         "Metadata replacement/create reused an original inode")
+    return {"fixture": "android-metadata-save-v1", "rootRetained": True, "preservedOriginals": True,
+            "createdCount": 1, "replacedCount": 1, "beforeCount": len(first), "afterCount": len(last),
+            "configurationUnchanged": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "files": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                       "mode": stat.S_IMODE(last[name]["identity"][2])}
+                      for name, mode, _, raw in _shell_metadata_roster(value, True)
+                      if stat.S_ISREG(mode) and name.startswith(SHELL_METADATA_LOCALE + "/")],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_candidate_inventory(value, namespace):
+    """Only the five fixed nodes, before launch or after successful finality.
+
+    Unexpected children refuse before any leaf read or subtree inspection.
+    Artifact names are checked for absence, never opened, measured or hashed.
+    """
+    need(_ROOT == root_path(value), "Candidate fixture differs from the original service root")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / "candidate-evidence"
+    owner = (value["runnerUid"], value["runnerGid"])
+    rows, originals = [], []
+    for relative, expected in ((".", ["candidate-manifest.json", "candidate-receipt.json", "operation"]),
+                               ("operation", ["candidate-operation-intent.json"])):
+        path = root if relative == "." else root / relative
+        directory(path)
+        before = path.lstat()
+        need(stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o700 and (before.st_uid, before.st_gid) == owner
+             and 0 < before.st_nlink <= 16, "Candidate directory ownership or mode differs")
+        children = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                need(len(children) < len(expected) and entry.name in expected, "Unexpected candidate fixture entry")
+                children.append(entry.name)
+        need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Candidate directory changed")
+        rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+        originals.append((path, identity(before)))
+    for relative, expected in SHELL_CANDIDATE_DOCUMENTS.items():
+        path = root / relative
+        before = path.lstat()
+        need(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600
+             and before.st_nlink == 1 and (before.st_uid, before.st_gid) == owner,
+             "Candidate document ownership or mode differs")
+        observed = record(path, len(expected))
+        need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+             and identity(path.lstat()) == identity(before), "Candidate document bytes or identity differ")
+        rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+        originals.append((path, identity(before)))
+    for relative in SHELL_CANDIDATE_ARTIFACT_TARGETS:
+        _absent(root / relative)
+    need(all(row["identity"][0] == rows[0]["identity"][0] for row in rows)
+         and len({tuple(row["identity"][:2]) for row in rows}) == 5
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Candidate fixture node aliases, cross-device entry or inventory drift")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 2, "fixture": "android-candidate-documents-v1", "root": str(root),
+            "entries": rows, "absent": list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "namespace": namespace}
+
+
+def shell_candidate_fixture(value, before_raw, after_raw):
+    """Closed original DATA, never authority to inspect a failed/live fixture."""
+    before, after = decode(before_raw, 8192), decode(after_raw, 8192)
+    owner = (value["runnerUid"], value["runnerGid"])
+    roster = [(".", stat.S_IFDIR | 0o700, ["candidate-manifest.json", "candidate-receipt.json", "operation"]),
+              ("operation", stat.S_IFDIR | 0o700, ["candidate-operation-intent.json"]),
+              *((relative, stat.S_IFREG | 0o600, raw) for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items())]
+    for document, raw in ((before, before_raw), (after, after_raw)):
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "entries", "absent", "namespace"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
+             and document["fixture"] == "android-candidate-documents-v1"
+             and document["root"] == str(shell_fixture_root(value) / "candidate-evidence")
+             and document["absent"] == list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "Candidate inventory shape or root differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == 5, "Candidate fixture must contain exactly five nodes")
+        for row, (relative, mode, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Candidate node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(number) is int and 0 <= number < 1 << 64 for number in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owner
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Candidate original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Candidate fixture has an unexpected child")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Candidate document differs from the fixed literal DATA")
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == 5, "Candidate nodes alias or cross devices")
+    need(before_raw == after_raw, "Candidate original nodes, bytes or absent artifact targets changed")
+    return {"fixture": "android-candidate-documents-v1", "rootRetained": True, "documentsUnchanged": True,
+            "noUnexpectedEntries": True, "artifactTargetsAbsent": True, "entryCount": 5,
+            "documentBytes": sum(len(raw) for raw in SHELL_CANDIDATE_DOCUMENTS.values()), "directoryMode": 0o700, "fileMode": 0o600,
+            "documents": [{"path": relative, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                          for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items()],
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def shell_project_receipt(raw):
+    receipt = decode(raw, 2048)
+    # Canonical comparison is deliberately type-sensitive: Python's True == 1
+    # cannot turn missing boolean/original settlement DATA into a success.
+    need(canonical(receipt) == canonical(SHELL_PROJECT_RECEIPT), "Positive project/draft receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_candidate_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(canonical(receipt) == canonical(SHELL_CANDIDATE_RECEIPT), "Candidate documents receipt is missing, malformed or premature")
+    return receipt
+
+
+
+def shell_path_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_PATH_RECEIPT), "Project-path receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_workflow_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_WORKFLOW_RECEIPT),
+         "Workflow Apply receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_metadata_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_METADATA_RECEIPT),
+         "Metadata Save receipt is missing, malformed or premature")
+    return receipt
+
+
+def shell_session_receipt(raw, case):
+    need(type(case) is str and case in SHELL_SESSION_CASES, "Different fixed session receipt case")
+    receipt = decode(raw, SHELL_SESSION_RECEIPT_LIMIT)
+    need(raw == canonical(receipt) == canonical(SHELL_SESSION_RECEIPTS[case]),
+         "Session receipt is missing, malformed, premature or for another method profile")
+    return receipt
+
+
+def _shell_tools_offline_object(value, fields, message):
+    need(type(value) is dict and set(value) == set(fields), message)
+    return value
+
+
+def _shell_tools_offline_context(context, case):
+    offline = case.startswith("offline-")
+    _shell_tools_offline_object(context, {"projectId", "draftRevision", "baselineGeneration", "platform", "operation"}
+        | ({"savedConfig"} if offline else set()), "Tools/Offline original context shape differs")
+    need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["projectId"]) is not None
+         and all(type(context[key]) is int and 0 <= context[key] < (1 << 32) - 1 for key in ("draftRevision", "baselineGeneration"))
+         and context["platform"] == "android" and context["operation"] == ("offline-preflight" if offline else "build"),
+         "Tools/Offline original context differs")
+    if offline:
+        config = SHELL_TOOLS_OFFLINE_CONFIGS[case]
+        need(canonical(context["savedConfig"]) == canonical({"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()}),
+             "Offline intent is not bound to the exact predeclared saved bytes")
+
+
+def _shell_tools_terminal(projection, case):
+    need(projection["phase"] == "settled" and projection["finality"] == "settled", "Tools public finality is still pending/unknown")
+    if case == "tools-cancel":
+        need(projection["outcome"] == "cancelled" and projection["reason"] == "cancelled" and projection["result"] is None,
+             "Preclaim Tools cancellation advertised a core result")
+        return
+    core = _shell_tools_offline_object(projection["result"], {"schemaVersion", "policyVersion", "context", "hostPlatform",
+        "outcome", "checks", "commandsAttempted", "lifetime", "assurance"}, "Tools actual core terminal is missing")
+    need(type(core["schemaVersion"]) is int and core["schemaVersion"] == 1 and core["policyVersion"] == "environment-diagnostics-v1"
+         and core["hostPlatform"] == "linux" and canonical(core["context"]) == canonical(projection["context"])
+         and core["outcome"] in ("complete", "unavailable") and projection["outcome"] == core["outcome"]
+         and projection["reason"] == "none", "Tools core/owner terminal differs or is partial")
+    checks = core["checks"]
+    need(type(checks) is list and len(checks) == 3, "Tools fixed Linux Android check roster differs")
+    attempts = 0
+    for row, role in zip(checks, ("git", "java", "javac")):
+        _shell_tools_offline_object(row, {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"},
+                                   "Tools check is not closed Linux DATA")
+        need(row["id"] == role and row["state"] in ("not-run", "completed") and row["build"] is None
+             and type(row["help"]) is str and 0 < len(row["help"].encode("utf-8")) <= 1024 and row["help"].strip()
+             and all(ord(char) > 31 and ord(char) != 127 for char in row["help"]), "Tools fixed check or bounded help differs")
+        baseline = _shell_tools_offline_object(row["baseline"], {"kind", "version", "build"}, "Tools core baseline shape differs")
+        need(baseline["build"] is None and (baseline == {"kind": "no-local-policy", "version": None, "build": None} if role == "git" else
+             baseline["kind"] == "workflow-reference" and type(baseline["version"]) is str
+             and re.fullmatch(r"[0-9][A-Za-z0-9._+\-]{0,63}", baseline["version"]) is not None),
+             "Tools core-supplied baseline differs")
+        if row["state"] == "not-run":
+            need(row["reason"] in ("missing-in-supported-lookup", "unsupported-installation", "unselected-installation")
+                 and row["returnCode"] is None and row["version"] is None and row["assessment"] == "not-assessed",
+                 "Tools not-run row is not an honest fixed-lookup refusal")
+            continue
+        attempts += 1
+        need(type(row["returnCode"]) is int and -(1 << 31) <= row["returnCode"] < 1 << 31
+             and row["reason"] in ("observed", "nonzero-exit", "version-unrecognized")
+             and (row["reason"] == "nonzero-exit") == (row["returnCode"] != 0), "Tools completed original return differs")
+        if row["reason"] == "observed":
+            pattern = (r"[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?(?:[.\-][A-Za-z0-9][A-Za-z0-9.+\-]{0,40})?" if role == "git" else
+                       r"[0-9]{1,3}(?:[._][0-9]{1,6}){0,3}(?:[+\-][A-Za-z0-9][A-Za-z0-9.+_\-]{0,32})?")
+            need(type(row["version"]) is str and len(row["version"]) <= 64 and re.fullmatch(pattern, row["version"]) is not None
+                 and row["assessment"] == "no-local-policy", "Tools observed version or non-readiness assessment differs")
+        else:
+            need(row["version"] is None and row["assessment"] == "not-assessed", "Unobserved tool advertised a version")
+    need(type(core["commandsAttempted"]) is int and core["commandsAttempted"] == attempts
+         and (core["outcome"] == "unavailable") == (attempts == 0), "Tools command/observation count differs")
+    need(canonical(core["lifetime"]) == canonical({"complete": True, "fatal": False, "contained": True,
+         "commandDispatched": attempts > 0, "commands": attempts, "inputClosed": True, "handlersRestored": True,
+         "toolDescriptorsClosed": True, "stopObserved": "none"}), "Tools actual core lifetime did not settle")
+    need(canonical(core["assurance"]) == canonical({"basis": "local-tool-observation", "toolsAttempted": attempts > 0,
+         "projectCodeExecuted": False, "projectFilesRead": False, "repositoryObserved": False, "sdkInspected": False,
+         "credentialsRead": False, "storeContacted": False, "dependencyCompleteness": "unknown", "releaseReadiness": "unknown",
+         "toolCacheEffects": "possible"}), "Tools observation was relabelled as readiness or project execution")
+
+
+def _shell_offline_terminal(projection, case):
+    outcome, reason = (("refused", "saved-config-changed") if case == "offline-drift" else
+                       ("cancelled", "cancelled") if case == "offline-cancel" else ("complete", "none"))
+    need(projection["phase"] == "terminal" and projection["intentUsable"] is False
+         and projection["outcome"] == outcome and projection["reason"] == reason, "Offline actual outcome or consumed intent differs")
+    if outcome != "complete":
+        need(projection["result"] is None, "Refused/cancelled Offline case advertised a report")
+        return
+    report = _shell_tools_offline_object(projection["result"], {"schemaVersion", "scope", "usedConfig", "findings", "summary", "limitations"},
+                                       "Offline actual complete report is missing")
+    need(type(report["schemaVersion"]) is int and report["schemaVersion"] == 1 and report["scope"] == "saved-offline-android-no-core-build"
+         and canonical(report["usedConfig"]) == canonical(projection["context"]["savedConfig"])
+         and report["limitations"] == SHELL_TOOLS_OFFLINE_LIMITATIONS, "Offline report scope, saved bytes or limitations differ")
+    summary = _shell_tools_offline_object(report["summary"], {"total", "shown", "omitted", "counts"}, "Offline summary fields differ")
+    counts = _shell_tools_offline_object(summary["counts"], SHELL_TOOLS_OFFLINE_STATUSES, "Offline summary status roster differs")
+    need(all(type(summary[key]) is int and 0 <= summary[key] <= 4096 for key in ("total", "shown", "omitted"))
+         and summary["shown"] == min(summary["total"], 128) and summary["omitted"] == summary["total"] - summary["shown"]
+         and all(type(count) is int and 0 <= count <= 4096 for count in counts.values()) and sum(counts.values()) == summary["total"],
+         "Offline summary counts differ")
+    rows = report["findings"]
+    need(type(rows) is list and len(rows) == summary["shown"], "Offline bounded findings count differs")
+    seen, configured = {status: 0 for status in SHELL_TOOLS_OFFLINE_STATUSES}, []
+    for index, row in enumerate(rows):
+        _shell_tools_offline_object(row, {"ordinal", "check", "status", "message", "projectCheckIndex"}, "Offline finding fields differ")
+        need(type(row["ordinal"]) is int and row["ordinal"] == index and row["check"] in SHELL_TOOLS_OFFLINE_CHECKS
+             and row["message"] == row["check"] and row["status"] in SHELL_TOOLS_OFFLINE_STATUSES
+             and (row["projectCheckIndex"] is None or row["check"] == "configured-project-check"
+                  and type(row["projectCheckIndex"]) is int and 0 <= row["projectCheckIndex"] <= 31), "Offline finding is not redacted fixed DATA")
+        seen[row["status"]] += 1
+        if row["check"] == "configured-project-check":
+            configured.append(row)
+    need(all(seen[status] <= counts[status] for status in seen) and len(configured) == 1
+         and type(configured[0]["projectCheckIndex"]) is int and configured[0]["projectCheckIndex"] == 0
+         and configured[0]["status"] == ("FAIL" if case == "offline-negative" else "PASS")
+         and all(counts[status] == 0 for status in ("MISSING", "BLOCKED", "INVALID"))
+         and (counts["FAIL"] > 0 if case == "offline-negative" else counts["FAIL"] == 0),
+         "Offline fixed project check is missing or complete-negative was relabelled PASS")
+
+
+def shell_tools_offline_receipt(raw, case):
+    """Closed observer engineering DATA, never a shipping qualification token."""
+    need(type(case) is str and case in SHELL_TOOLS_OFFLINE_CASES, "Different fixed Tools/Offline receipt case")
+    receipt = decode(raw, SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT)
+    fields = {"schema", "case", "qualificationOnly", "builder", "projectPicker", "savedObservation", "requests", "initial", "ui",
+              "reciprocalBusy", "hold", "original", "terminal", "fixture"}
+    _shell_tools_offline_object(receipt, fields, "Tools/Offline receipt fields differ")
+    need(raw == canonical(receipt), "Tools/Offline receipt is not original canonical LF DATA")
+    offline, cancelled = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
+    boundary = "inspection" if case == "tools-cancel" else "settlement" if case in ("tools-settlement", "offline-settlement") else "none"
+    fixed = {"schema": "installed-tools-offline-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+        "projectPicker": True, "savedObservation": True,
+        "requests": {"toolsStart": 0 if offline else 1, "toolsCancel": 1 if case == "tools-cancel" else 0,
+                     "offlinePrepare": 1 if offline else 0, "offlineStart": 1 if offline else 0, "offlineCancel": 1 if case == "offline-cancel" else 0},
+        "initial": {"toolsAvailable": True, "offlineAvailable": True},
+        "ui": {"start": True, "consent": offline, "terminal": True, "cancel": cancelled},
+        "reciprocalBusy": case in ("tools-settlement", "offline-cancel", "offline-settlement"),
+        "hold": {"boundary": boundary, "entered": boundary != "none", "released": boundary != "none"},
+        "fixture": {"scriptTrace": SHELL_TOOLS_OFFLINE_TRACES[case].decode("ascii"), "laterTrace": "", "savedConfigChanged": case == "offline-drift"}}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed),
+         "Tools/Offline route, consent, reciprocal gate, hold release or fixed trace differs")
+    original = receipt["original"]
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(noChild=False, activeRetained=False, resourceUnknown=False)
+    if case == "tools-cancel":
+        flags.update({key: False for key in ("acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+                                            "stderrEofClosed", "coreLifetimeSettled")})
+        flags["noChild"] = True
+    _shell_tools_offline_object(original, {"domain", "id", "generation", *flags}, "Tools/Offline original resource fields differ")
+    need(original["domain"] == ("offline" if offline else "tools")
+         and all(type(original[key]) is str and re.fullmatch(r"[0-9a-f]{32}", original[key]) is not None for key in ("id", "generation"))
+         and canonical({key: original[key] for key in flags}) == canonical(flags),
+         "Tools/Offline same-original inspection, claim, IO, ledger or actual joins are missing")
+    projection = _shell_tools_offline_object(receipt["terminal"], {"ownerGeneration", "context", "phase", "outcome", "reason", "result"}
+        | ({"operationId", "intentUsable"} if offline else {"runId", "finality"}), "Tools/Offline actual typed projection differs")
+    need(projection["operationId" if offline else "runId"] == original["id"] and projection["ownerGeneration"] == original["generation"],
+         "Tools/Offline terminal belongs to a different original")
+    _shell_tools_offline_context(projection["context"], case)
+    (_shell_offline_terminal if offline else _shell_tools_terminal)(projection, case)
+    return receipt
+
+
+def _shell_path_roster(changed):
+    return tuple((SHELL_PATH_MOVES.get(name, name) if changed else name, kind) for name, kind in SHELL_PATH_NODES) + (
+        (("path-project/inputs/link-input", "symlink"),) if changed else ())
+
+
+def _shell_path_absent(changed):
+    return list(SHELL_PATH_ABSENT) + (["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else
+        ["path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"])
+
+
+def _shell_paths_inventory(value, namespace, *, changed=False):
+    """Fixed before/after fixture; after is reachable only after actual success.
+
+    No failed-work scan, repair, restoration or target-file follow is admitted.
+    A directory's exact children are admitted before any descendant is opened.
+    """
+    need(_ROOT == root_path(value) and type(changed) is bool, "Different original path fixture or phase")
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value)
+    roster = _shell_path_roster(changed)
+    rows, originals = {}, []
+    # Parent roster admission is first, including both fixed sibling roots.
+    for name, kind in roster:
+        if kind != "directory":
+            continue
+        path = root / name
+        before = path.lstat()
+        mode = 0o500 if changed and name == "path-project" else 0o700
+        need(stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == mode
+             and (before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and 0 < before.st_nlink <= 16, "Path fixture directory identity differs")
+        expected = sorted(Path(child).name for child, _ in roster if str(Path(child).parent) == name)
+        found = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                need(len(found) < len(expected) and entry.name in expected, "Unexpected project-path fixture entry")
+                found.append(entry.name)
+        need(sorted(found) == expected and identity(path.lstat()) == identity(before), "Project-path directory changed")
+        rows[name] = {"path": name, "kind": kind, "identity": list(identity(before)), "children": expected}
+        originals.append((path, identity(before)))
+    for name, kind in roster:
+        if kind == "directory":
+            continue
+        path = root / name
+        before = path.lstat()
+        need((before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and before.st_nlink == 1, "Path fixture leaf ownership differs")
+        if kind == "file":
+            need(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600, "Path fixture leaf kind differs")
+            observed = record(path, len(SHELL_PATH_BYTES))
+            need(observed["size"] == len(SHELL_PATH_BYTES) and observed["sha256"] == hashlib.sha256(SHELL_PATH_BYTES).hexdigest(),
+                 "Path fixture inert bytes changed")
+            row = {**observed, "path": name, "kind": kind, "identity": list(identity(before))}
+        else:
+            need(kind == "symlink" and stat.S_ISLNK(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o777
+                 and before.st_size == 13 and os.readlink(path) == "link-original", "Path fixture link transition differs")
+            row = {"path": name, "kind": kind, "identity": list(identity(before)), "target": "link-original"}
+        need(identity(path.lstat()) == identity(before), "Path fixture leaf changed during observation")
+        rows[name] = row
+        originals.append((path, identity(before)))
+    for name in _shell_path_absent(changed):
+        _absent(root / name)
+    need(len({(row["identity"][0], row["identity"][1]) for row in rows.values()}) == len(roster)
+         and all(row["identity"][0] == namespace["identity"][0] for row in rows.values())
+         and all(identity(path.lstat()) == original for path, original in originals), "Path fixture aliases or original identity drift")
+    _shell_namespace_check(value, binding)
+    return {"schemaVersion": 2, "fixture": "project-paths-v1", "root": str(root), "changed": changed,
+            "entries": [rows[name] for name, _ in roster], "absent": _shell_path_absent(changed), "namespace": namespace}
+
+
+def shell_paths_fixture(value, before_raw, after_raw):
+    """Typed correspondence only; not authority to observe a live/failed case."""
+    documents, namespaces = [], []
+    for raw, changed in ((before_raw, False), (after_raw, True)):
+        doc = decode(raw, 8192)
+        roster = _shell_path_roster(changed)
+        need(type(doc) is dict and set(doc) == {"schemaVersion", "fixture", "root", "changed", "entries", "absent", "namespace"}
+             and canonical(doc) == raw and type(doc["schemaVersion"]) is int and doc["schemaVersion"] == 2
+             and doc["fixture"] == "project-paths-v1" and doc["root"] == str(shell_fixture_root(value)) and doc["changed"] is changed
+             and doc["absent"] == _shell_path_absent(changed), "Project-path inventory shape, root or phase differs")
+        namespace = _shell_namespace_data(value, doc["namespace"])
+        namespaces.append(namespace)
+        rows = doc["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Project-path fixture must have exactly fourteen/fifteen nodes")
+        for row, (name, kind) in zip(rows, roster):
+            fields = {"path", "kind", "identity"} | ({"children"} if kind == "directory" else {"target"} if kind == "symlink" else {"size", "sha256"})
+            need(type(row) is dict and set(row) == fields and row["path"] == name and row["kind"] == kind, "Project-path node roster differs")
+            original = row["identity"]
+            mode = (stat.S_IFDIR | (0o500 if changed and name == "path-project" else 0o700)) if kind == "directory" else (
+                stat.S_IFLNK | 0o777 if kind == "symlink" else stat.S_IFREG | 0o600)
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode
+                 and original[3:5] == [value["runnerUid"], value["runnerGid"]]
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Project-path node identity differs")
+            if kind == "directory":
+                need(row["children"] == sorted(Path(child).name for child, _ in roster if str(Path(child).parent) == name), "Project-path directory has unexpected children")
+            elif kind == "symlink":
+                need(original[5] == 1 and original[6] == 13 and row["target"] == "link-original", "Project-path symlink differs")
+            else:
+                need(original[5] == 1 and original[6] == len(SHELL_PATH_BYTES) and type(row["size"]) is int
+                     and row["size"] == len(SHELL_PATH_BYTES) and row["sha256"] == hashlib.sha256(SHELL_PATH_BYTES).hexdigest(), "Project-path fixed inert bytes differ")
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+             and all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows),
+             "Project-path nodes alias or cross devices")
+        documents.append({row["path"]: row for row in rows})
+    before, after = documents
+    for name, kind in SHELL_PATH_NODES:
+        new_name = SHELL_PATH_MOVES.get(name, name)
+        old, new = before[name]["identity"], after[new_name]["identity"]
+        if name == "path-project":
+            need(old[:2] == new[:2] and old[3:8] == new[3:8] and new[8] >= old[8], "Registered path root changed beyond the fixed mode transition")
+        elif name in ("path-project/inputs", "path-project/ios"):
+            need(old[:6] == new[:6] and new[7] >= old[7] and new[8] >= old[8], "Path mutation parent identity changed")
+        elif new_name != name:
+            need(old[:8] == new[:8] and new[8] >= old[8], "Path transition did not preserve the original moved node")
+        else:
+            need(old == new, "Unchanged project-path node identity changed")
+        if kind == "file":
+            need(before[name]["sha256"] == after[new_name]["sha256"], "Moved original file bytes changed")
+    need(namespaces[0] == namespaces[1] and before_raw != after_raw, "Project-path mutations or original namespace differ")
+    return {"fixture": "project-paths-v1", "rootRetained": True, "originalsRetained": True, "noUnexpectedEntries": True,
+            "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5,
+            "fileBytes": len(SHELL_PATH_BYTES) * 5, "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"],
+            "rootModes": [0o700, 0o500], "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_prepare(value, case, namespace):
+    _shell_namespace_check(value, namespace)
+    base, environment = _ROOT / ("gui-" + case), shell_environment(value, case)
+    log_binding = _shell_log_prepare(value, case)
+    for path in (base, *(base / name for name in ("home", "tmp", "runtime", "config", "cache", "data", "empty-config"))):
+        path.mkdir(mode=0o700)
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    auth = Path(environment["XAUTHORITY"])
+    _D.write(auth, b"", 0o600)
+    os.chown(auth, value["runnerUid"], value["runnerGid"])
+    bus = base / "runtime/session-bus"
+    need(len(str(bus).encode("ascii")) < 108, "Private D-Bus socket exceeds native path bound")
+    # Deliberately no include, service directory/helper, systemd activation,
+    # pidfile, fork or syslog. The config's protected parent is not app-writable.
+    config = ("<busconfig><type>session</type><listen>unix:path=" + str(bus)
+        + "</listen><auth>EXTERNAL</auth><policy context=\"default\">"
+        + "<allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/>"
+        + "</policy></busconfig>\n").encode("ascii")
+    _D.write(_ROOT / ("shell-" + case + "-bus.conf"), config, 0o444)
+    for path in (Path("/tmp/.X99-lock"), Path("/tmp/.X11-unix/X99"), bus, base / "runtime/absent-system-bus"):
+        _absent(path)  # Conflict is failure, never permission to repair/remove.
+    if case == "positive":
+        _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value, namespace)))
+        _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value, namespace)))
+    if case == "project-paths":
+        _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value, namespace)))
+    if case == "workflow-apply":
+        _retain("shell-workflow-apply-before.json", canonical(_shell_workflow_inventory(value, namespace)))
+    if case in SHELL_SESSION_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_session_inventory(value, namespace, case)))
+    if case == "metadata-save":
+        _retain("shell-metadata-save-before.json", canonical(_shell_metadata_inventory(value, namespace)))
+    if case in SHELL_TOOLS_OFFLINE_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_tools_offline_inventory(value, namespace, case)))
+    return environment, log_binding
+
+
+def _shell_fixtures_final(value, namespace):
+    """Compare retained fixtures only after every original case has returned."""
+    # Every original case, including the eight Tools/Offline cases, returned through the
+    # same shell_result gate. Check every earlier original family and the
+    # saved metadata together, never by following a failed/possibly-live case.
+    need(canonical(_shell_project_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+         and canonical(_shell_candidate_inventory(value, namespace))
+         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+         and canonical(_shell_paths_inventory(value, namespace, changed=True))
+         == read(_ROOT / "public/shell-project-paths-after.json", 8192)
+         and canonical(_shell_workflow_inventory(value, namespace, installed=True))
+         == read(_ROOT / "public/shell-workflow-apply-after.json", 8192)
+         and canonical(_shell_metadata_inventory(value, namespace, saved=True))
+         == read(_ROOT / "public/shell-metadata-save-after.json", 8192),
+         "Shell observations changed another original fixture family")
+    for case in SHELL_SESSION_CASES:
+        need(canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_SESSION_INVENTORY_LIMIT),
+             "Later shell observations changed an earlier original session fixture")
+    for case in SHELL_TOOLS_OFFLINE_CASES:
+        need(canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT),
+             "Later shell observations changed an earlier original Tools/Offline fixture")
+
+
+def _shell_original_child_map(raw, expected):
+    """One actual original-child map, matched to the admitted loader identities."""
+    need(type(expected) is dict and len(expected) == 6, "Original shell admitted mapping set differs")
+    rows = decode(raw, 8192)
+    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+         and [row.get("role") for row in rows] == sorted(expected), "Original shell child roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Original shell child mapping differs")
+    return rows
+
+
+SHELL_SETTLED_FAILURE_LABELS = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SettledFailure\n"
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+
+
+def _shell_settled_failure_result(stdout, stderr, case, code, labels):
+    """One closed expected-negative observation, never general code1 acceptance."""
+    need(case == "settled-failure" and type(code) is int and code == 1
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT
+         and type(labels) is bytes and labels == SHELL_SETTLED_FAILURE_LABELS
+         and _shell_label_pair(labels) == {"step": "SettledFailure", "boundary": "dom", "bootstrapProgress": "advanced"},
+         "Original settled-failure capture or first label differs")
+    def records(raw):
+        lines = raw.split(b"\n")  # Retain prefixed records and unterminated tails; CR is not LF.
+        return [line + b"\n" if index < len(lines) - 1 else line
+                for index, line in enumerate(lines) if b"MRK_" in line]
+    need(records(stdout) == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+         *SHELL_SETTLED_FAILURE_LABELS.splitlines(keepends=True),
+         b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n",
+         b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"] and records(stderr) == [],
+         "Original settled-failure bootstrap/label/handoff/failure order differs")
+    return {"case": case, "exitCode": 1, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+            "qualified": False, "expectedFailureObserved": True, "failureHandoff": "original-quit-relay-loop-returned"}
+
+
+def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
+    """Original bounded captures, not wrapper zero or an observation delay."""
+    if case == "settled-failure":
+        return _shell_settled_failure_result(stdout, stderr, case, code, failure_labels)
+    need(failure_labels is None, "A success-requiring case supplied a failure-label export")
+    need(case in SHELL_CASES and type(code) is int and code == 0
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
+         "Original shell capture failed/incomplete")
+    lines = [line for line in stdout.splitlines() + stderr.splitlines() if line.startswith(b"MRK_")]
+    marker = b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified"
+    contracts = b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified"
+    if case == "positive":
+        # The admitted xvfb-run transport merges application stderr into
+        # stdout. Keep each original LF and each independent receipt bound.
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 6 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_PROJECT_MARKER) and output[3].endswith(b"\n")
+             and output[4].startswith(SHELL_CANDIDATE_MARKER) and output[4].endswith(b"\n")
+             and output[5] == marker + b"\n" and diagnostics == [],
+             "Positive original bootstrap/contract/receipt/completion order differs")
+        # Each independent JSON+LF retains its original 2048-byte bound.
+        receipt = shell_project_receipt(output[3][len(SHELL_PROJECT_MARKER):])
+        candidate = shell_candidate_receipt(output[4][len(SHELL_CANDIDATE_MARKER):])
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "projectDraft": receipt, "candidateDocuments": candidate}
+    if case in ("project-paths", "workflow-apply", "metadata-save"):
+        receipt_marker, receipt_reader, field = {
+            "project-paths": (SHELL_PATH_MARKER, shell_path_receipt, "projectPaths"),
+            "workflow-apply": (SHELL_WORKFLOW_MARKER, shell_workflow_receipt, "workflowApply"),
+            "metadata-save": (SHELL_METADATA_MARKER, shell_metadata_receipt, "metadataSave"),
+        }[case]
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(receipt_marker) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Original path/workflow/metadata bootstrap/contract/receipt/completion order differs")
+        receipt = receipt_reader(output[3][len(receipt_marker):])
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+                field: receipt}
+    if case in SHELL_TOOLS_OFFLINE_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_TOOLS_OFFLINE_MARKER) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Tools/Offline original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_tools_offline_receipt(output[3][len(SHELL_TOOLS_OFFLINE_MARKER):], case)
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "toolsOffline": receipt}
+    if case in SHELL_SESSION_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(6 <= len(output) <= SHELL_SESSION_R1_LIMIT + 5
+             and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[-2].startswith(SHELL_SESSION_MARKER) and output[-2].endswith(b"\n")
+             and output[-1] == marker + b"\n" and diagnostics == [],
+             "Original session bootstrap/contract/maps/receipt/completion order differs")
+        receipt = shell_session_receipt(output[-2][len(SHELL_SESSION_MARKER):], case)
+        maps = output[3:-2]
+        need(len(maps) == receipt["behavior"]["assessments"]
+             and all(line.startswith(CHILD_MARKER.encode("ascii")) and line.endswith(b"\n") and b"\r" not in line
+                     and len(line) <= 8192 + len(CHILD_MARKER) for line in maps),
+             "Session assessments lack their bounded original child-map captures")
+        rows = [_shell_original_child_map(line[len(CHILD_MARKER):], expected) for line in maps]
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": rows, "sessionInputs": receipt}
+    if case == "normal":
+        wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
+        need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": False, "maps": []}
+    # The outstanding case cannot advertise success. Its IPC caller may retire
+    # before the fixed unavailable diagnostic; only the held original's later
+    # genuine settlement/map report plus completed GUI observation is required.
+    maps = [line for line in lines if line.startswith(CHILD_MARKER.encode("ascii"))]
+    remaining = [line for line in lines if line not in maps]
+    need(sorted(remaining) in (sorted([contracts, marker]), sorted([contracts, marker, b"MRK_DESKTOP_CAPABILITIES=unavailable"]))
+         and len(maps) == 1 and len(maps[0]) <= 8192 + len(CHILD_MARKER)
+         and type(expected) is dict and len(expected) == 6, "Outstanding original/GUI completion differs")
+    rows = _shell_original_child_map(maps[0][len(CHILD_MARKER):], expected)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": False, "domAndGtkObserved": True, "maps": [rows]}
+
+
+def shell_window_ids(raw):
+    need(type(raw) is bytes and len(raw) <= 128, "Private display window response exceeds bound")
+    rows = raw.splitlines()
+    need(len(rows) <= 2 and all(re.fullmatch(rb"[1-9][0-9]{0,9}", row) is not None for row in rows),
+         "Private display returned malformed/unbounded window IDs")
+    values = [int(row) for row in rows]
+    need(len(set(values)) == len(values) and all(value < 1 << 32 for value in values), "Duplicate/oversized XID")
+    return values
+
+
+def _shell_window_pid(value, pid):
+    # Selection DATA only. Never use this numeric ID to wait, signal, clean,
+    # claim process custody or reconstruct a lost original worker.
+    need(type(pid) is int and 0 < pid < 1 << 31, "Private shell window PID differs")
+    proc = Path("/proc") / str(pid)
+    status = dict(line.split(":", 1) for line in _kernel(proc / "status").splitlines() if ":" in line)
+    need(all(status[key].split() == [str(value[id_key])] * 4 for key, id_key in (("Uid", "runnerUid"), ("Gid", "runnerGid")))
+         and status["NoNewPrivs"].strip() == "1"
+         and _kernel(proc / "cgroup") == "0::/system.slice/" + _ROOT.name + ".service\n"
+         and os.readlink(proc / "exe") == str(_ROOT / "shell-normal"), "Window does not report this task's original normal executable")
+
+
+def _shell_diagnostic_time():
+    try:
+        value = time.monotonic()
+        return value if type(value) in (int, float) and math.isfinite(value) else None
+    except BaseException:
+        return None
+
+
+def _shell_note(record, **fields):
+    # Only private in-memory diagnostic dictionaries; never lifecycle authority.
+    try:
+        if type(record) is dict:
+            record.update(fields)
+    except BaseException:
+        pass
+
+
+def _shell_call_started(timeout):
+    try:
+        return {"timeoutSeconds": timeout, "ownerReturned": False,
+                "startMonotonic": _shell_diagnostic_time(), "endMonotonic": None}
+    except BaseException:
+        return None
+
+
+def _shell_call_finished(record, returned):
+    # Record the actual return before the optional finish-clock observation.
+    # In particular, a clock failure cannot replace an owner's original error.
+    _shell_note(record, ownerReturned=returned)
+    _shell_note(record, endMonotonic=_shell_diagnostic_time())
+
+
+def _shell_call_summary(record):
+    if type(record) is not dict:
+        return None
+    start, end = record.get("startMonotonic"), record.get("endMonotonic")
+    start = start if type(start) in (int, float) and math.isfinite(start) else None
+    end = end if type(end) in (int, float) and math.isfinite(end) else None
+    elapsed = end - start if start is not None and end is not None and end >= start else None
+    timeout, returned = record.get("timeoutSeconds"), record.get("ownerReturned")
+    return {"timeoutSeconds": timeout if type(timeout) is int and 0 < timeout <= 60 else None,
+            "ownerReturned": returned if type(returned) is bool else None,
+            "startMonotonic": start, "endMonotonic": end,
+            "ownerElapsedSeconds": elapsed if elapsed is not None and math.isfinite(elapsed) else None}
+
+
+def _shell_capture_summary(result, argv, display_log=None, *, controller=False, normal=False):
+    limit = 4096 if controller else LIMIT
+    if not (type(result) is subprocess.CompletedProcess and result.args == argv
+            and type(result.returncode) is int and type(result.stdout) is bytes
+            and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= limit):
+        return None
+    captured = {"exitCode": result.returncode}
+    streams = [("stdout", result.stdout, 128 if controller else 1024 if normal else 256,
+                128 if controller else 2048 if normal else 256),
+               ("stderr", result.stderr, 256 if controller else 1024, 256 if controller else 2048)]
+    if not controller and type(display_log) is bytes and len(result.stdout) + len(result.stderr) + len(display_log) <= LIMIT:
+        streams.append(("display", display_log, 1024, 2048))
+    for name, raw, head, tail in streams:
+        prefix, suffix = raw[:head], raw[max(head, len(raw) - tail):]
+        captured[name] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                          "head": prefix.decode("utf-8", "replace"), "tail": suffix.decode("utf-8", "replace"),
+                          "truncated": len(prefix) + len(suffix) < len(raw)}
+    return captured
+
+
+def _shell_normal_markers(stdout, stderr):
+    """Closed counts from an already validated, joined original capture only."""
+    markers = {b"MRK_DESKTOP_CAPABILITIES=available\n": "capabilitiesAvailable",
+               b"MRK_DESKTOP_CAPABILITIES=unavailable\n": "capabilitiesUnavailable",
+               b"MRK_DESKTOP_CATALOGUE=returned\n": "catalogueReturned",
+               b"MRK_DESKTOP_CATALOGUE=refused\n": "catalogueRefused"}
+    stages = ("setup-enter", "page-start-trusted", "page-start-untrusted",
+              "page-finish-trusted", "page-finish-untrusted", "hook-installed",
+              "app-info-enter", "catalog-enter", "content-terminated",
+              "content-reason-crashed", "content-reason-exceeded-memory-limit",
+              "content-reason-terminated-by-api", "content-reason-unknown")
+    # Exact static Rust records from the SAME capability admission/original wait.
+    # Unknown original codes map to literal other; unknown emitted bytes do not.
+    failure_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                     "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                     "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+    stages += tuple("capabilities-" + origin + "-" + code
+                    for origin in ("admission", "query-wait") for code in failure_codes)
+    # Linux-only first-error cause DATA, counted only as complete fixed records.
+    native_failures = (
+        'unsupported-platform',
+        'missing-compile-anchor',
+        'stopped',
+        'deadline',
+        'native-unavailable',
+        'native-denied',
+        'namespace',
+        'mount',
+        'ownership',
+        'extended-attributes',
+        'identity-changed',
+        'manifest',
+        'inventory',
+        'bounds',
+        'already-used',
+        'interrupted',
+        'close-uncertain',
+        'ledger-invariant',
+        'transfer-unavailable',
+        'destination-occupied',
+    )
+    local_causes = (
+        'selection-profile-closed',
+        'selection-compile-binding',
+        'selection-method-outside-profile',
+        'inspection-unavailable',
+        'acquisition-entry-not-released',
+        'acquisition-custody-missing',
+        'acquisition-lock',
+        'final-claim-owner-gate',
+        'returned-spawn-process-fd-limit',
+        'returned-spawn-system-fd-limit',
+        'returned-spawn-memory',
+        'returned-spawn-resource-unavailable',
+        'returned-spawn-permission-denied',
+        'returned-spawn-not-found',
+        'returned-spawn-exec-format',
+        'returned-spawn-other',
+        'engine-response',
+        'unavailable',
+    )
+    stages += tuple("capabilities-cause-" + origin + "-" + reason
+                    for origin in ("inspection", "capability", "preparation", "final-claim") for reason in native_failures)
+    stages += tuple("capabilities-cause-" + label for label in local_causes)
+    prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
+    stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
+    result = {}
+    for name, raw in (("stdout", stdout), ("stderr", stderr)):
+        row = {"markers": {label: 0 for label in markers.values()}, "unexpectedMrk": 0,
+               "stages": {stage: 0 for stage in stages}, "unexpectedBootstrap": 0}
+        for line in raw.splitlines(keepends=True):
+            if line in markers:
+                row["markers"][markers[line]] += 1
+            elif line.startswith(b"MRK_"):
+                row["unexpectedMrk"] += 1
+            elif line in stage_lines:
+                row["stages"][stage_lines[line]] += 1
+            elif line.startswith(prefix):
+                row["unexpectedBootstrap"] += 1
+        result[name] = row
+    return result
+
+
+def _shell_resource_summary(value):
+    """Closed, bounded observation DATA; never a resource-policy/finality gate."""
+    try:
+        fields = {"pidsMax": "pids.max", "pidsCurrent": "pids.current", "pidsEventsMax": "pids.events",
+                  "memoryEvents": "memory.events"}
+        need(type(value) is dict and set(value) == {"scope", "phase", "bindingMatched", "unavailable", *fields}
+             and type(value["scope"]) is str and value["scope"] == "original-service-resource-observation-only"
+             and type(value["phase"]) is str and value["phase"] in {"main-failure-before-join", "failure-after-join-attempt"}
+             and type(value["bindingMatched"]) is bool, "Invalid resource observation")
+        missing = value["unavailable"]
+        need(type(missing) is list and len(missing) <= 5
+             and all(type(item) is str and item in {"binding", *fields.values()} for item in missing)
+             and len(set(missing)) == len(missing), "Invalid unavailable resource labels")
+        result = {key: value[key] for key in ("scope", "phase", "bindingMatched")}
+        result["unavailable"] = list(missing)
+        need(value["bindingMatched"] and "binding" not in missing or not value["bindingMatched"] and missing == ["binding"],
+             "Resource binding/availability differs")
+        for name, leaf in fields.items():
+            item = value[name]
+            if not value["bindingMatched"] or leaf in missing:
+                need(item is None, "Unavailable resource has a value")
+            elif name == "memoryEvents":
+                need(type(item) is dict and set(item) == {"max", "oom", "oom_kill"}
+                     and all(type(number) is int and 0 <= number < 1 << 64 for number in item.values()), "Invalid memory counters")
+                item = dict(item)
+            else:
+                need(type(item) is int and 0 <= item < 1 << 64 or name == "pidsMax" and type(item) is str and item == "max",
+                     "Invalid task counter")
+            result[name] = item
+        need(len(canonical(result)) < 1024, "Resource observation exceeds its bound")
+        return result
+    except BaseException:
+        return None
+
+
+def _shell_resource_diagnostic(value, phase):
+    """One original service's public counters, never a failed-owner/private read.
+
+    Only called after the original startup _domain admission. Sequential reads
+    are not an atomic snapshot, the failing spawn's errno, or cleanup evidence.
+    """
+    unavailable = {"scope": "original-service-resource-observation-only", "phase": phase,
+                   "bindingMatched": False, "pidsMax": None, "pidsCurrent": None,
+                   "pidsEventsMax": None, "memoryEvents": None, "unavailable": ["binding"]}
+    try:
+        need(type(value) is dict and all(type(value.get(key)) is str
+             and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in ("runId", "attempt"))
+             and _ROOT == root_path(value), "Different original resource root")
+        group = "/system.slice/" + _ROOT.name + ".service"
+        membership = "0::" + group + "\n"
+        need(_kernel("/proc/self/cgroup", 512) == membership, "Different original resource domain")
+    except BaseException:
+        return _shell_resource_summary(unavailable)
+    result = {**unavailable, "bindingMatched": True, "unavailable": []}
+    for leaf, name in (("pids.max", "pidsMax"), ("pids.current", "pidsCurrent"),
+                       ("pids.events", "pidsEventsMax"), ("memory.events", "memoryEvents")):
+        try:
+            raw = _kernel(Path("/sys/fs/cgroup" + group) / leaf, 1024)
+            need(type(raw) is str and 0 < len(raw) <= 1024, "Resource input bound differs")
+            if leaf in {"pids.max", "pids.current"}:
+                need(leaf == "pids.max" and raw == "max\n" or re.fullmatch(r"[0-9]{1,20}\n", raw), "Invalid task scalar")
+                observed = "max" if raw == "max\n" else int(raw)
+                need(observed == "max" or observed < 1 << 64, "Task scalar exceeds its bound")
+            else:
+                lines, counters = raw.splitlines(keepends=True), {}
+                need(0 < len(lines) <= 32, "Resource event row bound differs")
+                for line in lines:
+                    match = re.fullmatch(r"([a-z_]{1,32}) ([0-9]{1,20})\n", line)
+                    need(match is not None, "Invalid resource event row")
+                    key, number = match.groups()
+                    need(key not in counters and int(number) < 1 << 64, "Duplicate or unbounded resource event")
+                    counters[key] = int(number)
+                keys = ("max",) if leaf == "pids.events" else ("max", "oom", "oom_kill")
+                need(all(key in counters for key in keys), "Required resource counter unavailable")
+                observed = counters["max"] if leaf == "pids.events" else {key: counters[key] for key in keys}
+            result[name] = observed
+        except BaseException:
+            result["unavailable"].append(leaf)
+    try:
+        need(_kernel("/proc/self/cgroup", 512) == membership, "Original resource domain changed")
+    except BaseException:
+        return _shell_resource_summary(unavailable)
+    return _shell_resource_summary(result)
+
+
+def _shell_failure_output(marker, data):
+    # Includes JSON escaping and all metadata; never unbounded terminal text.
+    raw = marker + canonical(data)
+    if len(raw) > 32768:
+        completed = (data.get("controller") or {}).get("lastCompleted") or {}
+        for capture in (data["capture"], completed.get("capture")):
+            for row in (capture or {}).values():
+                if type(row) is dict:
+                    row.pop("head", None)
+                    row.pop("tail", None)
+                    row["truncated"] = row["size"] != 0
+        raw = marker + canonical(data)
+    if len(raw) <= 32768:
+        sys.stderr.write(raw.decode("ascii"))
+        sys.stderr.flush()
+
+
+def _shell_command_failure(argv, result, case, display_log, log_error, original, call, *, label_data=None):
+    """Same actual owner return and original sidecar only; never a verdict."""
+    try:
+        capture = _shell_capture_summary(result, argv, display_log)
+        labels, reason = None, "owner-finality-unavailable"
+        handoff = None
+        if capture is not None:
+            reason = "unavailable"
+            try:
+                labels = _shell_labels_read(original) if label_data is None else label_data[1]
+            except BaseException:
+                pass
+            if labels is not None:
+                reason = None
+                if result.returncode == 1:
+                    # Closed DATA from the SAME joined capture, never Xvfb log
+                    # text, a second label read, or cleanup/continuation authority.
+                    wanted = b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
+                    failed = b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n"
+                    terminal = []
+                    for raw in (result.stdout, result.stderr):
+                        lines = raw.split(b"\n")  # Only LF delimits a record, never a bare CR.
+                        for index, line in enumerate(lines):
+                            if (b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF" in line or b"MRK_INSTALLED_SHELL_OBSERVATION" in line
+                                    or line.startswith(b"MRK_") and b"-verified" in line):
+                                # Include malformed/prefixed records and the unterminated
+                                # tail so neither can disappear beside a genuine pair.
+                                terminal.append(line + b"\n" if index < len(lines) - 1 else line)
+                    if len(terminal) == 2 and terminal.count(wanted) == 1 and terminal.count(failed) == 1:
+                        handoff = "original-quit-relay-loop-returned"
+        name = None if log_error is None else type(log_error).__name__
+        data = {"schemaVersion": 1, "scope": "original-shell-command-failure-diagnostic-only",
+                "case": case, "qualified": False, "cleanupEstablished": False,
+                "logErrorType": name if name is None or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+                "capture": capture, "labels": labels, "labelsReason": reason, "failureHandoff": handoff,
+                "ownerCall": _shell_call_summary(call)}
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
+    except BaseException:
+        pass  # Never replace an original failure, including a log read failure.
+
+
+def _shell_error_data(original, origin):
+    safe_messages = {
+        "Normal window controller endpoint expired",
+        "Normal original returned before controller command",
+        "Normal window controller command bound exhausted",
+        "No original controller command budget remains",
+        "Original normal shell returned before Quit",
+        "Original private shell window did not become visible in the finite observation",
+        "Original normal shell/controller did not settle",
+        "Original shell capture failed/incomplete",
+        "Actual normal capabilities/catalogue or observer completion missing",
+        "owned command failed, timed out, or produced incomplete output",
+        "owned command cleanup could not be confirmed",
+        "owned command executable could not be started",
+        "owned command produced incomplete output",
+        "owned command output exceeds its bound",
+        "owned command exceeded its original deadline",
+        "owned command protocol or original ownership is incomplete",
+        "Original shell error log was replaced or changed",
+        "Original shell error log changed during capture",
+        "Combined shell output exceeds its bound",
+    }
+
+    known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
+                         if isinstance(value := getattr(_OWNER, name, None), type))
+
+    name = type(original).__name__
+    row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+           "origin": origin, "originalProcessFacts": None}
+    # Never call exception formatting: it may contain argv, environment
+    # or other context, or itself raise. Only fixed public messages pass.
+    args = BaseException.args.__get__(original)
+    if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
+        row["message"] = args[0]
+    if type(original) in known_errors:
+        # Exact trusted family only; read stored fields, not properties.
+        fields = vars(original)
+        row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
+                                       for key in ("dispatched", "contained", "cleanup_complete")}
+    return row
+
+
+def _shell_owner_failure(case, error, original, call):
+    """Finite sidecar DATA only; neither exception text nor a new lifetime authority."""
+    try:
+        _shell_call_finished(call, False)
+        labels, reason = None, "owner-finality-unavailable"
+        if type(error) is getattr(_OWNER, "ProcessError", None):
+            fields = vars(error)  # Exact trusted type: stored built-in flags, not properties/causes.
+            if fields.get("contained") is True and fields.get("cleanup_complete") is True:
+                reason = "unavailable"
+                try:
+                    labels = _shell_labels_read(original)
+                except BaseException:
+                    pass
+                if labels is not None:
+                    reason = None
+        facts = _shell_error_data(error, "owner")
+        facts.pop("message", None)  # No exception text in this diagnostic lane.
+        data = {"schemaVersion": 1, "scope": "original-shell-owner-failure-diagnostic-only",
+                "case": case, "phase": "owner-call", "qualified": False, "cleanupEstablished": False,
+                "capture": None, "labels": labels, "labelsReason": reason, "error": facts,
+                "ownerCall": _shell_call_summary(call)}
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
+    except BaseException:
+        pass  # Diagnosis/clock/format/output failures never replace the active original.
+
+
+def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
+                          join_error=None, capture_error=None, display_log=None,
+                          controller=None, error_origin="main", resources=None):
+    """Best-effort diagnosis from original memory, never finality or read authority.
+
+    A failed service cannot export its private files. Its existing stderr can
+    still explain a failed synthetic, no-project normal launch. In particular,
+    an unjoined holder is never inspected and no diagnostic error replaces the
+    operation's original failure.
+    """
+    try:
+        errors = [(item, origin) for item, origin in
+                  ((error, error_origin), (join_error, "join"), (capture_error, "capture")) if item is not None]
+        result = None
+        data = {"schemaVersion": 1, "scope": "original-normal-failure-diagnostic-only",
+                "qualified": False, "cleanupEstablished": False, "joined": joined,
+                "stage": stage, "inputs": inputs, "controllerCommands": len(commands),
+                "lastControllerCommand": commands[-1]["phase"] if commands else None,
+                "workerGuardState": None, "workerErrorCount": None, "workerCall": None,
+                "controller": None, "capture": None, "bootstrap": None,
+                "resources": _shell_resource_summary(resources)}
+        if type(controller) is dict:
+            observation = {}
+            for name in ("normalStartMonotonic", "controllerEndpoint", "serviceEndpoint", "failureMonotonic"):
+                value = controller.get(name)
+                observation[name] = value if type(value) in (int, float) and math.isfinite(value) else None
+            budget = controller.get("carrierTimeoutSeconds")
+            observation["carrierTimeoutSeconds"] = budget if type(budget) is int and 45 < budget <= 60 else None
+            observation["lastAttempt"] = observation["lastCompleted"] = None
+            attempt = controller.get("lastAttempt")
+            labels = {"search", "window-pid", "focus", "focus-readback", "key"}
+            stages = {"initial-window", "bootstrap-margin", "quit-input", "quit-dialog", "quit-confirmation"}
+            if type(attempt) is dict and attempt.get("label") in labels:
+                ordinal, valid = attempt.get("ordinal"), attempt.get("validOriginalResult")
+                observation["lastAttempt"] = {"label": attempt["label"],
+                    "ordinal": ordinal if type(ordinal) is int and 1 <= ordinal <= 97 else None,
+                    "stage": attempt.get("stage") if attempt.get("stage") in stages else None,
+                    "phase": attempt.get("phase") if attempt.get("phase") in
+                             {"admission", "owner-call", "result-validation", "policy", "complete"} else None,
+                    "validOriginalResult": valid if type(valid) is bool else None,
+                    "ownerCall": _shell_call_summary(attempt.get("ownerCall"))}
+            completed = controller.get("lastCompleted")
+            if type(completed) is dict and completed.get("label") in labels:
+                ordinal = completed.get("ordinal")
+                observation["lastCompleted"] = {"label": completed["label"],
+                    "ordinal": ordinal if type(ordinal) is int and 1 <= ordinal <= 96 else None,
+                    "stage": completed.get("stage") if completed.get("stage") in stages else None,
+                    "ownerCall": _shell_call_summary(completed.get("ownerCall")),
+                    "capture": _shell_capture_summary(completed.get("result"), completed.get("argv"), controller=True)}
+            data["controller"] = observation
+        if joined:
+            state = holder.get("guardState")
+            data["workerGuardState"] = state if state in ("NEW", "INSTALLED", "ACTIVE", "RESTORED", "UNKNOWN") else "other"
+            worker_errors = holder.get("errors", [])
+            worker_observation = holder.get("shellDiagnostic")
+            worker_origins = []
+            if type(worker_observation) is dict:
+                data["workerCall"] = _shell_call_summary(worker_observation.get("ownerCall"))
+                worker_origins = worker_observation.get("errorOrigins", [])
+            if type(worker_errors) is list:
+                data["workerErrorCount"] = len(worker_errors)
+                for index, item in enumerate(worker_errors[:4]):
+                    origin = worker_origins[index] if type(worker_origins) is list and index < len(worker_origins) else None
+                    label = "worker-" + origin if origin in {"guard-install", "guard-activate", "owner",
+                            "guard-restore", "guard-check", "guard-state"} else "worker"
+                    errors.append((item, label))
+            result = holder.get("result")
+        data["errors"] = [_shell_error_data(item, origin) for item, origin in errors[:4]]
+        data["errorsTruncated"] = len(errors) > 4
+        data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None, normal=True)
+        if data["capture"] is not None:
+            try:
+                data["bootstrap"] = _shell_normal_markers(result.stdout, result.stderr)
+            except BaseException:
+                pass  # Keep the primary diagnostic even if optional counting fails.
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_FAILURE=", data)
+    except BaseException:
+        pass  # A diagnostic is not authority to replace the original error.
+
+
+def _shell_normal(value, environment, expected, log_binding):
+    global _FAILED, _PHASE
+    need(not _FAILED, "Prior shell/root failure")
+    _FAILED, _PHASE = True, "shell-normal"
+    started = time.monotonic()
+    end = min(started + 45, _END - CLIENT_RESERVATION - 1)
+    seconds = min(60, math.floor(_END - CLIENT_RESERVATION - started))
+    need(seconds > 45 and end > started + 35, "Insufficient original normal-window lifetime remains")
+    argv, holder, commands = shell_argv(value, "normal"), {}, []
+    worker = threading.Thread(target=_overlap_worker, args=(holder, argv, environment, seconds),
+                              kwargs={"shell_diagnostic": True}, name="mrk-installed-shell-normal", daemon=False)
+    failure, join_error, capture_error, joined, inputs = None, None, None, False, 0
+    display_log = None
+    stage, diagnostic_attempted = "start", False
+    resources, resource_attempted = None, False
+    controller = {"normalStartMonotonic": started, "controllerEndpoint": end, "serviceEndpoint": _END,
+                  "carrierTimeoutSeconds": seconds, "failureMonotonic": None,
+                  "lastAttempt": None, "lastCompleted": None}
+
+    def resource_snapshot(phase):
+        nonlocal resources, resource_attempted
+        if not resource_attempted:
+            resource_attempted = True
+            try:
+                resources = _shell_resource_diagnostic(value, phase)
+            except BaseException:
+                pass  # Preserve the original error and join even if diagnosis fails.
+
+    def diagnose(error, origin):
+        nonlocal diagnostic_attempted
+        if not diagnostic_attempted:
+            diagnostic_attempted = True
+            resource_snapshot("failure-after-join-attempt")
+            _shell_normal_failure(holder, argv, joined=joined, stage=stage, inputs=inputs, commands=commands,
+                                  error=error, join_error=join_error, capture_error=capture_error, display_log=display_log,
+                                  controller=controller, error_origin=origin, resources=resources)
+
+    def xdo(label, args, *, codes=(0,)):
+        attempt = {"label": label, "ordinal": len(commands) + 1, "stage": stage,
+                   "phase": "admission", "ownerCall": None, "validOriginalResult": False}
+        _shell_note(controller, lastAttempt=attempt)
+        need(time.monotonic() < end, "Normal window controller endpoint expired")
+        need(worker.is_alive(), "Normal original returned before controller command")
+        need(len(commands) < 96, "Normal window controller command bound exhausted")
+        timeout = min(5, math.floor(end - time.monotonic()))
+        need(timeout > 0, "No original controller command budget remains")
+        command_argv = _drop(value, ["/usr/bin/xdotool", *args])
+        call, returned = _shell_call_started(timeout), False
+        _shell_note(attempt, phase="owner-call", ownerCall=call)
+        try:
+            result = _OWNER.run_owned(command_argv, environ=environment, cwd=Path("/"), timeout=timeout,
+                capture=True, text=False, output_limit=4096, execution_scope=None, journal_binding=None, cleanup=False)
+            returned = True
+        finally:
+            _shell_call_finished(call, returned)
+        _shell_note(attempt, phase="result-validation")
+        need(type(result) is subprocess.CompletedProcess and result.args == command_argv and type(result.returncode) is int
+             and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= 4096,
+             "Original private-display controller result incomplete")
+        _shell_note(attempt, phase="policy", validOriginalResult=True)
+        _shell_note(controller, lastCompleted={"label": label, "ordinal": attempt["ordinal"], "stage": stage,
+                                              "argv": command_argv, "result": result, "ownerCall": call})
+        commands.append({"phase": label, "argv": command_argv, "exitCode": result.returncode,
+                         "stdout": result.stdout.decode("ascii"), "stderr": result.stderr.decode("ascii"), "timeoutSeconds": timeout})
+        need(result.returncode in codes and time.monotonic() < end, "Original private-display command failed/late")
+        _shell_note(attempt, phase="complete")
+        return result
+
+    def search(title, pid=None):
+        args = ["search", "--onlyvisible", "--all", "--maxdepth", "1", "--limit", "2"]
+        if pid is not None:
+            args += ["--pid", str(pid)]
+        return xdo("search", [*args, "--name", title], codes=(0, 1))
+
+    def wait_window(title, pid=None):
+        for _ in range(64):
+            result = search(title, pid)
+            if result.returncode == 0:
+                need(result.stderr == b"", "Successful private window query emitted a diagnostic")
+                ids = shell_window_ids(result.stdout)
+                need(len(ids) == 1, "Private normal window is missing/ambiguous")
+                return ids[0]
+            need(result.stdout == b"", "Unsuccessful private window query returned an ID")
+            time.sleep(min(0.1, max(0.0, end - time.monotonic())))
+        raise Refused("Original private shell window did not become visible in the finite observation")
+
+    def input_key(window, title, pid, key):
+        nonlocal inputs
+        _shell_window_pid(value, pid)
+        result = search(title, pid)
+        need(result.returncode == 0 and result.stderr == b"" and shell_window_ids(result.stdout) == [window],
+             "Same private XID/title/PID no longer corresponds before input")
+        focused = xdo("focus", ["windowfocus", "--sync", str(window)])
+        need(focused.stdout == focused.stderr == b"", "Private focus command emitted a diagnostic")
+        observed = xdo("focus-readback", ["getwindowfocus", "-f"])
+        need(observed.stderr == b"" and shell_window_ids(observed.stdout) == [window], "Exact private focus was not read back")
+        _shell_window_pid(value, pid)
+        result = xdo("key", ["key", "--clearmodifiers", key])
+        need(result.stdout == result.stderr == b"", "Private XTEST key command emitted a diagnostic")
+        inputs += 1
+
+    try:
+        worker.start()
+        stage = "initial-window"
+        title = "^Mobile Release Kit$"
+        window = wait_window(title)
+        reported = xdo("window-pid", ["getwindowpid", str(window)])
+        need(reported.stderr == b"" and re.fullmatch(rb"[1-9][0-9]{0,9}\n", reported.stdout) is not None,
+             "Normal private window PID was not returned")
+        pid = int(reported.stdout)
+        _shell_window_pid(value, pid)
+        # Scheduling margin only, never a success receipt. Both genuine
+        # original core returns are still required from the bounded capture.
+        stage = "bootstrap-margin"
+        margin = min(time.monotonic() + 22, end - 8)
+        while time.monotonic() < margin:
+            need(worker.is_alive(), "Original normal shell returned before Quit")
+            time.sleep(min(0.25, max(0.0, margin - time.monotonic())))
+        stage = "quit-input"
+        input_key(window, title, pid, "ctrl+q")
+        title = r"^Quit and discard unsaved drafts\?$"
+        stage = "quit-dialog"
+        dialog = wait_window(title, pid)
+        need(dialog != window, "GTK Quit did not create its own real dialog")
+        stage = "quit-confirmation"
+        input_key(dialog, title, pid, "alt+o")
+    except BaseException as error:
+        failure = error
+        _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
+        resource_snapshot("main-failure-before-join")
+    finally:
+        try:
+            # A failed start return does not prove that no thread was created.
+            # Attempt the same original join even then; an unstarted join error
+            # remains a failure, never a guessed no-worker receipt.
+            worker.join(max(0.0, min(_END, started + seconds + 20) - time.monotonic()))
+            joined = not worker.is_alive()
+        except BaseException as error:
+            join_error = error
+            if failure is None:
+                _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
+        if joined and "result" in holder:
+            try:
+                _command_capture("shell-normal", argv, holder["result"], seconds)
+                if holder.get("guardState") == "RESTORED" and holder.get("errors") == []:
+                    display_log = _shell_log_capture(value, "normal", log_binding, holder["result"])
+            except BaseException as error:
+                capture_error = error
+                if failure is None and join_error is None:
+                    _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
+    errors = (failure, join_error, capture_error, *(holder.get("errors", []) if joined else []))
+    primary = next((error for error in errors if error is not None), None)
+    if primary is not None:
+        origin = "main" if failure is not None else "join" if join_error is not None else "capture" if capture_error is not None else "worker"
+        diagnose(primary, origin)
+    else:
+        stage = "final-verification"
+    try:
+        _retain("shell-normal-control.json", canonical({"joined": joined, "inputs": inputs, "commands": commands,
+            "workerGuardState": holder.get("guardState") if joined else None,
+            "workerErrorCount": len(holder.get("errors", [])) if joined else None,
+            "startMonotonic": started, "controllerEndpoint": end, "carrierTimeoutSeconds": seconds,
+            "originalDeadline": _END, "errorType": type(failure).__name__ if failure is not None else None}))
+        for error in errors:
+            if error is not None:
+                raise error
+        need(joined and inputs == 2 and holder.get("guardState") == "RESTORED" and "result" in holder and display_log is not None
+             and time.monotonic() < _END, "Original normal shell/controller did not settle")
+        result = holder["result"]
+        observed = shell_result(result.stdout, result.stderr, "normal", result.returncode, expected)
+    except BaseException as error:
+        if primary is None:
+            _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
+        diagnose(error, "verification")
+        raise
+    _FAILED = False
+    return observed
+
+
+def _finish_body(value, request_sha, start, states, observations, traces, cases, loader):
+    need(tuple(row["phase"] for row in _COMMANDS) == root_phases(value) and states == lifecycle_states(value)
+         and not _FAILED and time.monotonic() < _END, "Original fixed root command/state roster incomplete or late")
+    verify_package_observations(_COMMANDS, root_path(value))
+    extra = {}
+    if "installed" in value:
+        installed = value["installed"]
+        wanted = {"positive", "deadline", "shutdown", "emfile", "overlap"} if installed["case"] == "positive" else {installed["case"]}
+        need(set(cases) == wanted, "Original fixed installed case roster incomplete")
+        _installed_loader_check(loader)
+        _retain("loader-final.json", canonical(loader))
+        _retain("installed-cases.json", canonical(cases))
+        extra = {"case": installed["case"], "candidateRosterSha256": installed["candidateRosterSha256"],
+                 "candidateProducerAttempt": installed["candidateProducerAttempt"], "candidateArtifactId": installed["candidateArtifactId"],
+                 "consumerAttempt": value["attempt"], "acceptedU": installed["acceptedU"],
+                 "lifecycleComplete": installed["case"] == "positive", "fixturePublished": installed["case"] == "positive"}
+    elif "shell" in value:
+        shell = value["shell"]
+        need(set(cases) == set(SHELL_CASES), "Original fixed shell case roster incomplete")
+        _shell_data_check(loader)
+        _installed_loader_check(loader)
+        _retain("loader-final.json", canonical(loader))
+        _retain("shell-cases.json", canonical(cases))
+        extra = {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+                 "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+                 "packageLifecycleQualified": False, "shellPackageBuilt": False}
+    if "installed" not in value or value["installed"]["case"] == "positive":
+        _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
+    _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
+        "entrySha256": start["entrySha256"], "invocationId": start["invocationId"], "unit": start["unit"]["Id"],
+        "state": result_state(value), "productQualified": False, "states": states, "scriptTraces": traces,
+        "commands": _COMMANDS, "files": list(_FILES), "originalDeadline": value["deadline"], **extra}))
+    need(time.monotonic() < _END, "Original lifecycle result closed late")
+    print("Root lifecycle body completed; original StopPost/client finality pending.", flush=True)
+
+
 def unit_start():
     _root_ids()
     value, request_sha = _context(copying=True)
@@ -1034,6 +6319,8 @@ def unit_start():
     _retain("unit-start.json", canonical(start))
     _retain("inputs.json", canonical(value))
     _retain("dpkg-policy.json", canonical(policy))
+    loader = (_installed_loader_start(value, namespaces) if "installed" in value
+              else _shell_loader_start(value, namespaces) if "shell" in value else None)
     env = {**_environment(), "MRK_UBUNTU_PUBLICATION_NATIVE": "1", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
     for label, test in (("native-root", ROOT_TEST), ("native-user", USER_TEST)):
         argv = [str(_ROOT / "platform-tests"), test, "--exact", "--ignored", "--test-threads=1"]
@@ -1042,7 +6329,7 @@ def unit_start():
     _no_package_data()
     _no_admin_data()
     _absent(Path("/var/lib/mobile-release-kit"))
-    states, observations, traces = {}, {}, {}
+    states, observations, traces, cases = {}, {}, {}, {}
 
     def state(phase, status, variant):
         result = command("state-" + phase, ["/usr/bin/dpkg-query", "-W", "-f=${Status}\t${Version}\n", PACKAGE], maximum=15, codes=(0, 1))
@@ -1091,12 +6378,98 @@ def unit_start():
     need(refused.stdout == b"" and refused.stderr == REFUSAL.format("the fixed release or administrator platform is unsupported").encode("ascii"),
          "Installed helper did not give the exact nonroot Profile refusal")
     observation("unpacked")
+    if "installed" in value and value["installed"]["case"] != "positive":
+        fixture = _refusal_fixture(value, loader)
+        case = value["installed"]["case"]
+        cases[case] = _installed_case(value, case, loader)
+        _refusal_fixture_check(fixture)
+        _retain("refusal-fixture-after.json", canonical(fixture))
+        state("refusal", "install ok unpacked", "P0")
+        _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
+        return
     mutate("configure", "--configure", PACKAGE, [("postinst", ("configure",))], published=True)
     state("p0", "install ok installed", "P0")
     observation("p0")
+    if "shell" in value:
+        original = observations["p0"]["published"]["P0"]
+        expected = _installed_payload(value, loader, original)
+        namespace = _shell_fixtures_prepare(value)
+        for case in SHELL_CASES:
+            environment, log_binding = _shell_prepare(value, case, namespace)
+            if case == "normal":
+                cases[case] = _shell_normal(value, environment, expected, log_binding)
+            else:
+                result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
+                                 shell_log=(value, case, log_binding))
+                # Only the immutable public copy is reread after command closed
+                # the single original label FD; never reopen the private leaf.
+                failure_labels = read(_ROOT / "public/shell-settled-failure-failure.labels", SHELL_FAILURE_LABEL_LIMIT) \
+                    if case == "settled-failure" else None
+                cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected,
+                                          failure_labels=failure_labels)
+                if case == "positive":
+                    after = canonical(_shell_project_inventory(value, namespace, saved=True))
+                    _retain("shell-positive-project-after.json", after)
+                    shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
+                    candidate_after = canonical(_shell_candidate_inventory(value, namespace))
+                    _retain("shell-positive-candidate-after.json", candidate_after)
+                    shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
+                if case == "project-paths":
+                    paths_after = canonical(_shell_paths_inventory(value, namespace, changed=True))
+                    _retain("shell-project-paths-after.json", paths_after)
+                    shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
+                if case == "workflow-apply":
+                    workflow_after = canonical(_shell_workflow_inventory(value, namespace, installed=True))
+                    _retain("shell-workflow-apply-after.json", workflow_after)
+                    shell_workflow_fixture(value, read(_ROOT / "public/shell-workflow-apply-before.json", 8192), workflow_after)
+                    # Same fixed earlier fixture originals, after this actual
+                    # workflow exit; never inspect a failed/possibly-live case.
+                    need(canonical(_shell_project_inventory(value, namespace, saved=True))
+                         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+                         and canonical(_shell_candidate_inventory(value, namespace))
+                         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+                         and canonical(_shell_paths_inventory(value, namespace, changed=True))
+                         == read(_ROOT / "public/shell-project-paths-after.json", 8192),
+                         "Workflow case changed another original fixture family")
+                if case in SHELL_SESSION_CASES:
+                    session_after = canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+                    _retain("shell-" + case + "-after.json", session_after)
+                    shell_session_fixture(value, case,
+                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_SESSION_INVENTORY_LIMIT), session_after)
+                if case == "metadata-save":
+                    metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
+                    _retain("shell-metadata-save-after.json", metadata_after)
+                    shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
+                if case in SHELL_TOOLS_OFFLINE_CASES:
+                    tools_offline_after = canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+                    _retain("shell-" + case + "-after.json", tools_offline_after)
+                    shell_tools_offline_fixture(value, case,
+                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT), tools_offline_after)
+            _shell_namespace_check(value, namespace)
+        _shell_fixtures_final(value, namespace)
+        need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
+        state("shell-finished", "install ok installed", "P0")
+        _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
+        return
+    if "installed" in value:
+        original = observations["p0"]["published"]["P0"]
+        expected = _installed_payload(value, loader, original)
+        for case in ("positive", "deadline", "shutdown", "emfile"):
+            cases[case] = _installed_case(value, case, loader, expected)
+            need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during installed candidate observations")
     _scripts("before-upgrade", set(SCRIPT_PINS))
-    mutate("upgrade", "--install", _ROOT / "private/F1.deb",
-           [("prerm", ("upgrade", f1)), ("postrm", ("upgrade", f1)), ("postinst", ("configure", p0))], published=True)
+    if "installed" in value:
+        mutate("upgrade-unpack", "--unpack", _ROOT / "private/F1.deb", [("prerm", ("upgrade", f1)), ("postrm", ("upgrade", f1))])
+        state("upgrade-unpacked", "install ok unpacked", "F1")
+        _scripts("upgrade-unpacked", set(SCRIPT_PINS))
+        _binaries(value, "upgrade-unpacked", "F1")
+        _absent(INPUT / M)
+        _tree(INPUT / F1, F1, published=False)
+        need(_tree(PREFIX / M, M, published=True) == original, "Original published M changed before old-child registration")
+        cases["overlap"], traces["upgrade-configure"] = _installed_overlap(value, policy, loader, expected)
+    else:
+        mutate("upgrade", "--install", _ROOT / "private/F1.deb",
+               [("prerm", ("upgrade", f1)), ("postrm", ("upgrade", f1)), ("postinst", ("configure", p0))], published=True)
     state("upgrade", "install ok installed", "F1")
     _scripts("upgrade", set(SCRIPT_PINS))
     _binaries(value, "upgrade", "F1")
@@ -1118,16 +6491,7 @@ def unit_start():
     _no_package_data()
     _no_admin_data()
     observation("purge")
-    need(tuple(row["phase"] for row in _COMMANDS) == ROOT_PHASES and not _FAILED and time.monotonic() < _END,
-         "Original fixed root command roster incomplete or late")
-    verify_package_observations(_COMMANDS, root_path(value))
-    _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
-    _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
-        "entrySha256": start["entrySha256"], "invocationId": start["invocationId"], "unit": start["unit"]["Id"],
-        "state": "p0-f1-lifecycle-observed", "productQualified": False, "states": states, "scriptTraces": traces,
-        "commands": _COMMANDS, "files": list(_FILES), "originalDeadline": value["deadline"]}))
-    need(time.monotonic() < _END, "Original lifecycle result closed late")
-    print("Root lifecycle body completed; original StopPost/client finality pending.", flush=True)
+    _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
 
 
 def _no_denials(observation):
@@ -1181,6 +6545,221 @@ def unit_stop():
     print("Root lifecycle StopPost completed.", flush=True)
 
 
+def installed_closed_result(value, outcome, raw_files):
+    """Pure correspondence after the unchanged original-client/finality gate."""
+    installed = value["installed"]
+    for key in ("case", "candidateRosterSha256", "candidateProducerAttempt", "candidateArtifactId", "acceptedU"):
+        need(outcome.get(key) == installed[key], "Closed installed source/artifact provenance differs")
+    positive = installed["case"] == "positive"
+    need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("lifecycleComplete") is positive
+         and outcome.get("fixturePublished") is positive, "Closed refusal was relabelled as a publication lifecycle")
+    entry, final = (decode(raw_files["loader-" + phase + ".json"], LIMIT) for phase in ("entry", "final"))
+    for key in ("scope", "namespaces", "diagnostics", "cacheRows", "entryObjects", "externalPrerequisites"):
+        need(entry[key] == final[key], "Closed original loader interval differs")
+    need(entry["payloadAdmitted"] is False and final["payloadAdmitted"] is positive
+         and all(final["bindings"].get(path) == row for path, row in entry["bindings"].items()), "Original entry bindings changed or refusal admitted payload")
+    policy = installed["loaderPolicy"]
+    need(loader_diagnostics(raw_files["loader-diagnostics.stdout"]) == entry["diagnostics"]
+         and raw_files["loader-diagnostics.stderr"] == raw_files["loader-cache.stderr"] == b"", "Original OS loader command capture differs")
+    rows = loader_cache(raw_files["loader-cache.stdout"], policy["packages"]["libc-bin"][2])
+    need(entry["entryObjects"] == policy["osNames"]
+         and entry["cacheRows"] == [row for row in rows if row["soname"] in set(policy["osNames"]) | PRIVATE_SONAMES],
+         "Closed all-SONAME cache roster differs")
+    for name, path in loader_candidates(policy["osNames"], rows):
+        need(path in entry["bindings"], "Closed original cache/default/hwcaps candidate omitted")
+        loader_selected(entry["bindings"][path], policy["libraries"][name]["file"])
+    cases = decode(raw_files["installed-cases.json"])
+    wanted = {"positive", "deadline", "shutdown", "emfile", "overlap"} if positive else {installed["case"]}
+    need(type(cases) is dict and set(cases) == wanted, "Closed original installed case roster differs")
+    expected = None
+    if positive:
+        runtime = decode(raw_files["loader-runtime.json"])
+        expected = runtime["expectedMaps"]
+        need(set(expected) == {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+             and runtime["manifestSha256"] == M and runtime["protocolSha256"] == Q
+             and runtime["privateObjects"] == sorted(PRIVATE_SONAMES)
+             and runtime["shadowedCacheRows"] == [row for row in entry["cacheRows"] if row["soname"] in PRIVATE_SONAMES],
+             "Closed private A map/search correspondence differs")
+        for role, row in expected.items():
+            need(type(row) is dict and set(row) == {"paths", "deviceMajor", "deviceMinor", "inode"}
+                 and type(row["paths"]) is list and 0 < len(row["paths"]) <= 3, "Closed admitted child mapping shape differs")
+            for path in row["paths"]:
+                binding = final["bindings"].get(path)
+                need(type(binding) is dict and "identity" in binding
+                     and (row["deviceMajor"], row["deviceMinor"], row["inode"])
+                         == (os.major(binding["identity"][0]), os.minor(binding["identity"][0]), binding["identity"][1]),
+                     "Closed map alias was not independently bound")
+        joined = decode(raw_files["installed-overlap-join.json"])
+        configure = next(row for row in outcome["commands"] if row["phase"] == "upgrade-configure")
+        need(joined["joined"] is joined["releaseWritten"] is True and joined["workerGuardState"] == "RESTORED"
+             and type(joined["workerErrorCount"]) is int and joined["workerErrorCount"] == 0 and joined["originalDeadline"] == value["deadline"]
+             and joined["originalServiceEndpoint"] == value["deadline"] - CLIENT_RESERVATION - 1
+             and joined["configureEndpoint"] <= min(joined["startMonotonic"] + 10, joined["originalServiceEndpoint"])
+             and configure["originalEndpoint"] == joined["configureEndpoint"]
+             and type(configure["timeoutSeconds"]) is int
+             and 0 < configure["timeoutSeconds"] <= math.floor(configure["originalEndpoint"] - configure["startMonotonic"]),
+             "Closed original worker join/configure remaining-clock evidence differs")
+    else:
+        before = decode(raw_files["refusal-fixture-before.json"], LIMIT)
+        after = decode(raw_files["refusal-fixture-after.json"], LIMIT)
+        need(before == after and before["neverPublished"] is True and before["case"] == installed["case"] and before["manifestSha256"] == M,
+             "Closed deliberately never-published refusal fixture changed")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    for case in wanted:
+        phase = "installed-" + case
+        need(commands[phase]["argv"] == _installed_argv(value, case), "Closed original candidate test argv differs")
+        observed = installed_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
+        need(observed == cases[case], "Closed original installed case result differs")
+    return {"case": installed["case"], "candidateRosterSha256": installed["candidateRosterSha256"],
+            "candidateProducerAttempt": installed["candidateProducerAttempt"], "candidateArtifactId": installed["candidateArtifactId"],
+            "consumerAttempt": value["attempt"], "acceptedU": installed["acceptedU"], "cases": cases,
+            "lifecycleComplete": positive, "fixturePublished": positive}
+
+
+def shell_closed_loader(value, raw_files):
+    """Reconcile retained originals; never query a possibly live GUI process."""
+    policy = expand_shell_loader_policy(value["shell"]["loaderPolicy"], value["shell"]["compiler"])
+    entry, final = (decode(raw_files["loader-" + phase + ".json"], LIMIT) for phase in ("entry", "final"))
+    for key in ("scope", "namespaces", "diagnostics", "cacheRows", "entryObjects", "globalObjects", "hwcapsTiers",
+                "moduleRoots", "privateSearch", "runtimeData", "externalPrerequisites"):
+        need(entry[key] == final[key], "Closed original shell loader/DATA interval differs: " + key)
+    need(entry["payloadAdmitted"] is False and final["payloadAdmitted"] is True
+         and entry["runtimeDataRechecked"] is False and final["runtimeDataRechecked"] is True
+         and all(final["bindings"].get(path) == row for path, row in entry["bindings"].items()),
+         "Original shell entry/DATA bindings changed or final recheck is missing")
+    need(loader_diagnostics(raw_files["loader-diagnostics.stdout"]) == entry["diagnostics"]
+         and raw_files["loader-diagnostics.stderr"] == raw_files["loader-cache.stderr"] == b"",
+         "Original shell loader command capture differs")
+    names = policy["osNames"]
+    libc = next(row for row in policy["packages"].values() if row["binaryPackage"].split(":")[0] == "libc6")
+    rows = loader_cache(raw_files["loader-cache.stdout"], libc["version"], shell_names=names)
+    global_names = shell_global_names(policy["libraries"])
+    need(entry["entryObjects"] == names and entry["globalObjects"] == global_names
+         and entry["cacheRows"] == [row for row in rows if row["soname"] in set(names) | PRIVATE_SONAMES],
+         "Closed all-SONAME shell cache roster differs")
+    for path, present in entry["hwcapsTiers"].items():
+        bound = entry["bindings"].get(path, {})
+        need("directory" in bound if present else bound.get("absent") is True,
+             "Original shell hwcaps directory presence has no binding")
+    for name, path in shell_loader_candidates(global_names, rows, entry["hwcapsTiers"]):
+        need(path in entry["bindings"], "Closed original shell cache/default/hwcaps candidate omitted")
+        loader_selected(entry["bindings"][path], policy["libraries"][name]["file"])
+    need(entry["moduleRoots"] == policy["moduleRoots"] and entry["privateSearch"] == policy["graph"]["privateSearch"],
+         "Closed original shell module/private-search roster differs")
+    shell_module_proof(policy["graph"], entry["moduleRoots"], entry["bindings"])
+    for row in entry["privateSearch"]:
+        need(row["path"] in entry["bindings"], "Closed original per-requester candidate omitted")
+        shell_private_selected(row, entry["bindings"][row["path"]], policy["libraries"][row["name"]]["file"])
+    data = entry["runtimeData"]
+    need(shell_data_projection(data) == shell_data_projection(policy["runtimeData"])
+         and len(data["records"]) == len(policy["runtimeData"]["records"]) == len(SHELL_DATA_ROOTS),
+         "Closed original runtime DATA/cache summary differs")
+    for index, pin in enumerate(data["records"]):
+        leaf = "shell-root-data-" + str(index) + ".json"
+        raw = raw_files[leaf]
+        need(pin == {"path": leaf, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+             "Closed complete original shell DATA bytes differ")
+        need(policy["runtimeData"]["records"][index] == {**pin, "path": "shell-consumer-data-" + str(index) + ".json"},
+             "Closed shell DATA is not the originally admitted current-VM identity")
+    runtime = decode(raw_files["loader-runtime.json"])
+    expected = runtime["expectedMaps"]
+    need(set(expected) == {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+         and runtime["manifestSha256"] == M and runtime["protocolSha256"] == Q
+         and runtime["privateObjects"] == sorted(PRIVATE_SONAMES)
+         and runtime["shadowedCacheRows"] == [row for row in entry["cacheRows"] if row["soname"] in PRIVATE_SONAMES]
+         and runtime["shadowedDefaultNames"] == [directory + "/" + tier + name for directory in DEFAULT_LIBRARY_DIRS
+             for tier in ("", *("glibc-hwcaps/" + tier + "/" for tier in HWCAPS)) for name in sorted(PRIVATE_SONAMES)],
+         "Closed private A/OS shell namespace correspondence differs")
+    for role, row in expected.items():
+        if role == "python" or role in PRIVATE_SONAMES:
+            relative = "python/bin/python3" if role == "python" else "python/lib/" + role
+            paths = [str(PREFIX / M / relative)]
+            provider = policy["graph"]["runtime"][relative]["file"]
+        else:
+            paths = sorted([directory + "/" + role for directory in DEFAULT_LIBRARY_DIRS[:2]]
+                           + (["/lib64/" + role] if role == "ld-linux-x86-64.so.2" else []))
+            provider = policy["libraries"][role]["file"]
+        need(type(row) is dict and set(row) == {"paths", "deviceMajor", "deviceMinor", "inode"} and row["paths"] == paths
+             and all(type(row[key]) is int for key in ("deviceMajor", "deviceMinor", "inode")),
+             "Closed original A mapping role or aliases differ")
+        for path in paths:
+            binding = final["bindings"].get(path)
+            need(type(binding) is dict and "identity" in binding
+                 and all(binding[key] == provider[key] for key in ("size", "sha256"))
+                 and (row["deviceMajor"], row["deviceMinor"], row["inode"])
+                     == (os.major(binding["identity"][0]), os.minor(binding["identity"][0]), binding["identity"][1]),
+                 "Closed original child-map alias lacks its independently bound inode/bytes")
+    return expected
+
+
+def shell_closed_result(value, outcome, raw_files):
+    """Correspondence only, after the same original-client/StopPost gate."""
+    shell = value["shell"]
+    for key, field in (("shellRosterSha256", "rosterSha256"), ("shellProducerAttempt", "producerAttempt"),
+                       ("shellArtifactId", "artifactId"), ("acceptedU", "acceptedU")):
+        need(outcome.get(key) == shell[field], "Closed shell original provenance differs")
+    need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("packageLifecycleQualified") is False
+         and outcome.get("shellPackageBuilt") is False, "Connection was relabelled as a shell package qualification")
+    expected = shell_closed_loader(value, raw_files)
+    cases = decode(raw_files["shell-cases.json"])
+    need(type(cases) is dict and set(cases) == set(SHELL_CASES), "Closed original shell case roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    for case in SHELL_CASES:
+        phase = "shell-" + case
+        need(commands[phase]["argv"] == shell_argv(value, case), "Closed original shell argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "Closed original shell combined output differs")
+        result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected,
+            failure_labels=raw_files["shell-settled-failure-failure.labels"] if case == "settled-failure" else None)
+        need(canonical(result) == canonical(cases[case]),
+             "Closed original shell capture differs")
+    fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
+    candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
+    paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
+    workflow = shell_workflow_fixture(value, raw_files["shell-workflow-apply-before.json"], raw_files["shell-workflow-apply-after.json"])
+    metadata = shell_metadata_fixture(value, raw_files["shell-metadata-save-before.json"], raw_files["shell-metadata-save-after.json"])
+    sessions = {case: {"native": cases[case]["sessionInputs"],
+        "fixture": shell_session_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_SESSION_CASES}
+    tools_offline = {case: {"native": cases[case]["toolsOffline"],
+        "fixture": shell_tools_offline_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_TOOLS_OFFLINE_CASES}
+    need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
+             for key in ("scriptTrace", "laterTrace", "savedConfigChanged")}) for pair in tools_offline.values()),
+         "Tools/Offline original native fixture observations differ from the outer inventories")
+    namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
+                  ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
+                   *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json")]
+    namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)["namespace"]
+                      for case in SHELL_TOOLS_OFFLINE_CASES)
+    need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
+    control = decode(raw_files["shell-normal-control.json"])
+    need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
+         and control.get("workerErrorCount") == 0 and control.get("errorType") is None
+         and control.get("originalDeadline") == value["deadline"] and type(control.get("commands")) is list
+         and 11 <= len(control["commands"]) <= 96, "Original normal controller/worker finality differs")
+    keys = [row for row in control["commands"] if row["phase"] == "key"]
+    need(len(keys) == 2 and all(row["exitCode"] == 0 and row["stdout"] == row["stderr"] == "" for row in keys)
+         and [row["argv"] for row in keys] == [_drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key]) for key in ("ctrl+q", "alt+o")],
+         "Normal window did not use the two fixed original XTEST commands")
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(set(p0["published"]) == {"P0"}
+         and decode(raw_files["published-before-upgrade.txt"], LIMIT) == p0["published"],
+         "Original unchanged P0 publication observation differs")
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
+            "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
+            "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
+            "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
+            "sessionInputs": sessions,
+            "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
+            "toolsOffline": tools_offline,
+            "settledFailure": cases["settled-failure"],
+            "packageLifecycleQualified": False, "shellPackageBuilt": False}
+
+
 def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_result, public_destination):
     # This gate precedes every read of R. An exception/partial/nonzero original
     # client result authorizes neither possible-live DATA access nor cleanup.
@@ -1195,7 +6774,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     runtime = [arg.removeprefix("--property=RuntimeMaxSec=") for arg in client_result.args if arg.startswith("--property=RuntimeMaxSec=")]
     need(len(runtime) == 1 and re.fullmatch(r"[1-9][0-9]{0,3}s", runtime[0]) is not None and int(runtime[0][:-1]) < 1200,
          "Original client finite lifetime argument missing")
-    properties = {**PROPERTIES, "RuntimeMaxSec": runtime[0]}
+    properties = {**PROPERTIES, "TasksMax": service_task_limit(value), "RuntimeMaxSec": runtime[0]}
     need(client_result.args == _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties), "Original service client argv differs")
     root = root_path(value)
     directory(root / "public", protected=True)
@@ -1212,27 +6791,27 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     need(_D.same(decode(read(root / "public/inputs.json")), value)
          and stop["result"] == {"path": "unit-result.json", "size": len(outcome_raw), "sha256": hashlib.sha256(outcome_raw).hexdigest()},
          "Original closed root result/input pin differs")
-    need(outcome["state"] == "p0-f1-lifecycle-observed" and outcome["productQualified"] is False
+    need(outcome["state"] == result_state(value) and outcome["productQualified"] is False
          and outcome["sourceSha"] == value["sourceSha"] and outcome["handoffSha256"] == handoff_sha256
          and outcome["entrySha256"] == entry_sha256 and outcome["invocationId"] == start["invocationId"]
          and outcome["unit"] == start["unit"]["Id"] and outcome["originalDeadline"] == value["deadline"]
-         and tuple(row["phase"] for row in outcome["commands"]) == ROOT_PHASES
+         and tuple(row["phase"] for row in outcome["commands"]) == root_phases(value)
          and len(stop["commands"]) == 1 and stop["commands"][0]["phase"] == "stop-unit-show"
          and stop["commands"][0]["exitCode"] == 0, "Original lifecycle phase/result roster differs")
     for row in outcome["commands"]:
-        codes = (0, 1) if row["phase"] in {"state-initial", "state-purge"} else ((1,) if row["phase"] in {"nonroot-helper", "duplicate"} else (0,))
+        if row["phase"] == "shell-settled-failure":
+            need("shell" in value and type(row["exitCode"]) is int and row["exitCode"] == 1,
+                 "Original settled-failure phase must retain raw exit1")
+            continue  # Full raw capture/label classification follows only after unchanged finality and export checks.
+        codes = (79,) if row["phase"] == "installed-emfile" else (0, 1) if row["phase"] in {"state-initial", "state-purge"} else ((1,) if row["phase"] in {"nonroot-helper", "duplicate"} else (0,))
         need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Original lifecycle phase exit differs")
     verify_package_observations(outcome["commands"], root)
     rows = outcome["files"] + stop["files"] + [stop["result"]]
     for name in ("unit-stop.json",):
         pin = record(root / "public" / name, JSON_LIMIT)
         rows.append({**pin, "path": name})
-    fixed = {phase + "." + suffix for phase in (*ROOT_PHASES, "stop-unit-show") for suffix in ("stdout", "stderr")}
-    fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "mutation-denials.txt"}
-    fixed |= {"scripts-" + phase + ".json" for phase in ("unpacked", "before-upgrade", "upgrade", "duplicate", "remove", "purge")}
-    fixed |= {"binaries-unpacked.json", "binaries-upgrade.json"}
-    fixed |= {"published-" + phase + ".txt" for phase in ("before-upgrade", "after-upgrade", "after-duplicate", "after-remove", "after-purge")}
-    need(len(rows) <= 128 and len({row["path"] for row in rows}) == len(rows)
+    fixed = public_files(value)
+    need(len(rows) <= (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128) and len({row["path"] for row in rows}) == len(rows)
          and {path.name for path in (root / "public").iterdir()} == {row["path"] for row in rows} == fixed,
          "Original fixed public evidence roster differs")
     total, raw_files = 0, {}
@@ -1249,18 +6828,18 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
         total += len(raw)
         need(total <= TOTAL_LIMIT and time.monotonic() < value["deadline"], "Original evidence aggregate/endpoint exceeded")
         raw_files[row["path"]] = raw
-    states = {phase: {"status": status, "version": VERSIONS[variant][1] if variant else ""} for phase, status, variant in (
-        ("initial", "absent", None), ("unpacked", "install ok unpacked", "P0"), ("p0", "install ok installed", "P0"),
-        ("upgrade", "install ok installed", "F1"), ("duplicate", "install ok half-configured", "F1"),
-        ("remove", "deinstall ok config-files", "F1"), ("purge", "absent", None))}
+    states = lifecycle_states(value)
     need(outcome["states"] == states, "Original lifecycle package-state assertions differ")
-    snapshots = {phase: decode(raw_files["observe-" + phase + ".stdout"], LIMIT)
-                 for phase in ("unpacked", "p0", "upgrade", "duplicate", "remove", "purge")}
-    need(snapshots["unpacked"]["published"] == {} and set(snapshots["p0"]["published"]) == {"P0"}
-         and set(snapshots["upgrade"]["published"]) == {"P0", "F1"}
-         and snapshots["p0"]["published"]["P0"] == snapshots["upgrade"]["published"]["P0"]
-         and all(snapshots[phase]["published"] == snapshots["upgrade"]["published"] for phase in ("duplicate", "remove", "purge")),
-         "Original complete two-version retention assertions differ")
+    extra = (installed_closed_result(value, outcome, raw_files) if "installed" in value
+             else shell_closed_result(value, outcome, raw_files) if "shell" in value else {})
+    unpacked = decode(raw_files["observe-unpacked.stdout"], LIMIT)
+    need(unpacked["published"] == {}, "Original unpack did not preserve publication absence")
+    if "shell" not in value and ("installed" not in value or value["installed"]["case"] == "positive"):
+        snapshots = {phase: decode(raw_files["observe-" + phase + ".stdout"], LIMIT) for phase in ("p0", "upgrade", "duplicate", "remove", "purge")}
+        need(set(snapshots["p0"]["published"]) == {"P0"} and set(snapshots["upgrade"]["published"]) == {"P0", "F1"}
+             and snapshots["p0"]["published"]["P0"] == snapshots["upgrade"]["published"]["P0"]
+             and all(snapshots[phase]["published"] == snapshots["upgrade"]["published"] for phase in ("duplicate", "remove", "purge")),
+             "Original complete two-version retention assertions differ")
     # One finality-gated bounded copy, not a new wait, root query or disposition.
     public_destination = absolute(str(public_destination))
     directory(public_destination)
@@ -1270,9 +6849,11 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     for name, raw in {**raw_files, "client.stdout": client_result.stdout, "client.stderr": client_result.stderr}.items():
         exported.append(_D.write(public_destination / ("lifecycle-" + name), raw, 0o600))
     need(time.monotonic() < value["deadline"], "Original evidence export closed late")
-    return {"state": "p0-f1-lifecycle-observed", "unit": start["unit"]["Id"], "invocationId": start["invocationId"],
+    return {"state": result_state(value), "unit": start["unit"]["Id"], "invocationId": start["invocationId"],
             "sourceSha": value["sourceSha"], "files": exported, "productQualified": False,
-            "disposition": "published-versions-and-root-task-retained-until-disposable-vm-disposition"}
+            "disposition": ("never-published-refusal-fixture-unpacked-package-and-root-task-retained-no-cleanup-claim"
+                            if "installed" in value and value["installed"]["case"] != "positive"
+                            else "published-versions-and-root-task-retained-until-disposable-vm-disposition"), **extra}
 
 
 def main():

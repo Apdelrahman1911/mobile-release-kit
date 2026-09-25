@@ -831,7 +831,8 @@ test('Artifacts UI SOURCE keeps folder/project/draft boundaries, closed actions 
   assert.doesNotMatch(source, /\bhref\s*=|\bwindow\.open\s*\(|\b(?:onSave|onDiscard|onProject|draft|projectId)\s*[:=]|\b(?:chooseProject|saveDraft|discardDraft|writeFile|fetch)\s*\(/);
   for (const key of Object.keys(evidenceHelp)) assert.equal(source.includes(`evidenceHelp.${key}`), true);
   assert.match(source, /\['authorizedBy', 'executedBy', 'producedBy'\]/);
-  assert.deepEqual([...app.matchAll(/new CandidateEvidenceController\(([^)]*)\)/g)].map((m) => m[1]), ['']);
+  // The callback only shares the existing busy fence, not project/draft authority.
+  assert.deepEqual([...app.matchAll(/new CandidateEvidenceController\(([^)]*)\)/g)].map((m) => m[1]), ['savedCommandBusy']);
   assert.match(app, /candidateEvidence\.beginConnection\(\)/);
   assert.match(app, /candidateEvidence\.connect\(connection\)/);
   assert.match(app, /candidateEvidence\.dispose\(\)/);

@@ -45,6 +45,7 @@ pub(crate) enum Purpose { Full, Signing, Store }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(Debug))]
 pub(crate) enum Reason {
     None, Closed, Unqualified, UnsupportedPlatform, UnsupportedFilesystem,
     UnsupportedFormat, InvalidRequest, Busy, SourceRefused, SourceChanged,
@@ -84,6 +85,15 @@ enum Failure { Native(AssetError), Assessment(crate::credential_assessment::Asse
 // an original owner/result. No serde `rc` feature or R1 DTO change is needed.
 #[derive(Clone)]
 pub(crate) struct CommandError(Arc<Failure>);
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl CommandError {
+    pub(crate) fn installed_assessment_failure(&self) -> crate::credential_assessment::InstalledAssessmentFailure {
+        match self.0.as_ref() {
+            Failure::Assessment(error) => error.installed_failure(),
+            Failure::Native(_) => crate::credential_assessment::InstalledAssessmentFailure::none(),
+        }
+    }
+}
 impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { self.0.serialize(serializer) }
 }
@@ -103,12 +113,85 @@ pub(crate) enum Source<'a> {
 }
 pub(crate) struct Prepare<'a> { pub(crate) context_revision: u32, pub(crate) source: Source<'a>, pub(crate) fields: Option<&'a Value> }
 
+// A separate DATA-only purpose in the existing native owner. These four field
+// names grant neither credential capture nor arbitrary pathname authority.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum ProjectPathField {
+    #[serde(rename = "version.source")] VersionSource,
+    #[serde(rename = "ios.project")] IosProject,
+    #[serde(rename = "ios.workspace")] IosWorkspace,
+    #[serde(rename = "metadata.root")] MetadataRoot,
+}
+impl ProjectPathField {
+    pub(crate) fn directory(self) -> bool { self != Self::VersionSource }
+    pub(crate) fn accepts_basename(self, name: &str) -> bool {
+        match self {
+            Self::IosProject => name.ends_with(".xcodeproj"),
+            Self::IosWorkspace => name.ends_with(".xcworkspace"),
+            Self::VersionSource | Self::MetadataRoot => true,
+        }
+    }
+}
+pub(crate) struct ChooseProjectPath<'a> { pub(crate) project_id: &'a str, pub(crate) field: ProjectPathField }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectPathResult {
+    project_id: String, field: ProjectPathField, relative_path: String,
+}
+
+pub(crate) fn choose_project_path(body: &Value) -> Result<ChooseProjectPath<'_>, AssetError> {
+    bounded(body, SMALL_LIMIT)?;
+    let object = exact(body, &["projectId", "field"])?;
+    let project_id = text(&object["projectId"])?;
+    if !protocol::valid_id(project_id) { return Err(AssetError::invalid()); }
+    let field = match text(&object["field"])? {
+        "version.source" => ProjectPathField::VersionSource, "ios.project" => ProjectPathField::IosProject,
+        "ios.workspace" => ProjectPathField::IosWorkspace, "metadata.root" => ProjectPathField::MetadataRoot,
+        _ => return Err(AssetError::invalid()),
+    };
+    Ok(ChooseProjectPath { project_id, field })
+}
+pub(crate) fn project_path_result(project_id: &str, field: ProjectPathField, relative_path: String) -> Result<ProjectPathResult, AssetError> {
+    if !protocol::valid_id(project_id) || !crate::release_version_protocol::relative_display_path(&relative_path)
+        || !field.accepts_basename(relative_path.rsplit('/').next().unwrap_or("")) { return Err(AssetError::invalid()); }
+    let result = ProjectPathResult { project_id: copy_text(project_id)?, field, relative_path };
+    serde_json::to_writer(Counter { used: 0, limit: SMALL_LIMIT }, &result).map_err(|_| AssetError::new(Reason::Capacity))?;
+    Ok(result)
+}
+/// All path-picker exits use this closed safe vocabulary, never a native path,
+/// errno or another lane's message. Only settled genuine Cancel returns null.
+pub(crate) fn project_path_error(reason: Reason) -> crate::error::BridgeError {
+    let (code, message) = match reason {
+        Reason::None | Reason::InvalidRequest => ("project_path_invalid", "The project-path request has an unsupported shape or size."),
+        Reason::Closed | Reason::Unqualified | Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem =>
+            ("project_path_unavailable", "Browsing existing project paths is unavailable in this desktop runtime profile."),
+        Reason::Busy => ("project_path_busy", "Finish the original native operation before browsing a project path."),
+        Reason::ContextStale | Reason::DocumentLost | Reason::Shutdown | Reason::UserCancelled =>
+            ("project_path_stale", "The project or document context changed; no field was updated."),
+        Reason::SourceRefused | Reason::ProjectOverlap | Reason::ExclusionUnconfirmed | Reason::UnsupportedFormat =>
+            ("project_path_unsafe", "Choose an existing supported file or folder strictly inside the selected project."),
+        Reason::SourceChanged => ("project_path_changed", "The selected path or project changed during selection; no field was updated."),
+        Reason::MaterialLimit | Reason::ParserLimit | Reason::Capacity =>
+            ("project_path_limit", "The project-path selection exceeded a supported limit."),
+        Reason::Deadline | Reason::ReviewExpired => ("project_path_deadline", "The project-path selection exceeded its operation deadline."),
+        Reason::CleanupUnknown => ("project_path_cleanup_unknown", "Original project-path cleanup is unconfirmed. New native work is disabled; keep this window open."),
+    };
+    crate::error::BridgeError::new(code, message)
+}
+
 // No Debug/Deserialize or renderer readback. Immutable record backing is shared
 // by Arc in the owner, rather than cloning these write-only strings for leases.
 pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
 impl Fields {
     pub(crate) fn empty_firebase() -> Self { Self { kind: Kind::AndroidFirebase, values: Vec::new() } }
     pub(crate) fn byte_count(&self) -> usize { self.values.iter().flatten().map(String::capacity).sum() }
+    // Lookup admission counts retained allocation capacity, including empty
+    // value cells. Keep the independent committed-record charge unchanged.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let cells = self.values.capacity().checked_mul(std::mem::size_of::<Option<String>>())?;
+        self.values.iter().flatten().try_fold(cells, |bytes, value| bytes.checked_add(value.capacity()))
+    }
     pub(crate) fn into_value(&self) -> Value {
         let mut object = Map::new();
         for (name, value) in field_names(self.kind).iter().zip(&self.values) {
@@ -274,9 +357,116 @@ pub(crate) fn lock(body: &Value) -> Result<(), AssetError> {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_project_path_command_contracts() {
+    // Explicit-call, DATA-only contracts for a future harness=false observer.
+    // They neither dispatch GTK nor manufacture a native selection proof.
+    use serde_json::json;
+    let fields = [
+        ("version.source", ProjectPathField::VersionSource, false, "release/VERSION"),
+        ("ios.project", ProjectPathField::IosProject, true, "ios/Example.xcodeproj"),
+        ("ios.workspace", ProjectPathField::IosWorkspace, true, "ios/Example.xcworkspace"),
+        ("metadata.root", ProjectPathField::MetadataRoot, true, "metadata/en-US"),
+    ];
+    for (name, expected, directory, relative) in fields {
+        let body = json!({"projectId":"Project_1-a", "field":name});
+        let args = choose_project_path(&body).ok().expect("fixed field refused");
+        assert_eq!(args.project_id, "Project_1-a"); assert_eq!(args.field, expected);
+        assert_eq!(expected.directory(), directory);
+        let result = project_path_result(args.project_id, args.field, relative.to_owned()).ok().expect("relative DATA refused");
+        let value = serde_json::to_value(&result).expect("bounded DTO serialization");
+        assert_eq!(value, json!({"projectId":"Project_1-a", "field":name, "relativePath":relative}));
+        assert!(serde_json::to_vec(&result).expect("DTO bytes").len() <= SMALL_LIMIT);
+        for key in ["path", "relativePath", "initialFolder", "filters", "title", "draft", "expectedIdentity", "operationId"] {
+            let mut extra = body.clone(); extra[key] = json!("not authority");
+            assert!(choose_project_path(&extra).is_err());
+        }
+    }
+    for field in ["", "Version.source", "ios", "ios.project ", "metadata.root.extra", "android.keystore", "candidate.root"] {
+        assert!(choose_project_path(&json!({"projectId":"project-1", "field":field})).is_err());
+    }
+    for body in [Value::Null, json!([]), json!({}), json!({"projectId":"project-1"}),
+        json!({"field":"version.source"}), json!({"projectId":1,"field":"version.source"}),
+        json!({"projectId":"project-1","field":null}), json!({"projectId":"project-1","field":"x".repeat(SMALL_LIMIT)})] {
+        assert!(choose_project_path(&body).is_err());
+    }
+    for id in ["".to_owned(), "a".repeat(65), "a/b".to_owned(), " x".to_owned(), "a\0b".to_owned(), "prøject".to_owned()] {
+        assert!(choose_project_path(&json!({"projectId":id, "field":"version.source"})).is_err());
+    }
+    assert!(choose_project_path(&json!({"projectId":"A".repeat(64), "field":"version.source"})).is_ok());
+    // The transport rule is the existing conservative relative-display subset,
+    // not an extension whitelist, normalization, trimming or truncation rule.
+    for relative in ["", "/absolute", "../VERSION", "dir/./VERSION", "dir//VERSION", ".hidden", "private/VERSION",
+        "dir/name ", "dir/name.", "dir/name\\file", "C:VERSION", "dir/a\nb", "dir/CON.txt", "build/VERSION"] {
+        assert!(project_path_result("project-1", ProjectPathField::VersionSource, relative.into()).is_err());
+    }
+    assert!(project_path_result("project-1", ProjectPathField::VersionSource, "package.json".into()).is_ok());
+    assert!(project_path_result("project-1", ProjectPathField::VersionSource, "no-extension".into()).is_ok());
+    for (field, wrong) in [(ProjectPathField::IosProject, "Example.XCODEPROJ"), (ProjectPathField::IosWorkspace, "Example.xcodeproj")] {
+        assert!(project_path_result("project-1", field, wrong.into()).is_err());
+    }
+    let exactly_512 = format!("{}/{}/c", "a".repeat(255), "b".repeat(254));
+    assert_eq!(exactly_512.len(), 512);
+    assert!(project_path_result("project-1", ProjectPathField::VersionSource, exactly_512.clone()).is_ok());
+    assert!(project_path_result("project-1", ProjectPathField::VersionSource, format!("{exactly_512}d")).is_err());
+    assert!(project_path_result("project-1", ProjectPathField::MetadataRoot, vec!["a"; 12].join("/")).is_ok());
+    assert!(project_path_result("project-1", ProjectPathField::MetadataRoot, vec!["a"; 13].join("/")).is_err());
+    let cancellation: Option<ProjectPathResult> = None;
+    assert_eq!(serde_json::to_value(cancellation).expect("null DTO"), Value::Null);
+    let errors = [
+        (Reason::InvalidRequest, "project_path_invalid"), (Reason::Unqualified, "project_path_unavailable"),
+        (Reason::Busy, "project_path_busy"), (Reason::ContextStale, "project_path_stale"),
+        (Reason::UserCancelled, "project_path_stale"), (Reason::SourceRefused, "project_path_unsafe"),
+        (Reason::SourceChanged, "project_path_changed"), (Reason::Capacity, "project_path_limit"),
+        (Reason::Deadline, "project_path_deadline"), (Reason::CleanupUnknown, "project_path_cleanup_unknown"),
+    ];
+    for (reason, code) in errors {
+        let error = project_path_error(reason);
+        assert_eq!(error.code, code); assert!(!error.retryable && !error.message.is_empty());
+        assert!(serde_json::to_vec(&error).expect("safe fixed error").len() <= SMALL_LIMIT);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_project_path_wiring_contract() {
+    // Fixed source DATA only. Handler registration alone does not grant Tauri
+    // command permission: AppManifest and the main/local ACL must agree too.
+    fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        source.split_once(start).expect("source start").1.split_once(end).expect("source end").0
+    }
+    let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
+    let handlers = section(include_str!("shell.rs"), "tauri::generate_handler![", "];");
+    let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).expect("fixed main capability DATA");
+    assert_eq!(commands.matches("\"choose_project_path\"").count(), 1);
+    assert_eq!(handlers.split(',').filter(|name| name.trim() == "choose_project_path").count(), 1);
+    assert_eq!(capability["local"], true);
+    assert_eq!(capability["windows"], serde_json::json!(["main"]));
+    assert!(capability.get("remote").is_none());
+    let permissions = capability["permissions"].as_array().expect("closed permissions");
+    assert_eq!(permissions.iter().filter(|permission| permission.as_str() == Some("allow-choose-project-path")).count(), 1);
+    for permission in permissions {
+        let permission = permission.as_str().expect("named permission");
+        assert!(permission.starts_with("allow-") || ["core:event:allow-listen", "core:event:allow-unlisten"].contains(&permission));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn lookup_fields_charge_keeps_empty_cells_and_string_capacity() {
+        let mut value = String::with_capacity(79); value.push_str("data"); value.truncate(1);
+        let mut values = Vec::with_capacity(7); values.push(Some(value)); values.push(None);
+        let fields = Fields { kind: Kind::GoogleWif, values };
+        let cells = fields.values.capacity() * std::mem::size_of::<Option<String>>();
+        assert_eq!(fields.retained_bytes(), Some(cells + fields.byte_count()));
+        assert!(cells > 0 && fields.byte_count() > 1);
+        assert_eq!(Fields::empty_firebase().retained_bytes(), Some(0));
+    }
+    #[test]
+    fn project_path_command_is_registered_once_for_the_fixed_main_local_capability() { assert_project_path_wiring_contract(); }
+    #[test]
+    fn project_path_commands_are_closed_bounded_relative_data_only() { assert_project_path_command_contracts(); }
     #[test]
     fn commands_are_closed_and_never_admit_paths_or_observations() {
         assert!(status(&json!({})).is_ok());

@@ -5,13 +5,17 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import guide from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import { initialWorkspace, workspaceReducer } from '../src/drafts.ts';
-import { ReleaseInputGuidanceController, parseReleaseInputHelp, parseReleaseInputResult, releaseInputGroups, releaseInputRows } from '../src/releaseInputGuidance.ts';
+import { ReleaseInputGuidanceController, parseReleaseInputHelp, parseReleaseInputResult, releaseInputGroups, releaseInputRows, sessionPreparationKind } from '../src/releaseInputGuidance.ts';
 
 const assurance = { basis: 'schema-policy', projectCodeExecuted: false, toolsProbed: false, credentialsRead: false,
   gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' };
 const info = { runtime: { state: 'available' }, capabilities: { methods: [{ method: 'config.validate', available: true, reason: '' }] } };
 function row(name = 'MOBILE_RELEASE_SYNTHETIC_INPUT', platform = 'project', stage = 'candidate', extra = {}) {
   return { name, platform, stage, environment: `mobile-${stage}`, kind: 'secret', alternatives: [], reason: 'Synthetic core-returned reason.', state: 'unknown', ...extra };
+}
+function guidedRow(kindId = 'android-keystore', stage = 'candidate') {
+  const kind = guide.kinds.find((entry) => entry.id === kindId), field = kind.fields[0];
+  return row(field.requirement, kind.platform, stage, { kind: field.input === 'text' ? 'variable' : field.input, alternatives: field.alternatives });
 }
 function valid(requirements = [row()]) { return { valid: true, state: 'format-valid', issues: [], requirements, assurance: { ...assurance } }; }
 function invalid() { return { valid: false, state: 'invalid', issues: [{ code: 'config.invalid', status: 'INVALID',
@@ -45,7 +49,7 @@ function harness() {
     get state() { return controller.getSnapshot(); }, get selected() { return workspace.projects[workspace.selectedId]; },
     get helpRetirements() { return helpRetirements; },
     busy(value) { busy = value; },
-    replace(session) { workspace = { ...workspace, projects: { ...workspace.projects, [session.project.id]: session } }; controller.syncProject(); },
+    replace(session, sync = true) { workspace = { ...workspace, projects: { ...workspace.projects, [session.project.id]: session } }; if (sync) controller.syncProject(); },
     dispatch(action) {
       controller.beforeWorkspaceAction(action); // Same pre-reducer ordering as App.
       workspace = workspaceReducer(workspace, action); controller.syncProject();
@@ -241,10 +245,72 @@ test('old success/failure cannot clear a newer attempt; reentrant retirement, sa
   h.controller.dispose();
 });
 
+test('preparation targets require the exact current core row, active hint and actually selected draft without submitting anything', async () => {
+  const h = harness();
+  try {
+    await read(h, valid([guidedRow(), guidedRow('android-keystore', 'production'), guidedRow('apple-p12')]));
+    const source = h.state, input = source.result.requirements[0], calls = h.calls.length;
+    const target = h.controller.preparationTarget(source, input);
+    assert.ok(target); assert.equal(target.source, source); assert.equal(target.requirement, input);
+    assert.equal(target.guideId, 'android-keystore');
+    assert.deepEqual(target.scope, { platform: 'android', stage: 'candidate', purpose: 'full' });
+    assert.ok(Object.isFrozen(target) && Object.isFrozen(target.scope));
+    assert.doesNotMatch(JSON.stringify(target), /DRAFT_ONLY_CANARY/);
+    let active = target;
+    const retainedContinue = () => h.controller.preparationCurrent(target, active);
+    assert.equal(retainedContinue(), true);
+    active = null; assert.equal(retainedContinue(), false); // dismissed/unmounted hint
+    active = h.controller.preparationTarget(source, input);
+    assert.notEqual(active, target); assert.equal(retainedContinue(), false); // a newer opening of the same row
+    assert.equal(h.controller.preparationCurrent(active, active), true);
+    assert.equal(h.controller.preparationTarget(source, { ...input }), null);
+    assert.equal(h.controller.preparationTarget(source, source.result.requirements[1]), null); // other stage, even an actual row
+    const unsupported = h.controller.preparationTarget(source, source.result.requirements[2]);
+    assert.ok(unsupported); assert.equal(sessionPreparationKind(unsupported.guideId), null);
+    for (const changed of [{ guideId: 'android-firebase' }, { requirement: { ...input } }, { scope: { ...target.scope, purpose: 'signing' } }]) {
+      const unrelated = { ...target, ...changed };
+      assert.equal(h.controller.preparationCurrent(unrelated, unrelated), false);
+    }
+    h.busy(true); assert.equal(h.controller.preparationCurrent(active, active), false); h.busy(false);
+    // No preceding sync: equal counters/content cannot hide a new draft object.
+    h.replace({ ...h.selected, draft: structuredClone(h.selected.draft) }, false);
+    assert.equal(h.state, source);
+    assert.equal(h.controller.preparationCurrent(active, active), false);
+    assert.equal(h.controller.preparationTarget(source, input), null);
+    assert.equal(h.state, source); assert.equal(h.calls.length, calls); // checks themselves are nonmutating
+  } finally { h.controller.dispose(); }
+});
+
+test('retired preparation callbacks cannot revive after stage, project, draft, help, connection or save transitions', async () => {
+  const changes = [
+    ['stage away and back', (h) => { h.controller.setStage('production'); h.controller.setStage('candidate'); }],
+    ['project away and back', (h) => { h.dispatch({ type: 'switch', projectId: 'p2' }); h.dispatch({ type: 'switch', projectId: 'p1' }); }],
+    ['draft reset', (h) => h.dispatch({ type: 'reset', projectId: 'p1' })],
+    ['failed snapshot with equal generations', failedSnapshot],
+    ['catalog replacement', (h) => h.controller.setCatalog({ credentialGuide: guide, credentials: [] })],
+    ['same service reconnect', (h) => h.controller.setConnection(h.api, info)],
+    ['cancelled selection', (h) => { h.controller.setSelectionPending(true); h.controller.setSelectionPending(false); }],
+    ['save intent', (h) => h.controller.saveIntent()],
+    ['dispose', (h) => h.controller.dispose()],
+  ];
+  for (const [label, change] of changes) {
+    const h = harness();
+    try {
+      await read(h, valid([guidedRow()]));
+      const original = h.state, target = h.controller.preparationTarget(original, original.result.requirements[0]);
+      assert.ok(target, label); assert.equal(h.controller.preparationCurrent(target, target), true, label);
+      change(h);
+      assert.equal(h.controller.preparationCurrent(target, target), false, label);
+      assert.equal(h.controller.preparationTarget(original, target.requirement), null, label);
+    } finally { h.controller.dispose(); }
+  }
+});
+
 test('App and Credentials keep retirement before awaits/reducer, original save returns, safe reference navigation and honest UI labels', () => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   const page = readFileSync(new URL('../src/pages/Credentials.tsx', import.meta.url), 'utf8');
   const pane = readFileSync(new URL('../src/components/ReleaseInputGuidance.tsx', import.meta.url), 'utf8');
+  const session = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
   const module = readFileSync(new URL('../src/releaseInputGuidance.ts', import.meta.url), 'utf8');
   const dispatch = app.slice(app.indexOf('const dispatch ='), app.indexOf('const [configEdit]'));
   const retire = dispatch.indexOf('releaseInputControllerRef.current?.beforeWorkspaceAction(action)');
@@ -261,7 +327,36 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   assert.ok(app.includes('releaseInputs.dispose()') && app.includes('() => setHelp(null)'));
   assert.ok(page.includes('<CredentialSession state={state} controller={controller}'));
   assert.ok(page.includes('<AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide}'));
-  assert.ok(page.includes('setSelectedGuide(kind); guideRef.current?.focus()'));
+  const navigation = page.slice(page.indexOf('const openGuide ='), page.indexOf('const credentials ='));
+  assert.ok(navigation.includes('inputController.preparationCurrent(target, target)'));
+  assert.ok(navigation.includes('activePreparation.current = target; setPreparation(target); sessionRef.current?.focus()'));
+  assert.doesNotMatch(navigation, /\.(?:setScope|syncProject|submitContext|open|choose|prepareSelection|prepareScalar|confirmPreview|discard|lock)\(/);
+  assert.ok(page.includes('inputController.preparationCurrent(target, activePreparation.current)'));
+  assert.ok(page.includes('mounted.current = false; activePreparation.current = null'));
+  assert.ok(page.includes('if (!mounted.current || activePreparation.current !== target) return'));
+  assert.ok(pane.includes('controller.preparationTarget(state, row.requirement)'));
+  const sessionInstances = page.match(/<CredentialSession[\s\S]*?\/>/gu) ?? [];
+  assert.equal(sessionInstances.length, 1); assert.doesNotMatch(sessionInstances[0], /\bkey=/u);
+  const continuation = session.slice(session.indexOf('const continuePreparation ='), session.indexOf('return <section ref={sessionRef}'));
+  for (const guard of ['!mounted.current', 'renderRef.current !== render', 'localRef.current !== local', 'controller.getSnapshot() !== state',
+    '!isPreparationCurrent(preparation)', 'preparationSessionReason(preparation, controller.getSnapshot()', '!takePreparation(preparation)']) assert.ok(continuation.includes(guard), guard);
+  assert.ok(continuation.indexOf('!takePreparation(preparation)') < continuation.indexOf('controller.setScope'));
+  assert.ok(continuation.includes('if (preparationScopeChanged(preparation, state.scope)) controller.setScope({ ...preparation.scope })'));
+  assert.ok(continuation.includes('if (nextKind !== local.kindId) changeLocal({ kindId: nextKind })'));
+  assert.doesNotMatch(continuation, /\bawait\b|replacementId:|confirmLock:|\.(?:submitContext|open|choose|prepareSelection|prepareScalar|confirmPreview|discard|lock)\(/);
+  assert.ok(session.includes('localRef.current = next; setLocal(next)'));
+  for (const update of ['changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })', 'changeLocal({ replacementId: event.target.value || null })',
+    'changeLocal({ confirmLock: true })']) assert.ok(session.includes(update), update);
+  assert.ok(session.includes('const selectionVisible = !!(nativeAvailable && inSession && guide && !projectPathActive)'));
+  assert.ok(session.includes('const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind)'));
+  assert.ok(session.includes("(idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token'))"));
+  assert.ok(session.includes('{writeOnlyFormMounted && kind &&'));
+  assert.ok(session.includes("<WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`}"));
+  const privateForm = session.slice(session.indexOf('function WriteOnlyFields'), session.indexOf('export function CredentialSession'));
+  assert.doesNotMatch(privateForm, /preparation|localRef|onDirty|onEdit|setScope/u);
+  assert.ok(privateForm.includes('const [values, setValues] = useState<Record<string, string>>({})'));
+  assert.ok(session.includes('preparationCurrent && preparationKind &&')); // stale target never acquires the newly selected project label
+  assert.ok(session.includes('sessionKindHelp(originalPreparationKind)'));
   assert.ok(pane.includes('controller.getSnapshot() === state') && page.includes('inputController.getSnapshot() === inputState'));
   for (const label of ['Required by this draft; presence not checked.', 'How / where to find it', 'Expected format', 'If unavailable or incorrect',
     'No requirements returned for this stage', 'saved files were not re-observed', 'persistent vault storage', 'Project settings']) assert.ok(pane.includes(label), label);

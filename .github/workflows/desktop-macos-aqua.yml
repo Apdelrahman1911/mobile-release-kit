@@ -1,0 +1,556 @@
+name: Desktop macOS genuine Aqua engineering verification
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-aqua
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-macos-aqua-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  aqua:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-aqua'
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef
+      MRK_BUNDLED_PROTOCOL_SHA256: 860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+    steps:
+      - name: Admit only this exact disposable-hosted source route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
+          # Independently accepted DATA01 M-plus-two-notices description; no rebuild.
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef ]]
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
+          [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
+      - name: Check out exact reviewed source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA stager Python, not the packaged interpreter
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Select fixed frontend compiler
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Reserve fresh work and record exact source and actual tool bindings
+        id: work
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]]
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-aqua.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
+          "$MRK_PYTHON" -I -S -B - "$root/source-binding.json" <<'PY'
+          import json, os, subprocess, sys
+          tools = {}
+          for name, command in (
+              ("rustc", ["rustc", "--version", "--verbose"]),
+              ("cargo", ["cargo", "--version", "--verbose"]),
+              ("cltSdkPath", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"]),
+              ("cltSdkVersion", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
+              ("cltSdkBuild", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"]),
+              ("cltCompiler", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "--version"]),
+              ("node", ["node", "--version"]),
+              ("python", [sys.executable, "-I", "-S", "-B", "--version"]),
+          ):
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
+              if not result.stdout or len(result.stdout) > 4096: raise ValueError("tool version output refused")
+              tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
+          value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                   "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
+                   "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
+                   "scope": "four-fixed-genuine-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
+                   "caseNames": ["first-save", "noop-stale", "picker-loss", "save-loss"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
+                   "actualAquaSaveGate": "not-yet-executed", "shippingBinaryQualified": False, "distributionQualified": False}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 65536: raise ValueError("source/tool binding size refused")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              while data:
+                  n = os.write(fd, data)
+                  if not n: raise RuntimeError("write refused")
+                  data = data[n:]
+              os.fsync(fd)
+          finally: os.close(fd)
+          PY
+      - name: Bind the complete reviewed first-party checkout before compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
+          import hashlib, json, os, stat, subprocess, sys
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
+          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
+          files = []
+          for row in rows[:-1]:
+              header, raw_name = row.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              name = raw_name.decode("utf-8", "strict")
+              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
+              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
+                  digest = hashlib.sha256()
+                  size = 0
+                  while block := os.read(fd, 65536):
+                      size += len(block)
+                      if size > before.st_size: raise ValueError("tracked input grew")
+                      digest.update(block)
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if size != before.st_size or sig(before) != sig(after) or sig(after) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
+              finally:
+                  os.close(fd)
+              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
+          value = {"source": os.environ["GITHUB_SHA"], "tree": git("rev-parse", "HEAD^{tree}").decode().strip(), "files": files}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 2 * 1024 * 1024: raise ValueError("source inventory output bound")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data)
+              stream.flush()
+              os.fsync(stream.fileno())
+          PY_SOURCE
+      - name: Fail fast on native Scripts ownership and package format (never Installer)
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input \
+            --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
+          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]]
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-format-parts" > "$MRK_MACOS_WORK/package-format-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-format-scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-format-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-format-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-format-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
+          [[ $xar_status == 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
+            --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+            --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
+          # Only inert archive bytes were checked. Never run this exit97 hook.
+      - name: Download only the exact accepted M archive (no rebuild or fallback)
+        timeout-minutes: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10639324707/zip" > "$MRK_MACOS_WORK/accepted-native-evidence.zip"
+      - name: Reuse complete M bytes and add the two pinned notices
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime \
+            --archive "$MRK_MACOS_WORK/accepted-native-evidence.zip" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
+            --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
+      - name: Compile the fixed debug actual-main observer and normal embedded frontend once
+        timeout-minutes: 24
+        shell: bash
+        env:
+          npm_config_cache: ${{ steps.work.outputs.root }}/npm-cache
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          cd desktop
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          cd src-tauri
+          set +e
+          cargo test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
+            --target aarch64-apple-darwin --test installed-shell-observation --no-run --message-format=json \
+            > "$MRK_MACOS_WORK/observer-build.jsonl" 2> "$MRK_MACOS_WORK/observer-build.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/observer-build.status"
+          [[ $status == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PY_BUILD'
+          import json, os, pathlib, re, stat
+          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          path = root / "observer-build.jsonl"
+          if path.stat().st_size > 4 * 1024 * 1024: raise ValueError("compiler record bound")
+          rows = [json.loads(line) for line in path.read_bytes().splitlines()]
+          if [r.get("success") for r in rows if r.get("reason") == "build-finished"] != [True]: raise ValueError("original compiler did not finish")
+          targets = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "installed-shell-observation" and r["target"].get("kind") == ["test"] and r.get("executable")]
+          if len(targets) != 1 or targets[0].get("profile", {}).get("test") is not True: raise ValueError("one actual-main test target required")
+          binary = pathlib.Path(targets[0]["executable"])
+          expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/deps"
+          if binary.parent != expected or not re.fullmatch(r"installed_shell_observation-[0-9a-f]+", binary.name): raise ValueError("fixed observation target path")
+          m = binary.lstat()
+          if not stat.S_ISREG(m.st_mode) or m.st_nlink != 1 or m.st_mode & 0o111 == 0: raise ValueError("original compiler artifact type")
+          with open(os.environ["GITHUB_ENV"], "a") as stream:
+              stream.write("MRK_MACOS_OBSERVER_BINARY=" + str(binary) + "\n")
+          PY_BUILD
+      - name: Assemble the instrumented engineering app; ad-hoc sign only the app
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
+            --binary "$MRK_MACOS_OBSERVER_BINARY" \
+            --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
+          /usr/bin/codesign --force --sign - --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+          /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
+      - name: Bind this completed signed app and unchanged runtime into fresh Installer DATA
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
+            --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
+            --output "$MRK_MACOS_WORK/input" > "$MRK_MACOS_WORK/input-result.json"
+          inventory=$("$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/input-result.json" <<'PY'
+          import json, os, re, stat, sys
+          fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          try:
+              before = os.fstat(fd)
+              if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 2048: raise ValueError("receipt refused")
+              data = os.read(fd, 2049)
+              after = os.fstat(fd)
+              sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+              if sig(before) != sig(after) or len(data) != before.st_size: raise ValueError("receipt changed")
+          finally: os.close(fd)
+          value = json.loads(data)["inventorySha256"]
+          if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value): raise ValueError("receipt digest")
+          print(value)
+          PY
+          )
+          printf 'MRK_MACOS_INSTALL_INVENTORY_SHA256=%s\n' "$inventory" >> "$GITHUB_ENV"
+          # The app/runtime manifest anchor above was independently reviewed.
+          # This second digest only binds the already-completed output of this
+          # authorized build into its one-shot installer; it grants no runtime,
+          # GUI, distribution, update or arbitrary adjacent-file authority.
+      - name: Build the fixed one-shot root Installer and scripts-only package
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          (
+            cd desktop/src-tauri
+            cargo build --locked --release --no-default-features --features macos-installed-installer \
+              --target aarch64-apple-darwin --bin mrk-macos-install
+          )
+          installer="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mrk-macos-install"
+          /usr/bin/codesign --force --sign - --timestamp=none "$installer"
+          /usr/bin/codesign --verify --strict "$installer"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py scripts \
+            --input "$MRK_MACOS_WORK/input" --installer "$installer" \
+            --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
+            --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]]
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
+          [[ $xar_status == 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
+            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
+            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
+      - name: Standard Installer only is privileged; never execute the app or Python as root
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          diagnostic=(--package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg"
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py check-installer-result-absent \
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
+            > "$MRK_MACOS_WORK/installer-log-cursor.json"
+          cursor_status=$?
+          printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-log-cursor.status"
+          cursor_status_saved=$?
+          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
+            > "$MRK_MACOS_WORK/installer-output.txt" 2>&1
+          installer_status=$?
+          printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-output.status"
+          installer_status_saved=$?
+          # Read only the fixed bounded log interval, also after Installer failure.
+          # The selected raw lines are unbound diagnostics, never readback input.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-capture "${diagnostic[@]}" \
+            --cursor "$MRK_MACOS_WORK/installer-log-cursor.json" \
+            --selected-output "$MRK_MACOS_WORK/installer-log-selected.txt" > "$MRK_MACOS_WORK/installer-log-capture.json"
+          capture_status=$?
+          printf '%s\n' "$capture_status" > "$MRK_MACOS_WORK/installer-log-capture.status"
+          capture_status_saved=$?
+          set -e
+          if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
+          # A collision, partial publication, unknown close or timeout fails
+          # here. Keep originals; no uninstall, rollback, retries or repair.
+      - name: Nonroot byte/mode readback, not a headless GUI substitute
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py observe-installation \
+            --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
+            --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
+          printf '%s\n' 'Instrumented engineering installation only; the following four genuine Aqua cases must separately pass.'
+      - name: Four serial genuine Aqua cases through the unchanged original invocation owner
+        timeout-minutes: 6
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py \
+            > "$MRK_MACOS_WORK/aqua-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-failure.jsonl"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua.status"
+          [[ $status == 0 ]]
+          # No retry/open/launchctl/TCC changes or false success after an owner
+          # exception. Missing output does not establish original app finality.
+      - name: Verify source stayed unchanged; retire only disposable owned build output
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c core.fsmonitor=false diff --exit-code HEAD --
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$CARGO_TARGET_DIR" == "$MRK_MACOS_WORK/cargo-target" && "$MRK_MACOS_WORK" == "$RUNNER_TEMP"/mrk-macos-aqua.* ]]
+          # All compiler/Installer/original application calls returned; the
+          # retained package, source/result records and synthetic fixtures are
+          # verification evidence. Never delete a shared tool/dependency cache.
+          for path in "$CARGO_TARGET_DIR" "$MRK_MACOS_WORK/npm-cache" "$GITHUB_WORKSPACE/desktop/node_modules" "$GITHUB_WORKSPACE/desktop/dist"; do
+            [[ -d "$path" && ! -L "$path" && -O "$path" ]]
+            /bin/rm -rf -- "$path"
+          done
+      - name: Export bounded diagnostics without altering original command evidence
+        if: always() && steps.work.outputs.root != ''
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS'
+          import hashlib, json, os, pathlib, re, stat
+          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          parent = pathlib.Path(os.environ["RUNNER_TEMP"])
+          if root.parent != parent or not root.name.startswith("mrk-macos-aqua."): raise ValueError("fixed work root required")
+          held = root.lstat()
+          if not stat.S_ISDIR(held.st_mode) or held.st_uid != os.getuid() or held.st_mode & 0o077: raise ValueError("owned private work root required")
+          def sig(s):
+              return (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          def snapshot(name, limit, tail=False):
+              # One finite read of an original leaf; never wait for a writer,
+              # repair/truncate its output, or treat a stable snapshot as finality.
+              fd = None
+              try:
+                  fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid() or before.st_mode & 0o022: raise ValueError("original leaf refused")
+                  if before.st_size > limit and not tail:
+                      return None, {"state": "over-limit", "observedBytes": before.st_size, "limitBytes": limit}
+                  length = min(before.st_size, limit)
+                  offset = before.st_size - length if tail else 0
+                  data = os.pread(fd, length, offset)
+                  if len(data) != length or sig(before) != sig(os.fstat(fd)) or sig(before) != sig((root / name).lstat()): raise ValueError("original leaf changed")
+                  return data, {"state": "bounded-tail" if offset else "complete-snapshot", "observedBytes": before.st_size,
+                                "retainedBytes": len(data), "offsetBytes": offset, "truncated": bool(offset), "sha256": hashlib.sha256(data).hexdigest()}
+              except (OSError, ValueError):
+                  return None, {"state": "unavailable-or-changing"}
+              finally:
+                  if fd is not None: os.close(fd)
+          def publish(name, data):
+              fd = os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+              with os.fdopen(fd, "wb") as stream:
+                  stream.write(data)
+                  stream.flush()
+                  os.fsync(stream.fileno())
+          records = []
+          for original, status_name, limit, output, tail in (
+              ("observer-build.jsonl", "observer-build.status", 4 * 1024 * 1024, "observer-build.admitted.jsonl", False),
+              ("observer-build.stderr", "observer-build.status", 64 * 1024, "observer-build.stderr.tail.txt", True),
+              ("installer-output.txt", "installer-output.status", 64 * 1024, "installer-output.tail.txt", True),
+          ):
+              status, status_meta = snapshot(status_name, 4)
+              record = {"original": original, "originalStatus": None, "export": None}
+              # No original status means the command may be unfinished. Do
+              # not open its transcript; preserve it in place for the owner.
+              if status is None or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,2})\n", status) or int(status) > 255:
+                  record["snapshot"] = {"state": "unavailable-original-status-missing-or-invalid"}
+              else:
+                  record["originalStatus"] = int(status)
+                  data, metadata = snapshot(original, limit, tail)
+                  record["snapshot"] = metadata
+                  if data is not None:
+                      publish(output, data)
+                      record["export"] = output
+              records.append(record)
+          report = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
+                    "scope": "bounded-diagnostic-snapshots-only-not-original-process-family-finality",
+                    "originalsPreserved": True, "records": records}
+          data = json.dumps(report, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 4096: raise ValueError("diagnostic metadata bound")
+          publish("bounded-diagnostics.json", data)
+          PY_DIAGNOSTICS
+      - name: Preserve bounded original evidence; upload alone is not an Aqua pass
+        if: always() && steps.work.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/package-format-input.json
+            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
+            ${{ steps.work.outputs.root }}/package-format-prepare.json
+            ${{ steps.work.outputs.root }}/package-format-tar.status
+            ${{ steps.work.outputs.root }}/package-format-xar.status
+            ${{ steps.work.outputs.root }}/package-format-audit.json
+            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
+            ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/runtime-result.json
+            ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl
+            ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt
+            ${{ steps.work.outputs.root }}/bounded-diagnostics.json
+            ${{ steps.work.outputs.root }}/observer-build.status
+            ${{ steps.work.outputs.root }}/app-result.json
+            ${{ steps.work.outputs.root }}/input-result.json
+            ${{ steps.work.outputs.root }}/scripts-result.json
+            ${{ steps.work.outputs.root }}/package-audit.json
+            ${{ steps.work.outputs.root }}/installation-observation.json
+            ${{ steps.work.outputs.root }}/installer-output.tail.txt
+            ${{ steps.work.outputs.root }}/installer-output.status
+            ${{ steps.work.outputs.root }}/installer-log-cursor.json
+            ${{ steps.work.outputs.root }}/installer-log-cursor.status
+            ${{ steps.work.outputs.root }}/installer-log-capture.json
+            ${{ steps.work.outputs.root }}/installer-log-capture.status
+            ${{ steps.work.outputs.root }}/installer-log-selected.txt
+            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg
+            ${{ steps.work.outputs.root }}/package-prepare.json
+            ${{ steps.work.outputs.root }}/package-tar.status
+            ${{ steps.work.outputs.root }}/package-xar.status
+            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/aqua-results.jsonl
+            ${{ steps.work.outputs.root }}/aqua-failure.jsonl
+            ${{ steps.work.outputs.root }}/aqua.status
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      # Instrumented engineering evidence only. No release, Store mutation,
+      # shipping-binary equivalence, notarization or physical-device claim.
+      # On uncertainty retain originals; runner disposal is not observed here.

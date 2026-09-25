@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { Catalog, CredentialGuide, HelpContent } from '../types.ts';
 import { Badge, DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
@@ -7,7 +7,8 @@ import type { AssetDisplayState } from '../assetSessionTypes.ts';
 import type { AssetSessionController } from '../assetSessionController.ts';
 import type { ProjectSession } from '../drafts.ts';
 import { ReleaseInputGuidance } from '../components/ReleaseInputGuidance.tsx';
-import type { ReleaseInputGuidanceController, ReleaseInputGuidanceState } from '../releaseInputGuidance.ts';
+import { sessionPreparationKind } from '../releaseInputGuidance.ts';
+import type { ReleaseInputGuidanceController, ReleaseInputGuidanceState, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
 
 function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { guide: CredentialGuide | null; selected: string; onSelect: (kind: string) => void; sessionAvailable: boolean; onHelp: (help: HelpContent) => void }) {
   const kind = guide?.kinds.find((entry) => entry.id === selected) ?? guide?.kinds[0];
@@ -34,16 +35,41 @@ function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { g
 export function Credentials({ catalog, state, controller, project, inputState, inputController, onSettings, onHelp, nativeBusyReason = null }: { catalog: Catalog | null; state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; inputState: ReleaseInputGuidanceState; inputController: ReleaseInputGuidanceController; onSettings: () => void; onHelp: (help: HelpContent) => void; nativeBusyReason?: string | null }) {
   const [filter, setFilter] = useState('');
   const [selectedGuide, setSelectedGuide] = useState('');
+  const [preparation, setPreparation] = useState<ReleaseInputPreparationTarget | null>(null);
+  const activePreparation = useRef<ReleaseInputPreparationTarget | null>(null);
+  const mounted = useRef(true);
   const guideRef = useRef<HTMLDivElement>(null);
+  const sessionRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; activePreparation.current = null; }; }, []);
   const currentHelp = (content: HelpContent) => { if (inputController.getSnapshot() === inputState) onHelp(content); };
+  const isPreparationCurrent = (target: ReleaseInputPreparationTarget) => mounted.current && inputController.preparationCurrent(target, activePreparation.current);
+  const dismissPreparation = (target: ReleaseInputPreparationTarget) => {
+    if (!mounted.current || activePreparation.current !== target) return;
+    activePreparation.current = null; setPreparation(null);
+  };
+  const takePreparation = (target: ReleaseInputPreparationTarget): boolean => {
+    if (!isPreparationCurrent(target)) return false;
+    // Retire this navigation hint before any explicit session choice changes.
+    activePreparation.current = null; setPreparation(null); return true;
+  };
+  const openGuide = (target: ReleaseInputPreparationTarget) => {
+    if (!mounted.current || !inputController.preparationCurrent(target, target)) return;
+    setSelectedGuide(target.guideId);
+    if (sessionPreparationKind(target.guideId)) {
+      activePreparation.current = target; setPreparation(target); sessionRef.current?.focus();
+    } else {
+      activePreparation.current = null; setPreparation(null); guideRef.current?.focus();
+    }
+  };
   const credentials = inputState.help.credentials.filter((entry) => `${entry.name} ${entry.platform} ${entry.what}`.toLocaleLowerCase().includes(filter.toLocaleLowerCase()));
   return <>
     <PageHeading eyebrow="CREDENTIALS & SIGNING" title="Private by design." description="Understand each input, review its supported checks, and keep storage separate from assignment." />
     <div className="privacy-hero card"><div className="privacy-illustration"><Icon name="lock" size={42} /></div><div><Badge tone="info">Private inputs are not project settings</Badge><h2>Your credentials stay out of this draft.</h2><p>Use only the explicitly available private-input controls below. Persistent vault storage and account login remain unavailable. Do not paste tokens, passwords, private keys, or service-account JSON into project settings.</p></div></div>
     <div className="three-card-grid">{[{ icon: 'android' as const, title: 'Android signing', description: 'A keystore, signing policy, and the matching upload identity.' }, { icon: 'apple' as const, title: 'Apple signing', description: 'Certificates, provisioning, and protected App Store access.' }, { icon: 'github' as const, title: 'GitHub access', description: 'Reviewed repository access and protected release environments.' }].map((item) => <div className="card credential-summary" key={item.title}><span className="soft-icon"><Icon name={item.icon} size={23} /></span><h3>{item.title}</h3><p>{item.description}</p><Badge>Native / service verification not run</Badge></div>)}</div>
-    <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={(kind) => { setSelectedGuide(kind); guideRef.current?.focus(); }} />
+    <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={openGuide} />
     {nativeBusyReason && <p className="review-caution" role="status">{nativeBusyReason} Private session controls cannot start conflicting work; original status, cancellation and discard remain separate.</p>}
-    <CredentialSession state={state} controller={controller} project={project} guide={catalog?.credentialGuide ?? null} onHelp={onHelp} nativeBusyReason={nativeBusyReason} />
+    <div ref={sessionRef} tabIndex={-1}><CredentialSession state={state} controller={controller} project={project} guide={catalog?.credentialGuide ?? null} onHelp={onHelp} nativeBusyReason={nativeBusyReason}
+      preparation={preparation} isPreparationCurrent={isPreparationCurrent} takePreparation={takePreparation} dismissPreparation={dismissPreparation} /></div>
     <div ref={guideRef} tabIndex={-1}><AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide} sessionAvailable={state.mode === 'native' && state.status?.capability.available === true && !state.blocked && !state.observationFailed && nativeBusyReason === null} onHelp={currentHelp} /></div>
     <section className="card"><SectionHeading title="Core requirement catalogue" description="Conditional requirements are guidance, not proof that credentials exist or work."><label className="search-field"><Icon name="search" size={16} /><span className="sr-only">Find a credential requirement</span><input type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Find a requirement…" /></label></SectionHeading>
       {credentials.length ? <div className="credential-list">{credentials.map((credential, index) => <article key={`${credential.name}-${index}`}><div className="credential-row-heading"><div className="inline-heading"><h3>{credential.name}</h3><HelpButton content={{ ...credential, label: credential.name }} onHelp={currentHelp} /></div><Badge>Not verified</Badge></div><p>{credential.what}</p><div className="credential-meta"><span>{credential.platform}</span><span>{credential.kind}</span><span>{credential.stages.join(' · ')}</span></div><p className="credential-when">{credential.requiredWhen}</p></article>)}</div> : <EmptyState compact icon="key" title={filter ? 'No matching requirement' : 'No native credential catalogue loaded'} description={filter ? 'Try a platform name or a different keyword.' : 'The connected core supplies exact credential names, conditional requiredness, formats, and recovery guidance. Browser examples never invent credential status.'} />}

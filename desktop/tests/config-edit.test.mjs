@@ -14,6 +14,7 @@ import { editInputFits, isU32, normalEditResult, parseConfigEditStatus, projecti
 import { configurationStatus, draftStatus } from '../src/certainty.ts';
 import { initialWorkspace, isDirty, savedRevisionFresh, workspaceReducer } from '../src/drafts.ts';
 import { valueSummary } from '../src/preparation.ts';
+import { configurationSetupNeeded, savedSetupRevision } from '../src/setupGuidance.ts';
 
 const TOK = {
   window: 'a'.repeat(32), otherWindow: 'b'.repeat(32), session: 'c'.repeat(32),
@@ -21,7 +22,8 @@ const TOK = {
 };
 const BASE = { schemaVersion: 1, android: { enabled: true, applicationId: 'com.example.inert' }, source: { candidateBranch: 'main' } };
 const IGNORE = ['.mobile-release/', '.mobile-release-init-prepare/', '.mobile-release-init/', '.mobile-release-init-cleanup/',
-  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/'];
+  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/',
+  '.mobile-release-version-prepare/', '.mobile-release-version/', '.mobile-release-version-cleanup/'];
 const assurance = {
   basis: 'schema-policy', projectCodeExecuted: false, toolsProbed: false,
   credentialsRead: false, gitObserved: false, storeContacted: false,
@@ -185,6 +187,111 @@ function reviewing(harness, plan = view()) {
   assert.ok(binding);
   return binding;
 }
+
+test('setup guidance distinguishes a complete missing observation from unknown or superseded reads', () => {
+  const session = observed(initialWorkspace, null).projects.a;
+  const needsSetup = (value, state = initialConfigEdit) => configurationSetupNeeded(value, false, state);
+  assert.equal(needsSetup(session), true);
+  assert.equal(configurationSetupNeeded(session, true, initialConfigEdit), false);
+  for (const value of [null, { ...session, snapshot: null },
+    { ...session, observedAt: null }, { ...session, snapshotRequest: 2 },
+    { ...session, snapshotError: { code: 'unavailable', message: 'Read failed', retryable: false } },
+    { ...session, snapshotPredatesSave: true }, { ...session, sourceChanged: true },
+    { ...session, saveRecoveryRequired: true },
+    { ...session, snapshot: { ...session.snapshot, discovery: { ...session.snapshot.discovery, partial: true } } },
+    ...['invalid', 'unavailable', 'format-valid'].map((state) => ({ ...session, snapshot: { ...session.snapshot, config: { ...session.snapshot.config, state } } })),
+  ]) assert.equal(needsSetup(value), false);
+  // Even a normally settled save cannot manufacture read/save chronology.
+  for (const phase of ['opening', 'applying', 'unknown', 'final']) {
+    const retained = owner(phase);
+    assert.equal(needsSetup(session, { ...initialConfigEdit, status: status(2, phase === 'final' ? null : retained, phase === 'final' ? retained : null) }), false);
+  }
+  assert.equal(needsSetup(session, { ...initialConfigEdit, unknownEvidence: owner('unknown') }), false);
+  for (const phase of ['opening', 'applying', 'final']) {
+    const retained = owner(phase);
+    const buffered = configEditReducer(initialConfigEdit, { type: 'observe', source: 'event',
+      status: status(2, phase === 'final' ? null : retained, phase === 'final' ? retained : null) });
+    assert.equal(buffered.status, null);
+    assert.notEqual(buffered.buffered, null);
+    assert.equal(needsSetup(session, buffered), false);
+  }
+  assert.equal(needsSetup(session, { ...initialConfigEdit, recoveryProjects: [{ projectId: 'a' }] }), false);
+});
+
+test('setup handoff requires the original settled save and is an inert selected-project view', async () => {
+  const h = await connected({ workspace: loaded({ base: null }) });
+  const binding = reviewing(h, view('create', 'create'));
+  const next = () => savedSetupRevision(h.state, h.workspace.projects.a, h.workspace.selectedId);
+  assert.equal(next(), null);
+  assert.equal(h.controller.apply(binding), true);
+  h.publish(h.owner('applying', { plan: view('create', 'create') }));
+  assert.equal(next(), null);
+  h.publish(h.owner('finalizing', { plan: view('create', 'create') }));
+  assert.equal(next(), null);
+  h.publish(h.owner('final', { plan: view('create', 'create') }));
+  const before = structuredClone({ workspace: h.workspace, state: h.state });
+  const calls = h.calls.length;
+  assert.equal(next(), binding.draftRevision);
+  assert.deepEqual({ workspace: h.workspace, state: h.state }, before);
+  assert.equal(h.calls.length, calls);
+  h.dispatch({ type: 'select', project: project('b') });
+  assert.equal(next(), null);
+  h.dispatch({ type: 'switch', projectId: 'a' });
+  assert.equal(next(), binding.draftRevision);
+  assert.equal(h.workspace.projects.a.draft.android.applicationId, 'com.example.submitted');
+  h.dispatch({ type: 'edit', projectId: 'a', path: 'android.applicationId', value: 'com.example.newer' });
+  assert.equal(next(), null);
+  assert.equal(h.workspace.projects.a.draft.android.applicationId, 'com.example.newer');
+});
+
+test('setup handoff refuses status-only, mismatched, unknown, recovery and late receipts', async () => {
+  const h = await connected();
+  h.controller.apply(reviewing(h));
+  h.publish(h.owner('final'));
+  assert.notEqual(savedSetupRevision(h.state, h.workspace.projects.a, 'a'), null);
+  const refused = (state, session = h.workspace.projects.a) => assert.equal(savedSetupRevision(state, session, 'a'), null);
+  for (const update of [
+    { mode: 'preview' }, { attempt: null }, { initialized: false }, { listening: false },
+    { integrityFailed: true }, { generationLost: true }, { nativeBlocked: true },
+    { observationIssue: 'bridge' }, { unknownEvidence: owner('unknown') },
+    { recoveryProjects: [{ projectId: 'a' }] },
+  ]) refused({ ...h.state, ...update });
+  for (const mutate of [
+    (s) => { s.attempt.handled = false; }, (s) => { s.attempt.applyClaimed = false; },
+    (s) => { s.attempt.submittedPlanToken = TOK.otherPlan; },
+    (s) => { s.attempt.projectionRevision += 1; },
+    (s) => { s.attempt.binding.projectId = 'b'; },
+    (s) => { s.attempt.projection.phase = 'unknown'; },
+    (s) => { s.attempt.projection.nativeFinality = 'unknown'; },
+    (s) => { s.attempt.projection.lateSettled = true; },
+    (s) => { s.attempt.projection.coreOutcome.journal = 'recovery_required'; },
+    (s) => { s.attempt.projection.sessionId = TOK.otherSession; },
+    (s) => { s.status.windowGeneration = TOK.otherWindow; },
+    (s) => { s.status.active = owner('opening', { sessionId: TOK.otherSession }); },
+  ]) { const state = structuredClone(h.state); mutate(state); refused(state); }
+  for (const update of [
+    { saveRecoveryRequired: true }, { draft: {} }, { baseline: {} },
+    ...[{ result: 'unchanged' }, { sessionId: TOK.otherSession }, { statusRevision: 100 },
+      { baselineGeneration: 0 }, { resultingBaselineGeneration: null }, { draftRevision: 99 },
+    ].map((row) => ({ lastSave: { ...h.workspace.projects.a.lastSave, ...row } })),
+  ]) refused(h.state, { ...h.workspace.projects.a, ...update });
+});
+
+test('setup handoff does not call a no-op a new save or replace a newer submitted draft', async () => {
+  const noOp = await connected({ workspace: loaded({ dirty: false }) });
+  const plan = view('preserve', 'preserve');
+  noOp.controller.apply(reviewing(noOp, plan));
+  noOp.publish(noOp.owner('final', { plan }));
+  assert.equal(noOp.workspace.projects.a.lastSave.result, 'unchanged');
+  assert.equal(savedSetupRevision(noOp.state, noOp.workspace.projects.a, 'a'), null);
+  const late = await connected();
+  late.controller.apply(reviewing(late));
+  late.dispatch({ type: 'edit', projectId: 'a', path: 'android.applicationId', value: 'com.example.newer' });
+  late.publish(late.owner('final'));
+  assert.equal(late.workspace.projects.a.lastSave.result, 'saved');
+  assert.equal(savedSetupRevision(late.state, late.workspace.projects.a, 'a'), null);
+  assert.equal(late.workspace.projects.a.draft.android.applicationId, 'com.example.newer');
+});
 
 test('the bridge uses only the five fixed commands, exact arguments and exact event', async () => {
   const calls = [];

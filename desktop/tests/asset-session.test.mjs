@@ -7,6 +7,7 @@ import { assetError, assetJsonFits, assetRequestFits, parseAssetStatus } from '.
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../src/assetSessionHelp.ts';
+import { preparationScopeChanged, preparationSessionReason } from '../src/releaseInputGuidance.ts';
 import guide from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 
 const A = 'a'.repeat(32);
@@ -73,6 +74,22 @@ async function ready(h, patch = {}) {
   h.controller.submitContext(); await settle();
   h.latest('context').resolve(status(1, patch)); await settle();
   assert.equal(h.controller.getSnapshot().contextCurrent, true);
+}
+// Only the passive kind/scope projection consumed by the pure session guard.
+// This does not fabricate an actionable hint: exact source/active/draft admission
+// is exercised through the actual guidance controller in its own existing suite.
+function preparationView(guideId = 'android-firebase', scope = { platform: 'android', stage: 'production', purpose: 'full' }) {
+  return Object.freeze({ guideId, scope: Object.freeze({ ...scope }) });
+}
+const emptyPreparationLocal = { kindId: 'android-keystore', replacementId: null, confirmLock: false, writeOnlyFormMounted: false };
+function assertPreparationPreservesOriginal(h) {
+  const original = h.controller.getSnapshot(), count = h.calls.length;
+  assert.notEqual(preparationSessionReason(preparationView(), original, emptyPreparationLocal), null);
+  assert.equal(h.controller.getSnapshot(), original);
+  assert.equal(h.controller.getSnapshot().intent, original.intent);
+  assert.equal(h.controller.getSnapshot().previewDeadline, original.previewDeadline);
+  assert.equal(h.controller.getSnapshot().entryGeneration, original.entryGeneration);
+  assert.equal(h.calls.length, count);
 }
 
 test('status DTO detaches the provider and refuses raw material, extra authority and bad cross-links', () => {
@@ -151,6 +168,75 @@ test('unqualified native and browser modes never collect input or fabricate a se
     await assert.rejects(previewApi.prepareCredential({}), (error) => error.code === 'AssetSessionUnavailable');
   } finally { h.controller.dispose(); }
   assert.equal(h.unsubscribed(), true);
+});
+
+test('preparation refuses active or uncertain work and local replacement/private forms without treating completed intent as pending', async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    const current = h.controller.getSnapshot(), count = h.calls.length, target = preparationView();
+    assert.equal(preparationSessionReason(target, current, emptyPreparationLocal), null);
+    const idle = operation({ phase: 'idle', settlement: 'known', assessment: null, preview: null });
+    for (const [label, patch] of [
+      ['native capability unavailable', { status: status(2, { capability: { available: false, reason: 'unqualified' } }) }],
+      ['browser', { mode: 'preview' }],
+      ['status observation', { observing: true }],
+      ['unacknowledged original despite idle status', { originPending: true, status: status(2, { operation: idle }) }],
+      ['unconfirmed intent', { observationFailed: true, intent: { kind: 'google-wif', change: 'new', record: null } }],
+      ['project-path original', { status: status(2, { operation: operation({ operation: 'choose-project-path', phase: 'picking', settlement: 'pending', assessment: null, preview: null }) }) }],
+      ['late-known original', { status: status(2, { operation: { ...idle, settlement: 'late-known' } }) }],
+      ['selection', { status: status(2, { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) }) }],
+      ['review', { status: status(2, { operation: operation() }), previewDeadline: 1000 }],
+      ['cancellation', { cancelledOperationId: 3, status: status(2, { operation: operation({ phase: 'stopping', settlement: 'pending', assessment: null, preview: null }) }) }],
+      ['record change', { status: status(2, { records: [{ recordId: D, revision: 7, kind: 'android-firebase', availability: 'mutation-pending' }] }) }],
+    ]) assert.notEqual(preparationSessionReason(target, { ...current, ...patch }, emptyPreparationLocal), null, label);
+    for (const patch of [{ replacementId: D }, { replacementId: 'no-longer-present' }, { confirmLock: true }, { writeOnlyFormMounted: true }]) {
+      const local = Object.freeze({ ...emptyPreparationLocal, ...patch });
+      assert.notEqual(preparationSessionReason(target, current, local), null);
+      assert.deepEqual(local, { ...emptyPreparationLocal, ...patch });
+    }
+    assert.match(preparationSessionReason(preparationView('apple-p12'), current, emptyPreparationLocal), /reference guide only/);
+    assert.equal(preparationSessionReason(target, current, emptyPreparationLocal, 'Other original work is pending.'), 'Other original work is pending.');
+    const same = preparationView('google-wif', current.scope), form = { ...emptyPreparationLocal, kindId: 'google-wif', writeOnlyFormMounted: true };
+    assert.equal(preparationScopeChanged(same, current.scope), false);
+    assert.equal(preparationSessionReason(same, current, form), null); // focus only; no key/scope/form change
+    assert.notEqual(preparationSessionReason(preparationView('project-read-token', current.scope), current, form), null);
+    const completed = { ...current, originPending: false, intent: { kind: 'google-wif', change: 'assign', record: { recordId: C, expectedRevision: 1 } },
+      cancelledOperationId: idle.operationId, selectionKind: 'android-firebase', status: status(2, { operation: idle }) };
+    assert.equal(preparationSessionReason(same, completed, form), null); // residual completed intent/kind/cancel ID is not an original in flight
+    assert.equal(h.controller.getSnapshot(), current); assert.equal(h.calls.length, count);
+  } finally { h.controller.dispose(); }
+});
+
+test('an admitted changed preparation scope reuses one context submission; equal choices and closed sessions start nothing', async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    const target = preparationView(), before = h.calls.length;
+    assert.equal(preparationSessionReason(target, h.controller.getSnapshot(), emptyPreparationLocal), null);
+    // This is the same guarded helper/setter seam as the reviewed UI handler,
+    // not a React/native picker test. Its source wiring is checked separately.
+    if (preparationScopeChanged(target, h.controller.getSnapshot().scope)) h.controller.setScope({ ...target.scope });
+    await settle();
+    assert.deepEqual(h.calls.slice(before).map((call) => call.command), ['context']);
+    assert.deepEqual(h.latest('context').args, { projectId: 'project-a', draft: h.selected().draft, ...target.scope });
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    h.latest('context').resolve(status(2, { context: { ...context, ...target.scope, revision: 2 } })); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, true);
+    const unchanged = h.controller.getSnapshot(), count = h.calls.length;
+    assert.equal(preparationScopeChanged(target, unchanged.scope), false);
+    if (preparationScopeChanged(target, unchanged.scope)) h.controller.setScope({ ...target.scope });
+    assert.equal(h.controller.getSnapshot(), unchanged); assert.equal(h.calls.length, count);
+  } finally { h.controller.dispose(); }
+  const closed = harness(status(0, { mode: 'closed', context: null }));
+  try {
+    await closed.controller.connect(closed.api);
+    const target = preparationView(), count = closed.calls.length;
+    assert.equal(preparationSessionReason(target, closed.controller.getSnapshot(), emptyPreparationLocal), null);
+    if (preparationScopeChanged(target, closed.controller.getSnapshot().scope)) closed.controller.setScope({ ...target.scope });
+    await settle();
+    assert.equal(closed.controller.getSnapshot().status.mode, 'closed'); assert.equal(closed.calls.length, count);
+  } finally { closed.controller.dispose(); }
 });
 
 test('context edits invalidate immediately and coalesce while the original context reply is pending', async () => {
@@ -300,24 +386,43 @@ test('a failed mutation is not retried by status, event, or view teardown', asyn
   assert.equal(h.unsubscribed(), true);
 });
 
-test('a status read started before a command failure cannot clear the newer uncertainty', async () => {
+for (const code of ['unknown', 'asset_deadline']) test(`a status read started before a command failure cannot clear the newer uncertainty (${code})`, async () => {
   const h = harness();
+  const terminal = (revision) => status(revision, code === 'asset_deadline' ? {
+    operation: operation({ phase: 'idle', reason: 'deadline', settlement: 'known', assessment: null, preview: null }),
+  } : {});
   try {
     await ready(h);
     h.controller.prepareScalar('google-wif', { ...fields });
     const oldRead = deferred(); h.api.assetStatus = () => oldRead.promise;
     const reading = h.controller.checkStatus(); await settle();
-    h.latest('prepare').reject({ code: 'unknown', message: 'inert-private-detail' }); await settle();
+    h.latest('prepare').reject({ code, message: 'inert-private-detail' }); await settle();
     assert.equal(h.controller.getSnapshot().observationFailed, true);
-    oldRead.resolve(status(2)); await reading;
+    assert.equal(JSON.stringify(h.controller.getSnapshot()).includes('inert-private-detail'), false);
+    // Native context can survive the known deadline. Neither its event nor the
+    // already-started read can erase the original Prepare reply's uncertainty.
+    h.emit(terminal(2));
+    assert.deepEqual(h.controller.getSnapshot().status.context, context);
     assert.equal(h.controller.getSnapshot().observationFailed, true);
     assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    oldRead.resolve(terminal(2)); await reading;
+    assert.equal(h.controller.getSnapshot().observationFailed, true);
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.getSnapshot().status.operation?.preview ?? null, null);
+    if (code === 'asset_deadline') assert.equal(h.controller.getSnapshot().status.operation.reason, 'deadline');
     assert.equal(h.controller.prepareScalar('google-wif', fields), false);
-    h.api.assetStatus = async () => status(3);
+    assert.equal(h.controller.confirmPreview(A, 'save'), false);
+    h.api.assetStatus = async () => terminal(3);
     await h.controller.checkStatus();
     assert.equal(h.controller.getSnapshot().observationFailed, false);
     assert.equal(h.controller.getSnapshot().contextCurrent, true);
+    assert.equal(h.controller.getSnapshot().error, null);
+    assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.getSnapshot().status.operation?.preview ?? null, null);
+    assert.equal(h.controller.confirmPreview(A, 'save'), false);
     assert.equal(h.calls.filter((call) => call.command === 'prepare').length, 1);
+    assert.equal(h.calls.filter((call) => call.command === 'commit' || call.command === 'bind').length, 0);
   } finally { h.controller.dispose(); }
 });
 
@@ -354,11 +459,13 @@ test('original file replacement survives view subscriptions and Keep binds only 
     const stopBeforeReply = h.controller.subscribe(() => {}); stopBeforeReply();
     assert.equal(assetIntentPending(h.controller.getSnapshot()), true);
     assert.deepEqual(h.controller.getSnapshot().intent, { kind: 'android-firebase', change: 'replace', record: { recordId: D, expectedRevision: 7 } });
+    assertPreparationPreservesOriginal(h);
     const pendingRecords = records.map((record) => record.recordId === D ? { ...record, availability: 'mutation-pending' } : record);
     h.latest('choose').resolve(status(2, { records: pendingRecords, operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) })); await settle();
     const unsubscribe = h.controller.subscribe(() => {}); unsubscribe();
     const intent = h.controller.getSnapshot().intent;
     assert.deepEqual(intent, { kind: 'android-firebase', change: 'replace', record: { recordId: D, expectedRevision: 7 } });
+    assertPreparationPreservesOriginal(h);
     assert.equal(h.controller.prepareSelection({}), true);
     assert.equal(h.controller.discard(), false); // Selected predecessor is not the new Prepare operation.
     assert.equal(h.controller.getSnapshot().originPending, true);
@@ -369,6 +476,7 @@ test('original file replacement survives view subscriptions and Keep binds only 
       preview: { token: B, action: 'save', expiresInMs: 9000, subject } }) })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true);
     assert.match(sessionTargetLabel(guide, subject, pendingRecords), /item 2 · revision 7/u);
+    assertPreparationPreservesOriginal(h);
     assert.equal(h.controller.confirmPreview(B, 'save'), true);
     const resulting = records.map((record) => record.recordId === D ? { ...record, revision: 8 } : record);
     h.latest('commit').resolve(status(4, { records: resulting, operation: operation({ operationId: 5, operation: 'commit', source: 'captured', assessment: firebaseAssessment(),

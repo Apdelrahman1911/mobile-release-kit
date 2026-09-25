@@ -89,6 +89,23 @@ from the retained original backups, not merely removing the changed file and rer
 maintainer help with a sanitized description, not private config/journal contents. Do not rerun
 apply until the conflict is resolved and recovery state is cleared safely.
 
+## Other desktop transaction namespaces are not init recovery
+
+The separate metadata-text profile uses `.mobile-release-metadata-text-prepare`,
+`.mobile-release-metadata-text` and `.mobile-release-metadata-text-cleanup`.
+The source-authored [saved-version VALUE profile](desktop-release-version-edit.md)
+uses `.mobile-release-version-prepare`, `.mobile-release-version` and
+`.mobile-release-version-cleanup`. Configuration/init vocabulary now appends
+ignore rules for all of them, but the legacy init `STATE_NAMES` and recovery
+ownership do not change. Their mere presence, including incomplete/headerless
+state, makes foreign owners refuse rather than clean it up.
+
+These directories are private original transaction evidence, not disposable
+cache. Never commit, upload or blindly delete them. Desktop version recovery
+and its native writer qualification remain closed. `init --recover` is not a
+fallback for version or metadata state; preserve the original operation and
+obtain separately authorized, domain-specific recovery assistance.
+
 ## Supported environment and bounds
 
 Mutation/recovery requires local Linux or macOS filesystems honoring directory `flock`, directory

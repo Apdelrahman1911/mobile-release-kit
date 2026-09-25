@@ -15,17 +15,46 @@ than duplicating it in JavaScript or Rust. The CLI remains supported.
 
 The production distribution must include its Python engine and non-SDK helpers.
 An absent or invalid bundled runtime is an error, not permission to use an
-arbitrary system Python. **Production engine launch is currently gated off even
-if a manifest is supplied:** manifest hashing alone does not hold filesystem
-custody through later executable/import opens. The reviewed native bundle
-admission implementation and its platform evidence are still required. The
-foundation's engine integration is available only to an explicit trusted
-development build. Android still needs a compatible JDK/Android SDK and
+arbitrary system Python. The general bundled-runtime resolver remains closed:
+manifest hashing alone does not hold filesystem custody through later opens.
+There is now a separate, fixed Linux installed-runtime path for the normal
+shell, with per-request original custody and finality. Its current scope is
+capabilities/help, native project selection, a static project snapshot, and
+in-memory configuration suggestion, validation and redacted review, plus
+draft-based Environment prerequisites and read-only GitHub workflow proposals,
+saved release-version reads, public locale-text observation/validation, and a
+separate candidate-document inspector.
+Prerequisites do not inspect tools; proposals do not read or write repository
+files, verify remote refs or contact GitHub. The installed-shell and
+project/draft/guidance native checks are still pending; this is not general Linux
+or production qualification. A separate configuration-only installed Save route
+now uses the existing edit owner, full two-file review, explicit confirmation and
+original runtime settlement. Its installed native check is also pending.
+A separately sealed workflow profile now connects the existing GitHub review
+and confirmation UI to that same installed edit owner. It can create absent
+callers or preserve exact originals, never save the configuration draft. This
+is **prepared source, not installed workflow qualification**; the installed
+check and independent original-finality review are still required.
+A third sealed profile connects public locale-text Review/Save to the same
+installed owner. It requires the registered project root, a complete file
+preview, acknowledgment and typed `SAVE`; it never saves the configuration
+draft. Its new sixth installed `metadata-save` case and independent integration
+verification are still pending. This is prepared implementation, not a native
+or production-readiness claim.
+Credentials, tools, network and Store actions remain unavailable on that path. Trusted development builds
+remain a separate explicit mode, never a fallback. Android still needs a compatible JDK/Android SDK and
 project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
 protected hosted macOS runner. The desktop does not make these SDK requirements
 disappear. No complete installer or clean-machine qualification is claimed here.
 
 ## Foundation capabilities
+
+This table describes implemented surfaces, not a grant to execute them. The
+installed path above admits its twelve passive core methods, separate
+project/evidence-folder pickers and separately sealed configuration/workflow/metadata edit profiles; the UI shows an explicit
+reason for unavailable actions.
+Choosing a project does not enable the credential/asset session. Draft changes
+stay in memory until a separately reviewed and confirmed native Save.
 
 | Surface | Foundation behavior | What this does not prove |
 | --- | --- | --- |
@@ -33,16 +62,17 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
 | Saved release version | Explicit Dashboard read of the saved configuration's version file, using the same parser and version/build policy as core builds | A version from an unsaved draft, Git commit proof, artifact comparison, full preflight or release readiness |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
-| Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
+| Configuration save implementation (installed verification pending) | Existing separate native owner, fixed Linux installed profile, exact two-file preview/apply contract, guided confirmation and original-outcome handling | General packaged/native qualification, project initialization, workflow or metadata Save, or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
+| Local workflow Apply implementation (installed verification pending) | Existing four-caller review, complete text, separate confirmation and one-use Apply through the original shared edit owner; create absent or preserve exact bytes | Configuration Save, overwrite/pin upgrades, remote setup, Mac/Windows workflow writes, or completed installed qualification |
 | Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
-| Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
+| Public locale text save implementation (installed verification pending) | Separate fixed Linux metadata profile, complete one-locale file review and original one-use typed Save; close retains the draft | Completed installed qualification, Mac/Windows writes, screenshot editing, locale deletion or packaged-runtime readiness |
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment requirements | Current-draft prerequisites, fixed baseline guidance and missing-feature explanations | Observing installed tools, running doctor or native admission |
 | Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
 | Saved Android offline checks implementation (disabled) | Saved-input consent, the existing shared offline core policy and original cancellation/finality ownership; core builds disabled | Enabled execution, a sandbox, no-network/no-write behavior, native/runtime qualification or release readiness |
 | Saved Android build implementation (disabled) | Guided saved-input review, one explicit app/variant, build progress/cancellation and captured AAB observations through the existing core | Enabled execution, fresh-source provenance, verified signing, a release candidate, qualified tools or Store approval |
-| Candidate evidence inspector (disabled) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
+| Candidate evidence inspector (installed verification pending) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
 | Credentials, releases, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use the portable passive services. Its original-parent static reader
@@ -147,17 +177,18 @@ provenance and artifact bytes unverified.”** Choosing evidence never replaces 
 source project, discards a draft or changes GitHub context. The separate original
 operation ID permits exact cancellation and status recovery after a lost reply;
 “Stopping” is not proof of settlement, and cleanup-unknown remains blocking.
-Earlier observations are shown only as stale. Inspection is currently
-qualification-gated and Linux-only; preview builds and older native fixtures
-cannot run it. macOS/Windows evidence adapters and production runtime admission
-remain outstanding.
+Earlier observations are shown only as stale. The inspector now has a separate
+fixed installed Linux profile, without granting private-asset authority. Its
+installed native verification is pending; preview/development builds and older
+native fixtures cannot run it. macOS/Windows evidence adapters and general
+production runtime admission remain outstanding.
 
 Typed saving does **not** expand this passive method list. Configuration's separate
 finite owner and core transaction contract are documented in
 [configuration editing](desktop-configuration-edit.md) and the
 [Rust bridge contract](../desktop/src-tauri/runtime-contract.md#separately-gated-finite-configuration-edit).
-The new guided Save flow remains unavailable until native and runtime
-qualification gates are satisfied. Preparing an unchanged configuration can
+The guided Save flow is available only through its narrow profile and original
+native admission; installed verification is not yet complete. Preparing an unchanged configuration can
 still require an explicit ignore-file update; only a native reviewed plan can
 declare a complete no-op. Known committed files, cleanup status and recovery
 requirements are shown separately, never collapsed into a generic “Saved.”
@@ -170,6 +201,20 @@ walking them. It uses anchored no-follow descriptor reads with traversal/read
 budgets and explicit partial/error results. It does not infer an enclosing
 repository above the selected directory or read arbitrary file contents for the
 renderer.
+
+### Edit or create saved version values (separately gated)
+
+Dashboard has an app-managed **Open → edit name/build strings → review complete
+original/after bytes → confirm Save** implementation, with explicit **Create
+version file** only for a source observed absent. It does not apply unsaved
+Settings, rewrite unrelated bytes or perform an automatic version bump. This
+new writer's independent gate is false and its installed source binding is None;
+no native/platform/recovery/shipping qualification is claimed. Browser preview
+never fabricates a load or Save. A new source-bound runtime and distinct Linux
+original-owner verification are required, not another edit domain's old payload.
+See [saved-version VALUE editing](desktop-release-version-edit.md) for the
+ordinary UI flow, ten-rule ignore prerequisite, lifecycle and uncertainty rules.
+The existing Read action below stays a separate, unchanged read-only service.
 
 ### Read the saved release version
 
@@ -205,8 +250,8 @@ observation; they are not file custody, build consent or release-readiness evide
 This read does not match a build Prepare snapshot or implement a build Start
 recheck. Retry is explicit, and retiring a UI result does not cancel or
 claim settlement of its native owner. Browser preview never fabricates a read.
-Installed/production runtime execution remains disabled even with a valid
-manifest, and Windows observation remains unavailable. The card reports real
+This saved-version method is included in the installed twelve-method passive
+profile, with installed native verification pending. Windows observation remains unavailable. The card reports real
 runtime/platform unavailability rather than using ambient Python.
 
 This is build-input preparation, **not offline preflight**. Even core preflight
@@ -551,12 +596,13 @@ standalone distribution**:
 - `prepare_runtime.py` includes both the passive and configuration bootstraps
   plus the core ZIP in the complete inventory. Preparing these files does not
   authorize either entry point to run.
-- The Linux installed-runtime inspection module has a deliberately narrow
-  first scope: Ubuntu 24.04 x86_64 GNU, GA Linux 6.8, and a single original local
-  ext4/XFS root mount with protected immutable installation names. It retains
-  original descriptor custody, refuses unknown namespace/mount/permission
-  observations, and records explicit close results. It is **not connected to
-  engine launch** and cannot manufacture an executable qualified runtime.
+- The Linux installed-runtime inspection module retains original descriptor
+  custody, refuses unknown namespace/mount/permission observations and records
+  consuming close results. Separate fixed installed-A selectors connect the
+  twelve-method passive profile and configuration edit owner on the exact
+  reviewed Linux x86_64 GNU host profile (including its pinned kernel). This is
+  not general Ubuntu/Linux qualification or permission to use an arbitrary
+  manifest, host or engine; installed shell/Save verification remains pending.
 
 Supply provenance, accepted redistribution notices, real native custody,
 loader/import behavior, installer publication and clean-install checks remain
@@ -573,6 +619,26 @@ preview is an explicit `VITE_MRK_BROWSER_PREVIEW=1` development build, prominent
 labelled with inert example data. A bridge error must never activate preview.
 
 ## Verification and resource rules
+
+The prepared installed workflow route is limited to the normal
+`desktop-shell` profile on Linux x86_64 GNU, with the existing A runtime and
+exact Ubuntu/platform/custody checks, including kernel `6.17.0-1022-azure`.
+It does not enable a global edit flag or a development/publisher fallback.
+The existing installed-shell observer has a separate fifth `workflow-apply`
+case: mixed preserve/create, a changed-pin conflict without a token, explicit
+unchanged confirmation, and native Quit with a pending review. Its original
+45-second, 128-evaluation and 2048-byte receipt limits remain unchanged.
+Source, compilation or prior headless checks do not establish that this path
+works in an installed window. The full Desktop remains incomplete.
+
+The separate sixth `metadata-save` case uses the actual editor and two explicit
+Reviews: close the first without applying, retain the text, then reopen and
+acknowledge/type `SAVE` for one Apply. It requires genuine original session,
+plan, revision, runtime/child/stream finality and fresh Load correspondence.
+Independent post-exit inventories require one replacement, one new text file,
+and preservation of the title, unrelated sentinel, configuration and inputs.
+The same 45-second/128-evaluation/2048-byte receipt limits apply. This case is
+source-authored and awaiting installed verification; no Store is contacted.
 
 Read [repository verification](verification.md) first. The historical native/
 process suites and CI controller must not run on a shared VPS. Desktop filenames

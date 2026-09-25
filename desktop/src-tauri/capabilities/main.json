@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries, finite configuration, local workflow or selected public metadata-text editing, saved offline-check and Android-build consent/status/cancellation, and closed session-only credential commands with native owner qualification. Offline checks disable core builds; saved Android builds remain unavailable without qualified native runtime and tool custody. Both can execute trusted saved project code. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
+  "description": "Fixed passive queries, finite configuration, local workflow or selected public metadata-text or saved-version value editing, saved offline-check and Android-build consent/status/cancellation, and closed session-only credential commands with native owner qualification. Offline checks disable core builds; saved Android builds remain unavailable without qualified native runtime and tool custody. Both can execute trusted saved project code. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
   "windows": ["main"],
   "local": true,
   "permissions": [
-    "allow-app-info", "allow-choose-project", "allow-project-snapshot", "allow-catalog",
+    "allow-app-info", "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
     "allow-environment-requirements", "allow-release-version-observe",
     "allow-artifact-evidence-choose", "allow-artifact-evidence-status", "allow-artifact-evidence-observe", "allow-artifact-evidence-cancel",
     "allow-start-environment-diagnostics", "allow-environment-diagnostics-status", "allow-cancel-environment-diagnostics",
@@ -18,6 +18,8 @@
     "allow-github-workflow-edit-close", "allow-github-workflow-edit-status",
     "allow-metadata-text-observe", "allow-metadata-text-validate", "allow-metadata-text-edit-open", "allow-metadata-text-edit-prepare",
     "allow-metadata-text-edit-apply", "allow-metadata-text-edit-close", "allow-metadata-text-edit-status",
+    "allow-release-version-edit-open", "allow-release-version-edit-prepare", "allow-release-version-edit-apply",
+    "allow-release-version-edit-close", "allow-release-version-edit-status",
     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
     "allow-vault-status", "allow-vault-open", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",

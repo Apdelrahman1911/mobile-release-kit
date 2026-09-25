@@ -19,15 +19,18 @@ import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConne
 import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
+import { VERSION_EDIT_EVENT, parseVersionEditGuide, parseVersionEditStatus, versionEditError, versionEditRequestFits } from './releaseVersionEdit.ts';
+import type { VersionEditCommand, VersionEditStatus } from './releaseVersionEdit.ts';
 import { OFFLINE_PREFLIGHT_EVENT, encodeOfflinePreflightRequest, offlinePreflightError, parseOfflinePreflightStatus } from './offlinePreflightProtocol.ts';
 import type { OfflinePreflightCommand } from './offlinePreflightProtocol.ts';
 import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
 import { ANDROID_BUILD_EVENT, encodeAndroidBuildRequest, androidBuildError, parseAndroidBuildStatus } from './androidBuildProtocol.ts';
 import type { AndroidBuildCommand } from './androidBuildProtocol.ts';
 import type { AndroidBuildStatus } from './androidBuildTypes.ts';
+import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -130,6 +133,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       return structuredClone(result);
     } catch (error) { throw metadataTextError(error); }
   };
+  const versionCall = async (command: VersionEditCommand, args: unknown): Promise<VersionEditStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'VersionEditUnavailable' };
+      if (!versionEditRequestFits(command, args)) throw { code: 'VersionEditInvalid' };
+      const status = parseVersionEditStatus(await invoke<unknown>(command, structuredClone(args) as Record<string, unknown>));
+      if (!status) throw { code: 'VersionEditStatusInvalid' };
+      return status;
+    } catch (error) { throw versionEditError(error); }
+  };
   const connectionCall = (command: 'github_connection_status' | 'github_connection_connect_token' | 'github_connection_refresh' | 'github_connection_disconnect', args: Record<string, unknown>): Promise<GitHubConnectionStatus> => {
     // Deliberately not async and not the generic call/apiError route. Start one
     // invoke synchronously; its callbacks do not close over the token arguments.
@@ -145,6 +157,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     mode,
     appInfo: () => call<AppInfo>('app_info'),
     chooseProject: () => call<ProjectReference | null>('choose_project'),
+    chooseProjectPath: async (input) => {
+      try {
+        if (mode !== 'native') throw { code: 'project_path_unavailable' };
+        const request = parseProjectPathRequest(input);
+        if (!request) throw { code: 'project_path_invalid' };
+        // Exactly these two non-path arguments; no draft, root, title or filter.
+        const result = parseProjectPathSelection(await invoke<unknown>('choose_project_path', { projectId: request.projectId, field: request.field }), request);
+        if (result === undefined) throw projectPathError(null);
+        return result;
+      } catch (error) { throw projectPathError(error); }
+    },
     chooseEvidenceFolder: () => evidenceCall('artifact_evidence_choose', {}),
     evidenceStatus: () => evidenceCall('artifact_evidence_status', {}),
     observeEvidence: (selectionId) => evidenceCall('artifact_evidence_observe', { selectionId }),
@@ -168,7 +191,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       const githubSetup = parseCatalogGitHubSetup(result);
       if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
       return { ...result, githubSetup: structuredClone(githubSetup), credentialGuide: parseCatalogCredentialGuide(result),
-        githubConnection: parseGitHubConnectionHelp(result.githubConnection), metadataText: parseMetadataTextGuide(result.metadataText) };
+        githubConnection: parseGitHubConnectionHelp(result.githubConnection), metadataText: parseMetadataTextGuide(result.metadataText), releaseVersionEdit: parseVersionEditGuide(result.releaseVersionEdit) };
     },
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
@@ -249,6 +272,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired' };
         return await listen('github-workflow-edit-status', onStatus);
       } catch (error) { throw workflowEditError(error); }
+    },
+    openReleaseVersionEdit: (request) => versionCall('release_version_edit_open', request),
+    prepareReleaseVersionEdit: (request) => versionCall('release_version_edit_prepare', request),
+    applyReleaseVersionEdit: (sessionId, planToken) => versionCall('release_version_edit_apply', { sessionId, planToken }),
+    closeReleaseVersionEdit: (sessionId) => versionCall('release_version_edit_close', { sessionId }),
+    releaseVersionEditStatus: () => versionCall('release_version_edit_status', {}),
+    subscribeReleaseVersionEdit: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'VersionEditUnavailable' };
+        return await listen(VERSION_EDIT_EVENT, onStatus);
+      } catch (error) { throw versionEditError(error); }
     },
     observeMetadataText: (request) => metadataCall('metadata_text_observe', request, parseMetadataTextObservation),
     validateMetadataText: (request) => metadataCall('metadata_text_validate', request, parseMetadataTextValidation),

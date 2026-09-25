@@ -144,7 +144,8 @@ class GitHubSetupTests(unittest.TestCase):
 
     def test_catalog_has_closed_beginner_help_without_a_draft_or_proposal(self):
         with patch.object(setup, "propose_github_setup", side_effect=AssertionError("proposal not requested")):
-            result = execute("catalog", {})["githubSetup"]
+            catalog_result = execute("catalog", {})
+        result = catalog_result["githubSetup"]
         self.assertEqual(set(result), {"schemaVersion", "inputs", "guidance"})
         self.assertEqual([item["id"] for item in result["inputs"]], ["toolingRepository", "toolingSha", "suppliedSnapshot"])
         self.assertEqual([item["requiredness"] for item in result["inputs"]], ["required", "required", "optional"])
@@ -159,6 +160,28 @@ class GitHubSetupTests(unittest.TestCase):
         combined = json.dumps(result)
         for expected in ("not the application repository", "40", "not a snapshot read", "self-hosted", "secrets: inherit"):
             self.assertIn(expected, combined)
+        credential_help = {item["name"]: item for item in catalog_result["credentials"]}
+        for name, field, source_advice in (
+            ("ANDROID_KEYSTORE_BASE64", "where", "Your existing upload-key keystore"),
+            ("ANDROID_KEYSTORE_PASSWORD", "format", "A nonempty private keystore password"),
+            ("ANDROID_GOOGLE_SERVICES_JSON_BASE64", "format",
+             "The original Firebase client JSON; later checks must bind its application identity."),
+        ):
+            item = credential_help[f"MOBILE_RELEASE_{name}"]
+            text = item[field]
+            self.assertEqual(item["requiredness"], "conditional")
+            self.assertLessEqual(len(text.encode()), 1024)
+            self.assertIn(source_advice, text)
+            self.assertIn("Credentials & Signing", text)
+            self.assertIn("when available", text)
+            self.assertNotIn("future", text)
+            self.assertNotIn("Import is not yet implemented", text)
+            self.assertIn("No values are collected, read or checked here.", item["failure"])
+        for name, field in (("ANDROID_KEYSTORE_BASE64", "where"), ("ANDROID_GOOGLE_SERVICES_JSON_BASE64", "format")):
+            self.assertIn("current availability and scope", credential_help[f"MOBILE_RELEASE_{name}"][field])
+        password_help = credential_help["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"]["format"]
+        self.assertIn("private controls", password_help)
+        self.assertIn("Never enter it in this checklist, project configuration or command arguments", password_help)
         result["inputs"][0]["label"] = "mutated by caller"
         self.assertNotEqual(execute("catalog", {})["githubSetup"]["inputs"][0]["label"], "mutated by caller")
 

@@ -58,6 +58,9 @@ export function assetIntentPending(state: AssetDisplayState): boolean {
 }
 
 export function assetCancellationReason(state: AssetDisplayState): string | null {
+  const operation = state.status?.operation;
+  if (operation?.operation === 'choose-project-path' && !(operation.phase === 'idle' && operation.settlement === 'known'))
+    return 'This is a project-path selection, not a credential operation. Cancel belongs to its original native picker; credential discard cannot cancel it.';
   if (state.originPending) return 'The new action has not supplied a usable acknowledgement of its original operation. Wait for its reply or check status; no cancellation has been sent for it. Cancelling the previous step would not cancel this action.';
   if (cancellationPending(state)) return 'Cancellation has already been requested for the original operation. Wait for its cleanup status.';
   return null;
@@ -365,7 +368,7 @@ export class AssetSessionController {
   discard(): boolean {
     const operation = this.state.status?.operation;
     if (!this.api || this.state.mode !== 'native' || !operation || (operation.phase === 'idle' && operation.settlement === 'known') || this.cancelling === operation.operationId || this.disposed) return false;
-    if (operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
+    if (operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
     // Each explicit phase has a fresh native ID. A prior selected/preview
     // status cannot identify a new in-flight operation, even if an event has
     // overtaken its originating acknowledgement. Never fake accepting Cancel.
@@ -377,7 +380,7 @@ export class AssetSessionController {
     return true;
   }
   lock(): boolean {
-    if (!this.api || this.state.mode !== 'native' || this.state.busy || this.disposed || this.state.status?.mode !== 'session') return false;
+    if (!this.api || this.state.mode !== 'native' || this.state.busy || this.disposed || this.state.status?.mode !== 'session' || this.state.status.operation?.operation === 'choose-project-path' && !this.idle()) return false;
     this.contextAcknowledged = null;
     this.intentPhase = null;
     this.update({ contextCurrent: false, reviewReady: false, originPending: false, intent: null, selectionKind: null, previewDeadline: null });

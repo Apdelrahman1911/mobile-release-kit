@@ -8,8 +8,10 @@ fn empty_state() -> DocumentState {
     DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
-        context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
-        quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+        session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
+        quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        first_origin: None }
 }
 fn section<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     text.split_once(start).unwrap().1.split_once(end).unwrap().0
@@ -56,7 +58,7 @@ fn an_empty_unqualified_android_owner_does_not_claim_resource_work() {
 #[test]
 fn android_commands_stay_raw_local_and_closed_without_generic_permissions() {
     let commands = section(include_str!("../build.rs"), "const COMMANDS: &[&str] = &[", "];");
-    let handlers = section(SHELL, ".invoke_handler(tauri::generate_handler![", "])");
+    let handlers = section(SHELL, "tauri::generate_handler![", "];");
     let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
     assert_eq!(capability["local"], true); assert_eq!(capability["windows"], serde_json::json!(["main"]));
     assert!(capability.get("remote").is_none());
@@ -155,8 +157,14 @@ fn android_retirement_never_hides_status_stop_or_lends_offline_fixture_authority
 #[test]
 fn android_relay_loss_and_both_quit_backends_keep_originals_in_finality() {
     let relay = section(SHELL, "fn start_relay(", "\nasync fn settle_relay(");
-    for before in ["document.android_build_subscribe()", "let mut android_build_guard = AndroidBuildRelayGuard"] {
-        assert!(relay.find(before).unwrap() < relay.find("tauri::async_runtime::spawn(").unwrap());
+    let spawn = relay.find("tauri::async_runtime::spawn(async move {").unwrap();
+    let enter = relay.find("enter.await").unwrap();
+    for before in ["document.android_build_subscribe()", "let preflight_guard = PreflightRelayGuard", "let android_build_guard = AndroidBuildRelayGuard"] {
+        assert!(relay.find(before).unwrap() < spawn);
+    }
+    for binding in ["let mut preflight_guard = preflight_guard;", "let mut android_build_guard = android_build_guard;"] {
+        let captured = relay.find(binding).unwrap();
+        assert!(spawn < captured && captured < enter);
     }
     assert!(section(SHELL, "impl Drop for AndroidBuildRelayGuard", "\nfn start_relay(").contains("self.document.android_build_relay_lost()"));
     for required in ["android_build_revision != Some(status.status_revision)", "crate::android_build_protocol::EVENT", "document.android_build_relay_lost()",

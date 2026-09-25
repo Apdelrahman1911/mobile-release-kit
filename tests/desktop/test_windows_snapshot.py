@@ -2358,6 +2358,7 @@ class WindowsSnapshotPureTests(unittest.TestCase):
                 posix = importlib.import_module("mobile_release.api._snapshot")
                 config = {"path": CONFIG, "state": "missing", "data": None, "issues": []}
                 with patch.object(posix, "posix_snapshot_available", return_value=True), \
+                     patch.object(posix, "windows_snapshot_available", return_value=False), \
                      patch.object(posix, "_root_handles", return_value=nullcontext(707)), \
                      patch.object(posix, "_config", return_value=config), \
                      patch.object(posix, "_walk", return_value=None):
@@ -2369,24 +2370,26 @@ class WindowsSnapshotPureTests(unittest.TestCase):
                         importlib.import_module(name)  # Negative controls cannot load a real DLL.
 
     def test_profile_dispatch_and_binding_failure_never_fallback(self):
-        self.assertIs(policy._WINDOWS_SNAPSHOT_QUALIFIED, False)
+        self.assertIs(policy._WINDOWS_SNAPSHOT_QUALIFIED, True)
         with patch.object(sys, "platform", "win32"), patch.object(os, "name", "nt"), \
              patch.object(os, "open", side_effect=AssertionError("fallback filesystem open")), \
-             patch.object(windows, "_new_native", side_effect=AssertionError("closed gate loaded native")):
+             patch.object(windows, "_new_native", side_effect=AssertionError("capability discovery loaded native")):
             self.assertFalse(policy.posix_snapshot_available())
-            self.assertFalse(policy.snapshot_available())
-            with self.assertRaises(ApiError) as caught:
-                policy.project_snapshot(r"C:\selected")
-            self.assertEqual(caught.exception.code, "platform_unavailable")
+            self.assertTrue(policy.snapshot_available())
             caps = api.capabilities()
-            self.assertFalse(next(item for item in caps["methods"] if item["method"] == "project.snapshot")["available"])
+            self.assertTrue(next(item for item in caps["methods"] if item["method"] == "project.snapshot")["available"])
             self.assertTrue(all(not item["available"] for item in caps["actions"]))
             marker = {"inert-admitted-route": True}
-            with patch.object(policy, "_WINDOWS_SNAPSHOT_QUALIFIED", True), \
-                 patch.object(windows, "project_snapshot", return_value=marker) as route:
+            with patch.object(windows, "project_snapshot", return_value=marker) as route:
                 self.assertTrue(policy.snapshot_available())
                 self.assertIs(policy.project_snapshot(r"C:\selected", CONFIG), marker)
                 route.assert_called_once_with(r"C:\selected", CONFIG)
+            with patch.object(policy, "_WINDOWS_SNAPSHOT_QUALIFIED", False):
+                self.assertFalse(policy.snapshot_available())
+                with self.assertRaises(ApiError) as caught:
+                    policy.project_snapshot(r"C:\selected")
+                self.assertEqual(caught.exception.code, "platform_unavailable")
+                self.assertFalse(next(item for item in api.capabilities()["methods"] if item["method"] == "project.snapshot")["available"])
         with patch.object(native, "_load_bindings", side_effect=native.NativeUnavailable("pre-call refusal")), \
              patch.object(os, "open", side_effect=AssertionError("binding fallback")):
             with self.assertRaises(ApiError) as caught:

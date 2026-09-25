@@ -14,7 +14,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL,
-                                     METADATA_PROTOCOL, REQUEST_LIMIT, parse_request)
+                                     METADATA_PROTOCOL, VERSION_PROTOCOL, VERSION_REQUEST_LIMIT, REQUEST_LIMIT, parse_request)
 
 if TYPE_CHECKING:
     from .cancellation import DefaultCancellation
@@ -22,9 +22,10 @@ if TYPE_CHECKING:
 
 class EditInput:
     def __init__(self, started: float, *, protocol: str = PROTOCOL) -> None:
-        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
+        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
             raise ProtocolError("Invalid fixed edit domain")
         self.protocol = protocol
+        self.request_limit = VERSION_REQUEST_LIMIT if protocol == VERSION_PROTOCOL else REQUEST_LIMIT
         self.pid = os.getpid()
         self.thread = threading.current_thread()
         self.started = started
@@ -99,7 +100,7 @@ class EditInput:
                 self.custody_unknown = True
                 guard._abort(ProtocolError("Original edit input custody changed"))
                 raise ProtocolError("Original edit input changed")
-            limit = 1 if self.active else min(64 * 1024, REQUEST_LIMIT + 1 - len(self.buffer))
+            limit = 1 if self.active else min(64 * 1024, self.request_limit + 1 - len(self.buffer))
             if limit <= 0:
                 raise ProtocolError("Edit input exceeded its bound")
             try:
@@ -112,7 +113,7 @@ class EditInput:
             self.buffer.extend(chunk)
             if self.active_end is None:
                 self.active_end = now + 30.0  # A partial request cannot hold review open.
-            if len(self.buffer) > REQUEST_LIMIT:
+            if len(self.buffer) > self.request_limit:
                 self._stop()
         except BaseException:
             # Read errors and identity uncertainty are STOP, never EOF/finality.

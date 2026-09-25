@@ -1,0 +1,28 @@
+#!/bin/sh
+# Standard Installer invokes this root script after unpacking Scripts, not a
+# destination payload. No executable selection, PATH lookup or Python as root.
+set -eu
+umask 077
+printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=entry' >&2
+if [ "${3:-}" != / ]; then
+    printf '%s\n' 'MRK_MACOS_POSTINSTALL_REFUSED=target' >&2
+    exit 1
+fi
+printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=target-ok' >&2
+case "$0" in
+    ./postinstall)
+        scripts=.
+        printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=relative-entry' >&2 ;;
+    /*/postinstall)
+        scripts=${0%/*}
+        printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=absolute-entry' >&2 ;;
+    *)
+        printf '%s\n' 'MRK_MACOS_POSTINSTALL_REFUSED=entry' >&2
+        exit 1 ;;
+esac
+if ! cd -P "$scripts" 2>/dev/null; then
+    printf '%s\n' 'MRK_MACOS_POSTINSTALL_REFUSED=cwd' >&2
+    exit 1
+fi
+printf '%s\n' 'MRK_MACOS_POSTINSTALL_PHASE=cwd-ok' 'MRK_MACOS_POSTINSTALL_PHASE=pre-exec' >&2
+exec ./mrk-macos-install "$PWD/input"

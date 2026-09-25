@@ -76,23 +76,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 1
-      - name: Observe only the hosted Python body as public DATA
-        timeout-minutes: 1
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
-        run: |
-          set -euo pipefail
-          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent \
-            GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
-            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" GITHUB_JOB="$GITHUB_JOB" \
-            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_SHA="$GITHUB_SHA" \
-            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
-            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
-            MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" \
-            ImageOS="$ImageOS" ImageVersion="$ImageVersion" /usr/bin/python3.12 -I -S -B desktop/tools/observe_hosted_python.py
       - name: Prepare one bounded package lifecycle check
         id: prepare
         shell: bash
@@ -107,8 +90,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: '35507734308'
-          artifact-ids: '10604226841'
+          run-id: '36074195702'
+          artifact-ids: '10839621457'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
@@ -123,7 +106,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Independently reviewed entry bytes; verified before root imports.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '57786e9c4e49b7f56f762848832f1e62f0d2ca1b78fd359239d8bfd5aed1ed10'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '4e52df3b08618bef143ead1de40bb03d2d251d941e662a66e27087d264992af8'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

@@ -105,6 +105,9 @@ export class OfflinePreflightController {
     if (!this.disposed && (projectId === this.state.project?.projectId || projectId === this.attempt?.binding.context.projectId))
       this.retire(this.advance('contextGeneration'));
   }
+  // Version Save intents and every outcome retire prior saved-input consent,
+  // including unchanged/refused saves that do not change config generations.
+  versionIntent(): void { if (!this.disposed) this.retire(this.advance('contextGeneration')); }
   setSelectionPending(selectionPending: boolean): void {
     if (!this.disposed && selectionPending !== this.state.selectionPending) this.retire({ ...this.advance('selectionGeneration'), selectionPending });
   }
