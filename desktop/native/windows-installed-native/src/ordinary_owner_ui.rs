@@ -852,6 +852,7 @@ smoke_labels!(SmokeCheck {
     AdjacentAcquireState => "adjacent-element-acquire-state", FirstChild => "first-child-element",
     NextSibling => "next-sibling-element", NameOutputState => "name-output-state",
     NameContradiction => "name-contradictory-output", CurrentName => "current-name",
+    DashboardNameState => "dashboard-name-state",
     NameLength => "name-length", NameEncoding => "name-encoding",
     RuntimeIdOutputState => "runtime-id-output-state", RuntimeIdContradiction => "runtime-id-contradictory-output",
     RuntimeId => "runtime-id", RuntimeIdPresent => "runtime-id-present",
@@ -887,8 +888,21 @@ smoke_labels!(SmokeCheck {
     AccountRetirement => "account-retirement",
 });
 smoke_labels!(DashboardStage { Bind => "bind", Walk => "walk", Names => "names", NamesEnded => "names-ended" });
-smoke_labels!(DashboardScanEnd { Loading => "loading", Exhausted => "exhausted" });
-smoke_labels!(DashboardScanHistory { None => "none", LoadingOnly => "loading-only", ExhaustedSeen => "exhausted-seen" });
+smoke_labels!(DashboardScanEnd { Loading => "loading", Stale => "stale", Exhausted => "exhausted" });
+smoke_labels!(DashboardScanHistory { None => "none", LoadingOnly => "loading-only", StaleSeen => "stale-seen", ExhaustedSeen => "exhausted-seen" });
+#[derive(Debug, Eq, PartialEq)]
+enum DashboardNameRead { Text(String), Invalidated }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DashboardPass { found: [bool; 5], end: Option<DashboardScanEnd> }
+impl DashboardPass {
+    fn new() -> Self { Self { found: [false; 5], end: None } }
+    fn finish(&mut self, end: DashboardScanEnd) {
+        if self.end.is_some() { return; }
+        self.end = Some(end);
+        if end != DashboardScanEnd::Exhausted { self.found = [false; 5]; }
+    }
+    fn ready(&self) -> bool { self.end == Some(DashboardScanEnd::Exhausted) && self.found == [true; 5] }
+}
 // Ended scans are not continuous UI state. Masks are observed prefixes;
 // an unset button bit does not distinguish absence from a disabled button.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -946,14 +960,16 @@ impl DashboardProgress {
             | ((found[3] as u8) << 3) | ((found[4] as u8) << 4));
     }
     fn end_names(&mut self, end: DashboardScanEnd) {
-        // A loading break already ended this scan before its found reset; the
+        // A loading/stale break already ended this scan before its found reset; the
         // after-loop exhaustion observation must not replace that original end.
         if self.stage != DashboardStage::Names { return; }
         let (Some(match_mask), Some(walk_visited), Some(names)) =
             (self.current_match_mask, self.current_walk_visited, self.current_names) else { return; };
         self.stage = DashboardStage::NamesEnded; self.last_scan = Some(DashboardScan { match_mask, end, walk_visited, names });
         if end == DashboardScanEnd::Exhausted { self.scan_history = DashboardScanHistory::ExhaustedSeen; }
-        else if self.scan_history == DashboardScanHistory::None { self.scan_history = DashboardScanHistory::LoadingOnly; }
+        else if end == DashboardScanEnd::Stale && self.scan_history != DashboardScanHistory::ExhaustedSeen {
+            self.scan_history = DashboardScanHistory::StaleSeen;
+        } else if self.scan_history == DashboardScanHistory::None { self.scan_history = DashboardScanHistory::LoadingOnly; }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1429,7 +1445,7 @@ impl Smoke {
         let (pointer, table) = self.client()?;
         let status = unsafe { (table.base__.ElementFromHandle)(pointer, HWND(hwnd), output) }.0;
         // This is only the first read-only main binding, not a generic UIA
-        // retry policy. Dialog/property/walk/Invoke failures remain terminal.
+        // retry policy. Other property/dialog/walk/Invoke failures remain terminal.
         self.complete_initial_main(index, status, || clock.effect())
     }
     fn adjacent(&mut self, element: usize, child: bool, clock: &mut Clock) -> Result<Option<usize>> {
@@ -1442,11 +1458,13 @@ impl Smoke {
         Ok(self.acquire_return(index, status, true, clock,
             if child { SmokeCheck::FirstChild } else { SmokeCheck::NextSibling })?.then_some(index))
     }
-    fn name(&mut self, element: usize, clock: &mut Clock) -> Result<String> {
+    fn query_name(&mut self, element: usize, clock: &mut Clock) -> Result<i32> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
         self.trace.need(SmokeCheck::NameOutputState, self.query.bstr.is_null())?; self.query.begin(clock, &self.trace)?;
-        let status = unsafe { (table.CurrentName)(pointer, &mut self.query.bstr) }.0;
+        Ok(unsafe { (table.CurrentName)(pointer, &mut self.query.bstr) }.0)
+    }
+    fn finish_name(&mut self, status: i32, clock: &mut Clock) -> Result<String> {
         if status != 0 && !self.query.bstr.is_null() {
             self.query.unknown = true;
             return self.trace.result(SmokeCheck::NameContradiction, Err(Error::Unknown), Some(SmokeStatus::Hresult(status)));
@@ -1461,6 +1479,57 @@ impl Smoke {
         // query settlement and clock checks. Neither may replace its first fault.
         let text = self.trace.result(SmokeCheck::NameEncoding, text, None);
         self.query.settle(&self.trace)?; self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; text
+    }
+    fn name(&mut self, element: usize, clock: &mut Clock) -> Result<String> {
+        let status = self.query_name(element, clock)?; self.finish_name(status, clock)
+    }
+    fn dashboard_name_admitted(&self, element: usize, keep: usize) -> bool {
+        let (Some((hwnd, main, id)), Some(client), Some(walker)) =
+            (self.main.as_ref(), self.client, self.walker) else { return false; };
+        self.trace.phase.get() == SmokePhase::Dashboard
+            && self.trace.dashboard.get().is_some_and(|progress| progress.stage == DashboardStage::Names)
+            && !hwnd.is_null() && !id.is_empty() && *main < keep && client < keep && walker < keep
+            && client != walker && client != *main && walker != *main
+            && self.initialized && !self.uninit_entered && !self.uninit_returned
+            && self.trace.first.get().is_none() && !self.unknown && !self.settled && !self.windows.active
+            && !self.dashboard_ready && !self.quit_confirmed && !self.windows.post_entered && !self.invoke_entered
+            // This sole caller's cutoff retains exactly the acquired client,
+            // walker and adopted main. A phase/history alone is not a lease.
+            && self.originals.get(..keep).is_some_and(|prefix| prefix.iter().enumerate().all(|(index, original)| {
+                let kind = if index == client { Some(ComKind::Client) } else if index == walker { Some(ComKind::Walker) }
+                    else if index == *main { Some(ComKind::Element) } else { None };
+                kind == Some(original.kind) && original.state == SlotState::Owned && !original.active
+                    && !original.pointer.is_null() && original.status == 0
+            }))
+            && element >= keep && self.originals.get(element).is_some_and(|original|
+                original.kind == ComKind::Element && original.state == SlotState::Owned && !original.active
+                    && !original.pointer.is_null() && original.status == 0)
+    }
+    fn complete_dashboard_name_stale(&mut self, element: usize, keep: usize, status: i32,
+        after_return_clock: impl FnOnce() -> Result<()>) -> Result<bool> {
+        if status != A::UIA_E_ELEMENTNOTAVAILABLE as i32 || !self.dashboard_name_admitted(element, keep)
+            || !self.query.active || self.query.unknown || self.query.status != HRESULT_PENDING
+            || !self.query.bstr.is_null() || !self.query.array.is_null() {
+            return Ok(false); // All unrecognized results retain strict name completion.
+        }
+        self.query.status = status; self.query.active = false;
+        // A NULL output owns no string. Record whole-scan invalidation before
+        // the original post-call clock can freeze a first-fault snapshot.
+        self.trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Stale));
+        self.trace.result(SmokeCheck::Clock, after_return_clock(), None)?; Ok(true)
+    }
+    fn dashboard_name(&mut self, element: usize, keep: usize, clock: &mut Clock) -> Result<DashboardNameRead> {
+        // The adopted main is never eligible for the descendant exception.
+        if self.main.as_ref().is_some_and(|(_, main, _)| *main == element) {
+            return self.name(element, clock).map(DashboardNameRead::Text);
+        }
+        self.trace.need(SmokeCheck::DashboardNameState, self.dashboard_name_admitted(element, keep))?;
+        let status = self.query_name(element, clock)?;
+        if self.complete_dashboard_name_stale(element, keep, status, || clock.effect())? {
+            self.query.settle(&self.trace)?; Ok(DashboardNameRead::Invalidated)
+        } else {
+            self.finish_name(status, clock).map(DashboardNameRead::Text)
+        }
     }
     fn runtime_id(&mut self, element: usize, clock: &mut Clock) -> Result<Vec<i32>> {
         let pointer = self.pointer(element, ComKind::Element)?;
@@ -1630,18 +1699,21 @@ impl Smoke {
             self.bound(launch, clock)?; let keep = self.originals.len();
             let elements = self.walk(element, clock)?;
             self.trace.dashboard_update(DashboardProgress::walk_completed);
-            let mut found = [false; 5]; let expected_version = format!("DESKTOP {version}");
+            let mut pass = DashboardPass::new(); let expected_version = format!("DESKTOP {version}");
             self.trace.dashboard_update(DashboardProgress::begin_names);
             for index in elements {
-                let name = self.name(index, clock)?;
+                let name = match self.dashboard_name(index, keep, clock)? {
+                    DashboardNameRead::Text(name) => name,
+                    DashboardNameRead::Invalidated => { pass.finish(DashboardScanEnd::Stale); break; }
+                };
                 self.trace.dashboard_update(|progress| progress.name_returned(&name));
-                found[0] |= name == "Good releases start here.";
-                found[1] |= name == "Workspace navigation";
-                found[2] |= name == "Your next release, organized.";
-                found[3] |= name == expected_version;
-                self.trace.dashboard_update(|progress| progress.matches(found));
-                if name == "Choose a project" { found[4] |= self.enabled_button(index, clock)?; }
-                self.trace.dashboard_update(|progress| progress.matches(found));
+                pass.found[0] |= name == "Good releases start here.";
+                pass.found[1] |= name == "Workspace navigation";
+                pass.found[2] |= name == "Your next release, organized.";
+                pass.found[3] |= name == expected_version;
+                self.trace.dashboard_update(|progress| progress.matches(pass.found));
+                if name == "Choose a project" { pass.found[4] |= self.enabled_button(index, clock)?; }
+                self.trace.dashboard_update(|progress| progress.matches(pass.found));
                 let lower = name.to_ascii_lowercase();
                 let unavailable = [
                     ("the native service is unavailable", SmokeCheck::NativeServiceUnavailable),
@@ -1653,13 +1725,22 @@ impl Smoke {
                 if let Some(check) = unavailable { self.trace.need(check, false)?; }
                 if name.contains("Loading desktop capabilities and the core field catalogue") {
                     self.trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Loading));
-                    found = [false; 5]; break;
+                    pass.finish(DashboardScanEnd::Loading); break;
                 }
             }
             self.trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Exhausted));
+            pass.finish(DashboardScanEnd::Exhausted);
             self.release_suffix(keep)?;
-            if found == [true; 5] { self.dashboard_ready = true; break; }
+            if pass.ready() { self.dashboard_ready = true; break; }
+            let stale = pass.end == Some(DashboardScanEnd::Stale);
+            if stale {
+                // Retire the entire known suffix before reobserving the same
+                // original owner/root. The next pass repeats complete bound().
+                let same = self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd);
+                self.trace.need(SmokeCheck::RootContinuity, same)?;
+            }
             self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; std::thread::sleep(Duration::from_millis(100));
+            if stale { self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; }
         }
         self.trace.phase.set(SmokePhase::CloseRequest);
         self.bound(launch, clock)?;
@@ -2068,9 +2149,10 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
     let mut observation = trace.prerequisite_current(observation);
     if let Some(current) = account.as_mut() { current.zero(); }
     // Settle the actual original driver before any original process close.
-    // Only returned-NULL initial-main acquisition and the pre-action dashboard
-    // main-HWND scalar read may wait for readiness. Every other/later/effectful
-    // UIA timeout still fails even if a provider later acts.
+    // Only returned-NULL initial-main acquisition and the pre-action main-HWND
+    // scalar read may wait for readiness; a returned stale descendant name may
+    // invalidate one current pre-action scan. Other/later/effectful UIA failures
+    // remain terminal even if a provider later acts.
     let smoke_settled = smoke.as_mut().is_none_or(|value| value.settle().is_ok());
     if !smoke_settled || matches!(observation, Err(Error::Unknown)) {
         trace.prerequisite_fault(PrerequisiteCheck::L04, Error::Unknown, None, None);
@@ -3246,11 +3328,225 @@ mod contract_tests {
         assert!(bound.contains("self.trace.need(SmokeCheck::MainProcess, self.query.integer > 0 && self.query.integer as u32 == launch.outputs.dwProcessId)"));
         let observe = block(source, "    fn observe(&mut self, launch:", "    fn settle(&mut self)");
         assert!(observe.contains("self.bound(launch, clock)?; let keep = self.originals.len();"));
-        assert!(observe.contains("if found == [true; 5] { self.dashboard_ready = true; break; }"));
+        assert!(observe.contains("if pass.ready() { self.dashboard_ready = true; break; }"));
         assert!(observe.contains("self.trace.phase.set(SmokePhase::CloseRequest);\n        self.bound(launch, clock)?;"));
         let completion = block(source, "    fn complete_dashboard_handle_timeout(", "    fn main_native_handle(");
         for forbidden in ["self.main =", "self.dashboard_ready =", "self.quit_confirmed =", "self.windows.post_entered =", "self.invoke_entered ="] {
             assert!(!completion.contains(forbidden) && !main.contains(forbidden));
+        }
+    }
+
+    fn dashboard_stale_name_contract() {
+        // DATA only: none of these fake original pointers is queried,
+        // dereferenced or released. The production helpers own the policy.
+        fn fixture() -> Smoke {
+            let mut smoke = Smoke::new(); smoke.initialized = true;
+            for (index, kind) in [ComKind::Client, ComKind::Walker, ComKind::Element, ComKind::Element].into_iter().enumerate() {
+                let mut original = Box::new(ComOriginal::new(kind));
+                original.pointer = (index + 1) as *mut c_void; original.state = SlotState::Owned; original.status = 0;
+                smoke.originals.push(original);
+            }
+            smoke.client = Some(0); smoke.walker = Some(1); smoke.main = Some((5usize as F::HWND, 2, vec![42, 1]));
+            smoke.trace.phase.set(SmokePhase::Dashboard); smoke.trace.dashboard_begin_pass();
+            smoke.trace.dashboard_update(DashboardProgress::begin_walk);
+            smoke.trace.dashboard_update(|progress| progress.walk_visited(2));
+            smoke.trace.dashboard_update(DashboardProgress::walk_completed);
+            smoke.trace.dashboard_update(DashboardProgress::begin_names);
+            smoke.query.active = true; smoke
+        }
+        let stale = A::UIA_E_ELEMENTNOTAVAILABLE as i32;
+        assert_eq!(stale, 0x80040201u32 as i32);
+        let mut smoke = fixture(); let main = smoke.main.clone();
+        let originals: Vec<_> = smoke.originals.iter().map(|value| &**value as *const ComOriginal).collect();
+        smoke.trace.dashboard_update(|progress| {
+            progress.name_returned("Workspace navigation"); progress.matches([false, true, false, false, false]);
+        });
+        let calls = Cell::new(0);
+        assert_eq!(smoke.complete_dashboard_name_stale(3, 3, stale, || { calls.set(calls.get() + 1); Ok(()) }), Ok(true));
+        assert_eq!(calls.get(), 1); assert_eq!(smoke.query.status, stale);
+        assert!(!smoke.query.active && !smoke.query.unknown && smoke.query.bstr.is_null() && smoke.query.array.is_null());
+        let progress = smoke.trace.dashboard.get().unwrap();
+        assert_eq!(progress.stage, DashboardStage::NamesEnded);
+        assert_eq!(progress.last_scan.unwrap().end, DashboardScanEnd::Stale);
+        assert_eq!(progress.last_scan.unwrap().match_mask, 2); assert_eq!(progress.last_scan.unwrap().names.returned, 1);
+        assert_eq!(progress.scan_history, DashboardScanHistory::StaleSeen);
+        assert_eq!(smoke.main, main);
+        assert_eq!(smoke.originals.iter().map(|value| &**value as *const ComOriginal).collect::<Vec<_>>(), originals);
+        assert!(smoke.trace.first.get().is_none() && !smoke.dashboard_ready && !smoke.windows.post_entered
+            && !smoke.invoke_entered && !smoke.quit_confirmed && !smoke.passed());
+
+        for status in [0, 1, HRESULT_PENDING, A::UIA_E_TIMEOUT as i32, 0x80004005u32 as i32] {
+            let mut smoke = fixture(); let before = smoke.trace.dashboard.get(); let calls = Cell::new(0);
+            assert_eq!(smoke.complete_dashboard_name_stale(3, 3, status, || { calls.set(calls.get() + 1); Ok(()) }), Ok(false));
+            assert_eq!(calls.get(), 0); assert!(smoke.query.active); assert_eq!(smoke.query.status, HRESULT_PENDING);
+            assert_eq!(smoke.trace.dashboard.get(), before); assert!(smoke.trace.first.get().is_none() && !smoke.passed());
+        }
+        for denied in 0..44 {
+            let mut smoke = fixture(); let mut element = 3; let mut keep = 3;
+            match denied {
+                0 => smoke.trace.phase.set(SmokePhase::MainBinding),
+                1 => smoke.trace.phase.set(SmokePhase::QuitDialog),
+                2 => smoke.trace.phase.set(SmokePhase::QuitInvoke),
+                3 => smoke.dashboard_ready = true,
+                4 => smoke.windows.post_entered = true,
+                5 => smoke.invoke_entered = true,
+                6 => smoke.quit_confirmed = true,
+                7 => smoke.unknown = true,
+                8 => smoke.settled = true,
+                9 => { let _ = smoke.trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None); },
+                10 => smoke.originals[3].state = SlotState::Unknown,
+                11 => smoke.originals[3].active = true,
+                12 => smoke.originals[3].kind = ComKind::Walker,
+                13 => smoke.originals[3].pointer = null_mut(),
+                14 => smoke.main = None,
+                15 => element = 2, // Adopted main.
+                16 => element = 0, // Retained client, never a current descendant.
+                17 => element = 4,
+                18 => keep = 2, // Cannot retire the main.
+                19 => keep = 4, // Target outside this alleged fresh suffix.
+                20 => keep = usize::MAX,
+                21 => smoke.main.as_mut().unwrap().2.clear(),
+                22 => smoke.initialized = false,
+                23 => smoke.uninit_entered = true,
+                24 => smoke.uninit_returned = true,
+                25 => smoke.query.active = false,
+                26 => smoke.query.unknown = true,
+                27 => smoke.query.bstr = 1usize as *mut c_void,
+                28 => smoke.query.array = 1usize as *mut CO::SAFEARRAY,
+                29 => smoke.query.status = 0,
+                30 => smoke.trace.dashboard_begin_pass(),
+                31 => smoke.trace.dashboard.set(None),
+                32 => smoke.client = None,
+                33 => smoke.walker = None,
+                34 => smoke.client = Some(1),
+                35 => smoke.originals[0].state = SlotState::NoHandle,
+                36 => smoke.originals[1].active = true,
+                37 => smoke.originals[2].pointer = null_mut(),
+                38 => smoke.windows.active = true,
+                39 => smoke.originals[3].status = 1,
+                40 => smoke.originals[0].kind = ComKind::Element,
+                41 => smoke.originals[3].state = SlotState::Closed,
+                42 => smoke.originals[3].state = SlotState::NoHandle,
+                43 => {
+                    let mut extra = Box::new(ComOriginal::new(ComKind::Element));
+                    extra.pointer = 6usize as *mut c_void; extra.state = SlotState::Owned; extra.status = 0;
+                    smoke.originals.push(extra); keep = 4; element = 4; // Arbitrary extra retained prefix.
+                },
+                _ => unreachable!(),
+            }
+            let first = smoke.trace.first.get(); let progress = smoke.trace.dashboard.get();
+            let active = smoke.query.active; let status = smoke.query.status; let count = smoke.originals.len();
+            let calls = Cell::new(0);
+            assert_eq!(smoke.complete_dashboard_name_stale(element, keep, stale,
+                || { calls.set(calls.get() + 1); Ok(()) }), Ok(false));
+            assert_eq!(calls.get(), 0); assert_eq!(smoke.query.active, active); assert_eq!(smoke.query.status, status);
+            assert_eq!(smoke.trace.first.get(), first); assert_eq!(smoke.trace.dashboard.get(), progress);
+            assert_eq!(smoke.originals.len(), count); assert!(!smoke.passed());
+        }
+
+        // These are the same per-pass finish/ready methods used by observe,
+        // not a second readiness oracle. No stale prefix can survive a break.
+        for found in [[false, true, false, false, false], [true; 5]] {
+            let mut pass = DashboardPass::new(); pass.found = found; assert!(!pass.ready());
+            pass.finish(DashboardScanEnd::Stale); assert_eq!(pass.found, [false; 5]); assert!(!pass.ready());
+            pass.finish(DashboardScanEnd::Exhausted); assert_eq!(pass.end, Some(DashboardScanEnd::Stale));
+            assert!(!pass.ready());
+            let mut next = DashboardPass::new(); next.found = found.map(|value| !value);
+            next.finish(DashboardScanEnd::Exhausted); assert!(!next.ready());
+        }
+        let mut loading = DashboardPass::new(); loading.found = [true; 5];
+        loading.finish(DashboardScanEnd::Loading); loading.finish(DashboardScanEnd::Exhausted); assert!(!loading.ready());
+        let mut ready = DashboardPass::new(); ready.found = [true; 5]; assert!(!ready.ready());
+        ready.finish(DashboardScanEnd::Exhausted); assert!(ready.ready());
+
+        let mut history = DashboardProgress::new();
+        for (end, expected) in [
+            (DashboardScanEnd::Stale, DashboardScanHistory::StaleSeen),
+            (DashboardScanEnd::Loading, DashboardScanHistory::StaleSeen),
+            (DashboardScanEnd::Exhausted, DashboardScanHistory::ExhaustedSeen),
+            (DashboardScanEnd::Stale, DashboardScanHistory::ExhaustedSeen),
+        ] {
+            history.begin_pass(); history.begin_walk(); history.walk_visited(2); history.walk_completed(); history.begin_names();
+            history.end_names(end); let original = history;
+            history.end_names(DashboardScanEnd::Exhausted);
+            assert_eq!(history, original); assert_eq!(history.scan_history, expected);
+            assert_eq!(history.last_scan.unwrap().end, end);
+        }
+
+        // Actual retirement helper, but suffix slots are non-owning DATA.
+        // The retained fake owned prefix is never included or released.
+        let mut retirement = fixture(); retirement.query.active = false;
+        retirement.originals[3].state = SlotState::NoHandle; retirement.originals[3].pointer = null_mut();
+        retirement.originals.push(Box::new(ComOriginal::new(ComKind::Element)));
+        assert_eq!(retirement.release_suffix(3), Ok(())); assert_eq!(retirement.originals.len(), 3);
+        assert_eq!(retirement.main, Some((5usize as F::HWND, 2, vec![42, 1])));
+        let mut blocked = fixture(); blocked.query.active = false; blocked.originals[3].state = SlotState::Unknown;
+        assert_eq!(blocked.release_suffix(3), Err(Error::Unknown)); assert_eq!(blocked.originals.len(), 4);
+        assert_eq!(blocked.trace.first.get().unwrap().check, SmokeCheck::ComRelease); assert!(!blocked.passed());
+
+        let mut late = fixture(); let calls = Cell::new(0);
+        assert_eq!(late.complete_dashboard_name_stale(3, 3, stale,
+            || { calls.set(calls.get() + 1); Err(Error::Unsafe) }), Err(Error::Unsafe));
+        assert_eq!(calls.get(), 1); assert!(!late.query.active); assert_eq!(late.query.status, stale);
+        let first = late.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::Clock);
+        assert_eq!(first.dashboard.unwrap().last_scan.unwrap().end, DashboardScanEnd::Stale);
+        late.trace.phase.set(SmokePhase::DriverSettle);
+        let _ = late.trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None);
+        assert_eq!(late.trace.first.get(), Some(first));
+        let mut raw = [0u8; 1024]; let size = SmokeTrace::format(first, &mut raw).unwrap();
+        let text = std::str::from_utf8(&raw[..size]).unwrap();
+        assert!(text.contains("\"end\":\"stale\"") && text.contains("\"scanHistory\":\"stale-seen\""));
+        assert!(!late.passed());
+        for (remaining, expected) in [
+            (Ok(999), Err(Error::Unsafe)), (Ok(1000), Err(Error::Unsafe)),
+            (Err(Error::Unsafe), Err(Error::Unsafe)), (Ok(1001), Ok(())),
+        ] {
+            let mut smoke = fixture(); let calls = Cell::new(0);
+            assert_eq!(smoke.complete_dashboard_name_stale(3, 3, stale, || Ok(())), Ok(true));
+            assert_eq!(smoke.query.begin_with_remaining(|| { calls.set(calls.get() + 1); remaining }, &smoke.trace), expected);
+            assert_eq!(calls.get(), 1); assert_eq!(smoke.query.active, expected.is_ok());
+            assert_eq!(smoke.query.status, if expected.is_ok() { HRESULT_PENDING } else { stale });
+            assert!(!smoke.dashboard_ready && !smoke.passed());
+        }
+
+        // Bind the DATA cases to the real strict call, fresh current walk,
+        // invalidation break and exact suffix retirement before owner recheck.
+        // Provider success and actual COM release still need the native run.
+        let source = include_str!("ordinary_owner_ui.rs");
+        fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            source.split_once(start).unwrap().1.split_once(end).unwrap().0
+        }
+        let strict = block(source, "    fn name(&mut self, element:", "    fn dashboard_name_admitted(");
+        assert!(strict.contains("let status = self.query_name(element, clock)?; self.finish_name(status, clock)"));
+        let query = block(source, "    fn query_name(", "    fn finish_name(");
+        assert_eq!(query.matches("(table.CurrentName)").count(), 1);
+        assert!(query.contains("self.query.begin(clock, &self.trace)?;"));
+        let finish = block(source, "    fn finish_name(", "    fn name(&mut self, element:");
+        assert!(finish.contains("if status != 0 && !self.query.bstr.is_null()"));
+        assert!(finish.contains("self.query.returned(status, clock, &self.trace, SmokeCheck::CurrentName)?;"));
+        assert!(finish.contains("length <= 1024") && finish.contains("String::from_utf16"));
+        assert!(finish.contains("self.query.settle(&self.trace)?; self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; text"));
+        let wrapper = block(source, "    fn dashboard_name(&mut self,", "    fn runtime_id(");
+        assert!(wrapper.contains("return self.name(element, clock).map(DashboardNameRead::Text);"));
+        assert!(wrapper.contains("self.trace.need(SmokeCheck::DashboardNameState, self.dashboard_name_admitted(element, keep))?;"));
+        assert!(wrapper.contains("self.finish_name(status, clock).map(DashboardNameRead::Text)"));
+        assert!(wrapper.contains("self.query.settle(&self.trace)?; Ok(DashboardNameRead::Invalidated)"));
+        let observe = block(source, "    fn observe(&mut self, launch:", "    fn settle(&mut self)");
+        assert_eq!(observe.matches("self.dashboard_name(index, keep, clock)?").count(), 1);
+        let dashboard = block(observe, "        self.trace.phase.set(SmokePhase::Dashboard);",
+            "        self.trace.phase.set(SmokePhase::CloseRequest);");
+        assert!(dashboard.contains("self.bound(launch, clock)?; let keep = self.originals.len();\n            let elements = self.walk(element, clock)?;"));
+        assert!(dashboard.contains("let mut pass = DashboardPass::new();"));
+        assert!(dashboard.contains("DashboardNameRead::Invalidated => { pass.finish(DashboardScanEnd::Stale); break; }"));
+        let released = dashboard.split_once("self.release_suffix(keep)?;").unwrap().1;
+        assert!(released.contains("if pass.ready() { self.dashboard_ready = true; break; }"));
+        assert!(released.contains("self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd)"));
+        assert!(released.contains("if stale { self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; }"));
+        assert!(observe.contains("let name = self.name(index, clock)?;")); // Quit dialog remains strict.
+        assert!(observe.contains("self.trace.phase.set(SmokePhase::CloseRequest);\n        self.bound(launch, clock)?;"));
+        let completion = block(source, "    fn complete_dashboard_name_stale(", "    fn dashboard_name(&mut self,");
+        for forbidden in ["self.main =", "self.dashboard_ready =", "self.quit_confirmed =", "self.windows.post_entered =", "self.invoke_entered ="] {
+            assert!(!completion.contains(forbidden) && !wrapper.contains(forbidden));
         }
     }
 
@@ -3354,7 +3650,7 @@ mod contract_tests {
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
-        dashboard_name_observation_contract();
+        dashboard_name_observation_contract(); dashboard_stale_name_contract();
         startup_diagnostic_contract();
         // Actual admission helper, inert Results/counters only: no native clock,
         // output reservation, HWND/COM call or cleanup is entered by these cases.
