@@ -339,7 +339,6 @@ mod tests {
     ("SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", false),
     ("SOFTWARE\\Microsoft\\Edge\\WebView2", false),
     ("SOFTWARE\\Microsoft\\EdgeUpdate\\Clients", true),
-    ("SOFTWARE\\Microsoft\\EdgeWebView", true),
 ];"#));
                 let audit = native.split("fn absent(&mut self, root:").nth(1).unwrap().split("fn settled(&self)").next().unwrap();
                 assert!(audit.contains(r#"if self.unknown || self.originals.len() >= 96 { return Err(UiError::CleanupUnknown); }
