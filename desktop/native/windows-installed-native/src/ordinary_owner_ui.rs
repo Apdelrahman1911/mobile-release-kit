@@ -861,7 +861,7 @@ smoke_labels!(SmokeCheck {
     RuntimeIdLowerCall => "runtime-id-lower-bound-call", RuntimeIdUpperCall => "runtime-id-upper-bound-call",
     RuntimeIdBounds => "runtime-id-bounds", RuntimeIdElement => "runtime-id-element",
     NativeWindowHandle => "current-native-window-handle", ControlType => "current-control-type",
-    IsEnabled => "current-is-enabled", MainMissing => "main-element-missing",
+    IsEnabled => "current-is-enabled", IsOffscreen => "current-is-offscreen", MainMissing => "main-element-missing",
     MainBinding => "main-window-element-binding", ProcessId => "current-process-id",
     MainProcess => "main-element-process-binding", WalkBounds => "walk-depth-or-count",
     SiblingBounds => "walk-sibling-count", ComRelease => "com-original-release-state",
@@ -869,18 +869,25 @@ smoke_labels!(SmokeCheck {
     BundledEngineUnavailable => "bundled-engine-unavailable", EngineDisabled => "engine-disabled",
     BrowserPreview => "browser-preview", PostCloseOnce => "post-close-once", PostClose => "post-close",
     QuitDialogIdentity => "quit-dialog-title-or-uniqueness", QuitClassEncoding => "quit-dialog-class-encoding",
-    QuitClass => "quit-dialog-class", QuitButtons => "quit-buttons-identity-or-parent",
-    QuitButtonsState => "quit-button-scan-state", QuitButtonsBounds => "quit-button-scan-bounds",
-    QuitButtonsMissing => "quit-button-missing", QuitButtonsDuplicate => "quit-button-duplicate",
-    QuitButtonId => "quit-button-id", QuitButtonClass => "quit-button-class",
-    QuitButtonProcess => "quit-button-process", QuitButtonThread => "quit-button-thread",
-    QuitButtonVisibility => "quit-button-visibility", QuitButtonEnabled => "quit-button-enabled",
-    QuitButtonDescendant => "quit-button-descendant", QuitButtonLineage => "quit-button-lineage",
-    QuitButtonStyle => "quit-button-style", QuitButtonsChanged => "quit-buttons-retained-pair-changed",
-    QuitDefault => "quit-default-cancel", QuitDialogHandle => "quit-dialog-element-handle",
-    QuitOkIdentity => "quit-ok-identity-or-uniqueness", QuitCancelIdentity => "quit-cancel-identity-or-uniqueness",
-    QuitInstruction => "quit-instruction-or-cancel-missing", QuitOkMissing => "quit-ok-missing",
-    QuitBinding => "quit-dialog-original-binding", InvokeAcquireState => "invoke-pattern-acquire-state",
+    QuitClass => "quit-dialog-class", QuitTreeState => "quit-logical-tree-state",
+    QuitTreeBounds => "quit-logical-tree-bounds", QuitTreeIncomplete => "quit-logical-tree-incomplete",
+    QuitRuntime => "quit-logical-runtime-identity", QuitLineage => "quit-logical-ancestry",
+    QuitProcess => "quit-logical-process", QuitButtonsDuplicate => "quit-logical-button-duplicate",
+    QuitButtonType => "quit-logical-button-name-or-type", QuitButtonEnabled => "quit-logical-button-enabled",
+    QuitButtonVisibility => "quit-logical-button-onscreen", QuitButtonsChanged => "quit-logical-retained-pair-changed",
+    QuitNativeState => "quit-native-container-state", QuitNativeBounds => "quit-native-container-bounds",
+    QuitNativeProcess => "quit-native-container-process", QuitNativeThread => "quit-native-container-thread",
+    QuitNativeDescendant => "quit-native-container-descendant", QuitNativeLineage => "quit-native-container-lineage",
+    QuitNativeStyle => "quit-native-container-style", QuitNativeChanged => "quit-native-container-changed",
+    QuitParentAcquireState => "quit-logical-parent-acquire-state", QuitParentAcquire => "quit-logical-parent-acquire",
+    QuitDefault => "quit-default-cancel", QuitDefaultState => "quit-legacy-state-contradiction",
+    QuitLegacyAcquireState => "quit-legacy-pattern-acquire-state", QuitOkLegacyAcquire => "quit-ok-legacy-pattern-acquire",
+    QuitCancelLegacyAcquire => "quit-cancel-legacy-pattern-acquire", QuitOkLegacyState => "quit-ok-legacy-state",
+    QuitCancelLegacyState => "quit-cancel-legacy-state", QuitLegacyChanged => "quit-legacy-state-changed",
+    QuitDialogHandle => "quit-dialog-element-handle", QuitInstruction => "quit-instruction-missing",
+    QuitOkMissing => "quit-ok-missing", QuitCancelMissing => "quit-cancel-missing",
+    QuitBinding => "quit-dialog-original-binding", QuitPatterns => "quit-original-pattern-binding",
+    InvokeAcquireState => "invoke-pattern-acquire-state",
     InvokeAcquire => "invoke-pattern-acquire", InvokeOnce => "invoke-once", Invoke => "invoke",
     DriverUnknown => "driver-unknown", WindowQueryActive => "window-query-active",
     QuerySettlement => "query-settlement", UninitializeOnce => "apartment-uninitialize-once",
@@ -998,18 +1005,20 @@ impl StartupSample {
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QuitProgress { scan: u8, visited: u8, closed: u8, match_mask: u8, default_mask: Option<u8> }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SmokeFault {
     phase: SmokePhase, check: SmokeCheck, error: Error, status: Option<SmokeStatus>, dashboard: Option<DashboardProgress>,
-    main_binding_timeouts: Option<u16>, dashboard_binding_timeouts: Option<u16>, startup: StartupSample,
+    main_binding_timeouts: Option<u16>, dashboard_binding_timeouts: Option<u16>, startup: StartupSample, quit: Option<QuitProgress>,
 }
 struct SmokeTrace {
     phase: Cell<SmokePhase>, dashboard: Cell<Option<DashboardProgress>>, first: Cell<Option<SmokeFault>>, emitted: Cell<bool>,
-    main_binding_timeouts: Cell<u16>, dashboard_binding_timeouts: Cell<u16>, startup: Cell<StartupSample>,
+    main_binding_timeouts: Cell<u16>, dashboard_binding_timeouts: Cell<u16>, startup: Cell<StartupSample>, quit: Cell<Option<QuitProgress>>,
 }
 impl SmokeTrace {
     fn new() -> Self {
         Self { phase: Cell::new(SmokePhase::Setup), dashboard: Cell::new(None), first: Cell::new(None), emitted: Cell::new(false),
-            main_binding_timeouts: Cell::new(0), dashboard_binding_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()) }
+            main_binding_timeouts: Cell::new(0), dashboard_binding_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()), quit: Cell::new(None) }
     }
     // The real root() passes one USER32 read; scalar tests pass inert values.
     // Only original in-budget completions can update the sample. This helper
@@ -1052,31 +1061,38 @@ impl SmokeTrace {
                 let main_binding_timeouts = matches!(phase, SmokePhase::MainBinding | SmokePhase::Dashboard)
                     .then(|| self.main_binding_timeouts.get());
                 let dashboard_binding_timeouts = (phase == SmokePhase::Dashboard).then(|| self.dashboard_binding_timeouts.get());
+                let quit = if matches!(phase, SmokePhase::QuitDialog | SmokePhase::QuitInvoke) { self.quit.get() } else { None };
                 self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard,
-                    main_binding_timeouts, dashboard_binding_timeouts, startup: self.startup.get() }));
+                    main_binding_timeouts, dashboard_binding_timeouts, startup: self.startup.get(), quit }));
             }
         }
         result
     }
-    fn quit_binding<T>(&self, result: std::result::Result<T, crate::ui::quit_buttons::Failure>) -> Result<T> {
-        use crate::ui::quit_buttons::Failure as Q;
+    fn quit_native<T>(&self, result: std::result::Result<T, crate::ui::quit_native::Failure>) -> Result<T> {
+        use crate::ui::quit_native::Failure as Q;
         match result {
             Ok(value) => Ok(value),
             Err(failure) => {
                 let check = match failure {
-                    Q::State => SmokeCheck::QuitButtonsState, Q::Bounds => SmokeCheck::QuitButtonsBounds,
-                    Q::Missing => SmokeCheck::QuitButtonsMissing, Q::Duplicate => SmokeCheck::QuitButtonsDuplicate,
-                    Q::Id => SmokeCheck::QuitButtonId, Q::Class => SmokeCheck::QuitButtonClass,
-                    Q::Process => SmokeCheck::QuitButtonProcess, Q::Thread => SmokeCheck::QuitButtonThread,
-                    Q::Visibility => SmokeCheck::QuitButtonVisibility, Q::Enabled => SmokeCheck::QuitButtonEnabled,
-                    Q::Descendant => SmokeCheck::QuitButtonDescendant, Q::Lineage => SmokeCheck::QuitButtonLineage,
-                    Q::Style => SmokeCheck::QuitButtonStyle, Q::Default => SmokeCheck::QuitDefault,
-                    Q::Changed => SmokeCheck::QuitButtonsChanged,
+                    Q::State => SmokeCheck::QuitNativeState, Q::Bounds => SmokeCheck::QuitNativeBounds,
+                    Q::Process => SmokeCheck::QuitNativeProcess, Q::Thread => SmokeCheck::QuitNativeThread,
+                    Q::Descendant => SmokeCheck::QuitNativeDescendant, Q::Lineage => SmokeCheck::QuitNativeLineage,
+                    Q::Style => SmokeCheck::QuitNativeStyle, Q::Changed => SmokeCheck::QuitNativeChanged,
                 };
                 let error = match failure { Q::State => Error::State, Q::Bounds => Error::Bounds, _ => Error::Unsafe };
                 self.result(check, Err(error), None)
             }
         }
+    }
+    fn quit_scan_begin(&self) -> Result<()> {
+        self.need(SmokeCheck::QuitTreeState, matches!(self.phase.get(), SmokePhase::QuitDialog | SmokePhase::QuitInvoke)
+            && self.first.get().is_none() && self.quit.get().is_none_or(|progress| progress.scan == 1))?;
+        let scan = if self.quit.get().is_none() { 1 } else { 2 };
+        self.quit.set(Some(QuitProgress { scan, visited: 0, closed: 0, match_mask: 0, default_mask: None })); Ok(())
+    }
+    fn quit_update(&self, update: impl FnOnce(&mut QuitProgress)) {
+        if !matches!(self.phase.get(), SmokePhase::QuitDialog | SmokePhase::QuitInvoke) { return; }
+        if let Some(mut progress) = self.quit.get() { update(&mut progress); self.quit.set(Some(progress)); }
     }
     fn need(&self, check: SmokeCheck, value: bool) -> Result<()> { self.result(check, need(value), None) }
     fn initial_main_timeout(&self) -> Result<()> {
@@ -1139,6 +1155,12 @@ impl SmokeTrace {
         }
         if let Some(count) = fault.main_binding_timeouts { write!(output, ",\"mainBindingTimeouts\":{count}")?; }
         if let Some(count) = fault.dashboard_binding_timeouts { write!(output, ",\"dashboardBindingTimeouts\":{count}")?; }
+        if let Some(progress) = fault.quit {
+            write!(output, ",\"quit\":{{\"scan\":{},\"visited\":{},\"closed\":{},\"matchMask\":{},\"defaultMask\":",
+                progress.scan, progress.visited, progress.closed, progress.match_mask)?;
+            match progress.default_mask { Some(mask) => write!(output, "{mask}")?, None => write!(output, "null")? }
+            write!(output, "}}")?;
+        }
         Self::format_startup(&mut output, fault.startup)?;
         writeln!(output, "}}")?; Ok(output.position() as usize)
     }
@@ -1162,7 +1184,7 @@ impl SmokeTrace {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum ComKind { Client, Walker, Element, Invoke }
+enum ComKind { Client, Walker, Element, Invoke, Legacy }
 struct ComOriginal {
     pointer: *mut c_void, kind: ComKind, state: SlotState, active: bool, status: i32, release_return: u32,
 }
@@ -1198,14 +1220,14 @@ impl ComOriginal {
 }
 struct UiQuery {
     active: bool, unknown: bool, status: i32, bstr: *mut c_void, array: *mut CO::SAFEARRAY,
-    integer: i32, boolean: windows::core::BOOL, hwnd: HWND, control: A::UIA_CONTROLTYPE_ID,
+    integer: i32, boolean: windows::core::BOOL, hwnd: HWND, control: A::UIA_CONTROLTYPE_ID, legacy_state: u32,
     lower: i32, upper: i32, index: i32, dimensions: u32, element_size: u32, variant: u16,
     values: [i32; 16], destroy_entered: bool, destroy_return: i32,
 }
 impl UiQuery {
     fn new() -> Self {
         Self { active: false, unknown: false, status: HRESULT_PENDING, bstr: null_mut(), array: null_mut(),
-            integer: 0, boolean: windows::core::BOOL(0), hwnd: HWND(null_mut()), control: A::UIA_CONTROLTYPE_ID(0),
+            integer: 0, boolean: windows::core::BOOL(0), hwnd: HWND(null_mut()), control: A::UIA_CONTROLTYPE_ID(0), legacy_state: u32::MAX,
             lower: 0, upper: -1, index: 0, dimensions: 0, element_size: 0, variant: 0, values: [0; 16],
             destroy_entered: false, destroy_return: HRESULT_PENDING }
     }
@@ -1274,7 +1296,7 @@ impl WindowData {
 struct WindowQuery {
     entries: [WindowData; 32], count: usize, overflow: bool, active: bool, returned: i32, error: u32,
     identity_pid: u32, identity_tid: u32, thread_pid: u32, wait: u32,
-    class: [u16; 256], class_length: i32, ok: F::HWND, cancel: F::HWND,
+    class: [u16; 256], class_length: i32,
     post_entered: bool, post_return: i32, post_error: u32,
 }
 unsafe extern "system" fn thread_window(hwnd: F::HWND, raw: isize) -> i32 {
@@ -1299,7 +1321,7 @@ impl WindowQuery {
     fn new() -> Self {
         Self { entries: std::array::from_fn(|_| WindowData::new()), count: 0, overflow: false, active: false,
             returned: 0, error: 0, identity_pid: 0, identity_tid: 0, thread_pid: 0, wait: u32::MAX,
-            class: [0; 256], class_length: 0, ok: null_mut(), cancel: null_mut(),
+            class: [0; 256], class_length: 0,
             post_entered: false, post_return: 0, post_error: 0 }
     }
     fn original_live(&mut self, launch: &Launch, clock: &mut Clock, trace: &SmokeTrace) -> Result<()> {
@@ -1350,6 +1372,164 @@ impl WindowQuery {
         if let Some(main) = main { trace.need(SmokeCheck::RootContinuity, found == Some(main))?; }
         Ok(found)
     }
+}
+
+const QUIT_NODES: usize = 65; // The admitted root plus at most 64 descendants.
+const QUIT_DEPTH: usize = 32;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuitIdentity { runtime: Vec<i32>, process: u32 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuitNode {
+    element: usize, parent: Option<usize>, parent_probe: Option<usize>, previous: Option<usize>, depth: usize,
+    identity: QuitIdentity, name: String, control: i32,
+}
+#[derive(Clone)]
+struct QuitTree { nodes: Vec<QuitNode>, closed: usize }
+impl QuitTree {
+    fn new() -> Self { Self { nodes: Vec::with_capacity(QUIT_NODES), closed: 0 } }
+    fn node(&self, index: usize, trace: &SmokeTrace) -> Result<&QuitNode> {
+        trace.result(SmokeCheck::QuitTreeState, self.nodes.get(index).ok_or(Error::State), None)
+    }
+    fn push(&mut self, node: QuitNode, process: u32, trace: &SmokeTrace) -> Result<usize> {
+        trace.result(SmokeCheck::QuitTreeBounds,
+            if self.nodes.len() < QUIT_NODES && node.depth <= QUIT_DEPTH { Ok(()) } else { Err(Error::Bounds) }, None)?;
+        trace.need(SmokeCheck::QuitRuntime, (2..=16).contains(&node.identity.runtime.len())
+            && !self.nodes.iter().any(|old| old.identity.runtime == node.identity.runtime || old.element == node.element))?;
+        trace.need(SmokeCheck::QuitProcess, process != 0 && node.identity.process == process)?;
+        if self.nodes.is_empty() {
+            trace.need(SmokeCheck::QuitLineage, node.parent.is_none() && node.parent_probe.is_none() && node.previous.is_none() && node.depth == 0 && self.closed == 0)?;
+        } else {
+            let parent = trace.result(SmokeCheck::QuitLineage, node.parent.ok_or(Error::Unsafe), None)?;
+            let original = self.node(parent, trace)?;
+            trace.need(SmokeCheck::QuitLineage, parent == self.closed && node.parent_probe.is_some() && node.depth == original.depth + 1
+                && node.previous == self.nodes.iter().rposition(|old| old.parent == Some(parent)))?;
+        }
+        let index = self.nodes.len(); self.nodes.push(node);
+        trace.quit_update(|progress| {
+            progress.visited = self.nodes.len() as u8;
+            let node = &self.nodes[index];
+            if node.control == A::UIA_ButtonControlTypeId.0 {
+                progress.match_mask |= match node.name.as_str() { "OK" => 1, "Cancel" => 2, _ => 0 };
+            }
+        });
+        Ok(index)
+    }
+    fn close_parent(&mut self, parent: usize, trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::QuitTreeState, parent == self.closed && parent < self.nodes.len())?;
+        self.closed += 1; trace.quit_update(|progress| progress.closed = self.closed as u8); Ok(())
+    }
+    fn select(&self, trace: &SmokeTrace) -> Result<[usize; 2]> {
+        trace.need(SmokeCheck::QuitTreeIncomplete, !self.nodes.is_empty() && self.closed == self.nodes.len())?;
+        let mut selected = [None, None]; let mut instruction = false;
+        for (index, node) in self.nodes.iter().enumerate() {
+            instruction |= node.name == "Quit and discard unsaved drafts?";
+            if node.control != A::UIA_ButtonControlTypeId.0 { continue; }
+            let slot = match node.name.as_str() { "OK" => 0, "Cancel" => 1, _ => continue };
+            // Count every matching Button before checking enabled/offscreen.
+            // A disabled duplicate still makes the complete pair ambiguous.
+            trace.need(SmokeCheck::QuitButtonsDuplicate, selected[slot].is_none())?; selected[slot] = Some(index);
+        }
+        trace.need(SmokeCheck::QuitInstruction, instruction)?;
+        let ok = trace.result(SmokeCheck::QuitOkMissing, selected[0].ok_or(Error::Unsafe), None)?;
+        let cancel = trace.result(SmokeCheck::QuitCancelMissing, selected[1].ok_or(Error::Unsafe), None)?;
+        trace.need(SmokeCheck::QuitRuntime, ok != 0 && cancel != 0 && ok != cancel)?;
+        Ok([ok, cancel])
+    }
+    fn chain(&self, selected: usize, process: u32, trace: &SmokeTrace) -> Result<Vec<usize>> {
+        let leaf = self.node(selected, trace)?;
+        trace.need(SmokeCheck::QuitLineage, selected != 0 && leaf.depth > 0 && leaf.depth <= QUIT_DEPTH)?;
+        let mut chain = Vec::with_capacity(leaf.depth); let mut at = selected;
+        while at != 0 {
+            trace.result(SmokeCheck::QuitTreeBounds,
+                if chain.len() < QUIT_DEPTH { Ok(()) } else { Err(Error::Bounds) }, None)?;
+            let node = self.node(at, trace)?;
+            trace.need(SmokeCheck::QuitProcess, process != 0 && node.identity.process == process)?;
+            let parent = trace.result(SmokeCheck::QuitLineage, node.parent.ok_or(Error::Unsafe), None)?;
+            trace.need(SmokeCheck::QuitLineage, parent < at && !chain.contains(&parent))?;
+            let original = self.node(parent, trace)?;
+            trace.need(SmokeCheck::QuitLineage, node.depth == original.depth + 1)?;
+            trace.need(SmokeCheck::QuitRuntime, original.identity.runtime != leaf.identity.runtime
+                && !chain.iter().any(|old| self.nodes[*old].identity.runtime == original.identity.runtime))?;
+            chain.push(parent); at = parent;
+        }
+        let root = self.node(0, trace)?;
+        trace.need(SmokeCheck::QuitLineage, root.parent.is_none() && root.depth == 0 && chain.len() == leaf.depth)?;
+        trace.need(SmokeCheck::QuitProcess, root.identity.process == process)?;
+        Ok(chain)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuitControlFacts {
+    identity: QuitIdentity, name: String, control: i32, enabled: bool, offscreen: bool,
+    native: crate::ui::quit_native::Container, ancestors: Vec<QuitIdentity>,
+}
+impl QuitControlFacts {
+    fn valid(&self, expected_name: &str, root: &QuitIdentity, trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::QuitButtonType, self.name == expected_name && self.control == A::UIA_ButtonControlTypeId.0)?;
+        trace.need(SmokeCheck::QuitRuntime, self.identity.runtime != root.runtime && (2..=16).contains(&self.identity.runtime.len()))?;
+        trace.need(SmokeCheck::QuitProcess, root.process != 0 && self.identity.process == root.process
+            && self.ancestors.iter().all(|ancestor| ancestor.process == root.process))?;
+        trace.need(SmokeCheck::QuitLineage, !self.ancestors.is_empty() && self.ancestors.len() <= QUIT_DEPTH
+            && self.ancestors.last() == Some(root))?;
+        for (index, ancestor) in self.ancestors.iter().enumerate() {
+            trace.need(SmokeCheck::QuitRuntime, (2..=16).contains(&ancestor.runtime.len())
+                && ancestor.runtime != self.identity.runtime
+                && !self.ancestors[..index].iter().any(|old| old.runtime == ancestor.runtime))?;
+        }
+        trace.need(SmokeCheck::QuitButtonEnabled, self.enabled)?;
+        trace.need(SmokeCheck::QuitButtonVisibility, !self.offscreen)
+    }
+    fn same(&self, current: &Self, trace: &SmokeTrace) -> Result<()> {
+        trace.quit_native(self.native.same(&current.native))?;
+        trace.need(SmokeCheck::QuitButtonsChanged, self.identity == current.identity && self.name == current.name
+            && self.control == current.control && self.enabled == current.enabled && self.offscreen == current.offscreen
+            && self.ancestors == current.ancestors)
+    }
+}
+fn quit_controls_valid(controls: &[QuitControlFacts; 2], root: &QuitIdentity, trace: &SmokeTrace) -> Result<()> {
+    controls[0].valid("OK", root, trace)?; controls[1].valid("Cancel", root, trace)?;
+    trace.need(SmokeCheck::QuitRuntime, controls[0].identity.runtime != controls[1].identity.runtime)
+}
+struct QuitScan {
+    tree: QuitTree, selected: [usize; 2], controls: [QuitControlFacts; 2],
+    parent_probes: [Vec<usize>; 2],
+}
+impl QuitScan {
+    fn elements(&self, trace: &SmokeTrace) -> Result<[usize; 2]> {
+        Ok([self.tree.node(self.selected[0], trace)?.element, self.tree.node(self.selected[1], trace)?.element])
+    }
+    fn same(&self, current: &Self, trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::QuitBinding, self.tree.node(0, trace)?.identity == current.tree.node(0, trace)?.identity)?;
+        for index in 0..2 { self.controls[index].same(&current.controls[index], trace)?; }
+        Ok(())
+    }
+}
+#[derive(Clone, Copy)]
+struct QuitPattern { element: usize, original: usize }
+#[derive(Clone, Copy)]
+struct QuitPatterns { elements: [usize; 2], legacy: [QuitPattern; 2], invoke: QuitPattern }
+impl QuitPatterns {
+    fn valid(&self, expected: [usize; 2], trace: &SmokeTrace) -> Result<()> {
+        trace.need(SmokeCheck::QuitPatterns, self.elements == expected && expected[0] != expected[1]
+            && self.legacy[0].element == expected[0] && self.legacy[1].element == expected[1] && self.invoke.element == expected[0])?;
+        let slots = [self.legacy[0].original, self.legacy[1].original, self.invoke.original];
+        trace.need(SmokeCheck::QuitPatterns, slots.iter().enumerate().all(|(index, original)|
+            !expected.contains(original) && !slots[..index].contains(original)))
+    }
+}
+fn quit_default_states(states: [u32; 2], trace: &SmokeTrace) -> Result<()> {
+    // Generated Controls flags are a u32 alias; DEFAULT lives in W. Both
+    // namespaces are already enabled, and no Common Controls call is made.
+    use windows_sys::Win32::UI::Controls as C;
+    let mask = u8::from(states[0] & W::STATE_SYSTEM_DEFAULT != 0) | (u8::from(states[1] & W::STATE_SYSTEM_DEFAULT != 0) << 1);
+    trace.quit_update(|progress| progress.default_mask = Some(mask));
+    let contradictory = C::STATE_SYSTEM_UNAVAILABLE | C::STATE_SYSTEM_INVISIBLE | C::STATE_SYSTEM_OFFSCREEN;
+    trace.need(SmokeCheck::QuitDefaultState, states.iter().all(|state| *state != u32::MAX && *state & contradictory == 0))?;
+    trace.need(SmokeCheck::QuitDefault, mask == 2)
+}
+
+fn quit_same_defaults(original: [u32; 2], current: [u32; 2], trace: &SmokeTrace) -> Result<()> {
+    quit_default_states(current, trace)?; trace.need(SmokeCheck::QuitLegacyChanged, current == original)
 }
 
 struct Smoke {
@@ -1705,6 +1885,165 @@ impl Smoke {
         }
         self.originals.truncate(from); Ok(())
     }
+    fn quit_identity(&mut self, element: usize, clock: &mut Clock) -> Result<QuitIdentity> {
+        let runtime = self.runtime_id(element, clock)?;
+        let pointer = self.pointer(element, ComKind::Element)?;
+        let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
+        self.query.integer = 0; self.query.begin(clock, &self.trace)?;
+        let status = unsafe { (table.CurrentProcessId)(pointer, &mut self.query.integer) }.0;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::ProcessId)?;
+        self.trace.need(SmokeCheck::QuitProcess, self.query.integer > 0)?;
+        Ok(QuitIdentity { runtime, process: self.query.integer as u32 })
+    }
+    fn quit_control_type(&mut self, element: usize, clock: &mut Clock) -> Result<i32> {
+        let pointer = self.pointer(element, ComKind::Element)?;
+        let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
+        self.query.control = A::UIA_CONTROLTYPE_ID(0); self.query.begin(clock, &self.trace)?;
+        let status = unsafe { (table.CurrentControlType)(pointer, &mut self.query.control) }.0;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::ControlType)?; Ok(self.query.control.0)
+    }
+    fn quit_parent(&mut self, element: usize, clock: &mut Clock) -> Result<usize> {
+        let pointer = self.pointer(element, ComKind::Element)?;
+        let walker = self.pointer(self.trace.result(SmokeCheck::WalkerMissing, self.walker.ok_or(Error::State), None)?, ComKind::Walker)?;
+        let table = unsafe { &**walker.cast::<*const A::IUIAutomationTreeWalker_Vtbl>() };
+        let index = self.reserve(ComKind::Element, clock)?;
+        let output = self.trace.result(SmokeCheck::QuitParentAcquireState, self.originals[index].begin(), None)?;
+        let status = unsafe { (table.GetParentElement)(walker, pointer, output) }.0;
+        self.acquire_return(index, status, false, clock, SmokeCheck::QuitParentAcquire)?; Ok(index)
+    }
+    fn quit_walk(&mut self, root: usize, process: u32, clock: &mut Clock) -> Result<QuitTree> {
+        self.trace.quit_scan_begin()?;
+        let mut tree = QuitTree::new();
+        let node = QuitNode { element: root, parent: None, parent_probe: None, previous: None, depth: 0,
+            identity: self.quit_identity(root, clock)?, name: self.name(root, clock)?, control: self.quit_control_type(root, clock)? };
+        tree.push(node, process, &self.trace)?;
+        // Every parent is completely closed, including its null child/sibling
+        // terminator. Edges and actual GetParentElement identities are retained;
+        // no early "found both" return can hide a disabled duplicate or escape.
+        while tree.closed < tree.nodes.len() {
+            let parent = tree.closed; let parent_element = tree.nodes[parent].element;
+            let depth = tree.nodes[parent].depth + 1; let mut previous = None;
+            let mut next = self.adjacent(parent_element, true, clock)?;
+            while let Some(element) = next {
+                self.trace.result(SmokeCheck::QuitTreeBounds,
+                    if tree.nodes.len() < QUIT_NODES && depth <= QUIT_DEPTH { Ok(()) } else { Err(Error::Bounds) }, None)?;
+                let probe = self.quit_parent(element, clock)?;
+                let actual_parent = self.quit_identity(probe, clock)?;
+                self.trace.need(SmokeCheck::QuitLineage, actual_parent == tree.nodes[parent].identity)?;
+                let node = QuitNode { element, parent: Some(parent), parent_probe: Some(probe), previous, depth,
+                    identity: self.quit_identity(element, clock)?, name: self.name(element, clock)?,
+                    control: self.quit_control_type(element, clock)? };
+                previous = Some(tree.push(node, process, &self.trace)?);
+                next = self.adjacent(element, false, clock)?;
+            }
+            tree.close_parent(parent, &self.trace)?;
+        }
+        Ok(tree)
+    }
+    fn quit_native_container(&mut self, handle: F::HWND, dialog: F::HWND, launch: &Launch, clock: &mut Clock)
+        -> Result<crate::ui::quit_native::Container> {
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        let result = self.trace.quit_native(crate::ui::quit_native::observe(
+            handle, dialog, launch.outputs.dwProcessId, launch.outputs.dwThreadId));
+        // Preserve the native refusal as first fault, including when the
+        // original endpoint also refuses after this bounded synchronous read.
+        let returned_clock = self.trace.result(SmokeCheck::Clock, clock.effect(), None);
+        let value = result?; returned_clock?; Ok(value)
+    }
+    fn quit_control(&mut self, tree: &QuitTree, selected: usize, expected_name: &str, dialog: F::HWND,
+        launch: &Launch, clock: &mut Clock) -> Result<(QuitControlFacts, Vec<usize>)> {
+        let node = tree.node(selected, &self.trace)?;
+        let element = node.element;
+        let identity = self.quit_identity(element, clock)?;
+        let name = self.name(element, clock)?; let control = self.quit_control_type(element, clock)?;
+        self.trace.need(SmokeCheck::QuitButtonsChanged, identity == node.identity && name == node.name && control == node.control)?;
+        let pointer = self.pointer(element, ComKind::Element)?;
+        let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
+        self.query.boolean = windows::core::BOOL(0); self.query.begin(clock, &self.trace)?;
+        let status = unsafe { (table.CurrentIsEnabled)(pointer, &mut self.query.boolean) }.0;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::IsEnabled)?; let enabled = self.query.boolean.0 != 0;
+        self.query.boolean = windows::core::BOOL(1); self.query.begin(clock, &self.trace)?;
+        let status = unsafe { (table.CurrentIsOffscreen)(pointer, &mut self.query.boolean) }.0;
+        self.query.returned(status, clock, &self.trace, SmokeCheck::IsOffscreen)?; let offscreen = self.query.boolean.0 != 0;
+        let native_handle = self.native_handle(element, clock)?;
+        let native = self.quit_native_container(native_handle, dialog, launch, clock)?;
+        let chain = tree.chain(selected, launch.outputs.dwProcessId, &self.trace)?;
+        let mut ancestors = Vec::with_capacity(chain.len()); let mut probes = Vec::with_capacity(chain.len()); let mut at = selected;
+        for parent in chain {
+            let current = tree.node(at, &self.trace)?; let expected = tree.node(parent, &self.trace)?;
+            let original_probe = self.trace.result(SmokeCheck::QuitLineage, current.parent_probe.ok_or(Error::State), None)?;
+            let retained_parent = self.quit_identity(expected.element, clock)?;
+            let retained_probe = self.quit_identity(original_probe, clock)?;
+            let probe = self.quit_parent(current.element, clock)?;
+            let actual_parent = self.quit_identity(probe, clock)?;
+            self.trace.need(SmokeCheck::QuitLineage, retained_parent == expected.identity
+                && retained_probe == expected.identity && actual_parent == expected.identity)?;
+            ancestors.push(expected.identity.clone()); probes.push(probe); at = parent;
+        }
+        let facts = QuitControlFacts { identity, name, control, enabled, offscreen, native, ancestors };
+        facts.valid(expected_name, &tree.node(0, &self.trace)?.identity, &self.trace)?;
+        Ok((facts, probes))
+    }
+    fn quit_scan(&mut self, root: usize, dialog: F::HWND, launch: &Launch, clock: &mut Clock) -> Result<QuitScan> {
+        let tree = self.quit_walk(root, launch.outputs.dwProcessId, clock)?;
+        let selected = tree.select(&self.trace)?;
+        let (ok, ok_probes) = self.quit_control(&tree, selected[0], "OK", dialog, launch, clock)?;
+        let (cancel, cancel_probes) = self.quit_control(&tree, selected[1], "Cancel", dialog, launch, clock)?;
+        let controls = [ok, cancel]; quit_controls_valid(&controls, &tree.node(0, &self.trace)?.identity, &self.trace)?;
+        Ok(QuitScan { tree, selected, controls, parent_probes: [ok_probes, cancel_probes] })
+    }
+    fn quit_bound(&mut self, launch: &Launch, main: F::HWND, dialog: F::HWND, root: usize,
+        expected: &QuitIdentity, clock: &mut Clock) -> Result<()> {
+        self.bound(launch, clock)?;
+        let mut selected = None;
+        for entry in &self.windows.entries[..self.windows.count] {
+            if entry.owner == main {
+                self.trace.need(SmokeCheck::QuitDialogIdentity, selected.is_none() && entry.hwnd == dialog
+                    && entry.title(&self.trace)? == "Quit Mobile Release Kit?")?;
+                selected = Some(entry.hwnd);
+            }
+        }
+        self.trace.need(SmokeCheck::QuitBinding, selected == Some(dialog))?;
+        self.windows.class_length = unsafe { W::GetClassNameW(dialog, self.windows.class.as_mut_ptr(), 256) };
+        self.trace.need(SmokeCheck::QuitClass, self.windows.class_length > 0 && self.windows.class_length < 255
+            && self.trace.result(SmokeCheck::QuitClassEncoding,
+                String::from_utf16(&self.windows.class[..self.windows.class_length as usize]).map_err(|_| Error::Unsafe), None)? == "#32770")?;
+        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+        let handle = self.native_handle(root, clock)?; let identity = self.quit_identity(root, clock)?;
+        self.trace.need(SmokeCheck::QuitBinding, handle == dialog && identity == *expected && identity.process == launch.outputs.dwProcessId)
+    }
+    fn quit_legacy_pattern(&mut self, element: usize, clock: &mut Clock, check: SmokeCheck) -> Result<QuitPattern> {
+        let pointer = self.pointer(element, ComKind::Element)?;
+        let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
+        let original = self.reserve(ComKind::Legacy, clock)?;
+        let output = self.trace.result(SmokeCheck::QuitLegacyAcquireState, self.originals[original].begin(), None)?;
+        let status = unsafe { (table.GetCurrentPatternAs)(pointer, A::UIA_LegacyIAccessiblePatternId,
+            &A::IUIAutomationLegacyIAccessiblePattern::IID, output) }.0;
+        self.acquire_return(original, status, false, clock, check)?; Ok(QuitPattern { element, original })
+    }
+    fn quit_legacy_state(&mut self, pattern: QuitPattern, clock: &mut Clock, check: SmokeCheck) -> Result<u32> {
+        let pointer = self.pointer(pattern.original, ComKind::Legacy)?;
+        let table = unsafe { &**pointer.cast::<*const A::IUIAutomationLegacyIAccessiblePattern_Vtbl>() };
+        // Exact generated 0.61.3 signature: CurrentState(*mut c_void, *mut u32).
+        // Scalar storage is registered in the same pending-aware UiQuery owner.
+        self.query.legacy_state = u32::MAX; self.query.begin(clock, &self.trace)?;
+        let status = unsafe { (table.CurrentState)(pointer, &mut self.query.legacy_state) }.0;
+        self.query.returned(status, clock, &self.trace, check)?; Ok(self.query.legacy_state)
+    }
+    fn quit_requery_originals(&mut self, original: &QuitScan, dialog: F::HWND, launch: &Launch, clock: &mut Clock) -> Result<()> {
+        for (index, name) in ["OK", "Cancel"].into_iter().enumerate() {
+            self.trace.need(SmokeCheck::QuitLineage, original.parent_probes[index].len() == original.controls[index].ancestors.len())?;
+            for (probe, expected) in original.parent_probes[index].iter().zip(&original.controls[index].ancestors) {
+                let actual = self.quit_identity(*probe, clock)?;
+                self.trace.need(SmokeCheck::QuitLineage, actual == *expected)?;
+            }
+            let (current, _observation_probes) = self.quit_control(&original.tree, original.selected[index], name, dialog, launch, clock)?;
+            // New read-only COM observations stay in self.originals. Never
+            // substitute them for this pair's original elements or patterns.
+            original.controls[index].same(&current, &self.trace)?;
+        }
+        Ok(())
+    }
     fn observe(&mut self, launch: &Launch, version: &str, clock: &mut Clock) -> Result<()> {
         self.trace.phase.set(SmokePhase::Setup);
         self.setup(clock)?;
@@ -1801,63 +2140,49 @@ impl Smoke {
             && self.trace.result(SmokeCheck::QuitClassEncoding,
                 String::from_utf16(&self.windows.class[..self.windows.class_length as usize]).map_err(|_| Error::Unsafe), None)? == "#32770")?;
         self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
-        let selected = self.trace.quit_binding(crate::ui::quit_buttons::scan(
-            dialog, launch.outputs.dwProcessId, launch.outputs.dwThreadId));
-        // This is one bounded synchronous USER32 observation, like window scan.
-        // Check the original clock even on refusal without replacing first fault.
-        let observed_clock = self.trace.result(SmokeCheck::Clock, clock.effect(), None);
-        let buttons = selected?; observed_clock?;
-        self.windows.ok = buttons.ok(); self.windows.cancel = buttons.cancel();
-        self.trace.quit_binding(buttons.default_cancel())?;
+        // Bind once from the admitted native TaskDialog. Logical control
+        // identity does not depend on native child IDs, classes or HWND layout.
         let dialog_element = self.from_window(dialog, clock)?;
         let dialog_bound = self.native_handle(dialog_element, clock)? == dialog;
         self.trace.need(SmokeCheck::QuitDialogHandle, dialog_bound)?;
-        let dialog_id = self.runtime_id(dialog_element, clock)?;
-        let elements = self.walk(dialog_element, clock)?;
-        let mut instruction = false; let mut ok = None; let mut cancel = None;
-        for index in elements {
-            let name = self.name(index, clock)?;
-            instruction |= name == "Quit and discard unsaved drafts?";
-            if name == "OK" && self.enabled_button(index, clock)? {
-                let bound = ok.is_none() && self.native_handle(index, clock)? == self.windows.ok;
-                self.trace.need(SmokeCheck::QuitOkIdentity, bound)?; ok = Some(index);
-            }
-            if name == "Cancel" && self.enabled_button(index, clock)? {
-                let bound = cancel.is_none() && self.native_handle(index, clock)? == self.windows.cancel;
-                self.trace.need(SmokeCheck::QuitCancelIdentity, bound)?; cancel = Some(index);
-            }
-        }
-        self.trace.need(SmokeCheck::QuitInstruction, instruction && cancel.is_some())?;
-        let ok = self.trace.result(SmokeCheck::QuitOkMissing, ok.ok_or(Error::Unsafe), None)?;
-        let cancel = self.trace.result(SmokeCheck::QuitCancelIdentity, cancel.ok_or(Error::Unsafe), None)?;
-        let ok_id = self.runtime_id(ok, clock)?; let cancel_id = self.runtime_id(cancel, clock)?;
-        self.trace.need(SmokeCheck::QuitButtons, ok_id != cancel_id && ok_id != dialog_id && cancel_id != dialog_id)?;
-        self.bound(launch, clock)?;
-        let bound = unsafe { W::GetWindow(dialog, W::GW_OWNER) } == hwnd && self.runtime_id(dialog_element, clock)? == dialog_id
-            && self.native_handle(ok, clock)? == self.windows.ok && self.enabled_button(ok, clock)?;
-        self.trace.need(SmokeCheck::QuitBinding, bound)?;
+        let dialog_identity = self.quit_identity(dialog_element, clock)?;
+        self.trace.need(SmokeCheck::QuitProcess, dialog_identity.process == launch.outputs.dwProcessId)?;
+        self.quit_bound(launch, hwnd, dialog, dialog_element, &dialog_identity, clock)?;
+        let buttons = self.quit_scan(dialog_element, dialog, launch, clock)?;
+        self.trace.need(SmokeCheck::QuitBinding, buttons.tree.node(0, &self.trace)?.identity == dialog_identity)?;
+        let elements = buttons.elements(&self.trace)?;
+        let legacy = [
+            self.quit_legacy_pattern(elements[0], clock, SmokeCheck::QuitOkLegacyAcquire)?,
+            self.quit_legacy_pattern(elements[1], clock, SmokeCheck::QuitCancelLegacyAcquire)?,
+        ];
+        let default_states = [
+            self.quit_legacy_state(legacy[0], clock, SmokeCheck::QuitOkLegacyState)?,
+            self.quit_legacy_state(legacy[1], clock, SmokeCheck::QuitCancelLegacyState)?,
+        ];
+        quit_default_states(default_states, &self.trace)?;
         self.trace.phase.set(SmokePhase::QuitInvoke);
-        let pointer = self.pointer(ok, ComKind::Element)?;
+        let pointer = self.pointer(elements[0], ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
         let index = self.reserve(ComKind::Invoke, clock)?;
         let output = self.trace.result(SmokeCheck::InvokeAcquireState, self.originals[index].begin(), None)?;
         let status = unsafe { (table.GetCurrentPatternAs)(pointer, A::UIA_InvokePatternId, &A::IUIAutomationInvokePattern::IID, output) }.0;
         self.acquire_return(index, status, false, clock, SmokeCheck::InvokeAcquire)?;
-        self.bound(launch, clock)?;
-        // Pattern acquisition can call the provider. Rebind the retained native
-        // pair and the original UIA elements after it, never adopt replacements.
-        let bound = unsafe { W::GetWindow(dialog, W::GW_OWNER) } == hwnd
-            && self.runtime_id(dialog_element, clock)? == dialog_id
-            && self.native_handle(dialog_element, clock)? == dialog
-            && self.runtime_id(ok, clock)? == ok_id && self.runtime_id(cancel, clock)? == cancel_id
-            && self.native_handle(ok, clock)? == buttons.ok() && self.native_handle(cancel, clock)? == buttons.cancel()
-            && self.name(ok, clock)? == "OK" && self.name(cancel, clock)? == "Cancel"
-            && self.enabled_button(ok, clock)? && self.enabled_button(cancel, clock)?;
-        self.trace.need(SmokeCheck::QuitBinding, bound)?;
-        self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
-        let retained = self.trace.quit_binding(crate::ui::quit_buttons::revalidate(&buttons));
-        let observed_clock = self.trace.result(SmokeCheck::Clock, clock.effect(), None);
-        retained?; observed_clock?;
+        let patterns = QuitPatterns { elements, legacy, invoke: QuitPattern { element: elements[0], original: index } };
+        patterns.valid(buttons.elements(&self.trace)?, &self.trace)?;
+        self.quit_bound(launch, hwnd, dialog, dialog_element, &dialog_identity, clock)?;
+        // Exactly one complete second scan, solely to compare. Every new COM
+        // output (including null terminators and parent probes) remains within
+        // the same 2048-slot owner; none can replace the original action pair.
+        let current = self.quit_scan(dialog_element, dialog, launch, clock)?;
+        buttons.same(&current, &self.trace)?;
+        self.quit_bound(launch, hwnd, dialog, dialog_element, &dialog_identity, clock)?;
+        self.quit_requery_originals(&buttons, dialog, launch, clock)?;
+        let current_states = [
+            self.quit_legacy_state(patterns.legacy[0], clock, SmokeCheck::QuitOkLegacyState)?,
+            self.quit_legacy_state(patterns.legacy[1], clock, SmokeCheck::QuitCancelLegacyState)?,
+        ];
+        quit_same_defaults(default_states, current_states, &self.trace)?;
+        patterns.valid(buttons.elements(&self.trace)?, &self.trace)?;
         self.trace.need(SmokeCheck::InvokeOnce, !self.invoke_entered)?;
         let pointer = self.pointer(index, ComKind::Invoke)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationInvokePattern_Vtbl>() };
@@ -3048,7 +3373,7 @@ mod contract_tests {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
             assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace), Err(error));
             assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status,
-                dashboard: None, main_binding_timeouts: None, dashboard_binding_timeouts: None, startup: StartupSample::new() }));
+                dashboard: None, main_binding_timeouts: None, dashboard_binding_timeouts: None, startup: StartupSample::new(), quit: None }));
         }
         let title = "Mobile Release Kit";
         accepts(vec![], None, None);
@@ -3712,40 +4037,231 @@ mod contract_tests {
         }
     }
 
+    fn quit_logical_controls_contract() {
+        use windows_sys::Win32::UI::Controls as C;
+        let containers = crate::ui::quit_native::contract(); crate::ui::QuitAction::contract();
+        // Inert scalar/runtime-ID/borrowed-handle fixtures only. These exercise
+        // the production selection, chain, state, identity and one-shot gates;
+        // no UIA/native provider, HWND query, release or finality is fabricated.
+        fn trace() -> SmokeTrace {
+            let value = SmokeTrace::new(); value.phase.set(SmokePhase::QuitDialog);
+            value.quit_scan_begin().expect("first inert scan"); value
+        }
+        fn node(index: usize, name: &str, parent: Option<usize>, previous: Option<usize>, depth: usize) -> QuitNode {
+            QuitNode { element: index + 10, parent, parent_probe: parent.map(|_| index + 100), previous, depth,
+                identity: QuitIdentity { runtime: vec![42, index as i32 + 1], process: 17 }, name: name.to_owned(),
+                control: if matches!(name, "OK" | "Cancel") { A::UIA_ButtonControlTypeId.0 } else { 0 } }
+        }
+        fn fixture() -> (QuitTree, SmokeTrace) {
+            let trace = trace(); let mut tree = QuitTree::new();
+            tree.push(node(0, "Quit Mobile Release Kit?", None, None, 0), 17, &trace).expect("inert root");
+            for (offset, name) in ["OK", "Cancel", "Quit and discard unsaved drafts?", "extra"].into_iter().enumerate() {
+                let index = offset + 1;
+                tree.push(node(index, name, Some(0), (index > 1).then_some(index - 1), 1), 17, &trace).expect("inert child");
+            }
+            while tree.closed < tree.nodes.len() { tree.close_parent(tree.closed, &trace).expect("inert complete edge"); }
+            (tree, trace)
+        }
+        let (tree, progress) = fixture(); assert_eq!(tree.select(&progress), Ok([1, 2]));
+        assert_eq!(tree.chain(1, 17, &progress), Ok(vec![0])); assert_eq!(tree.chain(2, 17, &progress), Ok(vec![0]));
+        assert_eq!(progress.quit.get(), Some(QuitProgress { scan: 1, visited: 5, closed: 5, match_mask: 3, default_mask: None }));
+        let root = tree.nodes[0].identity.clone();
+        let control = |position: usize, native: crate::ui::quit_native::Container| {
+            let node = &tree.nodes[position];
+            QuitControlFacts { identity: node.identity.clone(), name: node.name.clone(), control: node.control,
+                enabled: true, offscreen: false, native, ancestors: vec![root.clone()] }
+        };
+        for (ok, cancel) in [(0, 0), (1, 1), (2, 3), (0, 2)] {
+            let pair = [control(1, containers[ok].clone()), control(2, containers[cancel].clone())];
+            assert_eq!(quit_controls_valid(&pair, &root, &trace()), Ok(()));
+        } // Windowless, shared root container, native direct/nested and mixed.
+        let controls = [control(1, containers[0].clone()), control(2, containers[0].clone())];
+        let mut invalid = Vec::new();
+        let mut value = controls.clone(); value[0].enabled = false; invalid.push((value, SmokeCheck::QuitButtonEnabled));
+        let mut value = controls.clone(); value[1].offscreen = true; invalid.push((value, SmokeCheck::QuitButtonVisibility));
+        let mut value = controls.clone(); value[0].name = "other".to_owned(); invalid.push((value, SmokeCheck::QuitButtonType));
+        let mut value = controls.clone(); value[1].control = 0; invalid.push((value, SmokeCheck::QuitButtonType));
+        let mut value = controls.clone(); value[0].identity.process += 1; invalid.push((value, SmokeCheck::QuitProcess));
+        let mut value = controls.clone(); value[1].ancestors[0].process += 1; invalid.push((value, SmokeCheck::QuitProcess));
+        let mut value = controls.clone(); value[0].ancestors.clear(); invalid.push((value, SmokeCheck::QuitLineage));
+        let mut value = controls.clone(); value[1].ancestors[0].runtime[1] += 10; invalid.push((value, SmokeCheck::QuitLineage));
+        let mut value = controls.clone(); value[1].ancestors.push(root.clone()); invalid.push((value, SmokeCheck::QuitRuntime));
+        let mut value = controls.clone(); value[0].identity.runtime = root.runtime.clone(); invalid.push((value, SmokeCheck::QuitRuntime));
+        let mut value = controls.clone(); value[1].identity.runtime = value[0].identity.runtime.clone(); invalid.push((value, SmokeCheck::QuitRuntime));
+        for (pair, check) in invalid {
+            let trace = trace(); let mut effects = 0;
+            let result = (|| { quit_controls_valid(&pair, &root, &trace)?; effects += 1; Ok(()) })();
+            assert_eq!(result, Err(Error::Unsafe)); assert_eq!(effects, 0); assert_eq!(trace.first.get().unwrap().check, check);
+        }
+
+        for (position, name, control_type, check) in [
+            (1, "other", A::UIA_ButtonControlTypeId.0, SmokeCheck::QuitOkMissing),
+            (2, "other", A::UIA_ButtonControlTypeId.0, SmokeCheck::QuitCancelMissing),
+            (1, "OK", 0, SmokeCheck::QuitOkMissing),
+            (4, "OK", A::UIA_ButtonControlTypeId.0, SmokeCheck::QuitButtonsDuplicate),
+            (4, "Cancel", A::UIA_ButtonControlTypeId.0, SmokeCheck::QuitButtonsDuplicate),
+        ] {
+            let (mut value, trace) = fixture(); value.nodes[position].name = name.to_owned(); value.nodes[position].control = control_type;
+            // Selection has no enabled-state filter: even an unusable duplicate
+            // refuses before any selected control state or action is queried.
+            assert_eq!(value.select(&trace), Err(Error::Unsafe)); assert_eq!(trace.first.get().unwrap().check, check);
+        }
+        let (mut incomplete, incomplete_trace) = fixture(); incomplete.closed -= 1;
+        assert_eq!(incomplete.select(&incomplete_trace), Err(Error::Unsafe));
+        assert_eq!(incomplete_trace.first.get().unwrap().check, SmokeCheck::QuitTreeIncomplete);
+        let (mut root_button, root_button_trace) = fixture(); root_button.nodes[0].name = "OK".to_owned();
+        root_button.nodes[0].control = A::UIA_ButtonControlTypeId.0; root_button.nodes[1].name = "other".to_owned();
+        assert_eq!(root_button.select(&root_button_trace), Err(Error::Unsafe));
+        assert_eq!(root_button_trace.first.get().unwrap().check, SmokeCheck::QuitRuntime);
+
+        for (change, check, error) in [
+            (0, SmokeCheck::QuitRuntime, Error::Unsafe), (1, SmokeCheck::QuitRuntime, Error::Unsafe),
+            (2, SmokeCheck::QuitProcess, Error::Unsafe), (3, SmokeCheck::QuitLineage, Error::Unsafe),
+            (4, SmokeCheck::QuitLineage, Error::Unsafe), (5, SmokeCheck::QuitTreeBounds, Error::Bounds),
+        ] {
+            let trace = trace(); let mut value = QuitTree::new(); let root = node(0, "root", None, None, 0);
+            value.push(root.clone(), 17, &trace).unwrap(); let mut child = node(1, "OK", Some(0), None, 1);
+            match change {
+                0 => child.identity.runtime = root.identity.runtime, 1 => child.element = root.element,
+                2 => child.identity.process += 1, 3 => child.previous = Some(0),
+                4 => child.parent_probe = None, 5 => child.depth = QUIT_DEPTH + 1, _ => unreachable!(),
+            }
+            assert_eq!(value.push(child, 17, &trace), Err(error)); assert_eq!(trace.first.get().unwrap().check, check);
+        }
+        for (change, check) in [(0, SmokeCheck::QuitLineage), (1, SmokeCheck::QuitLineage), (2, SmokeCheck::QuitLineage),
+            (3, SmokeCheck::QuitProcess), (4, SmokeCheck::QuitRuntime)] {
+            let (mut value, trace) = fixture();
+            match change {
+                0 => value.nodes[1].parent = None, 1 => value.nodes[1].parent = Some(usize::MAX),
+                2 => value.nodes[1].parent = Some(1), 3 => value.nodes[0].identity.process += 1,
+                4 => value.nodes[0].identity.runtime = value.nodes[1].identity.runtime.clone(), _ => unreachable!(),
+            }
+            assert_eq!(value.chain(1, 17, &trace), Err(Error::Unsafe)); assert_eq!(trace.first.get().unwrap().check, check);
+        }
+        let count_trace = trace(); let mut bounded = QuitTree::new();
+        bounded.push(node(0, "root", None, None, 0), 17, &count_trace).unwrap();
+        for index in 1..QUIT_NODES {
+            bounded.push(node(index, "extra", Some(0), (index > 1).then_some(index - 1), 1), 17, &count_trace).unwrap();
+        }
+        assert_eq!(bounded.push(node(QUIT_NODES, "overflow", Some(0), Some(QUIT_NODES - 1), 1), 17, &count_trace), Err(Error::Bounds));
+        let depth_trace = trace(); let mut deep = QuitTree::new(); deep.push(node(0, "root", None, None, 0), 17, &depth_trace).unwrap();
+        for depth in 1..=QUIT_DEPTH {
+            deep.push(node(depth, "extra", Some(depth - 1), None, depth), 17, &depth_trace).unwrap();
+            deep.close_parent(depth - 1, &depth_trace).unwrap();
+        }
+        assert_eq!(deep.chain(QUIT_DEPTH, 17, &depth_trace).unwrap().len(), QUIT_DEPTH);
+        assert_eq!(deep.push(node(QUIT_DEPTH + 1, "overflow", Some(QUIT_DEPTH), None, QUIT_DEPTH + 1), 17, &depth_trace), Err(Error::Bounds));
+
+        let original = QuitScan { tree: tree.clone(), selected: [1, 2], controls: controls.clone(), parent_probes: [vec![201], vec![202]] };
+        let mut observed_tree = tree.clone();
+        for node in &mut observed_tree.nodes { node.element += 1000; node.parent_probe = node.parent_probe.map(|value| value + 1000); }
+        let current = QuitScan { tree: observed_tree, selected: [1, 2], controls: controls.clone(), parent_probes: [vec![1201], vec![1202]] };
+        assert_eq!(original.same(&current, &trace()), Ok(()));
+        let elements = original.elements(&trace()).unwrap(); assert_ne!(elements, current.elements(&trace()).unwrap());
+        let patterns = QuitPatterns { elements, legacy: [QuitPattern { element: elements[0], original: 301 },
+            QuitPattern { element: elements[1], original: 302 }], invoke: QuitPattern { element: elements[0], original: 303 } };
+        assert_eq!(patterns.valid(elements, &trace()), Ok(()));
+        assert_eq!(patterns.valid(current.elements(&trace()).unwrap(), &trace()), Err(Error::Unsafe)); // Compare, never adopt.
+        for change in 0..5 {
+            let mut replaced = patterns;
+            match change {
+                0 => replaced.elements.swap(0, 1), 1 => replaced.legacy[0].element = elements[1],
+                2 => replaced.invoke.element = elements[1], 3 => replaced.legacy[0].original = replaced.invoke.original,
+                4 => replaced.invoke.original = elements[0], _ => unreachable!(),
+            }
+            let trace = trace(); let mut effects = 0;
+            let result = (|| { replaced.valid(elements, &trace)?; effects += 1; Ok(()) })();
+            assert_eq!(result, Err(Error::Unsafe)); assert_eq!(effects, 0); assert_eq!(trace.first.get().unwrap().check, SmokeCheck::QuitPatterns);
+        }
+        for change in 0..7 {
+            let mut changed = controls[0].clone();
+            match change {
+                0 => changed.identity.runtime[1] += 10, 1 => changed.identity.process += 1,
+                2 => changed.name = "other".to_owned(), 3 => changed.control = 0, 4 => changed.enabled = false,
+                5 => changed.offscreen = true, 6 => changed.ancestors.insert(0, QuitIdentity { runtime: vec![42, 99], process: 17 }),
+                _ => unreachable!(),
+            }
+            let trace = trace(); assert_eq!(controls[0].same(&changed, &trace), Err(Error::Unsafe));
+            assert_eq!(trace.first.get().unwrap().check, SmokeCheck::QuitButtonsChanged);
+        }
+        let mut changed = controls[0].clone(); changed.native = containers[1].clone(); let native_trace = trace();
+        assert_eq!(controls[0].same(&changed, &native_trace), Err(Error::Unsafe));
+        assert_eq!(native_trace.first.get().unwrap().check, SmokeCheck::QuitNativeChanged);
+
+        for (states, check) in [
+            ([0, W::STATE_SYSTEM_DEFAULT], None),
+            ([0, 0], Some(SmokeCheck::QuitDefault)), ([W::STATE_SYSTEM_DEFAULT; 2], Some(SmokeCheck::QuitDefault)),
+            ([W::STATE_SYSTEM_DEFAULT, 0], Some(SmokeCheck::QuitDefault)),
+            ([u32::MAX, W::STATE_SYSTEM_DEFAULT], Some(SmokeCheck::QuitDefaultState)),
+            ([0, u32::MAX], Some(SmokeCheck::QuitDefaultState)),
+            ([C::STATE_SYSTEM_UNAVAILABLE, W::STATE_SYSTEM_DEFAULT], Some(SmokeCheck::QuitDefaultState)),
+            ([0, W::STATE_SYSTEM_DEFAULT | C::STATE_SYSTEM_INVISIBLE], Some(SmokeCheck::QuitDefaultState)),
+            ([0, W::STATE_SYSTEM_DEFAULT | C::STATE_SYSTEM_OFFSCREEN], Some(SmokeCheck::QuitDefaultState)),
+        ] {
+            let trace = trace(); let mut effects = 0;
+            let result = (|| { quit_default_states(states, &trace)?; effects += 1; Ok(()) })();
+            assert_eq!(result, if check.is_none() { Ok(()) } else { Err(Error::Unsafe) });
+            assert_eq!(effects, usize::from(check.is_none())); assert_eq!(trace.first.get().map(|fault| fault.check), check);
+        }
+        let defaults = [0, W::STATE_SYSTEM_DEFAULT]; assert_eq!(quit_same_defaults(defaults, defaults, &trace()), Ok(()));
+        let changed_trace = trace();
+        assert_eq!(quit_same_defaults(defaults, [W::STATE_SYSTEM_FOCUSED, W::STATE_SYSTEM_DEFAULT], &changed_trace), Err(Error::Unsafe));
+        assert_eq!(changed_trace.first.get().unwrap().check, SmokeCheck::QuitLegacyChanged);
+        for (status, pointer, expected) in [
+            (0, 0usize, Err(Error::Unsafe)), (0, 1, Ok(true)), (-1, 0, Err(Error::Unsafe)),
+            (-1, 1, Err(Error::Unknown)), (HRESULT_PENDING, 0, Err(Error::Unknown)), (HRESULT_PENDING, 1, Err(Error::Unknown)),
+        ] {
+            let trace = trace(); let mut original = ComOriginal::new(ComKind::Legacy); original.begin().unwrap();
+            original.pointer = pointer as *mut c_void;
+            assert_eq!(trace.result(SmokeCheck::QuitOkLegacyAcquire, original.returned(status, false), Some(SmokeStatus::Hresult(status))), expected);
+            // Fake pointers never enter native acquisition, Release or settle.
+            if expected.is_err() { assert_eq!(trace.first.get().unwrap().check, SmokeCheck::QuitOkLegacyAcquire); }
+        }
+        progress.phase.set(SmokePhase::QuitInvoke); progress.quit_scan_begin().unwrap();
+        assert_eq!(progress.quit.get().unwrap().scan, 2); assert_eq!(progress.quit_scan_begin(), Err(Error::Unsafe));
+        let first = progress.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::QuitTreeState);
+        progress.quit_update(|value| { value.visited = 65; value.closed = 65; value.match_mask = 3; value.default_mask = Some(2); });
+        progress.phase.set(SmokePhase::DriverSettle); let _ = progress.result::<()>(SmokeCheck::Clock, Err(Error::Unknown), None);
+        assert_eq!(progress.first.get(), Some(first)); let mut text = Vec::new(); progress.emit_to(&mut text).unwrap();
+        assert!(text.len() <= 1024 && std::str::from_utf8(&text).unwrap().contains("\"quit\":{\"scan\":2,\"visited\":0,\"closed\":0,\"matchMask\":0,\"defaultMask\":null}"));
+        assert_eq!(progress.emit_to(&mut text).unwrap(), None);
+        // Source wiring complements the real predicates; it is not evidence
+        // about this machine's TaskDialog provider or process finality.
+        let source = include_str!("ordinary_owner_ui.rs");
+        let observe = source.split_once("    fn observe(&mut self, launch:").unwrap().1.split_once("    fn settle(&mut self)").unwrap().0;
+        assert_eq!(observe.matches("self.quit_scan(dialog_element, dialog, launch, clock)?").count(), 2);
+        assert_eq!(observe.matches("(table.Invoke)(pointer)").count(), 1);
+        assert!(observe.contains("self.quit_requery_originals(&buttons, dialog, launch, clock)?;"));
+        assert!(observe.contains("let pointer = self.pointer(index, ComKind::Invoke)?;"));
+        assert!(observe.contains("self.query.begin(clock, &self.trace)?; self.invoke_entered = true;"));
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
         dashboard_name_observation_contract(); dashboard_stale_name_contract();
         startup_diagnostic_contract();
-        crate::ui::quit_buttons::contract();
-        // Actual finite error routing and action barrier; all results are inert,
-        // no HWND/COM/native clock or cleanup call can be reached by these cases.
-        use crate::ui::quit_buttons::Failure as Q;
+        quit_logical_controls_contract();
+        // Actual finite native-containment routing; no native call is entered.
+        use crate::ui::quit_native::Failure as Q;
         for (failure, check, error) in [
-            (Q::State, SmokeCheck::QuitButtonsState, Error::State),
-            (Q::Bounds, SmokeCheck::QuitButtonsBounds, Error::Bounds),
-            (Q::Missing, SmokeCheck::QuitButtonsMissing, Error::Unsafe),
-            (Q::Duplicate, SmokeCheck::QuitButtonsDuplicate, Error::Unsafe),
-            (Q::Id, SmokeCheck::QuitButtonId, Error::Unsafe),
-            (Q::Class, SmokeCheck::QuitButtonClass, Error::Unsafe),
-            (Q::Process, SmokeCheck::QuitButtonProcess, Error::Unsafe),
-            (Q::Thread, SmokeCheck::QuitButtonThread, Error::Unsafe),
-            (Q::Visibility, SmokeCheck::QuitButtonVisibility, Error::Unsafe),
-            (Q::Enabled, SmokeCheck::QuitButtonEnabled, Error::Unsafe),
-            (Q::Descendant, SmokeCheck::QuitButtonDescendant, Error::Unsafe),
-            (Q::Lineage, SmokeCheck::QuitButtonLineage, Error::Unsafe),
-            (Q::Style, SmokeCheck::QuitButtonStyle, Error::Unsafe),
-            (Q::Default, SmokeCheck::QuitDefault, Error::Unsafe),
-            (Q::Changed, SmokeCheck::QuitButtonsChanged, Error::Unsafe),
+            (Q::State, SmokeCheck::QuitNativeState, Error::State),
+            (Q::Bounds, SmokeCheck::QuitNativeBounds, Error::Bounds),
+            (Q::Process, SmokeCheck::QuitNativeProcess, Error::Unsafe),
+            (Q::Thread, SmokeCheck::QuitNativeThread, Error::Unsafe),
+            (Q::Descendant, SmokeCheck::QuitNativeDescendant, Error::Unsafe),
+            (Q::Lineage, SmokeCheck::QuitNativeLineage, Error::Unsafe),
+            (Q::Style, SmokeCheck::QuitNativeStyle, Error::Unsafe),
+            (Q::Changed, SmokeCheck::QuitNativeChanged, Error::Unsafe),
         ] {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::QuitDialog);
             let mut effects = 0;
-            let result: Result<()> = (|| { trace.quit_binding::<()>(Err(failure))?; effects += 1; Ok(()) })();
+            let result: Result<()> = (|| { trace.quit_native::<()>(Err(failure))?; effects += 1; Ok(()) })();
             assert_eq!(result, Err(error)); assert_eq!(effects, 0);
             let first = trace.first.get().expect("actual refusing decision");
             assert_eq!((first.phase, first.check, first.error), (SmokePhase::QuitDialog, check, error));
             assert_eq!(first.status, None); assert_eq!(first.dashboard, None);
-            assert_eq!(trace.quit_binding::<()>(Err(Q::Changed)), Err(Error::Unsafe));
+            assert_eq!(trace.quit_native::<()>(Err(Q::Changed)), Err(Error::Unsafe));
             assert_eq!(trace.first.get(), Some(first));
         }
         // Actual admission helper, inert Results/counters only: no native clock,
@@ -3905,7 +4421,7 @@ mod contract_tests {
             assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
             let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
                 error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0),
-                dashboard_binding_timeouts: Some(0), startup: StartupSample::new() };
+                dashboard_binding_timeouts: Some(0), startup: StartupSample::new(), quit: None };
             saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
             assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
             assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
@@ -3992,7 +4508,7 @@ mod contract_tests {
                 Some(SmokeStatus::Win32(u32::MAX))] {
                 let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard,
                     main_binding_timeouts: Some(u16::MAX), dashboard_binding_timeouts: Some(u16::MAX), startup: StartupSample {
-                        availability: StartupAvailability::Missing, last: Some((widest_word, longest_phase)) } };
+                        availability: StartupAvailability::Missing, last: Some((widest_word, longest_phase)) }, quit: None };
                 let mut raw = [0u8; 1024]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
                 let text = std::str::from_utf8(&raw[..size]).unwrap();
                 assert!(size <= 1024 && text.is_ascii() && text.ends_with("}\n") && text.lines().count() == 1);
