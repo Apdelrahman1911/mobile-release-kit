@@ -89,12 +89,12 @@ pub fn encode_request(id: &str, method: Method, params: &Value) -> Result<Vec<u8
     Ok(writer.bytes)
 }
 
-struct Seed<'a> { nodes: &'a mut usize, depth: usize }
+struct Seed<'a> { nodes: &'a mut usize, depth: usize, node_limit: usize, depth_limit: usize }
 impl<'de> DeserializeSeed<'de> for Seed<'_> {
     type Value = Value;
     fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
         *self.nodes += 1;
-        if *self.nodes > NODE_LIMIT || self.depth > DEPTH_LIMIT { return Err(de::Error::custom("JSON bounds exceeded")); }
+        if *self.nodes > self.node_limit || self.depth > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
         deserializer.deserialize_any(self)
     }
 }
@@ -112,33 +112,47 @@ impl<'de> Visitor<'de> for Seed<'_> {
     fn visit_unit<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
     fn visit_none<E: de::Error>(self) -> Result<Value, E> { Ok(Value::Null) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        if self.depth >= DEPTH_LIMIT { return Err(de::Error::custom("container nesting exceeded")); }
+        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
         let mut items = Vec::new();
-        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })? { items.push(value); }
+        while let Some(value) = seq.next_element_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
+            node_limit: self.node_limit, depth_limit: self.depth_limit })? { items.push(value); }
         Ok(Value::Array(items))
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-        if self.depth >= DEPTH_LIMIT { return Err(de::Error::custom("container nesting exceeded")); }
+        if self.depth >= self.depth_limit { return Err(de::Error::custom("container nesting exceeded")); }
         let mut items = Map::new();
         let mut names = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
             *self.nodes += 1;
-            if *self.nodes > NODE_LIMIT || self.depth + 1 > DEPTH_LIMIT { return Err(de::Error::custom("JSON bounds exceeded")); }
+            if *self.nodes > self.node_limit || self.depth + 1 > self.depth_limit { return Err(de::Error::custom("JSON bounds exceeded")); }
             if !names.insert(key.clone()) { return Err(de::Error::custom("duplicate JSON key")); }
-            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1 })?;
+            let value = map.next_value_seed(Seed { nodes: self.nodes, depth: self.depth + 1,
+                node_limit: self.node_limit, depth_limit: self.depth_limit })?;
             items.insert(key, value);
         }
         Ok(Value::Object(items))
     }
 }
 
-pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+fn strict_json_with_limits(bytes: &[u8], node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
     std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let mut nodes = 0usize;
-    let value = Seed { nodes: &mut nodes, depth: 0 }.deserialize(&mut decoder).map_err(|_| BridgeError::protocol())?;
+    let value = Seed { nodes: &mut nodes, depth: 0, node_limit, depth_limit }
+        .deserialize(&mut decoder).map_err(|_| BridgeError::protocol())?;
     decoder.end().map_err(|_| BridgeError::protocol())?;
     Ok(value)
+}
+
+pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    strict_json_with_limits(bytes, NODE_LIMIT, DEPTH_LIMIT)
+}
+
+// Fixed protected Android-file admission only; never an IPC/renderer policy.
+// The ordinary parser, runtime inventory and OS contract keep their old limits.
+pub(crate) fn strict_android_tool_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > crate::android_toolchain::MANIFEST_LIMIT { return Err(BridgeError::protocol()); }
+    strict_json_with_limits(bytes, 150_000, 16)
 }
 
 #[derive(Deserialize)]
@@ -253,6 +267,27 @@ mod tests {
         if let Value::Object(map) = &mut value { map.insert("extra".into(), Value::Null); }
         assert!(check_value(&value).is_err());
         assert!(strict_json(&serde_json::to_vec(&value).unwrap_or_default()).is_err());
+    }
+    #[test]
+    fn android_manifest_bounds_do_not_widen_the_ordinary_parser() {
+        // JSON DATA only, not a tool manifest/profile or an installed capability.
+        let mut value = Value::Array(vec![Value::Null; 149_999]);
+        let raw = serde_json::to_vec(&value).unwrap();
+        assert!(strict_android_tool_manifest_json(&raw).is_ok());
+        assert!(strict_json(&raw).is_err());
+        if let Value::Array(items) = &mut value { items.push(Value::Null); }
+        assert!(strict_android_tool_manifest_json(&serde_json::to_vec(&value).unwrap()).is_err());
+        let mut nested = Value::Null;
+        for _ in 0..16 { nested = Value::Array(vec![nested]); }
+        assert!(strict_android_tool_manifest_json(&serde_json::to_vec(&nested).unwrap()).is_ok());
+        nested = Value::Array(vec![nested]);
+        let raw = serde_json::to_vec(&nested).unwrap();
+        assert!(strict_android_tool_manifest_json(&raw).is_err() && strict_json(&raw).is_ok());
+        for raw in [br#"{"a":1,"a":2}"#.as_slice(), b"NaN", b"{} {}", &[0xff]] {
+            assert!(strict_android_tool_manifest_json(raw).is_err());
+        }
+        assert!(strict_android_tool_manifest_json(&vec![b' '; crate::android_toolchain::MANIFEST_LIMIT + 1]).is_err());
+        assert_eq!((NODE_LIMIT, DEPTH_LIMIT), (20_000, 32));
     }
     #[test]
     fn thirty_third_empty_container_is_not_a_depth_thirty_two_scalar() {

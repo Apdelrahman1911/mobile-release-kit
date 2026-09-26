@@ -562,13 +562,14 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_INSTALLED_SHELL_TRANSPORT: android-same-job-local-v1
           MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
-          # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'd52732c61de0f03a02ce1fa01a5f5955a49b43e2f2b783f22d84805c8317d346'
+          # Candidate source pin; separate SOURCE/material/native review remains required.
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '43d2ce6a4600bd23e6f6ad410d58c4f118ac8a7962012ca5de7ff617db9acbbb'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
-      - name: Retain original compiler evidence and shell outputs
+      - name: Retain only the typed compiler summary; same-job originals stay private
         id: upload
         if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -585,7 +586,9 @@ jobs:
         env:
           MRK_INSTALLED_SHELL_CASE: observe
           HOSTING: ${{ runner.environment }}
-          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          MRK_INSTALLED_SHELL_TRANSPORT: ${{ steps.compile.outputs.shell_transport }}
+          MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256: ${{ steps.compile.outputs.shell_local_transport_sha256 }}
+          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
         run: |
@@ -596,12 +599,23 @@ jobs:
           [[ "$MRK_INSTALLED_SHELL_CASE" == observe ]]
           /usr/bin/python3.12 -I -S -B - <<'PY'
           import os, re
-          values = [os.environ.get(name, '') for name in (
-              'MRK_INSTALLED_SHELL_ARTIFACT_ID', 'MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT', 'GITHUB_RUN_ATTEMPT')]
-          if not all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in values):
-              raise SystemExit('Missing or malformed original compiler artifact/attempt output')
-          if int(values[1]) > int(values[2]) or not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_SHELL_ROSTER_SHA256', '')):
+          artifact = os.environ.get('MRK_INSTALLED_SHELL_ARTIFACT_ID', '')
+          producer = os.environ.get('MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT', '')
+          consumer = os.environ.get('GITHUB_RUN_ATTEMPT', '')
+          transport = os.environ.get('MRK_INSTALLED_SHELL_TRANSPORT', '')
+          local_pin = os.environ.get('MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256', '')
+          if not all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (producer, consumer)):
+              raise SystemExit('Missing original compiler/consumer attempt output')
+          if not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_SHELL_ROSTER_SHA256', '')):
               raise SystemExit('Original compiler roster/producer attempt differs')
+          if transport == 'android-same-job-local-v1':
+              if artifact or producer != consumer or not re.fullmatch(r'[0-9a-f]{64}', local_pin):
+                  raise SystemExit('Android requires original same-job private transport, never a compiler artifact')
+          elif transport == 'actions-artifact-v1':
+              if local_pin or int(producer) > int(consumer) or not re.fullmatch(r'[1-9][0-9]{0,19}', artifact):
+                  raise SystemExit('Original legacy compiler artifact/attempt differs')
+          else:
+              raise SystemExit('Unknown original compiler transport')
           PY
       - name: Observe only the hosted Python body as public DATA
         if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
@@ -630,7 +644,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       - name: Download this run's exact original compiled shell outputs
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success' && steps.compile.outputs.shell_transport == 'actions-artifact-v1'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
@@ -660,10 +674,12 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare_native.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare_native.outputs.deadline }}
           MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}
-          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          MRK_INSTALLED_SHELL_TRANSPORT: ${{ steps.compile.outputs.shell_transport }}
+          MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256: ${{ steps.compile.outputs.shell_local_transport_sha256 }}
+          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
-          # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'd52732c61de0f03a02ce1fa01a5f5955a49b43e2f2b783f22d84805c8317d346'
+          # Candidate source pin; separate SOURCE/material/native review remains required.
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '43d2ce6a4600bd23e6f6ad410d58c4f118ac8a7962012ca5de7ff617db9acbbb'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

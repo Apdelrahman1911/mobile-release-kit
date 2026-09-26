@@ -240,10 +240,12 @@ impl Clocks {
 #[derive(Clone)]
 pub(crate) struct SavedCommandOwner { inner: Arc<Inner> }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-struct InstalledObservation { control: Arc<crate::shell::installed_observation::commands::Control>, original: Option<Arc<Session>>, retired: bool, core_settled: bool }
+struct InstalledObservation { control: Arc<crate::shell::installed_observation::commands::Control>, original: Option<Arc<Session>>, retired: bool, core_settled: bool, android_lifetime: Option<android_wire::Lifetime> }
 struct Inner {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     observation: Mutex<Option<InstalledObservation>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation_identity: Arc<()>,
     domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -551,6 +553,8 @@ impl SavedCommandOwner {
         Self { inner: Arc::new(Inner {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             observation: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation_identity: Arc::new(()),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
@@ -583,7 +587,10 @@ impl SavedCommandOwner {
         if reason != Availability::Available { return Err(prepare_refusal(self.inner.domain, reason)); }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
-            observation.control.claim(crate::shell::installed_observation::commands::Domain::Offline)?;
+            observation.control.claim(match self.inner.domain {
+                SavedCommandDomain::OfflinePreflight => crate::shell::installed_observation::commands::Domain::Offline,
+                SavedCommandDomain::AndroidBuild => crate::shell::installed_observation::commands::Domain::Android,
+            })?;
         }
         let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
@@ -769,6 +776,9 @@ impl SavedCommandOwner {
                     if let Some(observation) = observation.as_mut().filter(|o| o.original.as_ref().is_some_and(|s| Arc::ptr_eq(s, &owner))) {
                         observation.retired = true;
                         observation.core_settled = active.accepted && active.terminal && active.projection.result.as_ref().is_some_and(Terminal::settled);
+                        observation.android_lifetime = match active.projection.result.as_ref() {
+                            Some(Terminal::AndroidBuild(t)) => Some(t.lifetime.clone()), _ => None,
+                        };
                     }
                 }
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
@@ -811,6 +821,10 @@ impl Inner {
             && self.runtime.offline_preflight_installed_profile_available()
     }
     fn qualified(&self) -> bool {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.domain == SavedCommandDomain::AndroidBuild
+            && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)
+            && self.observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o| o.control.permits_android())) { return true; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         if self.domain == SavedCommandDomain::OfflinePreflight && self.fixture.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
@@ -1781,6 +1795,75 @@ mod tests;
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl SavedCommandOwner {
+    pub(crate) fn installed_android_identity(&self) -> std::sync::Weak<()> { Arc::downgrade(&self.inner.observation_identity) }
+    pub(crate) fn admit_installed_android_observation(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+        let r = self.inner.lock();
+        if self.inner.domain != SavedCommandDomain::AndroidBuild || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
+            || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
+            || !self.inner.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled) {
+            return Err(self.inner.domain.unavailable());
+        }
+        let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if slot.is_some() { return Err(self.inner.domain.unavailable()); }
+        *slot = Some(InstalledObservation { control: token.consume(&self.inner.observation_identity)?, original: None,
+            retired: false, core_settled: false, android_lifetime: None }); Ok(())
+    }
+    pub(crate) fn installed_android_snapshot(&self) -> Option<crate::shell::installed_observation::commands::AndroidSnapshot> {
+        let (owner, retired, core_settled, recorded_lifetime) = {
+            let book = self.inner.observation.lock().ok()?; let book = book.as_ref()?;
+            if !book.control.case.android() { return None; }
+            (book.original.as_ref()?.clone(), book.retired, book.core_settled, book.android_lifetime.clone())
+        };
+        if owner.domain != SavedCommandDomain::AndroidBuild || self.inner.domain != SavedCommandDomain::AndroidBuild { return None; }
+        let book = owner.resources.try_lock().ok()?;
+        let startup = owner.startup.try_lock().ok()?;
+        let native = book.native.as_ref()?.try_lock().ok()?;
+        let r = self.inner.lock();
+        let active = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, &owner));
+        let projection = active.map(|a| &a.projection)
+            .or_else(|| r.last.as_ref().filter(|p| p.operation_id == owner.id && p.owner_generation == owner.generation))?;
+        let lifetime = if retired { recorded_lifetime } else { match projection.result.as_ref() {
+            Some(Terminal::AndroidBuild(t)) => Some(t.lifetime.clone()), _ => None,
+        } }?;
+        let native_joined = book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
+            && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, .. })));
+        let facts = crate::shell::installed_observation::commands::OriginalFacts {
+            domain: "android", id: owner.id.clone(), generation: owner.generation.clone(),
+            inspection_joined: book.inspection_started && book.inspection_joined && !book.inspection_failed
+                && book.inspection.is_none() && book.inspection_error.is_none(),
+            acquisition_joined: book.acquisition_started && book.acquisition_joined && !book.acquisition_failed
+                && book.acquisition.is_none() && book.acquisition_error.is_none(),
+            attempted: startup.attempted,
+            no_child: !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none()
+                && !book.acquisition_started && book.acquisition.is_none() && book.child.is_none(),
+            child_waited_success: startup.returned && !startup.failed && book.child.is_some() && !book.wait_failed
+                && book.waited.as_ref().is_some_and(ExitStatus::success),
+            stdin_closed: book.write_end.as_ref().is_some_and(|v| v.sent && v.closed && !v.failed),
+            stdout_eof_closed: book.out_end.as_ref().is_some_and(|v| (2..=android_wire::MAX_FRAMES).contains(&v.frames)
+                && v.eof && v.closed && !v.failed),
+            stderr_eof_closed: book.err_end.as_ref().is_some_and(|v| v.frames == 0 && v.eof && v.closed && !v.failed),
+            io_joined: book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
+                && !book.write_failed && !book.out_failed && !book.err_failed
+                && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some(),
+            core_lifetime_settled: if retired { core_settled } else {
+                active.is_some_and(|a| a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(Terminal::settled)) },
+            runtime_ledger_settled: native.runtime.settled(), runtime_settlement_joined: native_joined,
+            driver_joined: owner.driver_joined.load(Ordering::SeqCst) && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
+            manager_joined: !owner.manager_failed.load(Ordering::SeqCst) && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
+            observer_joined: matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+            watchdog_joined: owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
+                && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+            retired_before_cutoff: retired, active_retained: active.is_some(),
+            resource_unknown: owner.resource_unknown.load(Ordering::SeqCst) || active.is_some_and(|a| a.unknown)
+                || self.inner.poisoned.load(Ordering::SeqCst),
+        };
+        Some(crate::shell::installed_observation::commands::AndroidSnapshot {
+            facts, tools_ledger_settled: native.tools.settled(),
+            native_integrity: native.settled() && native.failure.is_none() && native_joined
+                && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true }))),
+            lifetime, terminal: serde_json::to_value(projection.public().android().ok()?).ok()?,
+        })
+    }
     pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
         let r = self.inner.lock();
         if self.inner.domain != SavedCommandDomain::OfflinePreflight || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
@@ -1788,7 +1871,7 @@ impl SavedCommandOwner {
             || !self.inner.offline_installed_selected() { return Err(self.inner.domain.unavailable()); }
         let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if slot.is_some() { return Err(self.inner.domain.unavailable()); }
-        *slot = Some(InstalledObservation { control: token.consume()?, original: None, retired: false, core_settled: false }); Ok(())
+        *slot = Some(InstalledObservation { control: token.consume()?, original: None, retired: false, core_settled: false, android_lifetime: None }); Ok(())
     }
     pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::Snapshot> {
         let (owner, retired, core_settled) = {

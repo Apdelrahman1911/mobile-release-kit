@@ -17,7 +17,7 @@ import unittest
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, PropertyMock, call, patch
 
 from mobile_release import android, android_manifest, android_zip_integrity
 from mobile_release import desktop_android_build as service
@@ -504,6 +504,20 @@ class AndroidOwnedSeamTests(_InertCase):
                 self.assertIs(raised.exception, error)
                 self.assertEqual(f.operation.command_outcome(), {"outcome": "exited", "exitCode": 0})
                 f.operation.capture_after.assert_not_called()
+        # Actual successful operation/core wrappers contribute two checks;
+        # real tool argv/environment builders separately prove one each.
+        f = _InertRun(self)
+        f.command("gradle")
+        f.operation.gradle_command.side_effect = lambda: AndroidBuildOperation.gradle_command(f.operation)
+        f.operation.command_environment.side_effect = lambda: AndroidBuildOperation.command_environment(f.operation)
+        f.tools.gradle_command.side_effect = lambda task, work: ("/inert/gradle", "--no-daemon", task)
+        self.patched(f.tools, "command_environment", return_value={"INERT_FIXED": "environment"})
+        with patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=Path("/inert/work")):
+            self.assertEqual(android.run_android_build(f.bound.config, signed=False, cancellation=f.guard,
+                                                       operation=f.operation), {"android-aab": f.artifact.path})
+        self.assertEqual(f.tools.check.call_count, 2)
+        f.tools.gradle_command.assert_called_once_with(f.bound.task, Path("/inert/work"))
+        f.tools.command_environment.assert_called_once_with(Path("/inert/work"), f.bound.release)
 
     def test_command_exception_has_no_return_code_or_substitute_artifact(self):
         cases = ((False, ProcessError("PRIVATE dispatch", dispatched=True)),
@@ -593,7 +607,13 @@ class AndroidOwnedSeamTests(_InertCase):
         inspector = f.inspector()
         command = f.command("bundletool")
         manifest = self.patched(android_manifest, "validate_android_manifest", return_value=[findings()[1]])
-        result = f.validate()
+        f.operation.command_environment.side_effect = lambda: AndroidBuildOperation.command_environment(f.operation)
+        self.patched(f.tools, "command_environment", return_value={"INERT_FIXED": "environment"})
+        with patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=Path("/inert/work")):
+            result = f.validate()
+        self.assertEqual(f.tools.check.call_count, 2)  # Actual operation wrapper plus returned bundletool.
+        f.tools.bundletool_command.assert_called_once_with(f.artifact.path)
+        f.tools.command_environment.assert_called_once_with(Path("/inert/work"), f.bound.release)
         inspector.assert_called_once_with(f.reader_token, archive_bytes=f.artifact.size, checkpoint=f.artifact.check)
         manifest.assert_called_once_with("INERT_MANIFEST", expected_application_id="org.example.saved",
                                          release=f.bound.release, cancellation=f.guard)
@@ -638,6 +658,7 @@ class AndroidBuildServiceTests(_InertCase):
         self.assertLess(f.events.index("operation-close"), f.events.index("project-exit"))
         self.assertLess(f.events.index("project-exit"), f.events.index("invocation-exit"))
         f.operation.close.assert_called_once_with()
+        self.assertEqual(f.tools.check.call_count, 2)  # Post-inspection AND post-disposal, part of the14-round budget.
         self.assertEqual(f.artifact.verify_bytes.call_count, 2)
         self.assertEqual(f.run.terminal()["outcome"], "unknown")  # Input and handlers are not retired DATA yet.
         f.settle_outer()
@@ -655,6 +676,22 @@ class AndroidBuildServiceTests(_InertCase):
         with self.assertRaises(wire.ProtocolError):
             f.run.run()
         self.assertEqual(f.build_call.call_count, 1)
+        # Actual preparation contributes one direct check and invokes the
+        # separately exercised acquisition(1)/project-selection(2) exactly once.
+        prepared = _InertRun(self)
+        prepared.operation.prepared, prepared.operation.tools = False, None
+        inputs = object()
+        self.patched(prepared.operation, "_project_tool_inputs", return_value=inputs)
+        self.patched(prepared.files, "prepare_namespace")
+        self.patched(prepared.tools, "acquire")
+        self.patched(prepared.tools, "check_project_inputs")
+        with patch("mobile_release.android_build_tools.AndroidValidationTools", return_value=prepared.tools) as constructor:
+            AndroidBuildOperation.prepare(prepared.operation)
+        constructor.assert_called_once_with(prepared.operation, prepared.request.native["toolchain"])
+        prepared.tools.acquire.assert_called_once_with()
+        prepared.tools.check_project_inputs.assert_called_once_with(inputs)
+        prepared.tools.check.assert_called_once_with()
+        self.assertTrue(prepared.operation.prepared)
 
     def test_invalid_aab_can_complete_negative_inspection_but_never_claim_native_check(self):
         f = _InertRun(self)

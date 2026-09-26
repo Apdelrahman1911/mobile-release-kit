@@ -39,15 +39,19 @@ LAUNCH_CONTRACT = "gradle-posix-private-jvm-v1"
 PREFIX = "/opt/mobile-release-kit/android/"
 MANIFEST_NAME = "android-toolchain.json"
 OS_SHELL, OS_EXECUTABLE_DIRECTORY = "/usr/bin/dash", "/usr/bin"
-MAX_MANIFEST_BYTES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 1024**2, 512 * 1024**2, 1024**3
-MAX_TOOL_FILES, MAX_OS_FILES, MAX_ENTRIES, MAX_DESCRIPTORS = 2048, 128, 8192, 4096
-MIN_DESCRIPTOR_LIMIT = 8192  # Admission floor, NOT a claim of ambient headroom.
+MAX_MANIFEST_BYTES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 4 * 1024**2, 512 * 1024**2, 1024**3
+MAX_TOOL_FILES, MAX_OS_FILES, MAX_ENTRIES, MAX_DESCRIPTORS = 16_384, 256, 32_768, 32_768
+MAX_OS_HELPERS = 128
+MAX_MANIFEST_NODES = 150_000  # Closed schema maximum: 67 + 128 + 9 * (16384 + 256) = 149955.
+MAX_DIRECTORY_ADVANCES = 2 * MAX_ENTRIES  # Includes each original iterator's final next attempt.
+MIN_DESCRIPTOR_LIMIT = 65_536  # Admission floor, NOT a claim of ambient headroom.
 MAX_DEPTH, MAX_PATH_BYTES, READ_CHUNK = 16, 512, 64 * 1024
 MAX_SELECTION_BYTES, MAX_PROPERTY_LINES, MAX_PROPERTY_LINE = 512 * 1024, 4096, 4096
-MAX_CHECKPOINTS = 2_000_000
+MAX_CHECKPOINTS = 4_000_000  # Fourteen pre-cleanup metadata checks; final cleanup keeps its own cutoff.
 WORKERS = 2
 TOOL_ROLES = {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
               "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}
+AAPT2_PATH = "gradle/native/aapt2/aapt2"
 SELECTION_FIELDS = ("wrapper_properties", "local_properties", "root_gradle_properties",
                     "module_gradle_properties", "daemon_jvm_properties")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -115,7 +119,7 @@ def _shape(value: object, depth: int = 0, count: list[int] | None = None) -> Non
     if count is None:
         count = [0]
     count[0] += 1
-    _need(depth <= 16 and count[0] <= 20_000, "input-limit")
+    _need(depth <= 16 and count[0] <= MAX_MANIFEST_NODES, "input-limit")
     if type(value) is dict:
         for key, item in value.items():
             _need(type(key) is str)
@@ -176,6 +180,28 @@ class _Profile:
     directories: tuple[str, ...]
 
 
+def _direct_file(path: str, directory: str, suffix: str) -> bool:
+    if not path.startswith(directory):
+        return False
+    name = path[len(directory):]
+    return len(name) > len(suffix) and "/" not in name and name.endswith(suffix)
+
+
+def _native_path(path: str) -> bool:
+    # _file_specs first applies the shared absolute-path/component grammar.
+    # These families admit only explicitly inventoried canonical regular files,
+    # never directory discovery or ambient font/resolver configuration.
+    return (path.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
+            or path in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf",
+                        "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"}
+            or any(_direct_file(path, directory, ".conf")
+                   for directory in ("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
+            or any(_direct_file(path, f"/usr/share/fonts/truetype/{family}/", ".ttf")
+                   for family in ("dejavu", "lato", "liberation", "noto"))
+            or path == "/var/cache/fontconfig/CACHEDIR.TAG"
+            or re.fullmatch(r"/var/cache/fontconfig/[0-9a-f]{32}-le64\.cache-9", path) is not None)
+
+
 def _file_specs(value: object, *, native: bool = False) -> tuple[_FileSpec, ...]:
     _need(type(value) is list and 1 <= len(value) <= (MAX_OS_FILES if native else MAX_TOOL_FILES), "input-limit")
     specs = []
@@ -185,8 +211,7 @@ def _file_specs(value: object, *, native: bool = False) -> tuple[_FileSpec, ...]
         if native:
             # Canonical regular objects only. Known loader/helper aliases are
             # bound by the separate native OS profile, not followed here.
-            _need(item["path"].startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
-                  or item["path"] in {"/etc/ld.so.cache", "/etc/ld.so.conf"})
+            _need(_native_path(item["path"]))
         else:
             _need(parts[0] in {"jdk", "gradle", "sdk", "bundletool"} and len(parts) >= 2)
         _need(_integer(item["size"], MAX_FILE_BYTES) and _text(item["sha256"], _SHA)
@@ -241,6 +266,10 @@ def _parse_manifest(raw: bytes, binding: _Binding) -> _Profile:
         _need(TOOL_ROLES[role] in by_name)
         item = by_name[TOOL_ROLES[role]]
         _need(item.size > 0 and (role == "bundletool" or bool(item.mode & 0o111)))
+    # AGP uses this exact protected member, not a runtime extraction whose
+    # loader search origins depend on an arbitrary project/cache spelling.
+    _need(AAPT2_PATH in by_name and by_name[AAPT2_PATH].size > 0
+          and bool(by_name[AAPT2_PATH].mode & 0o111))
     jar = by_name[TOOL_ROLES["bundletool"]]
     _need(jar.sha256 == BUNDLETOOL_SHA256 and jar.size <= BUNDLETOOL_MAX_BYTES
           and any(item.path.startswith("sdk/") for item in files))
@@ -248,7 +277,7 @@ def _parse_manifest(raw: bytes, binding: _Binding) -> _Profile:
     _need(_text(os_profile["id"], _LABEL) and _text(os_profile["inventorySha256"], _SHA)
           and os_profile["shell"] == OS_SHELL and os_profile["executableDirectory"] == OS_EXECUTABLE_DIRECTORY)
     helpers = os_profile["helpers"]
-    _need(type(helpers) is list and 1 <= len(helpers) <= MAX_OS_FILES
+    _need(type(helpers) is list and 1 <= len(helpers) <= MAX_OS_HELPERS
           and all(_text(name, _COMPONENT) and name not in {".", ".."} for name in helpers))
     _need(helpers == sorted(set(helpers)) and {"sed", "uname", "xargs"}.issubset(helpers))
     native = _file_specs(os_profile["files"], native=True)
@@ -324,6 +353,7 @@ def _fixed_properties(root: str) -> tuple[tuple[str, str], ...]:
             ("org.gradle.java.installations.auto-detect", "false"),
             ("org.gradle.java.installations.auto-download", "false"),
             ("android.builder.sdkDownload", "false"),
+            ("android.aapt2FromMavenOverride", f"{root}/{AAPT2_PATH}"),
             ("kotlin.compiler.execution.strategy", "in-process"),
             ("kotlin.daemon.enabled", "false"))
 
@@ -343,6 +373,9 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
           and wrapper.get("distributionSha256Sum") == profile.distribution_sha256)
     local = {} if data["local_properties"] is None else _properties(data["local_properties"])
     for key, value in local.items():
+        target = key.casefold().removeprefix("systemprop.")
+        _need(target not in {"android.aapt2frommavenoverride", "android.aapt2version", "android.aapt2platform"}
+              and not target.startswith(("jna.", "jnidispatch.")))
         if key == "sdk.dir":
             _need(value == f"{profile.binding.root}/sdk")
         else:
@@ -353,7 +386,8 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
                   "org.gradle.parallel": "false", "org.gradle.workers.max": str(WORKERS)})
     forbidden = {"org.gradle.jvmargs", "gradle.user.home", "org.gradle.user.home", "kotlin.daemon.jvmargs",
                  "kotlin.daemon.jvm.options", "java.home", "java.io.tmpdir", "user.home", "java.library.path",
-                 "sdk.dir", "ndk.dir", "cmake.dir", "android.sdk.path", "android.sdkDownload"}
+                 "sdk.dir", "ndk.dir", "cmake.dir", "android.sdk.path", "android.sdkDownload",
+                 "android.aapt2Version", "android.aapt2Platform"}
     for field in ("root_gradle_properties", "module_gradle_properties"):
         properties = {} if data[field] is None else _properties(data[field])
         for key, value in properties.items():
@@ -362,18 +396,21 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
             else:
                 lower = key.casefold()
                 _need(lower not in {name.casefold() for name in (*fixed, *forbidden)}
-                      and not lower.startswith(("org.gradle.java.", "org.gradle.jvm", "kotlin.daemon.jvm")))
+                      and not lower.startswith(("org.gradle.java.", "org.gradle.jvm", "kotlin.daemon.jvm",
+                                                "jna.", "jnidispatch.")))
                 if lower.startswith("systemprop."):
                     target = lower[len("systemprop."):]
                     _need(target not in {name.casefold() for name in (*fixed, *forbidden)}
                           and not target.startswith(("java.", "javax.", "jdk.", "sun.", "org.gradle.java.",
-                                                    "org.gradle.jvm", "android.builder.sdk")))
+                                                    "org.gradle.jvm", "android.builder.sdk", "jna.", "jnidispatch.")))
     return tuple((field, data[field]) for field in SELECTION_FIELDS)
 
 
 def _jvm_arguments(work: Path, *, bundletool: bool = False) -> tuple[str, ...]:
     return ("-Xms64m", "-Xmx1024m" if bundletool else "-Xmx2048m", "-XX:MaxMetaspaceSize=512m",
-            "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}")
+            "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}",
+            "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+            f"-Djna.tmpdir={work}")
 
 
 def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True) -> tuple[int, ...]:
@@ -435,7 +472,7 @@ class _Entries:
                 raise
 
     def advance(self):
-        self.tools._charge("tool-directory-advances", 1, MAX_ENTRIES)
+        self.tools._charge("tool-directory-advances", 1, MAX_DIRECTORY_ADVANCES)
         _need(self.state == "OPEN" and self.close_state == "NOT_ATTEMPTED" and self.value is not None)
         result = next(self.value)
         self.tools._point()

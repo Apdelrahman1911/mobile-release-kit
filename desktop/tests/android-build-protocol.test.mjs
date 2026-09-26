@@ -449,3 +449,11 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
   assert.equal(androidBuildError({ code: 'PRIVATE_COMPILER_DIAGNOSIS', message: 'PRIVATE' }).code, 'android_build_protocol');
   assert.equal(reads, 0);
 });
+
+test('availability text does not turn a closed gate into missing-SDK diagnosis or an installer', () => {
+  assert.match(androidBuildAvailabilityText['runtime-unqualified'], /does not mean your JDK or SDK is missing/);
+  assert.match(androidBuildAvailabilityText['toolchain-unqualified'], /not selected, not inspected or not yet qualified/);
+  assert.match(androidBuildAvailabilityText['toolchain-unqualified'], /installs no tools and accepts no licenses/);
+  assert.match(androidBuildAvailabilityText['unsupported-platform'], /no fallback runner/);
+  assert.match(androidBuildAvailabilityText.available, /Saved-input review and explicit consent/);
+});

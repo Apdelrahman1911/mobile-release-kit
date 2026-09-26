@@ -1,4 +1,5 @@
 """Inert lifecycle policy tests; never start a service, child or package tool."""
+from contextlib import ExitStack
 from copy import deepcopy
 from itertools import permutations
 import ast
@@ -22,6 +23,13 @@ spec = importlib.util.spec_from_file_location(
     "publication_lifecycle_data", SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py")
 L = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(L)
+
+# Invented DATA for parser/mocked-filesystem tests ONLY; never native material.
+ANDROID_MATERIAL_DATA = {"instance": "inert-android", "manifestSha256": "1" * 64,
+    "osContractSha256": "2" * 64, "distributionSha256": "3" * 64}
+ANDROID_PUBLICATION_DATA = {"documents": {key: {"size": 1, "sha256": digit * 64}
+    for key, digit in (("manifest", "1"), ("osContract", "2"), ("sources", "4"))},
+    "totals": {"toolFiles": 5, "toolDirectories": 6, "toolBytes": 5, "osFiles": 4, "osAliases": 1, "osBytes": 4}}
 
 NEEDRESTART_CONFIG_DATA = (
     b"# needrestart - Restart daemons after library updates.\n#\n"
@@ -276,6 +284,8 @@ class GuardedXattrDiagnostics(unittest.TestCase):
             self.assertEqual(query.call_count, 1)
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class LifecycleData(unittest.TestCase):
     def test_compact_shell_policy_is_exact_lossless_and_independent_of_wire_inputs(self):
         value, _, _ = shell_loader_data(compact=False)
@@ -1155,18 +1165,24 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Twenty logs plus nineteen failure leaves retain the64MiB
-            # ceiling. Version adds six fixture and twelve GUI environment
-            # nodes beyond the existing nineteen cases.
-            # Only the shell roster cap is165;
+            # Twenty-four logs plus twenty-three failure leaves retain the64MiB
+            # ceiling. Android adds100 fixed source controls and48 GUI nodes.
+            # Only the shell roster cap is185;
             # the other profiles and32MiB aggregate evidence cap stay fixed.
             session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
                 for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
             tools_bytes = sum(len(data) for case in L.SHELL_TOOLS_OFFLINE_CASES
                 for _, mode, _, data in L._shell_tools_offline_roster(value, case, True) if stat.S_ISREG(mode))
+            android_bytes = sum(len(data) for case in L.SHELL_ANDROID_CASES
+                for _, mode, _, data in L._shell_android_roster(value, case, True) if stat.S_ISREG(mode))
             version_bytes = len(L.SHELL_PROJECT_CONFIG) + len(L.SHELL_PROJECT_IGNORE) + len(b"keep unrelated version fixture data\n") + 34
-            required = baseline + ((2496 << 20) + 7235 + session_bytes + tools_bytes + 1186 + 11 + version_bytes + 411 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + (165 + 430 if profile == "shell" else 128)
+            required = baseline + ((3008 << 20) + 7235 + session_bytes + tools_bytes + android_bytes + 1186 + 11 + version_bytes + 559 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + (185 + 582 if profile == "shell" else 128)
+            if profile == "shell":
+                # Five one-byte synthetic files, six directories, one-byte
+                # manifest and at most three new publication directories.
+                required += 5 + 1 + 15
+                inodes += 15
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2147,6 +2163,10 @@ class LifecycleData(unittest.TestCase):
                 self.assertEqual({key: properties[key] for key in defaults if key != "TasksMax"},
                                  {key: item for key, item in defaults.items() if key != "TasksMax"})
                 self.assertEqual(properties["RuntimeMaxSec"], "1160s")
+                if profile == "shell":
+                    self.assertEqual(properties["LimitNOFILE"], "65536")
+                else:
+                    self.assertNotIn("LimitNOFILE", properties)
 
                 # The collector must authenticate this original profile's argv
                 # before any public-root observation. The sentinel is not a
@@ -2169,12 +2189,26 @@ class LifecycleData(unittest.TestCase):
                             directory.assert_not_called()
                         read.assert_not_called()
 
-                observed = {key: defaults[key] for key in L.SHOW if key in defaults}
+                if profile == "shell":
+                    for wrong in (None, "65535", "65536:131072", "infinity"):
+                        args = [arg if not arg.startswith("--property=LimitNOFILE=")
+                                else "--property=LimitNOFILE=" + wrong for arg in argv
+                                if wrong is not None or not arg.startswith("--property=LimitNOFILE=")]
+                        client = subprocess.CompletedProcess(args, 0, b"", b"")
+                        with self.subTest(client_nofile=wrong), patch.object(L, "directory") as directory:
+                            with self.assertRaisesRegex(ValueError, "Original service client argv differs"):
+                                L.verify_service_result(handoff_path, handoff_sha, entry_sha, client, Path("/inert/public"))
+                            directory.assert_not_called()
+
+                show = L.SHOW + (("LimitNOFILE", "LimitNOFILESoft") if profile == "shell" else ())
+                observed = {key: defaults[key] for key in show if key in defaults}
                 observed.update(Id=unit, Type="exec", InvocationID="d" * 32, ControlGroup=group, Result="success",
                                 MemoryMax=str(6 << 30), TasksMax=tasks, RuntimeMaxUSec="1160s",
                                 RuntimeRandomizedExtraUSec="0", TimeoutStartUSec="10s", TimeoutStopUSec="10s",
                                 **{key: "no" for key in ("PrivateMounts", "PrivateTmp", "PrivateUsers",
                                                         "PrivateNetwork", "ProtectControlGroups")})
+                if profile == "shell":
+                    observed.update(LimitNOFILE="65536", LimitNOFILESoft="65536")
                 kernel = {"/proc/self/cgroup": "0::" + group + "\n",
                           **{str(Path("/sys/fs/cgroup" + group) / key): item for key, item in {
                               "cgroup.type": "domain\n", "memory.max": str(6 << 30) + "\n",
@@ -2182,7 +2216,10 @@ class LifecycleData(unittest.TestCase):
                               "cpu.max": "200000 100000\n", "memory.events": "max 0\noom 0\noom_kill 0\n",
                               "pids.events": "max 0\n"}.items()}}
                 for phase in ("start", "stop"):
-                    for fault in (None, "systemd-limit", "kernel-limit", "both-limits", "unlimited", "task-denial", "memory-denial"):
+                    faults = (None, "systemd-limit", "kernel-limit", "both-limits", "unlimited", "task-denial", "memory-denial")
+                    if profile == "shell":
+                        faults += ("nofile-soft", "nofile-hard", "nofile-kernel", "nofile-unlimited")
+                    for fault in faults:
                         props, counters = dict(observed), dict(kernel)
                         other = "64" if tasks == "256" else "256"
                         if fault in {"systemd-limit", "both-limits", "unlimited"}:
@@ -2193,19 +2230,29 @@ class LifecycleData(unittest.TestCase):
                             key = "pids.events" if fault == "task-denial" else "memory.events"
                             path = "/sys/fs/cgroup" + group + "/" + key
                             counters[path] = counters[path].replace("max 0", "max 1")
-                        stdout = "".join(key + "=" + props[key] + "\n" for key in L.SHOW).encode("ascii")
+                        if fault == "nofile-soft": props["LimitNOFILESoft"] = "65535"
+                        if fault == "nofile-hard": props["LimitNOFILE"] = "131072"
+                        if fault == "nofile-unlimited": props["LimitNOFILE"] = "infinity"
+                        nofile = (65535, 65536) if fault == "nofile-kernel" else (65536, 65536)
+                        stdout = "".join(key + "=" + props[key] + "\n" for key in show).encode("ascii")
                         result = subprocess.CompletedProcess(["/inert-show"], 0, stdout, b"")
                         with self.subTest(phase=phase, fault=fault), patch.object(L, "command", return_value=result) as command, \
-                                patch.object(L, "_kernel", side_effect=lambda path: counters[str(path)]):
+                                patch.object(L, "_kernel", side_effect=lambda path: counters[str(path)]), \
+                                patch.object(L.resource, "getrlimit", return_value=nofile) as limits:
                             if fault is None:
                                 actual = L._domain(value, phase)
                                 self.assertEqual(actual["unit"]["TasksMax"], tasks)
                                 self.assertEqual(actual["effective"]["pids.max"], tasks)
+                                if profile == "shell":
+                                    limits.assert_called_once_with(L.resource.RLIMIT_NOFILE)
+                                    self.assertEqual(actual["effective"]["nofile"], [65536, 65536])
+                                else:
+                                    limits.assert_not_called()
                             else:
-                                with self.assertRaisesRegex(ValueError, "Effective aggregate limits differ|Original aggregate resource denial"):
+                                with self.assertRaisesRegex(ValueError, "Effective aggregate limits differ|Original aggregate resource denial|Inherited shell descriptor limits differ"):
                                     L._domain(value, phase)
                             command.assert_called_once_with(phase + "-unit-show",
-                                ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(L.SHOW), unit], maximum=3)
+                                ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), unit], maximum=3)
         self.assertEqual(L.PROPERTIES, defaults)
 
     def test_namespace_keys_survive_reopen_but_original_checks_stay_exact(self):
@@ -2493,8 +2540,9 @@ def positive_capture(receipt=None, candidate=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 21, 4096, 11, 11],
-            "children": ["candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 25, 4096, 11, 11],
+            "children": ["android-build", "android-build-cancel", "android-build-failure", "android-build-refusals",
+                         "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
                          "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project",
                          "session-deadline", "session-inputs", "session-loss", "session-refusals", "tools-cancel",
                          "tools-observed", "tools-settlement", "version-project", "workflow-project"],
@@ -2827,6 +2875,100 @@ def version_fixture_data(value, *, saved=False):
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else ["version.properties"]), "namespace": namespace}
 
 
+def android_receipt_data(lifecycle, case):
+    """Invented Android terminal DATA; no owner, process, SDK or AAB is created."""
+    cancelled, refused = case == "android-build-cancel", case == "android-build-refusals"
+    complete = case == "android-build"
+    config = lifecycle.SHELL_ANDROID_CONFIG
+    version = lifecycle.SHELL_ANDROID_VERSION
+    context = {"projectId": "inert_android", "draftRevision": 1, "baselineGeneration": 0,
+        "platform": "android", "operation": "android-build-inspect",
+        "savedConfig": {"bytes": len(config), "sha256": hashlib.sha256(config).hexdigest()},
+        "savedVersion": {"source": "release/version.properties", "bytes": len(version), "sha256": hashlib.sha256(version).hexdigest(),
+                        "name": "1.2.3", "build": 7}}
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(domain="android", id="a" * 32, generation="b" * 32, noChild=False, activeRetained=False, resourceUnknown=False)
+    selection = {"module": ":app", "variant": "release", "applicationId": "org.example.saved", "task": ":app:bundleRelease"}
+    command = {"outcome": "not-dispatched" if refused else "unknown" if cancelled else "exited",
+               "exitCode": None if refused or cancelled else 0 if complete else 1}
+    findings = [{"ordinal": index, "check": check, "status": status} for index, (check, status) in
+                enumerate((("aab-structure", "PASS"), ("aab-manifest", "PASS"), ("signer", "SKIP")))] if complete else []
+    counts = {key: 0 for key in ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")}
+    if complete: counts.update(PASS=2, SKIP=1)
+    summary = {"total": len(findings), "shown": len(findings), "omitted": 0, "counts": counts}
+    activity = {"stage": "accepted" if refused else "disposing-work", "selection": None if refused else selection,
+                "command": command, "findings": findings, "summary": summary}
+    result = None
+    if complete:
+        result = {"schemaVersion": 1, "scope": "local-post-build-artifact-observation",
+            "usedConfig": deepcopy(context["savedConfig"]), "usedVersion": deepcopy(context["savedVersion"]),
+            "selection": deepcopy(selection), "toolchainProfile": "android-local-linux-gnu-x86_64-v1", "command": deepcopy(command),
+            "findings": deepcopy(findings), "summary": deepcopy(summary),
+            "artifacts": [{"logicalName": "android-aab", "platform": "android", "kind": "aab", "fileName": "app-release.aab",
+                "size": 4096, "sha256": "c" * 64, "architectures": [], "unknownAbi": False, "freshness": "not-established"}],
+            "assurances": {"structure": "passed", "nativeManifest": "passed", "applicationVersion": "native-checked",
+                "signer": "not-inspected", "toolkitSigning": "not-requested", "storeOperation": "not-requested",
+                "sourceBinding": "not-established", "releaseReadiness": "not-assessed"},
+            "limitations": ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+                "post-run-bytes-may-be-incremental-reused-or-stale", "source-binding-not-established", "artifact-signer-not-inspected",
+                "toolkit-signing-not-requested", "store-operation-not-requested", "release-readiness-not-assessed",
+                "local-output-observation-not-current-file-authority", "core-terminal-requires-original-native-finality"]}
+    terminal = {"operationId": flags["id"], "ownerGeneration": flags["generation"], "context": context,
+        "phase": "terminal", "intentUsable": False, "outcome": "complete" if complete else "refused" if refused else "cancelled" if cancelled else "failed",
+        "reason": "none" if complete else "saved-version-changed" if refused else "cancelled" if cancelled else "command-failed",
+        "stage": activity["stage"], "activity": activity,
+        "disposition": {"work": "not-created" if refused else "removed",
+            "artifacts": "not-created" if refused else "retained-local-result" if complete else "retained-incomplete"}, "result": result}
+    lifetime = {"complete": True, "fatal": False, "contained": True, "commandDispatched": not refused, "commands": 0 if refused else 2 if complete else 1,
+        "profileCalls": 0, "inputClosed": True, "handlersRestored": True, "invocationClosed": True, "artifactsClosed": True,
+        "toolsClosed": True, "namespaceClosed": True, "stopObserved": "cancelled" if cancelled else "none"}
+    fixture = {"sourceControlsAccounted": True, "savedVersionChanged": refused, "gradleBoundary": "" if refused else "active\n",
+               "generatedScopesNotExported": ["project/.mobile-release", "project/app/build", "project/build"]}
+    return {"schema": "installed-android-build-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+        "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
+        "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
+        "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
+        "original": flags, "toolsLedgerSettled": True, "nativeIntegrity": True, "coreLifetime": lifetime, "terminal": terminal, "fixture": fixture,
+        "limits": {key: False for key in ("normalActivation", "work3000Expiry", "privateJvmProfile", "noAutoInstall", "allHelperNativeGates", "networkIsolated")}}
+
+
+def android_fixture_data(value, case, *, after=False):
+    """Synthetic inode/ns correspondence only. No real fixture/material is read."""
+    namespace = fixture_namespace_data(value)
+    roster = L._shell_android_roster(value, case, after)
+    offset = 3000 + 100 * L.SHELL_ANDROID_CASES.index(case)
+    rows = []
+    for index, (name, mode, owners, expected) in enumerate(roster):
+        directory = stat.S_ISDIR(mode)
+        changed = after and (name == L.SHELL_ANDROID_VERSION_PATH and case == "android-build-refusals"
+                             or name == L.SHELL_ANDROID_TRACE and case != "android-build-refusals")
+        size = 4096 if directory else len(expected)
+        links = 2 + sum(stat.S_ISDIR(m) and n != "." and str(Path(n).parent) == name for n, m, _, _ in roster) if directory else 1
+        row = {"path": name, "kind": "directory" if directory else "file",
+               "identity": [1, offset + index, mode, *owners, links, size,
+                            1790240000326184301 if changed else 1790240000326184300,
+                            1790240000326184301 if changed else 1790240000326184300]}
+        row.update({"children": expected, "contentsInspected": expected is not None} if directory else
+                   {"size": size, "sha256": hashlib.sha256(expected).hexdigest()})
+        rows.append(row)
+    generated = ({"path": "project/.mobile-release", "kind": "directory", "contentsInspected": False,
+                  "identity": [1, offset + 99, stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"], 3, 4096,
+                               1790240000326184302, 1790240000326184302]}
+                 if after and case != "android-build-refusals" else None)
+    return {"schemaVersion": 1, "fixture": "installed-android-build-fixture-v1", "case": case, "root": namespace["root"] + "/" + case,
+        "after": after, "entries": rows, "generatedNamespace": generated, "generatedScopesNotExported": list(L.SHELL_ANDROID_GENERATED),
+        "namespace": namespace, "materials": deepcopy(ANDROID_MATERIAL_DATA)}
+
+
+def android_capture(case, receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_ANDROID_BUILD=" + L.canonical(android_receipt_data(L, case) if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n", b"")
+
+
 def tools_offline_receipt(case):
     """Fictional closed protocol DATA; no host executable or owner is invoked."""
     offline, cancel = case.startswith("offline-"), case in ("tools-cancel", "offline-cancel")
@@ -2924,6 +3066,7 @@ def closed_shell_data():
     value.pop("installed")
     value["shell"] = {"rosterSha256": "a" * 64, "producerAttempt": "1", "artifactId": "7",
                       "acceptedU": {"sourceSha": "b" * 40, "runId": "8", "attempt": "1", "artifactId": "9"}}
+    value["shell"]["androidPublication"] = L.shell_android_publication_request(value["taskRoot"])
     maps = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
             for role, row in sorted(expected.items())]
     captures = {"normal": (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""),
@@ -2933,7 +3076,8 @@ def closed_shell_data():
                 "project-paths": path_capture(), "workflow-apply": workflow_capture(),
                 **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture(),
                 **{case: tools_offline_capture(case) for case in L.SHELL_TOOLS_OFFLINE_CASES},
-                "settled-failure": settled_failure_capture(), "version-save": version_capture()}
+                "settled-failure": settled_failure_capture(), "version-save": version_capture(),
+                **{case: android_capture(case) for case in L.SHELL_ANDROID_CASES}}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         code = 1 if case == "settled-failure" else 0
@@ -2957,6 +3101,8 @@ def closed_shell_data():
         files["shell-version-save-" + phase + ".json"] = L.canonical(version_fixture_data(value, saved=phase == "after"))
         for case in L.SHELL_TOOLS_OFFLINE_CASES:
             files["shell-" + case + "-" + phase + ".json"] = L.canonical(tools_offline_fixture_data(value, case, after=phase == "after"))
+        for case in L.SHELL_ANDROID_CASES:
+            files["shell-" + case + "-" + phase + ".json"] = L.canonical(android_fixture_data(value, case, after=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2966,9 +3112,15 @@ def closed_shell_data():
     outcome = {"shellRosterSha256": value["shell"]["rosterSha256"], "shellProducerAttempt": "1", "shellArtifactId": "7",
                "acceptedU": value["shell"]["acceptedU"], "consumerAttempt": value["attempt"],
                "packageLifecycleQualified": False, "shellPackageBuilt": False, "commands": commands}
+    outcome["androidPublication"] = {"state": "verified-after-consumers", "instance": ANDROID_MATERIAL_DATA["instance"],
+        "materials": deepcopy(ANDROID_MATERIAL_DATA), **deepcopy(ANDROID_PUBLICATION_DATA), "createdDirectories": 7,
+        "verifiedFiles": 5, "verifiedBytes": 5, "manifestPublished": True, "uncertainEntry": None,
+        "qualified": False, "cleanupClaimed": False}
     return value, outcome, files, expected
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class ShellFixtureNamespaceContracts(unittest.TestCase):
     def test_readable_ancestry_preserves_control_private_and_only_stable_identity(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
@@ -3074,7 +3226,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         root / "version-project", root / "version-project/release",
                         *(root / case / name for case in L.SHELL_SESSION_CASES for name in (".", "project", "project/release", "sources")),
                         *(root / case / name for case in L.SHELL_TOOLS_OFFLINE_CASES
-                          for name, mode, _, _ in L._shell_tools_offline_roster(value, case) if stat.S_ISDIR(mode))])
+                          for name, mode, _, _ in L._shell_tools_offline_roster(value, case) if stat.S_ISDIR(mode)),
+                         *(root / case / name for case in L.SHELL_ANDROID_CASES
+                           for name, mode, _, _ in L._shell_android_roster(value, case) if stat.S_ISDIR(mode))])
                     self.assertEqual([call.args for call in writer.call_args_list], [
                         (root / "positive-project/app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
                         (root / "positive-project/version.properties", L.SHELL_PROJECT_VERSION, 0o600),
@@ -3098,7 +3252,9 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         *((root / case / name, data, stat.S_IMODE(mode)) for case in L.SHELL_SESSION_CASES
                           for name, mode, _, data in L._shell_session_roster(value, case) if stat.S_ISREG(mode)),
                         *((root / case / name, data, 0o600) for case in L.SHELL_TOOLS_OFFLINE_CASES
-                          for name, mode, _, data in L._shell_tools_offline_roster(value, case) if stat.S_ISREG(mode))])
+                          for name, mode, _, data in L._shell_tools_offline_roster(value, case) if stat.S_ISREG(mode)),
+                         *((root / case / name, data, 0o600) for case in L.SHELL_ANDROID_CASES
+                           for name, mode, _, data in L._shell_android_roster(value, case) if stat.S_ISREG(mode))])
                     self.assertEqual([call.args for call in ownership.call_args_list], [
                         (path, value["runnerUid"], value["runnerGid"]) for path in
                         (root / "positive-project/version.properties", root / "positive-project",
@@ -3120,9 +3276,11 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
                         *((root / case / name, *owners) for case in L.SHELL_SESSION_CASES
                           for name, _, owners, _ in L._shell_session_roster(value, case)),
                         *((root / case / name, *owners) for case in L.SHELL_TOOLS_OFFLINE_CASES
-                          for name, _, owners, _ in L._shell_tools_offline_roster(value, case))])
+                          for name, _, owners, _ in L._shell_tools_offline_roster(value, case)),
+                         *((root / case / name, *owners) for case in L.SHELL_ANDROID_CASES
+                           for name, _, owners, _ in L._shell_android_roster(value, case))])
                     links.assert_called_once_with("input.jks", root / "session-refusals/sources/link.jks")
-                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-210:]))
+                    self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in ownership.call_args_list[-310:]))
                     self.assertEqual([call.args for call in modes.call_args_list], [(root / "positive-project/app", 0o555),
                         (root / "workflow-project/.github/workflows", 0o700), (root / "workflow-project/.github", 0o700),
                         (root / "workflow-project/app", 0o555), (root / "workflow-project", 0o700),
@@ -3240,7 +3398,7 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertIs(branch.body[3], loop)
         self.assertEqual(ast.unparse(branch.body[4]), "_shell_fixtures_final(value, namespace)")
         self.assertEqual(L.SHELL_CASES[9], "metadata-save")
-        self.assertEqual(L.SHELL_CASES[-3:], ("offline-settlement", "settled-failure", "version-save"))
+        self.assertEqual(L.SHELL_CASES[17:20], ("offline-settlement", "settled-failure", "version-save"))
         self.assertEqual(ast.unparse(loop.body[0]), "environment, log_binding = _shell_prepare(value, case, namespace)")
         self.assertIsInstance(loop.body[1], ast.If)
         self.assertEqual(ast.unparse(loop.body[1].body[0]), "cases[case] = _shell_normal(value, environment, expected, log_binding)")
@@ -3252,6 +3410,8 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(prepare.body[0]), "_shell_namespace_check(value, namespace)")
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class ProjectDraftLifecycleContracts(unittest.TestCase):
     def test_fixed_saved_bytes_are_derived_from_actual_pure_core_and_wire_order(self):
         # Import the actual in-memory functions only when this focused DATA
@@ -3297,7 +3457,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(native.count(marker), 1)
         declared, entries = native.split(marker, 1)[1].split("] = [", 1)
         names = tuple(json.loads("[" + entries.split("];", 1)[0].strip().removesuffix(",") + "]"))
-        self.assertEqual((int(declared), len(names), len(set(names))), (19, 19, 19))
+        self.assertEqual((int(declared), len(names), len(set(names))), (23, 23, 23))
         self.assertEqual(names, L.SHELL_FIXTURE_CHILDREN)
         namespace = fixture_namespace_data(value)
         self.assertEqual(namespace["children"], list(names))
@@ -3310,7 +3470,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
                                        "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
                                        "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
-                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save"))
+                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save",
+                                       "android-build", "android-build-failure", "android-build-cancel", "android-build-refusals"))
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
@@ -3334,10 +3495,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual({name for name in roster if name.startswith("shell-version-save")},
                          {"shell-version-save.stdout", "shell-version-save.stderr", "shell-version-save-xvfb.stderr",
                           "shell-version-save-before.json", "shell-version-save-after.json"})
-        self.assertEqual(len(roster), 163)
-        self.assertEqual(len(roster) + 2, 165)
-        self.assertEqual(len(L.root_phases(value)), 34)
-        self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 165)
+        self.assertEqual(len(roster), 183)
+        self.assertEqual(len(roster) + 2, 185)
+        self.assertEqual(len(L.root_phases(value)), 38)
+        self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 185)
         self.assertEqual(L.TOTAL_LIMIT, 32 << 20)
         self.assertLessEqual(len(roster), L.SHELL_PUBLIC_FILE_LIMIT)
         for case in ("positive", "refuse-writable", "refuse-pth"):
@@ -3580,20 +3741,29 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         binding = L.canonical(namespace)
         for case in L.SHELL_CASES:
             writer = Mock()
-            with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
-                 patch.object(Path, "mkdir", autospec=True) as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
-                 patch.object(L, "_shell_namespace_check", return_value=namespace) as namespace_check, \
-                 patch.object(L, "_shell_fixtures_prepare") as prepare, \
-                 patch.object(L, "_shell_log_prepare", return_value="original-log-binding") as log, \
-                 patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
-                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
-                 patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
-                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory, \
-                  patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)) as workflow_inventory, \
-                  patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)) as metadata_inventory, \
-                  patch.object(L, "_shell_version_inventory", return_value=version_fixture_data(value)) as version_inventory, \
-                  patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}) as session_inventory, \
-                  patch.object(L, "_shell_tools_offline_inventory", return_value={"inert": "tools-offline-fixture"}) as tools_inventory:
+            # Each comma-separated context manager adds a static Python block.
+            # Keep the same left-to-right acquisition and reverse-order cleanup
+            # without exceeding the compiler's nesting limit as cases grow.
+            with self.subTest(case=case), ExitStack() as stack:
+                stack.enter_context(patch.object(L, "_ROOT", root))
+                stack.enter_context(patch.object(L, "_D", SimpleNamespace(write=writer)))
+                mkdir = stack.enter_context(patch.object(Path, "mkdir", autospec=True))
+                chown = stack.enter_context(patch.object(L.os, "chown"))
+                chmod = stack.enter_context(patch.object(L.os, "chmod"))
+                namespace_check = stack.enter_context(patch.object(L, "_shell_namespace_check", return_value=namespace))
+                prepare = stack.enter_context(patch.object(L, "_shell_fixtures_prepare"))
+                log = stack.enter_context(patch.object(L, "_shell_log_prepare", return_value="original-log-binding"))
+                stack.enter_context(patch.object(L, "_absent"))
+                retain = stack.enter_context(patch.object(L, "_retain"))
+                inventory = stack.enter_context(patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)))
+                candidate_inventory = stack.enter_context(patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)))
+                path_inventory = stack.enter_context(patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)))
+                workflow_inventory = stack.enter_context(patch.object(L, "_shell_workflow_inventory", return_value=workflow_fixture_data(value)))
+                metadata_inventory = stack.enter_context(patch.object(L, "_shell_metadata_inventory", return_value=metadata_fixture_data(value)))
+                version_inventory = stack.enter_context(patch.object(L, "_shell_version_inventory", return_value=version_fixture_data(value)))
+                session_inventory = stack.enter_context(patch.object(L, "_shell_session_inventory", return_value={"inert": "session-fixture"}))
+                tools_inventory = stack.enter_context(patch.object(L, "_shell_tools_offline_inventory", return_value={"inert": "tools-offline-fixture"}))
+                android_inventory = stack.enter_context(patch.object(L, "_shell_android_inventory", return_value={"inert": "android-fixture"}))
                 self.assertEqual(L._shell_prepare(value, case, binding), (L.shell_environment(value, case), "original-log-binding"))
                 namespace_check.assert_called_once_with(value, binding)
                 prepare.assert_not_called(); chmod.assert_not_called()
@@ -3641,6 +3811,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     workflow_inventory.assert_not_called()
                     tools_inventory.assert_called_once_with(value, binding, case)
                     retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "tools-offline-fixture"}))
+                elif case in L.SHELL_ANDROID_CASES:
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
+                    workflow_inventory.assert_not_called()
+                    android_inventory.assert_called_once_with(value, binding, case)
+                    retain.assert_called_once_with("shell-" + case + "-before.json", L.canonical({"inert": "android-fixture"}))
                 else:
                     inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called()
                     workflow_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
@@ -3652,6 +3827,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     version_inventory.assert_not_called()
                 if case not in L.SHELL_TOOLS_OFFLINE_CASES:
                     tools_inventory.assert_not_called()
+                if case not in L.SHELL_ANDROID_CASES:
+                    android_inventory.assert_not_called()
         with patch.object(L, "_shell_namespace_check", side_effect=L.Refused("original namespace changed")), \
              patch.object(L, "_shell_log_prepare") as logs, patch.object(Path, "mkdir") as mkdir:
             with self.assertRaises(ValueError): L._shell_prepare(value, "normal", binding)
@@ -4064,6 +4241,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
 
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class VersionSaveLifecycleContracts(unittest.TestCase):
     def test_version_receipt_requires_three_original_sessions_and_typed_finality(self):
         expected = version_receipt_data(); raw = L.canonical(expected)
@@ -4268,6 +4447,8 @@ class VersionSaveLifecycleContracts(unittest.TestCase):
                 L.shell_closed_result(value, current, altered)
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class CandidateDocumentsLifecycleContracts(unittest.TestCase):
     def test_fixed_literal_bytes_produce_the_existing_android_documents_only_dto(self):
         # Only an explicitly run DATA check imports the actual pure validators.
@@ -4548,6 +4729,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
 
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class ProjectPathLifecycleContracts(unittest.TestCase):
     def test_receipt_exact_size_every_leaf_and_closed_original_correspondence(self):
         receipt = project_path_receipt(); raw = L.canonical(receipt)
@@ -4711,10 +4894,736 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
                                        "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
                                        "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
-                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save"))
+                                       "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save",
+                                       "android-build", "android-build-failure", "android-build-cancel", "android-build-refusals"))
 
 
 
+class AndroidSameJobLifecycleContracts(unittest.TestCase):
+    """Inert private DATA/root-call ordering; never runs a service or native tool."""
+
+    def value(self, parent=Path("/inert")):
+        value = installed_handoff(); value.pop("installed")
+        value.update(attempt="1", taskRoot=str(parent / "mrk-desktop-ubuntu-publisher-10-1-observe"))
+        root = parent / "mrk-desktop-ubuntu-publisher-10-1-compile"
+        material = parent / "mrk-android-material-10-1"
+        pin = {"size": 12, "sha256": "c" * 64}
+        binaries = {role: {"path": value["taskRoot"] + "/work/admitted-shell/" + role, **pin} for role in ("normal", "observer")}
+        compiler = {"sourceSha": value["sourceSha"], "sourceTree": "b" * 40, "runId": "10", "attempt": "1",
+            "features": L.SHELL_FEATURES, "manifestSha256": L.M, "protocolSha256": L.Q, "exportedArtifacts": binaries,
+            "androidBuildMaterials": deepcopy(ANDROID_MATERIAL_DATA), "androidBuildPublication": deepcopy(ANDROID_PUBLICATION_DATA),
+            "androidBuildBindings": L.shell_android_compile_environment(ANDROID_MATERIAL_DATA),
+            "androidPreparation": {"path": str(material / "private/prepared.json"), **pin},
+            "androidOsContractInput": {"path": str(material / "os-contract.json"), **ANDROID_PUBLICATION_DATA["documents"]["osContract"]}}
+        context = {"sourceCommit": value["sourceSha"], "sourceTree": compiler["sourceTree"], "runId": "10", "runAttempt": "1",
+                   "job": "compile", "preparation": {"path": str(root / "preparation.json"), **pin}}
+        transport = {"schemaVersion": 1, "kind": "android-same-job-local-v1", "context": context,
+            **{key: {"path": str(path), "identity": [1, index, stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]]}
+                for index, (key, path) in enumerate((("compilerRoot", root), ("compilerEvidence", root / "private-compiler"),
+                    ("materialRoot", material)), 1)},
+            "compilerRoster": {"path": str(root / "private-compiler/shell-roster.json"), **pin},
+            "materialRecord": deepcopy(compiler["androidPreparation"])}
+        value["shell"] = {"binaries": binaries, "compiler": compiler, "rosterSha256": pin["sha256"], "producerAttempt": "1",
+            "acceptedU": {"sourceSha": value["compilerRecords"]["sourceSha"], "runId": "5", "attempt": "1", "artifactId": "11"},
+            "loaderPolicy": {}, "androidPublication": L.shell_android_publication_request(value["taskRoot"],
+                ANDROID_MATERIAL_DATA, ANDROID_PUBLICATION_DATA),
+            "localTransport": {"path": str(root / "android-local-transport.json"), "record": transport}}
+        self.seal(value)
+        return value
+
+    def seal(self, value):
+        envelope = value["shell"]["localTransport"]
+        raw = L.canonical(envelope["record"])
+        envelope.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+    def test_local_handoff_is_pure_and_does_not_activate_material_or_revive_an_endpoint(self):
+        value = self.value()
+        value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024, "installedBytes": {k: 2048 for k in L.VERSIONS},
+            "installedEntries": {k: 16 for k in L.VERSIONS}}
+        with patch.multiple(L, SHELL_ANDROID_MATERIALS=None, SHELL_ANDROID_PUBLICATION_DATA=None), \
+             patch.object(L, "read", side_effect=AssertionError("pure parser must not read preparation")), \
+             patch.object(L, "_android_material_engine", side_effect=AssertionError("pure parser must not import helper")), \
+             patch.object(L, "bind_shell_android_profile", side_effect=AssertionError("pure parser must not bind")), \
+             patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=1 << 30, f_frsize=4096, f_favail=1 << 30)), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)):
+            L.shell_handoff(value, [])
+            self.assertEqual(L._android_local_transport(value), value["shell"]["localTransport"]["record"])
+            self.assertEqual(L.shell_transport_provenance(value["shell"]), {"shellLocalTransport": value["shell"]["localTransport"]})
+            self.assertIsNone(L._capacity(value))
+            self.assertTrue(L._shell_android_roster(value, "android-build", True))
+            self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+
+    def test_local_handoff_refuses_mixed_artifact_and_changed_context_originals_or_profile(self):
+        for fault in ("source", "tree", "attempt", "job", "producer", "path", "owner", "material", "os", "artifact", "envelope"):
+            with self.subTest(fault=fault), patch.multiple(L, SHELL_ANDROID_MATERIALS=None, SHELL_ANDROID_PUBLICATION_DATA=None):
+                value = self.value(); shell = value["shell"]; transport = shell["localTransport"]["record"]
+                if fault == "source": transport["context"]["sourceCommit"] = "f" * 40
+                elif fault == "tree": transport["context"]["sourceTree"] = "f" * 40
+                elif fault == "attempt": transport["context"]["runAttempt"] = "2"
+                elif fault == "job": transport["context"]["job"] = "native"
+                elif fault == "producer": shell["producerAttempt"] = "2"
+                elif fault == "path": transport["compilerEvidence"]["path"] += "-other"
+                elif fault == "owner": transport["materialRoot"]["identity"][3] = True
+                elif fault == "material": shell["compiler"]["androidPreparation"]["sha256"] = "0" * 64
+                elif fault == "os": shell["compiler"]["androidOsContractInput"]["path"] = "/ambient/os.json"
+                elif fault == "artifact": shell["artifactId"] = "17"
+                self.seal(value)
+                if fault == "envelope": shell["localTransport"]["sha256"] = "0" * 64
+                with self.assertRaises(L.Refused): L.shell_handoff(value, [])
+                self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+
+    def root_documents(self, parent):
+        value = self.value(parent)
+        value.update(runnerUid=os.getuid(), runnerGid=os.getgid())
+        transport = value["shell"]["localTransport"]["record"]
+        for key in ("compilerRoot", "compilerEvidence", "materialRoot"):
+            path = Path(transport[key]["path"]); path.mkdir(mode=0o700)
+            transport[key]["identity"] = list(L.identity(path.lstat())[:5])
+        material = Path(transport["materialRoot"]["path"])
+        (material / "private").mkdir(mode=0o700)
+        def write(path, body, mode):
+            raw = L.canonical(body); path.write_bytes(raw); path.chmod(mode)
+            return {"path": str(path), "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        original = {"source": value["source"], "runnerUid": value["runnerUid"], "runnerGid": value["runnerGid"], "deadline": "0.5"}
+        transport["context"]["preparation"] = write(Path(transport["context"]["preparation"]["path"]), original, 0o600)
+        host = {"inert": "original private host DATA"}
+        host_pin = write(material / "private/host.json", host, 0o400)
+        prepared = {"materials": deepcopy(ANDROID_MATERIAL_DATA), "publication": deepcopy(ANDROID_PUBLICATION_DATA),
+            "materialRoot": str(material), "provenance": {"documents": {"host": {**host_pin, "path": "host.json"}}}}
+        transport["materialRecord"] = write(material / "private/prepared.json", prepared, 0o400)
+        compiler = value["shell"]["compiler"]
+        compiler["androidPreparation"] = deepcopy(transport["materialRecord"])
+        compiler_path = Path(transport["compilerEvidence"]["path"]) / "compiler.json"
+        compiler_pin = write(compiler_path, compiler, 0o600)
+        compiler["originalRecord"] = {**compiler_pin, "path": "compiler.json"}
+        roster = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}
+        roster["files"] = [deepcopy(compiler["originalRecord"])]
+        transport["compilerRoster"] = write(Path(transport["compilerRoster"]["path"]), roster, 0o600)
+        value["shell"]["rosterSha256"] = transport["compilerRoster"]["sha256"]
+        self.seal(value)
+        write(Path(value["shell"]["localTransport"]["path"]), transport, 0o400)
+        return value, prepared, host, write
+
+    def test_root_revalidates_exact_originals_with_native_deadline_before_binding(self):
+        for fault in (None, "validator", "profile", "roster", "replacement", "late"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+                value, prepared, host, write = self.root_documents(Path(temporary))
+                transport = value["shell"]["localTransport"]["record"]
+                now, events = [1.0], []
+                def validate(path, expected, *, context, host, deadline):
+                    events.append("validate")
+                    self.assertEqual(deadline, 10.0)  # Compiler's0.5 endpoint remains expired; no renewal.
+                    self.assertEqual(context, transport["context"])
+                    self.assertEqual(str(path), transport["materialRecord"]["path"])
+                    self.assertEqual(expected, {k: transport["materialRecord"][k] for k in ("size", "sha256")})
+                    if fault == "validator": raise L.Refused("inert host validation refusal")
+                    if fault == "profile": return {**prepared, "materials": {**prepared["materials"], "instance": "other"}}
+                    if fault == "replacement":
+                        path.rename(path.with_name("retained-original.json"))
+                        write(path, prepared, 0o400)
+                    if fault == "late": now[0] = 10.0
+                    return prepared
+                if fault == "roster":
+                    path = Path(transport["compilerRoster"]["path"])
+                    roster = L.decode(path.read_bytes()); roster["files"] = []
+                    transport["compilerRoster"] = write(path, roster, 0o600)
+                    value["shell"]["rosterSha256"] = transport["compilerRoster"]["sha256"]
+                    self.seal(value); write(Path(value["shell"]["localTransport"]["path"]), transport, 0o400)
+                engine = SimpleNamespace(read_record=Mock(side_effect=validate))
+                stack.enter_context(patch.multiple(L, _ROOT=L.root_path(value), _END=10.0, _FAILED=False,
+                                                 SHELL_ANDROID_MATERIALS=None, SHELL_ANDROID_PUBLICATION_DATA=None))
+                stack.enter_context(patch.object(L.time, "monotonic", side_effect=lambda: now[0]))
+                stack.enter_context(patch.object(L, "_android_material_engine", return_value=engine))
+                if fault:
+                    with self.assertRaises(L.Refused): L._android_original_preparation(value)
+                    self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+                else:
+                    L._android_original_preparation(value)
+                    self.assertEqual(L.SHELL_ANDROID_MATERIALS, prepared["materials"])
+                    self.assertEqual(L.SHELL_ANDROID_PUBLICATION_DATA, prepared["publication"])
+                self.assertEqual(events, ["validate"])
+                engine.read_record.assert_called_once()
+                self.assertEqual(engine.read_record.call_args.kwargs["host"], host)
+
+    def test_root_start_validates_before_any_publication_and_stoppost_is_cleanup_metadata_only(self):
+        value = self.value()
+        for fault in (False, True):
+            with self.subTest(refused=fault), ExitStack() as stack:
+                events = []
+                def validate(actual):
+                    events.append("validate")
+                    if fault: raise L.Refused("inert validation refusal")
+                def publish(actual):
+                    events.append("publication-boundary")
+                    raise L.Refused("stop inert test before any real publication")
+                stack.enter_context(patch.multiple(L, _ROOT=L.root_path(value), _D=SimpleNamespace(write=lambda *args: events.append("dpkg-log"))))
+                for name, replacement in (("_root_ids", Mock()), ("_context", Mock(return_value=(value, "a" * 64))),
+                        ("_android_original_preparation", validate), ("_namespaces", Mock(return_value={})),
+                        ("dpkg_policy", Mock(return_value={})), ("_domain", Mock(return_value={})),
+                        ("record", Mock(return_value={"sha256": "b" * 64})), ("_retain", Mock()),
+                        ("_publish_android", publish), ("command", Mock(side_effect=AssertionError("no command in this test")))):
+                    stack.enter_context(patch.object(L, name, replacement))
+                with self.assertRaises(L.Refused): L.unit_start()
+                self.assertEqual(events, ["validate"] if fault else ["validate", "dpkg-log", "publication-boundary"])
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(L, _ROOT=L.root_path(value), _END=-1.0, _COMMANDS=[], _FILES=[]))
+            stack.enter_context(patch.object(L.time, "monotonic", return_value=1.0))
+            stack.enter_context(patch.dict(L.os.environ, {"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"}))
+            for name, replacement in (("_root_ids", Mock()), ("_context", Mock(return_value=(value, "a" * 64))),
+                    ("read", Mock(return_value=b"{}\n")), ("record", Mock(return_value={"sha256": "b" * 64})),
+                    ("_domain", Mock(return_value={})), ("_namespaces", Mock(return_value={})), ("_retain", Mock()),
+                    ("verify_finality", Mock())):
+                stack.enter_context(patch.object(L, name, replacement))
+            forbidden = [stack.enter_context(patch.object(L, name, side_effect=AssertionError("StopPost must not prepare or bind")))
+                for name in ("_android_original_preparation", "_android_material_engine", "_publish_android", "bind_shell_android_profile", "command")]
+            stack.enter_context(patch("sys.stdout", new=io.StringIO()))
+            L.unit_stop()
+            for action in forbidden: action.assert_not_called()
+            self.assertEqual(L._END, 10.0)
+
+    def test_root_copies_and_imports_only_exact_pinned_protected_helper_and_data(self):
+        value = self.value(); root = L.root_path(value)
+        names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+                 "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
+                 for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
+        pins = {name: (1, "c" * 64) for name in names}
+        missing_font = {name: pin for name, pin in pins.items() if not name.endswith("/fonts.json")}
+        with patch.object(L, "ANDROID_PREPARATION_PINS", missing_font), self.assertRaises(L.Refused):
+            L._android_source_pins()
+        with ExitStack() as stack:
+            stack.enter_context(patch.multiple(L, __file__=str(root / "entry.py"), _ROOT=None, _END=None,
+                                             ANDROID_PREPARATION_PINS=pins))
+            stack.enter_context(patch.object(L.time, "monotonic", return_value=1.0))
+            stack.enter_context(patch.object(L, "directory"))
+            stack.enter_context(patch.object(L, "read", return_value=("a" * 64 + "\n" + "b" * 64 + "\n").encode()))
+            stack.enter_context(patch.object(L, "record", return_value={"sha256": "a" * 64}))
+            stack.enter_context(patch.object(L, "handoff", return_value=value))
+            stack.enter_context(patch.object(L, "_capacity"))
+            stack.enter_context(patch.object(Path, "iterdir", return_value=iter((root / "entry.py", root / "private"))))
+            mkdir = stack.enter_context(patch.object(Path, "mkdir"))
+            stack.enter_context(patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=value["runnerUid"], st_gid=value["runnerGid"])))
+            copy = stack.enter_context(patch.object(L, "copy_pinned"))
+            chmod = stack.enter_context(patch.object(L.os, "chmod"))
+            modules = stack.enter_context(patch.object(L, "_modules"))
+            self.assertEqual(L._context(copying=True), (value, "b" * 64))
+            copied = {call.args[1]: call.args[0] for call in copy.call_args_list}
+            for name in names:
+                self.assertEqual(copied[root / "source" / name], Path(value["source"]) / name)
+            self.assertIn(((root / "source/desktop/tools/android_material_data", 0o555), {}),
+                          [(call.args, call.kwargs) for call in chmod.call_args_list])
+            self.assertTrue(mkdir.called)
+            modules.assert_called_once_with(root, owner=True)
+        for writable in (False, True):
+            with self.subTest(writable=writable), patch.object(L, "ANDROID_PREPARATION_PINS", pins), \
+                 patch.object(L, "directory"), patch.object(L.os, "listxattr", return_value=[]), \
+                 patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | (0o644 if writable else 0o444))), \
+                 patch.object(L, "record", side_effect=lambda path, size: {"path": str(path), "size": size, "sha256": "c" * 64}), \
+                 patch.object(L.importlib.util, "spec_from_file_location") as spec, \
+                 patch.object(L.importlib.util, "module_from_spec") as module:
+                if writable:
+                    with self.assertRaises(L.Refused): L._android_material_engine(root)
+                    spec.assert_not_called()
+                else:
+                    self.assertIs(L._android_material_engine(root), module.return_value)
+                    spec.assert_called_once_with("_root_android_material_preparation", root / "source/desktop/tools/android_material_preparation.py")
+                    spec.return_value.loader.exec_module.assert_called_once_with(module.return_value)
+                    self.assertEqual(module.return_value._PROVIDER_LOADER_DATA, {name: getattr(L, name) for name in (
+                        "loader_diagnostics", "loader_cache", "shell_loader_candidates", "loader_selected", "DEFAULT_LIBRARY_DIRS", "HWCAPS")})
+
+
+class AndroidPublicationContracts(unittest.TestCase):
+    """Synthetic DATA and mocked filesystem failures; never publish or run tools."""
+
+    def data(self, change=None):
+        bundletool = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+        def file(name, mode=0o444, sha="a" * 64):
+            return {"path": name, "size": 1, "sha256": sha, "mode": mode}
+        files = [file("bundletool/bundletool.jar", sha=bundletool), file("gradle/bin/gradle", 0o555),
+                 file("jdk/bin/java", 0o555), file("jdk/bin/javac", 0o555), file("sdk/package.xml")]
+        contract = {"schemaVersion": 1, "id": "inert-os", "closure": "python-jdk-sdk-gradle-shell-loader-v1",
+                    "files": [file("/usr/bin/" + name, 0o755) for name in ("dash", "sed", "uname", "xargs")],
+                    "aliases": [{"path": "/bin", "target": "usr/bin", "canonical": "/usr/bin"}]}
+        manifest = {"schemaVersion": 1, "profile": "android-local-linux-gnu-x86_64-v1", "target": "linux-gnu-x86_64",
+            "instance": "inert-android", "launchContract": "gradle-posix-private-jvm-v1",
+            "versions": {"jdkVendor": "OpenJDK", "jdkVersion": "17.0.15", "gradleVersion": "8.14.5", "agpVersion": "8.9.2",
+                         "sdkPlatform": "android-35", "sdkPlatformRevision": "2", "sdkBuildToolsVersion": "35.0.0"},
+            "gradleDistribution": {"url": "https://services.gradle.org/distributions/gradle-8.14.5-bin.zip", "sha256": "3" * 64},
+            "bundletool": {"version": "1.18.3", "sha256": bundletool},
+            "roles": {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
+                      "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}, "files": files,
+            "osProfile": {"id": contract["id"], "inventorySha256": "", "shell": "/usr/bin/dash", "executableDirectory": "/usr/bin",
+                          "helpers": ["sed", "uname", "xargs"], "files": deepcopy(contract["files"])}}
+        sources = {"schemaVersion": 1, "files": [{"path": row["path"], "source": row["path"]} for row in files]}
+        if change:
+            change(manifest, contract, sources)
+        os_raw = L.canonical(contract)
+        manifest["osProfile"]["inventorySha256"] = hashlib.sha256(os_raw).hexdigest()
+        raw = {"manifest": L.canonical(manifest), "osContract": os_raw, "sources": L.canonical(sources)}
+        pins = {key: {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()} for key, body in raw.items()}
+        materials = {**ANDROID_MATERIAL_DATA, "manifestSha256": pins["manifest"]["sha256"], "osContractSha256": pins["osContract"]["sha256"]}
+        totals = {"toolFiles": 5, "toolDirectories": 6, "toolBytes": 5, "osFiles": 4, "osAliases": 1, "osBytes": 4}
+        return raw, materials, {"documents": pins, "totals": totals}
+
+    def test_closed_data_references_preserve_transport_and_profile_caps(self):
+        raw, materials, data = self.data()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            plan = L._android_publication_plan(raw)
+            request = L.shell_android_publication_request(Path("/task"))
+            self.assertEqual(plan["totals"], data["totals"])
+            self.assertEqual(request["sourceRoot"], "/task/work/admitted-android/tools")
+            self.assertLess(len(L.canonical(request)), 4096)
+            self.assertTrue(all(set(row) == {"path", "size", "sha256"} for row in request["documents"].values()))
+            self.assertNotIn("files", request)
+            for key, number in (("toolFiles", 16385), ("toolDirectories", 32768), ("osFiles", 257),
+                                ("osAliases", 129), ("toolBytes", 1 << 30), ("toolFiles", True)):
+                invalid = deepcopy(data); invalid["totals"][key] = number
+                with patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", invalid), self.assertRaises(ValueError):
+                    L.shell_android_publication_request(Path("/task"))
+            with patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", None), patch.object(L.os, "open") as opened:
+                with self.assertRaisesRegex(ValueError, "publication DATA is pending"):
+                    L.shell_android_publication_request(Path("/task"))
+                opened.assert_not_called()
+
+    def test_pinned_data_still_requires_complete_paths_roles_os_and_source_mapping(self):
+        for change in (lambda m, o, s: m["files"][0].update(path="sdk/../../escape"),
+                       lambda m, o, s: m["roles"].update(java="jdk/bin/other"),
+                       lambda m, o, s: m["files"][1].update(mode=0o644),
+                       lambda m, o, s: m["osProfile"]["files"][0].update(size=2),
+                       lambda m, o, s: s["files"].pop(),
+                       lambda m, o, s: s["files"][1].update(source=s["files"][0]["source"]),
+                       lambda m, o, s: o["aliases"][0].update(canonical="/etc"),
+                       lambda m, o, s: o["aliases"][0].update(target="../../usr/bin"),
+                       lambda m, o, s: m["versions"].update(gradleVersion="8.11.1")):
+            raw, materials, data = self.data(change)
+            with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+                with self.assertRaises(ValueError):
+                    L._android_publication_plan(raw)
+        for name in ("/usr/lib/" + "a" * 256, "/usr/lib/" + "a/" * 14 + "body.so", "/usr/lib/body."):
+            with self.subTest(path=name), self.assertRaises(ValueError):
+                L._android_native_path(name)
+        for name in ("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", "/var/cache/fontconfig/CACHEDIR.TAG",
+                     "/var/cache/fontconfig/" + "0a" * 16 + "-le64.cache-9"):
+            with self.subTest(font_input=name): self.assertTrue(L._android_native_path(name))
+        for name in ("/usr/share/fonts/truetype/noto/nested/Font.ttf", "/usr/share/fonts/truetype/noto/Font.otf",
+                     "/var/cache/fontconfig/" + "0A" * 16 + "-le64.cache-9",
+                     "/var/cache/fontconfig/" + "a" * 31 + "-le64.cache-9",
+                     "/var/cache/fontconfig/" + "a" * 32 + "-le64.cache-8",
+                     "/var/cache/fontconfig/nested/" + "a" * 32 + "-le64.cache-9",
+                     "/var/cache/fontconfig/cachedir.tag", "/var/cache/other/CACHEDIR.TAG"):
+            with self.subTest(unadmitted_font_input=name): self.assertFalse(L._android_native_path(name))
+        raw, materials, data = self.data()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            raw["manifest"] += b" "
+            with self.assertRaisesRegex(ValueError, "document bytes differ"):
+                L._android_publication_plan(raw)
+
+    def test_target_node_checks_device_owner_links_mode_and_xattrs(self):
+        valid = inert_stat(9, stat.S_IFREG | 0o444, size=1)
+        with patch.object(L, "_END", 10.0), patch.object(L.time, "monotonic", return_value=0.0), patch.object(L, "_FAILED", False):
+            for field, wrong in (("st_dev", 2), ("st_uid", 1001), ("st_gid", 1001), ("st_nlink", 2), ("st_mode", stat.S_IFREG | 0o664)):
+                invalid = deepcopy(valid); setattr(invalid, field, wrong)
+                with patch.object(Path, "lstat", return_value=invalid), patch.object(L, "_xattrs"), self.assertRaises(ValueError):
+                    L._android_node(Path("/inert"), owner=(0, 0), device=1, is_directory=False, mode=0o444)
+            with patch.object(Path, "lstat", return_value=valid), patch.object(L, "_xattrs", side_effect=L.Refused("attribute present")) as attrs:
+                with self.assertRaisesRegex(ValueError, "attribute present"):
+                    L._android_node(Path("/inert"), owner=(0, 0), device=1, is_directory=False, mode=0o444)
+                attrs.assert_called_once_with(Path("/inert"), False)
+            unreadable = inert_stat(9, stat.S_IFDIR | 0o700)
+            with patch.object(Path, "lstat", return_value=unreadable), patch.object(L, "_xattrs"):
+                with self.assertRaisesRegex(ValueError, "not readable/searchable"):
+                    L._android_ancestors(Path("/inert"), 1)
+
+    def test_real_private_temp_modes_membership_hashes_and_original_refusals(self):
+        # Ordinary DATA only; never touches /opt or publishes/executes a tool.
+        with tempfile.TemporaryDirectory() as temporary, patch.object(L, "_FAILED", False), \
+             patch.object(L, "_END", 10.0), patch.object(L.time, "monotonic", return_value=0.0):
+            parent = Path(temporary); root = parent / "payload"; device = parent.stat().st_dev
+            owner = (os.geteuid(), os.getegid()); original_node = L._android_node
+            def task_node(path, **options):
+                self.assertEqual(options["owner"], (0, 0))
+                return original_node(path, **{**options, "owner": owner})
+            # Preserve real mkdir/open/fchmod/stat behavior under the entry's
+            # umask; only root ownership is adapted to this unprivileged fixture.
+            old_umask = os.umask(0o077)
+            try:
+                with patch.object(L, "_android_node", side_effect=task_node):
+                    created = L._android_mkdir(root, device)
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+                    with self.assertRaisesRegex(ValueError, "original directory changed"):
+                        L._android_directory_mode(root, (created[0], created[1] + 1), 0o555)
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+                    with self.assertRaises(FileExistsError): L._android_mkdir(root, device)
+            finally:
+                os.umask(old_umask)
+            folder = root / "sdk"; folder.mkdir(mode=0o700); body = folder / "body"
+            body.write_bytes(b"one"); body.chmod(0o444); folder.chmod(0o555); root.chmod(0o555)
+            files = [{"path": "sdk/body", "size": 3, "sha256": hashlib.sha256(b"one").hexdigest(), "mode": 0o444}]
+            def readback():
+                return L._android_tree(root, files, ["sdk"], owner=owner, device=device)
+            try:
+                self.assertEqual(set(readback()), {"", "sdk", "sdk/body"})
+                folder.chmod(0o700); (folder / "extra").write_bytes(b"extra"); folder.chmod(0o555)
+                with self.assertRaisesRegex(ValueError, "count exceeded|Extra or repeated"): readback()
+                folder.chmod(0o700); (folder / "extra").unlink(); body.unlink(); folder.chmod(0o555)
+                with self.assertRaisesRegex(ValueError, "membership incomplete"): readback()
+                folder.chmod(0o700); body.write_bytes(b"two"); body.chmod(0o444); folder.chmod(0o555)
+                with self.assertRaisesRegex(ValueError, "body differs"): readback()
+            finally:
+                root.chmod(0o700); folder.chmod(0o700)
+            original = {"/opt": (1, 2, stat.S_IFDIR | 0o755, 0, 0)}
+            with self.assertRaisesRegex(ValueError, "original ancestor binding changed"):
+                L._android_merge_originals(original, {"/opt": (1, 3, stat.S_IFDIR | 0o755, 0, 0)})
+            self.assertEqual(original["/opt"][1], 2)
+
+    def test_copy_os_and_manifest_failures_never_publish_or_claim_cleanup(self):
+        raw, materials, data = self.data()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            plan = L._android_publication_plan(raw)
+            value = {"taskRoot": "/task", "runnerUid": 1001, "runnerGid": 1001,
+                     "shell": {"androidPublication": L.shell_android_publication_request(Path("/task"))}}
+            source = Path(value["shell"]["androidPublication"]["sourceRoot"])
+            source_specs = {str(source / row["path"]): row for row in plan["files"]}
+            def observed(path, *, owner=None, mode=None, is_directory=None, device=1):
+                path = Path(path)
+                spec = source_specs.get(str(path))
+                directory = spec is None if is_directory is None else is_directory
+                uid, gid = owner or ((1001, 1001) if path == source or source in path.parents else (0, 0))
+                mode = mode if mode is not None else (0o700 if directory else 0o500 if spec["mode"] & 0o111 else 0o400)
+                item = inert_stat(int(hashlib.sha256(str(path).encode()).hexdigest()[:12], 16),
+                                  (stat.S_IFDIR if directory else stat.S_IFREG) | mode, uid=uid, gid=gid, size=0 if directory else 1)
+                item.st_dev = device
+                return item
+            def tree(root, files, directories, **options):
+                specs = {row["path"]: row for row in files}
+                rows = {}
+                for name in ["", *directories, *specs]:
+                    directory = name == "" or name in directories
+                    mode = ((0o700 if options.get("source") else options.get("root_mode", 0o555) if not name else 0o555)
+                            if directory else (0o500 if specs[name]["mode"] & 0o111 else 0o400) if options.get("source") else specs[name]["mode"])
+                    rows[name] = L.identity(observed(root / name, owner=options["owner"], is_directory=directory, mode=mode))
+                if fault == "root-final" and options.get("manifest"):
+                    rows[""] = (rows[""][0], rows[""][1] + 1, *rows[""][2:])
+                return rows
+            for fault in ("collision", "copy", "os", "manifest", "root-final", "sync", "success"):
+                with self.subTest(fault=fault), ExitStack() as stack:
+                    for name, replacement in (("_ANDROID_PUBLICATION", None), ("_ANDROID_PUBLISHED", None), ("_FAILED", False), ("_END", 10.0)):
+                        stack.enter_context(patch.object(L, name, replacement))
+                    stack.enter_context(patch.object(L.time, "monotonic", return_value=0.0))
+                    stack.enter_context(patch.object(L, "_android_source_documents", return_value=(plan, {})))
+                    stack.enter_context(patch.object(L, "_android_tree", side_effect=tree))
+                    stack.enter_context(patch.object(L, "_android_node", side_effect=lambda path, **kw: L.identity(observed(path, **kw))))
+                    stack.enter_context(patch.object(L, "_android_ancestors", return_value={}))
+                    stack.enter_context(patch.object(L, "directory"))
+                    stack.enter_context(patch.object(L, "_absent", side_effect=L.Refused("instance exists") if fault == "collision" else None))
+                    stack.enter_context(patch.object(Path, "lstat", observed))
+                    stack.enter_context(patch.object(Path, "exists", return_value=True))
+                    mkdir = stack.enter_context(patch.object(L, "_android_mkdir", side_effect=lambda path, device:
+                        L.identity(observed(path, owner=(0, 0), is_directory=True, mode=0o755))))
+                    stack.enter_context(patch.object(L, "_android_directory_mode"))
+                    stack.enter_context(patch.object(Path, "mkdir", side_effect=AssertionError("no real publication directory")))
+                    descriptor = {}
+                    def open_directory(path, flags):
+                        descriptor["item"] = observed(path, owner=(0, 0), is_directory=True, mode=0o555)
+                        return 99  # Synthetic descriptor; never reaches the real OS.
+                    opened = stack.enter_context(patch.object(L.os, "open", side_effect=open_directory))
+                    stack.enter_context(patch.object(L.os, "fstat", side_effect=lambda fd: descriptor["item"]))
+                    stack.enter_context(patch.object(L.os, "fsync", side_effect=OSError("injected sync failure") if fault == "sync" else None))
+                    closed = stack.enter_context(patch.object(L.os, "close"))
+                    stack.enter_context(patch.object(L, "_android_os_check", side_effect=L.Refused("injected OS mismatch") if fault == "os" else None, return_value={}))
+                    calls = []
+                    def copy(source, target, expected, mode=0o444):
+                        calls.append(target.name)
+                        if fault == "copy" or fault == "manifest" and target.name == "android-toolchain.json":
+                            raise OSError("injected copy failure")
+                    stack.enter_context(patch.object(L, "copy_pinned", side_effect=copy))
+                    if fault == "success":
+                        receipt = L._publish_android(value)
+                        self.assertEqual(receipt["state"], "published")
+                        self.assertEqual(calls[-1], "android-toolchain.json")
+                        self.assertEqual(opened.call_count, len(plan["directories"]) + 1)
+                        self.assertEqual(closed.call_count, opened.call_count)
+                        with patch.object(L, "_android_tree", side_effect=L.Refused("post-consumer drift")):
+                            with self.assertRaisesRegex(ValueError, "post-consumer drift"):
+                                L._finish_android_publication(value)
+                        self.assertEqual(L._ANDROID_PUBLICATION["state"], "published")
+                        with patch.object(L, "_android_ancestors", return_value={"/opt": (1, 2, stat.S_IFDIR | 0o755, 0, 0)}):
+                            with self.assertRaisesRegex(ValueError, "publication prefix changed during consumers"):
+                                L._finish_android_publication(value)
+                        self.assertEqual(L._finish_android_publication(value)["state"], "verified-after-consumers")
+                        continue
+                    with self.assertRaises((L.Refused, OSError)):
+                        L._publish_android(value)
+                    self.assertIsNone(L._ANDROID_PUBLISHED)
+                    self.assertFalse(L._ANDROID_PUBLICATION["manifestPublished"])
+                    self.assertFalse(L._ANDROID_PUBLICATION["qualified"])
+                    self.assertFalse(L._ANDROID_PUBLICATION["cleanupClaimed"])
+                    self.assertEqual(L._ANDROID_PUBLICATION["verifiedFiles"], 0 if fault in {"collision", "copy"} else 5)
+                    self.assertEqual("android-toolchain.json" in calls, fault in {"manifest", "root-final", "sync"})
+                    if fault == "collision": mkdir.assert_not_called()
+                    if fault == "sync": closed.assert_called_once_with(99)
+                    else: opened.assert_not_called()
+
+    def test_publication_order_and_closed_result_require_original_consumers(self):
+        raw, materials, data = self.data()
+        source = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
+        body = source[source.index("def unit_start():"):source.index("def unit_stop():")]
+        self.assertLess(body.index("_context(copying=True)"), body.index("_publish_android(value)"))
+        self.assertLess(body.index("_publish_android(value)"), body.index("_shell_loader_start(value"))
+        finish = source[source.index("def _finish_body("):source.index("def unit_start():")]
+        self.assertLess(finish.index("_finish_android_publication(value)"), finish.index('_retain("unit-result.json"'))
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", materials), patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+            value = {"taskRoot": "/task", "shell": {"androidPublication": L.shell_android_publication_request(Path("/task"))}}
+            receipt = {"state": "verified-after-consumers", "instance": materials["instance"], "materials": materials,
+                "documents": data["documents"], "totals": data["totals"], "createdDirectories": 7, "verifiedFiles": 5,
+                "verifiedBytes": 5, "manifestPublished": True, "uncertainEntry": None, "qualified": False, "cleanupClaimed": False}
+            self.assertEqual(L._android_closed_publication(value, receipt), receipt)
+            for key, changed in (("state", "published"), ("manifestPublished", False), ("uncertainEntry", "jdk/bin/java"),
+                                 ("qualified", True), ("verifiedFiles", 4), ("createdDirectories", 10)):
+                invalid = {**receipt, key: changed}
+                with self.assertRaises(ValueError):
+                    L._android_closed_publication(value, invalid)
+
+
+class AndroidBuildLifecycleContracts(unittest.TestCase):
+    def test_pending_material_refuses_before_fixture_creation_or_any_process(self):
+        self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+        with patch.object(Path, "mkdir") as mkdir, patch.object(L.subprocess, "Popen") as process:
+            for action in (L.shell_android_compile_environment,
+                           lambda: L._shell_android_files("android-build"),
+                           lambda: L._shell_fixtures_prepare(installed_handoff())):
+                with self.assertRaisesRegex(ValueError, "material/OS-closure binding is pending"): action()
+            mkdir.assert_not_called(); process.assert_not_called()
+        for invalid in ({}, {**ANDROID_MATERIAL_DATA, "root": "/other"},
+                        {**ANDROID_MATERIAL_DATA, "instance": "../other"}, {**ANDROID_MATERIAL_DATA, "distributionSha256": True}):
+            with patch.object(L, "SHELL_ANDROID_MATERIALS", invalid):
+                with self.assertRaises(ValueError): L.shell_android_compile_environment()
+
+    def test_fixed_four_cases_keep_file_only_repository_and_real_build_boundary(self):
+        wrapper_prefix = (b"distributionUrl=https://services.gradle.org/distributions/gradle-8.14.5-bin.zip\n"
+                          b"distributionSha256Sum=")
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        self.assertIn("const ANDROID_WRAPPER_PREFIX: &str = "
+                      + json.dumps(wrapper_prefix.decode("ascii")) + ";", observer)
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA):
+            self.assertEqual(L.shell_android_compile_environment(), {"MRK_ANDROID_TOOL_INSTANCE": "inert-android",
+                "MRK_ANDROID_TOOL_MANIFEST_SHA256": "1" * 64, "MRK_ANDROID_OS_CONTRACT_SHA256": "2" * 64})
+            for case in L.SHELL_ANDROID_CASES:
+                roster = L._shell_android_roster(installed_handoff(), case)
+                self.assertEqual((len(roster), sum(stat.S_ISDIR(row[1]) for row in roster)), (25, 15))
+                files = {name: raw for name, mode, _, raw in roster if stat.S_ISREG(mode)}
+                settings = files["project/settings.gradle"].decode()
+                self.assertTrue(settings.startswith("pluginManagement {"))
+                self.assertLess(settings.index("gradle.startParameter.offline = true"), settings.index("repositories"))
+                self.assertEqual(settings.count("uri('/opt/mobile-release-kit/android/inert-android/gradle/repository')"), 2)
+                for remote in ("mavenLocal", "google()", "mavenCentral", "gradlePluginPortal", "https://", "http://"):
+                    self.assertNotIn(remote, settings)
+                app = files["project/app/build.gradle"].decode()
+                for fragment in ("version '8.9.2'", "compileSdk 35", "buildToolsVersion '35.0.0'",
+                                 "MOBILE_RELEASE_BUILD_NUMBER", "MOBILE_RELEASE_VERSION_NAME", "preReleaseBuild",
+                                 "mrkNativeBoundary", "out.getFD().sync()"):
+                    self.assertIn(fragment, app)
+                self.assertEqual("Thread.sleep(20000)" in app, case == "android-build-cancel")
+                self.assertEqual("throw new GradleException" in app, case == "android-build-failure")
+                self.assertIn(b"exit 70", files["project/gradlew"])
+                self.assertEqual(files["project/gradle/wrapper/gradle-wrapper.properties"],
+                    wrapper_prefix + b"3" * 64 + b"\n")
+                self.assertEqual(files[L.SHELL_ANDROID_TRACE], b"")
+        self.assertEqual(L.SHELL_CASES[-4:], ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals"))
+        self.assertEqual(len(L.SHELL_CASES), 24)
+
+    def test_separate_receipts_preserve_actual_core_child_and_native_finality(self):
+        for case in L.SHELL_ANDROID_CASES:
+            with self.subTest(case=case):
+                receipt = android_receipt_data(L, case)
+                raw = L.canonical(receipt)
+                self.assertEqual(L.shell_android_receipt(raw, case), receipt)
+                stdout, stderr = android_capture(case)
+                result = L.shell_result(stdout, stderr, case, 0, map_data())
+                self.assertEqual(result["androidBuild"], receipt)
+                self.assertFalse(receipt["original"]["noChild"])
+                self.assertEqual(receipt["coreLifetime"]["profileCalls"], 0)
+                self.assertEqual(receipt["coreLifetime"]["commands"], 2 if case == "android-build" else 0 if case == "android-build-refusals" else 1)
+                self.assertTrue(all(value is False for value in receipt["limits"].values()))
+                with self.assertRaises(ValueError): L.shell_tools_offline_receipt(raw, "offline-pass")
+                with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(tools_offline_receipt("offline-pass")), case)
+                for broken in (stdout.replace(L.SHELL_ANDROID_MARKER, L.SHELL_TOOLS_OFFLINE_MARKER),
+                               stdout + b"MRK_INSTALLED_SHELL_ANDROID_BUILD={}\n",
+                               stdout.replace(b"MRK_INSTALLED_SHELL_ANDROID_BUILD=", b"MRK_EXTRA=\nMRK_INSTALLED_SHELL_ANDROID_BUILD=")):
+                    with self.assertRaises(ValueError): L.shell_result(broken, stderr, case, 0, map_data())
+                with self.assertRaises(ValueError): L.shell_result(stdout, b"MRK_extra\n", case, 0, map_data())
+                with self.assertRaises(ValueError): L.shell_result(stdout, stderr, case, 1, map_data())
+
+    def test_every_native_boolean_and_typed_lifetime_is_required_not_a_peer_grant(self):
+        for case in L.SHELL_ANDROID_CASES:
+            original = android_receipt_data(L, case)
+            paths = [(("original", key), not value) for key, value in original["original"].items() if type(value) is bool]
+            paths += [(("coreLifetime", key), not value) for key, value in original["coreLifetime"].items() if type(value) is bool]
+            paths += [(("limits", key), True) for key in original["limits"]]
+            paths += [(("original", "domain"), "offline"), (("original", "domain"), "tools"),
+                (("original", "generation"), "c" * 32), (("nativeIntegrity",), False), (("toolsLedgerSettled",), False),
+                (("coreLifetime", "profileCalls"), 1), (("coreLifetime", "profileCalls"), False),
+                (("coreLifetime", "commands"), True), (("coreLifetime", "commands"), 3),
+                (("terminal", "context", "savedVersion", "sha256"), "0" * 64),
+                (("terminal", "context", "savedVersion", "build"), True), (("terminal", "context", "savedConfig", "bytes"), True),
+                (("terminal", "context", "draftRevision"), True), (("terminal", "intentUsable"), True),
+                (("requests", "androidStart"), True), (("requests", "androidPrepare"), 2), (("savedVersionObservation",), False)]
+            for path, value in paths:
+                with self.subTest(case=case, path=path, value=value):
+                    changed = deepcopy(original); target = changed
+                    for part in path[:-1]: target = target[part]
+                    target[path[-1]] = value
+                    with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            changed = deepcopy(original); changed["requests"]["offlineStart"] = 1
+            with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(original)[:-1], case)
+
+    def test_local_aab_summary_is_typed_and_never_release_or_signer_authority(self):
+        for path, value in [
+            (("result", "artifacts", 0, "size"), True), (("result", "artifacts", 0, "size"), (1 << 30) + 1),
+            (("result", "artifacts", 0, "sha256"), "bad"), (("result", "artifacts", 0, "unknownAbi"), True),
+            (("result", "artifacts", 0, "architectures"), ["x86_64"]),
+            (("result", "assurances", "signer"), "passed"), (("result", "assurances", "sourceBinding"), "established"),
+            (("result", "limitations"), []), (("activity", "command", "exitCode"), True),
+            (("activity", "summary", "total"), True), (("activity", "summary", "omitted"), 1),
+            (("activity", "findings", 0, "ordinal"), True), (("activity", "summary", "counts", "PASS"), 1)]:
+            with self.subTest(path=path, value=value):
+                receipt = android_receipt_data(L, "android-build"); target = receipt["terminal"]
+                for part in path[:-1]: target = target[part]
+                target[path[-1]] = value
+                with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(receipt), "android-build")
+        receipt = android_receipt_data(L, "android-build")
+        for section in ("activity", "result"):
+            receipt["terminal"][section]["findings"][2]["status"] = "PASS"
+            receipt["terminal"][section]["summary"]["counts"].update(PASS=3, SKIP=0)
+        with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(receipt), "android-build")
+
+    def test_original_25_controls_and_explicit_output_exclusions_are_not_whole_tree_claims(self):
+        value = installed_handoff()
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA):
+            for case in L.SHELL_ANDROID_CASES:
+                before, after = (android_fixture_data(value, case, after=phase) for phase in (False, True))
+                receipt = L.shell_android_fixture(value, case, L.canonical(before), L.canonical(after))
+                self.assertEqual((receipt["beforeCount"], receipt["afterCount"]), (25, 25))
+                self.assertNotIn("noUnexpectedEntries", receipt); self.assertNotIn("noPendingState", receipt)
+                self.assertEqual(receipt["generatedScopesNotExported"], ["project/.mobile-release", "project/app/build", "project/build"])
+                for raw in (L.canonical(before), L.canonical(after)): self.assertLessEqual(len(raw), L.SHELL_ANDROID_INVENTORY_LIMIT)
+                for fault in ("inode", "mode", "float-ns", "extra-control", "output-scan", "hash", "namespace", "material", "replacement"):
+                    changed = deepcopy(after)
+                    if fault == "inode": changed["entries"][0]["identity"][1] += 1000
+                    elif fault == "mode": changed["entries"][0]["identity"][2] = stat.S_IFDIR | 0o755
+                    elif fault == "float-ns": changed["entries"][0]["identity"][7] = float(changed["entries"][0]["identity"][7])
+                    elif fault == "extra-control": changed["entries"].append(deepcopy(changed["entries"][0]))
+                    elif fault == "output-scan":
+                        row = next(row for row in changed["entries"] if row["path"] == "project/app/build")
+                        row["children"] = ["app-release.aab"]; row["contentsInspected"] = True
+                    elif fault == "hash": next(row for row in changed["entries"] if row["kind"] == "file")["sha256"] = "0" * 64
+                    elif fault == "namespace": changed["namespace"]["identity"][1] += 100
+                    elif fault == "material": changed["materials"]["distributionSha256"] = "0" * 64
+                    else:
+                        path = L.SHELL_ANDROID_VERSION_PATH if case == "android-build-refusals" else L.SHELL_ANDROID_TRACE
+                        next(row for row in changed["entries"] if row["path"] == path)["identity"][1] += 1000
+                    with self.subTest(case=case, fault=fault), self.assertRaises(ValueError):
+                        L.shell_android_fixture(value, case, L.canonical(before), L.canonical(changed))
+
+    def test_after_exit_inventory_never_enumerates_generated_output_bodies(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        with patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA):
+            case = "android-build"
+            expected = android_fixture_data(value, case, after=True)
+            root = L.shell_fixture_root(value) / case
+            rows = {root if row["path"] == "." else root / row["path"]: row for row in expected["entries"]}
+            rows[root / expected["generatedNamespace"]["path"]] = expected["generatedNamespace"]
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            scans = []
+            def metadata(path):
+                return SimpleNamespace(**dict(zip(fields, rows[path]["identity"])))
+            def scan(path):
+                self.assertTrue(rows[path]["contentsInspected"]); scans.append(path)
+                scope = Mock(); scope.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in rows[path]["children"]))
+                scope.__exit__ = Mock(return_value=False); return scope
+            def file_record(path, limit):
+                row = rows[path]; self.assertEqual(limit, row["size"])
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with patch.object(L, "_ROOT", L.root_path(value)), \
+                 patch.object(L, "_shell_namespace_check", return_value=expected["namespace"]), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=metadata), \
+                 patch.object(L, "directory"), patch.object(L, "_xattrs"), patch.object(L, "record", side_effect=file_record), \
+                 patch.object(L.os, "scandir", side_effect=scan), patch.object(L.os, "open") as opening:
+                observed = L._shell_android_inventory(value, b"inert original namespace", case, after=True)
+                self.assertEqual(observed, expected); opening.assert_not_called()
+                self.assertFalse(any(root / name in scans for name in L.SHELL_ANDROID_GENERATED))
+
+    def test_cancel_checks_post_ack_original_busy_before_snapshot_early_returns(self):
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        predicate = observer.split("fn android_cancel_projection_valid(", 1)[1].split("\nfn android_terminal_dom", 1)[0]
+        for original in ('r.id.as_deref()==p["operationId"].as_str()',
+                         'r.generation.as_deref()==p["ownerGeneration"].as_str()',
+                         'r.context.as_ref()==p.get("context")'):
+            self.assertIn(original, predicate)
+        self.assertIn('(Some("busy"),Some("starting" | "running" | "stopping"))', predicate)
+        self.assertIn('(Some("available"),Some("terminal"))', predicate)
+        returned = observer.split("fn android_returned", 1)[1].split("fn android_terminal_valid", 1)[0]
+        self.assertIn("command==Command::AndroidCancel && !android_cancel_projection_valid(&r,&status)", returned)
+        tick = observer.split("fn android_tick", 1)[1].split("fn android_dom", 1)[0]
+        self.assertLess(tick.index("if r.android_replies[2]!=1"), tick.index("state.document.android_build_status()"))
+        wait = tick.split("Step::WaitFinal => {", 1)[1]
+        self.assertLess(wait.index("android_cancel_projection_valid"), wait.index("installed_observation_snapshot"))
+        self.assertIn("!self.original_matches(&r,&snapshot.facts,&snapshot.terminal)", wait)
+        self.assertIn("!snapshot.facts.retired_before_cutoff", wait)
+        self.assertIn("status.availability!=android::Availability::Busy { self.fail(); }", wait)
+        self.assertLess(wait.index("!snapshot.facts.retired_before_cutoff"), wait.index("self.android_terminal_valid(&r,&snapshot)"))
+        for case in ('("available","stopping",false)', '("available","terminal",true)',
+                     '("busy","terminal",false)', '("context",json!({"projectId":"foreign-context"}))'):
+            self.assertIn(case, observer)
+        self.assertNotIn("Duration::", predicate)
+
+    def test_android_qualification_uses_write_once_binding_without_record_lock(self):
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        self.assertIn("android_document: OnceLock<Weak<()>>", observer)
+        self.assertIn("android_document: OnceLock::new()", observer)
+        eligibility = observer.split("pub(crate) fn permits_android(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertNotIn("self.record()", eligibility)
+        self.assertNotIn("record.lock()", eligibility)
+        self.assertIn("self.android_document.get().and_then(Weak::upgrade).is_some()", eligibility)
+        attach = observer.split("fn attach_android(", 1)[1].split("pub(super) fn android_version_request", 1)[0]
+        self.assertIn("original.is_some() || self.android_document.get().is_some()", attach)
+        self.assertEqual(observer.count("self.android_document.set("), 1)
+        self.assertLess(attach.index("self.android_document.set(document_identity.clone())"),
+                        attach.index("AndroidFixture::capture"))
+        self.assertLess(attach.index("*original=Some(Arc::downgrade(q));"),
+                        attach.index("document.admit_installed_android"))
+        self.assertNotIn("r.android_document", observer)
+        finality = observer.split("fn android_complete(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("self.android_document.get().is_some()", finality)
+        self.assertNotIn("Weak::upgrade", finality)
+
+    def test_source_preserves_original_native_domain_clock_and_no_grant_boundaries(self):
+        observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        owner = (SOURCE / "desktop/src-tauri/src/saved_command_owner.rs").read_text()
+        toolchain = (SOURCE / "desktop/src-tauri/src/android_toolchain.rs").read_text()
+        build = (SOURCE / "desktop/src-tauri/build.rs").read_text()
+        for domain in ("Tools", "Offline", "Android"): self.assertIn("Domain::" + domain, observer)
+        for text in ("struct AndroidAdmission", "Weak<()>", "required_mask", "installed_candidate_matches_compiled",
+                     "OS_CONTRACT_BYTES: Option<&[u8]> = None;"):
+            self.assertTrue(text in observer + owner + toolchain + build, text)
+        self.assertTrue('include!(concat!(env!("OUT_DIR"), "/mrk-android-compile-data.rs"));' in toolchain)
+        self.assertTrue('const ANDROID_INPUT: &str = "MRK_ANDROID_OS_CONTRACT_INPUT";' in build)
+        for flag in ("ANDROID_NATIVE_QUALIFIED", "ANDROID_RUNTIME_QUALIFIED", "ANDROID_TOOLCHAIN_QUALIFIED"):
+            self.assertIn("const " + flag + ": bool = false;", owner)
+        self.assertIn("life.profile_calls!=0", observer)
+        self.assertIn('Duration::from_secs(3000)', owner)
+        self.assertIn('Duration::from_secs(3010)', owner)
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
+        domain = lifecycle.split("def _domain(value, label):", 1)[1].split("\ndef ", 1)[0]
+        # Verify the observed service properties, not a nonexistent unit-argv
+        # literal. The real installed domain must retain all initial views.
+        self.assertIn('need(all(props[key] == "no" for key in ("PrivateMounts", "PrivateTmp", '
+                      '"PrivateUsers", "PrivateNetwork", "ProtectControlGroups")),', domain)
+        self.assertIn('"Service substitutes an initial namespace/view"', domain)
+
+
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class ToolsOfflineLifecycleContracts(unittest.TestCase):
     def test_fixed_synthetic_roster_configs_and_existing_project_script_are_pinned(self):
         # Shape/correspondence DATA only. Actual core configuration validation
@@ -4928,6 +5837,8 @@ class ToolsOfflineLifecycleContracts(unittest.TestCase):
                         L.shell_closed_result(value, result, altered)
 
 
+@patch.object(L, "SHELL_ANDROID_MATERIALS", ANDROID_MATERIAL_DATA)
+@patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", ANDROID_PUBLICATION_DATA)
 class SessionFixtureContracts(unittest.TestCase):
     def test_private_fixture_config_is_valid_shared_policy_without_build_commands(self):
         from mobile_release.config import validate_config_data
@@ -5095,9 +6006,11 @@ class SessionFixtureContracts(unittest.TestCase):
         namespace = L.canonical(fixture_namespace_data(value))
         sessions = {case: session_fixture_data(value, case, changed=case == "session-refusals") for case in L.SHELL_SESSION_CASES}
         tools = {case: tools_offline_fixture_data(value, case, after=True) for case in L.SHELL_TOOLS_OFFLINE_CASES}
-        for changed in (None, *L.SHELL_SESSION_CASES, "metadata-save", "version-save", *L.SHELL_TOOLS_OFFLINE_CASES):
+        android = {case: android_fixture_data(value, case, after=True) for case in L.SHELL_ANDROID_CASES}
+        for changed in (None, *L.SHELL_SESSION_CASES, "metadata-save", "version-save", *L.SHELL_TOOLS_OFFLINE_CASES, *L.SHELL_ANDROID_CASES):
             current = deepcopy(sessions)
             current_tools = deepcopy(tools)
+            current_android = deepcopy(android)
             metadata = metadata_fixture_data(value, saved=True)
             version = version_fixture_data(value, saved=True)
             if changed == "version-save":
@@ -5106,6 +6019,8 @@ class SessionFixtureContracts(unittest.TestCase):
                 metadata["entries"][0]["identity"][1] += 1000
             elif changed in L.SHELL_TOOLS_OFFLINE_CASES:
                 current_tools[changed]["entries"][0]["identity"][1] += 1000
+            elif changed in L.SHELL_ANDROID_CASES:
+                current_android[changed]["entries"][0]["identity"][1] += 1000
             elif changed is not None:
                 # Identical fictional bytes can still belong to a different
                 # directory original. The already-retained capture must win.
@@ -5118,6 +6033,10 @@ class SessionFixtureContracts(unittest.TestCase):
                 self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
                 self.assertIs(after, True)
                 return current_tools[case]
+            def android_inventory(actual_value, actual_namespace, case, *, after=False):
+                self.assertIs(actual_value, value); self.assertEqual(actual_namespace, namespace)
+                self.assertIs(after, True)
+                return current_android[case]
             def retained(path, limit):
                 self.assertEqual(path.parent, L.root_path(value) / "public")
                 raw = files[path.name]; self.assertLessEqual(len(raw), limit); return raw
@@ -5130,14 +6049,17 @@ class SessionFixtureContracts(unittest.TestCase):
                   patch.object(L, "_shell_version_inventory", return_value=version), \
                   patch.object(L, "_shell_session_inventory", side_effect=session_inventory) as checking, \
                   patch.object(L, "_shell_tools_offline_inventory", side_effect=tools_inventory) as checking_tools, \
+                   patch.object(L, "_shell_android_inventory", side_effect=android_inventory) as checking_android, \
                  patch.object(L, "read", side_effect=retained), patch.object(L, "_retain") as replacement:
                 if changed is None:
                     self.assertIsNone(L._shell_fixtures_final(value, namespace))
                     self.assertEqual([call.args[2] for call in checking.call_args_list], list(L.SHELL_SESSION_CASES))
                     self.assertEqual([call.args[2] for call in checking_tools.call_args_list], list(L.SHELL_TOOLS_OFFLINE_CASES))
+                    self.assertEqual([call.args[2] for call in checking_android.call_args_list], list(L.SHELL_ANDROID_CASES))
                 else:
                     reason = ("another original fixture family" if changed in ("metadata-save", "version-save") else
-                              "earlier original Tools/Offline fixture" if changed in L.SHELL_TOOLS_OFFLINE_CASES else "earlier original session fixture")
+                              "earlier original Tools/Offline fixture" if changed in L.SHELL_TOOLS_OFFLINE_CASES else
+                              "earlier Android source controls" if changed in L.SHELL_ANDROID_CASES else "earlier original session fixture")
                     with self.assertRaisesRegex(ValueError, reason):
                         L._shell_fixtures_final(value, namespace)
                 replacement.assert_not_called()

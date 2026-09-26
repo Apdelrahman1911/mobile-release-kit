@@ -4,13 +4,19 @@
 use std::{collections::BTreeSet, path::PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use crate::protocol::strict_json;
+use crate::protocol::{strict_android_tool_manifest_json, strict_json};
 
 const PROFILE: &str = "android-local-linux-gnu-x86_64-v1";
 const TARGET: &str = "linux-gnu-x86_64";
 const PREFIX: &str = "/opt/mobile-release-kit/android/";
 const MANIFEST: &str = "android-toolchain.json";
-const MANIFEST_LIMIT: usize = 1024 * 1024;
+pub(crate) const MANIFEST_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const TOOL_ENTRY_COUNT: usize = 32_768;
+const TOOL_FILE_COUNT: usize = 16_384;
+const OS_FILE_COUNT: usize = 256;
+const OS_HELPER_COUNT: usize = 128;
+const OS_ALIAS_COUNT: usize = 128;
+const OS_CONTRACT_LIMIT: usize = 1024 * 1024;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024;
 const BUNDLETOOL_SHA256: &str = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29";
@@ -18,23 +24,29 @@ const BUNDLETOOL_MAX_BYTES: u64 = 32_520_401;
 const INSTANCE: Option<&str> = option_env!("MRK_ANDROID_TOOL_INSTANCE");
 const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_ANDROID_TOOL_MANIFEST_SHA256");
 const OS_ANCHOR: Option<&str> = option_env!("MRK_ANDROID_OS_CONTRACT_SHA256");
-// Intentionally ABSENT. Only a separately reviewed exact executable OS closure
-// (Python AND JDK/SDK/Gradle shell/helpers/loaders and aliases) may populate it.
-// A digest-shaped manifest field, Ubuntu name or claimed coverage is not that
-// external authentication/immutable-namespace/native qualification evidence.
-const OS_CONTRACT_BYTES: Option<&[u8]> = None;
+// Default is ABSENT. The explicit same-VM compiler input is copied by build.rs
+// only with the complete admitted tuple and an exact bounded byte match. This
+// compiled DATA is not native qualification or permission to run any tool.
+include!(concat!(env!("OUT_DIR"), "/mrk-android-compile-data.rs"));
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AndroidToolchainProfile {
     instance: String, root: PathBuf, manifest_sha256: String, os: OsContract,
 }
 
 impl AndroidToolchainProfile {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_candidate_matches_compiled(&self) -> bool { Self::compiled().as_ref() == Some(self) }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_candidate_root(&self) -> &std::path::Path { &self.root }
     pub(crate) fn compiled() -> Option<Self> {
         if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return None; }
-        let instance = INSTANCE.filter(|v| instance_name(v))?;
-        let manifest = MANIFEST_ANCHOR.filter(|v| sha(v))?;
-        let os = parse_os_contract(OS_CONTRACT_BYTES?, OS_ANCHOR?)?;
+        Self::from_compile_data(INSTANCE, MANIFEST_ANCHOR, OS_CONTRACT_BYTES, OS_ANCHOR)
+    }
+    fn from_compile_data(instance: Option<&str>, manifest: Option<&str>, raw: Option<&[u8]>, anchor: Option<&str>) -> Option<Self> {
+        let instance = instance.filter(|v| instance_name(v))?;
+        let manifest = manifest.filter(|v| sha(v))?;
+        let os = parse_os_contract(raw?, anchor?)?;
         Some(Self { instance: instance.into(), root: PathBuf::from(PREFIX).join(instance),
             manifest_sha256: manifest.into(), os })
     }
@@ -42,10 +54,10 @@ impl AndroidToolchainProfile {
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct FileSpec { path: String, size: u64, sha256: String, mode: u32 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Alias { path: String, target: String, canonical: String }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct OsContract { id: String, sha256: String, files: Vec<FileSpec>, aliases: Vec<Alias> }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -93,12 +105,30 @@ fn path(v: &str, absolute: bool) -> bool {
     let parts: Vec<_> = v[usize::from(absolute)..].split('/').collect();
     parts.len() <= 16 && parts.iter().all(|v| component(v))
 }
+fn direct_file(v: &str, directory: &str, suffix: &str) -> bool {
+    v.strip_prefix(directory).is_some_and(|name|
+        name.len() > suffix.len() && component(name) && name.ends_with(suffix))
+}
+fn font_configuration(v: &str) -> bool {
+    direct_file(v, "/etc/fonts/conf.avail/", ".conf")
+        || direct_file(v, "/usr/share/fontconfig/conf.avail/", ".conf")
+}
+fn font_cache(v: &str) -> bool {
+    v == "/var/cache/fontconfig/CACHEDIR.TAG"
+        || v.strip_prefix("/var/cache/fontconfig/").and_then(|name| name.strip_suffix("-le64.cache-9"))
+            .is_some_and(|digest| digest.len() == 32
+                && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
 fn native_path(v: &str) -> bool {
     path(v, true) && (v.starts_with("/usr/bin/") || v.starts_with("/usr/lib/") || v.starts_with("/usr/lib64/")
-        || v.starts_with("/etc/ld.so.conf.d/") || matches!(v, "/etc/ld.so.cache" | "/etc/ld.so.conf"))
+        || v.starts_with("/etc/ld.so.conf.d/") || font_configuration(v) || font_cache(v)
+        || ["dejavu", "lato", "liberation", "noto"].iter().any(|family|
+            direct_file(v, &format!("/usr/share/fonts/truetype/{family}/"), ".ttf"))
+        || matches!(v, "/etc/ld.so.cache" | "/etc/ld.so.conf" | "/etc/fonts/fonts.conf"
+            | "/etc/nsswitch.conf" | "/etc/host.conf" | "/etc/hosts" | "/etc/resolv.conf" | "/etc/gai.conf"))
 }
 fn files_valid(files: &[FileSpec], native: bool) -> bool {
-    !files.is_empty() && files.len() <= (if native { 128 } else { 2048 })
+    !files.is_empty() && files.len() <= (if native { OS_FILE_COUNT } else { TOOL_FILE_COUNT })
         && files.windows(2).all(|p| p[0].path < p[1].path)
         && files.iter().all(|f| f.size <= FILE_LIMIT && sha(&f.sha256) && f.mode <= 0o777 && f.mode & 0o022 == 0
             && if native { native_path(&f.path) } else { path(&f.path, false)
@@ -117,7 +147,7 @@ fn directories(files: &[FileSpec], native: bool) -> Option<BTreeSet<String>> {
     }
     if !native { folded.insert(MANIFEST.into()); }
     for d in &dirs { if names.contains(d) || !folded.insert(d.to_ascii_lowercase()) { return None; } }
-    (folded.len() <= 8192).then_some(dirs)
+    (folded.len() <= if native { 8192 } else { TOOL_ENTRY_COUNT }).then_some(dirs)
 }
 fn alias_destination(alias: &Alias) -> Option<String> {
     if !path(&alias.path, true) || !path(&alias.canonical, true) || alias.target.is_empty() || alias.target.len() > 512 { return None; }
@@ -132,27 +162,31 @@ fn alias_destination(alias: &Alias) -> Option<String> {
     Some(format!("/{}", parts.join("/"))) // Lexical DATA only; never follows a link.
 }
 fn parse_os_contract(raw: &[u8], anchor: &str) -> Option<OsContract> {
-    if raw.is_empty() || raw.len() > MANIFEST_LIMIT || !sha(anchor) || digest(raw) != anchor { return None; }
+    if raw.is_empty() || raw.len() > OS_CONTRACT_LIMIT || !sha(anchor) || digest(raw) != anchor { return None; }
     let d: ContractData = serde_json::from_value(strict_json(raw).ok()?).ok()?;
     if d.schema_version != 1 || d.closure != "python-jdk-sdk-gradle-shell-loader-v1" || !label(&d.id, false)
-        || !files_valid(&d.files, true) || d.aliases.len() > 128 { return None; }
+        || !files_valid(&d.files, true) || d.aliases.len() > OS_ALIAS_COUNT { return None; }
     let mut total = 0u64;
     for f in &d.files { total = total.checked_add(f.size)?; if total > TOTAL_LIMIT { return None; } }
     let mut targets = directories(&d.files, true)?;
     targets.extend(d.files.iter().map(|f| f.path.clone()));
     let folded_targets: BTreeSet<_> = targets.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let regular_files: BTreeSet<_> = d.files.iter().map(|f| f.path.as_str()).collect();
     let mut names = BTreeSet::new();
     for a in &d.aliases {
+        let loader_alias = a.canonical.starts_with("/usr/")
+            && (matches!(a.path.as_str(), "/bin" | "/lib" | "/lib64") || a.path.starts_with("/usr/"));
+        let font_alias = direct_file(&a.path, "/etc/fonts/conf.d/", ".conf")
+            && font_configuration(&a.canonical) && regular_files.contains(a.canonical.as_str());
         if !names.insert(a.path.to_ascii_lowercase()) || folded_targets.contains(&a.path.to_ascii_lowercase())
-            || !targets.contains(&a.canonical) || !a.canonical.starts_with("/usr/")
-            || !matches!(a.path.as_str(), "/bin" | "/lib" | "/lib64") && !a.path.starts_with("/usr/")
+            || !targets.contains(&a.canonical) || !(loader_alias || font_alias)
             || alias_destination(a).as_deref() != Some(a.canonical.as_str()) { return None; }
     }
     Some(OsContract { id: d.id, sha256: anchor.into(), files: d.files, aliases: d.aliases })
 }
 fn parse_manifest(raw: &[u8], profile: &AndroidToolchainProfile) -> Option<Inventory> {
     if raw.is_empty() || raw.len() > MANIFEST_LIMIT || digest(raw) != profile.manifest_sha256 { return None; }
-    let d: ManifestData = serde_json::from_value(strict_json(raw).ok()?).ok()?;
+    let d: ManifestData = serde_json::from_value(strict_android_tool_manifest_json(raw).ok()?).ok()?;
     if d.schema_version != 1 || d.profile != PROFILE || d.target != TARGET || d.instance != profile.instance
         || d.launch_contract != "gradle-posix-private-jvm-v1" || !label(&d.versions.jdk_vendor, false)
         || [&d.versions.jdk_version, &d.versions.gradle_version, &d.versions.agp_version,
@@ -169,10 +203,13 @@ fn parse_manifest(raw: &[u8], profile: &AndroidToolchainProfile) -> Option<Inven
         if f.size == 0 || role != &d.roles.bundletool && f.mode & 0o111 == 0 { return None; }
         if role == &d.roles.bundletool && (f.sha256 != BUNDLETOOL_SHA256 || f.size > BUNDLETOOL_MAX_BYTES) { return None; }
     }
+    // AGP's local override must name the inventoried native member. An old
+    // profile cannot fall back to project/cache-selected Maven extraction.
+    if !d.files.iter().any(|f| f.path == "gradle/native/aapt2/aapt2" && f.size > 0 && f.mode & 0o111 != 0) { return None; }
     let os = &d.os_profile;
     if !d.files.iter().any(|f| f.path.starts_with("sdk/")) || os.id != profile.os.id || os.inventory_sha256 != profile.os.sha256
         || os.files != profile.os.files || !files_valid(&os.files, true) || os.shell != "/usr/bin/dash" || os.executable_directory != "/usr/bin"
-        || os.helpers.is_empty() || os.helpers.len() > 128 || !os.helpers.iter().all(|h| component(h))
+        || os.helpers.is_empty() || os.helpers.len() > OS_HELPER_COUNT || !os.helpers.iter().all(|h| component(h))
         || !os.helpers.windows(2).all(|p| p[0] < p[1])
         || !["sed", "uname", "xargs"].iter().all(|name| os.helpers.iter().any(|h| h.as_str() == *name)) { return None; }
     for command in std::iter::once(os.shell.clone()).chain(os.helpers.iter().map(|h| format!("/usr/bin/{h}"))) {
@@ -203,8 +240,8 @@ mod native {
     }
     impl AndroidToolchainCustody {
         pub(crate) fn new(profile: AndroidToolchainProfile, budget: Arc<AndroidDescriptorBudget>) -> Self {
-            Self { profile, originals: OriginalDescriptorBook::new_android(budget), root: None, inventory: None,
-                aliases: Vec::with_capacity(128), inspected: false, attempted: false, stop: None }
+            Self { profile, originals: OriginalDescriptorBook::new_android_toolset(budget), root: None, inventory: None,
+                aliases: Vec::with_capacity(OS_ALIAS_COUNT), inspected: false, attempted: false, stop: None }
         }
         pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
             if self.attempted { return Err(Failure::AlreadyUsed); }
@@ -227,7 +264,7 @@ mod native {
             while let Some((directory, relative)) = pending.pop() {
                 for entry in self.originals.entries(directory, end, stop)? {
                     let name = if relative.is_empty() { entry.name.clone() } else { format!("{relative}/{}", entry.name) };
-                    if !seen.insert(name.clone()) || seen.len() > 8192 { return Err(Failure::Inventory); }
+                    if !seen.insert(name.clone()) || seen.len() > TOOL_ENTRY_COUNT { return Err(Failure::Inventory); }
                     let opened = if name == MANIFEST {
                         if entry.kind != FileType::RegularFile { return Err(Failure::Inventory); } manifest
                     } else if entry.kind == FileType::Directory {
@@ -316,7 +353,7 @@ mod pure_tests {
     }
     fn manifest_data() -> Value {
         let os = os_data(); let os_hash = digest(&serde_json::to_vec(&os).unwrap());
-        let files = ["bundletool/bundletool.jar","gradle/bin/gradle","jdk/bin/java","jdk/bin/javac","sdk/licenses/inert"]
+        let files = ["bundletool/bundletool.jar","gradle/bin/gradle","gradle/native/aapt2/aapt2","jdk/bin/java","jdk/bin/javac","sdk/licenses/inert"]
             .map(|path| json!({"path":path,"size":1,"mode":493,
                 "sha256":if path == "bundletool/bundletool.jar" { BUNDLETOOL_SHA256.to_owned() } else { "a".repeat(64) }}));
         json!({"schemaVersion":1,"profile":PROFILE,"target":TARGET,"instance":"inert-data-only",
@@ -344,10 +381,10 @@ mod pure_tests {
     }
     #[test]
     fn absent_compiled_profile_and_whole_manifest_binding_are_not_authority() {
-        assert!(OS_CONTRACT_BYTES.is_none() && AndroidToolchainProfile::compiled().is_none());
+        if OS_CONTRACT_BYTES.is_none() { assert!(AndroidToolchainProfile::compiled().is_none()); }
         let raw = serde_json::to_vec(&manifest_data()).unwrap(); let profile = profile(&raw);
         let parsed = parse_manifest(&raw, &profile).unwrap();
-        assert_eq!(parsed.data.files.len(), 5);
+        assert_eq!(parsed.data.files.len(), 6);
         assert_eq!(profile.root, PathBuf::from("/opt/mobile-release-kit/android/inert-data-only"));
         let mut changed = raw.clone(); changed.push(b' ');
         assert!(parse_manifest(&changed, &profile).is_none()); // Equal JSON is not equal anchored bytes.
@@ -357,13 +394,28 @@ mod pure_tests {
         assert!(parse_manifest(&duplicate, &self::profile(&duplicate)).is_none());
     }
     #[test]
+    fn compile_data_requires_the_complete_exact_tuple_without_fallback() {
+        let raw = serde_json::to_vec(&os_data()).unwrap();
+        let manifest = "a".repeat(64); let anchor = digest(&raw);
+        let make = AndroidToolchainProfile::from_compile_data;
+        assert!(make(Some("inert-data-only"), Some(&manifest), Some(&raw), Some(&anchor)).is_some());
+        assert!(make(None, Some(&manifest), Some(&raw), Some(&anchor)).is_none());
+        assert!(make(Some("inert-data-only"), None, Some(&raw), Some(&anchor)).is_none());
+        assert!(make(Some("inert-data-only"), Some(&manifest), None, Some(&anchor)).is_none());
+        assert!(make(Some("inert-data-only"), Some(&manifest), Some(&raw), None).is_none());
+        assert!(make(Some("../other"), Some(&manifest), Some(&raw), Some(&anchor)).is_none());
+        assert!(make(Some("inert-data-only"), Some(&manifest), Some(&raw), Some(&manifest)).is_none());
+        let mut changed = raw; changed.push(b' ');
+        assert!(make(Some("inert-data-only"), Some(&manifest), Some(&changed), Some(&anchor)).is_none());
+    }
+    #[test]
     fn manifest_requires_fixed_roles_contract_helpers_and_compiled_os_files() {
         assert!(manifest_valid(&manifest_data()));
         for role in ["java", "javac", "gradle", "bundletool", "sdk"] {
             let mut value = manifest_data(); value["roles"].as_object_mut().unwrap().remove(role);
             assert!(!manifest_valid(&value), "missing role {role}");
         }
-        for file in ["jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle", "bundletool/bundletool.jar", "sdk/licenses/inert"] {
+        for file in ["jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle", "gradle/native/aapt2/aapt2", "bundletool/bundletool.jar", "sdk/licenses/inert"] {
             let mut value = manifest_data(); value["files"].as_array_mut().unwrap().retain(|f| f["path"] != file);
             assert!(!manifest_valid(&value), "missing file {file}");
         }
@@ -402,16 +454,124 @@ mod pure_tests {
             files.push(spec(path)); files.sort_by(|a, b| a.path.cmp(&b.path));
             assert!(!files_valid(&files, false));
         }
-        let files: Vec<_> = (0..2048).map(|n| spec(format!("sdk/file-{n:04}"))).collect();
+        let files: Vec<_> = (0..TOOL_FILE_COUNT).map(|n| spec(format!("sdk/file-{n:05}"))).collect();
         assert!(files_valid(&files, false));
-        let mut too_many = files.clone(); too_many.push(spec("sdk/file-2048".into()));
+        let mut too_many = files.clone(); too_many.push(spec(format!("sdk/file-{TOOL_FILE_COUNT:05}")));
         assert!(!files_valid(&too_many, false));
-        let entries: Vec<_> = (0..2048).map(|n| spec(format!("sdk/d{n:04}/a/b/file"))).collect();
-        assert!(!files_valid(&entries, false)); // 8194 files/derived directories/manifest entries.
-        let native: Vec<_> = (0..129).map(|n| spec(format!("/usr/lib/inert-{n:03}"))).collect();
-        assert!(files_valid(&native[..128], true) && !files_valid(&native, true));
+        let mut entries: Vec<_> = (0..TOOL_ENTRY_COUNT / 4 - 1)
+            .map(|n| spec(format!("sdk/d{n:05}/a/b/file"))).collect();
+        entries.extend([spec("sdk/z-extra-a".into()), spec("sdk/z-extra-b".into())]);
+        assert!(files_valid(&entries, false)); // Exactly32768 files/derived directories/manifest entries.
+        entries.push(spec("sdk/z-extra-c".into()));
+        assert!(!files_valid(&entries, false));
+        let native: Vec<_> = (0..=OS_FILE_COUNT).map(|n| spec(format!("/usr/lib/inert-{n:03}"))).collect();
+        assert!(files_valid(&native[..OS_FILE_COUNT], true) && !files_valid(&native, true));
         let oversized = vec![b' '; MANIFEST_LIMIT + 1];
         assert!(parse_manifest(&oversized, &profile(&oversized)).is_none());
+    }
+    #[test]
+    fn native_configuration_admits_only_selected_direct_file_families() {
+        for allowed in ["/etc/fonts/fonts.conf", "/etc/fonts/conf.avail/50-user.conf",
+            "/usr/share/fontconfig/conf.avail/10-hinting.conf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/lato/Lato-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", "/var/cache/fontconfig/CACHEDIR.TAG",
+            "/var/cache/fontconfig/0bd3dc0958fa2205aaaa8ebb13e2872b-le64.cache-9",
+            "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"] {
+            assert!(native_path(allowed), "{allowed}");
+        }
+        for denied in ["/etc/passwd", "/etc/resolv.conf.bak", "/etc/fonts/conf.avail/.conf",
+            "/etc/fonts/conf.avail/nested/file.conf", "/etc/fonts/conf.avail/FILE.CONF",
+            "/etc/fonts/conf.avail/../outside.conf", "/etc/fonts/conf.d/50-user.conf",
+            "/usr/share/fontconfig/conf.avail/nested/file.conf", "/usr/share/fonts/truetype/other/Font.ttf",
+            "/usr/share/fonts/truetype/lato/Font.TTF", "/usr/share/fonts/truetype/lato/nested/Font.ttf",
+            "/usr/share/fonts/truetype/noto/nested/Font.ttf", "/var/cache/fontconfig/other",
+            "/var/cache/fontconfig/0BD3DC0958FA2205AAAA8EBB13E2872B-le64.cache-9",
+            "/var/cache/fontconfig/0bd3dc0958fa2205aaaa8ebb13e2872b-le64.cache-8",
+            "/var/cache/fontconfig/0bd3dc0958fa2205aaaa8ebb13e2872-le64.cache-9",
+            "/var/cache/fontconfig/nested/0bd3dc0958fa2205aaaa8ebb13e2872b-le64.cache-9",
+            "/usr/local/share/fonts/Font.ttf", "/usr/share/arbitrary/data"] {
+            assert!(!native_path(denied), "{denied}");
+        }
+    }
+    #[test]
+    fn font_aliases_cannot_mix_loader_routes_or_borrow_directory_targets() {
+        for canonical in ["/etc/fonts/conf.avail/inert.conf", "/usr/share/fontconfig/conf.avail/inert.conf"] {
+            let mut data = os_data();
+            data["files"].as_array_mut().unwrap().push(json!({
+                "path":canonical,"size":1,"sha256":"a".repeat(64),"mode":420}));
+            data["files"].as_array_mut().unwrap().sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+            let alias = json!({"path":"/etc/fonts/conf.d/inert.conf","target":canonical,"canonical":canonical});
+            data["aliases"].as_array_mut().unwrap().push(alias);
+            assert!(os_valid(&data));
+            for (source, target) in [
+                ("/etc/fonts/conf.d/nested/inert.conf", canonical),
+                ("/etc/fonts/conf.d/inert.CONF", canonical),
+                ("/etc/fonts/conf.d/inert.conf", "/usr/bin/dash"),
+                ("/etc/fonts/conf.d/inert.conf", "/etc/fonts/conf.avail"),
+                ("/etc/fonts/conf.d/inert.conf", "/etc/fonts/conf.avail/missing.conf"),
+            ] {
+                let mut changed = data.clone();
+                changed["aliases"][1] = json!({"path":source,"target":target,"canonical":target});
+                assert!(!os_valid(&changed), "{source} -> {target}");
+            }
+            if canonical.starts_with("/etc/") {
+                let mut changed = data.clone(); changed["aliases"][1]["path"] = json!("/usr/lib/inert.conf");
+                assert!(!os_valid(&changed)); // Legacy source cannot borrow a font-only /etc destination.
+            }
+            let mut collision = data.clone();
+            let alias = collision["aliases"][1].clone(); collision["aliases"].as_array_mut().unwrap().push(alias);
+            assert!(!os_valid(&collision));
+        }
+        let mut aliases = os_data();
+        aliases["aliases"] = json!((0..OS_ALIAS_COUNT).map(|n|
+            json!({"path":format!("/usr/lib/inert-{n:03}"),"target":"/usr/bin","canonical":"/usr/bin"}))
+            .collect::<Vec<_>>());
+        assert!(os_valid(&aliases));
+        aliases["aliases"].as_array_mut().unwrap().push(json!({
+            "path":"/usr/lib/overflow","target":"/usr/bin","canonical":"/usr/bin"}));
+        assert!(!os_valid(&aliases));
+    }
+    #[test]
+    fn os_file_growth_does_not_expand_the_helper_limit() {
+        let mut data = manifest_data(); let mut os = os_data();
+        let helpers: Vec<_> = (0..126).map(|n| format!("inert-{n:03}"))
+            .chain(["sed".into(), "uname".into(), "xargs".into()]).collect();
+        os["files"].as_array_mut().unwrap().extend(helpers[..126].iter().map(|name|
+            json!({"path":format!("/usr/bin/{name}"),"size":1,"sha256":"a".repeat(64),"mode":493})));
+        os["files"].as_array_mut().unwrap().sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        let os_raw = serde_json::to_vec(&os).unwrap();
+        data["osProfile"]["files"] = os["files"].clone();
+        data["osProfile"]["inventorySha256"] = json!(digest(&os_raw));
+        data["osProfile"]["helpers"] = json!(helpers);
+        for expected in [false, true] {
+            let raw = serde_json::to_vec(&data).unwrap(); let mut selected = profile(&raw);
+            selected.os = parse_os_contract(&os_raw, &digest(&os_raw)).unwrap();
+            assert_eq!(parse_manifest(&raw, &selected).is_some(), expected);
+            data["osProfile"]["helpers"].as_array_mut().unwrap().remove(0);
+        }
+    }
+    #[test]
+    fn complete_toolset_sized_json_fits_only_the_android_manifest_policy() {
+        let mut data = manifest_data();
+        let files = data["files"].as_array_mut().unwrap();
+        for n in files.len()..TOOL_FILE_COUNT {
+            files.push(json!({"path":format!("sdk/platforms/android-35/data/inert-{n:05}"),
+                "size":1,"sha256":"a".repeat(64),"mode":420}));
+        }
+        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        let mut raw = serde_json::to_vec(&data).unwrap();
+        assert!(raw.len() > 2 * 1024 * 1024 && raw.len() < MANIFEST_LIMIT);
+        assert_eq!(parse_manifest(&raw, &profile(&raw)).unwrap().data.files.len(), TOOL_FILE_COUNT);
+        assert!(strict_json(&raw).is_err());
+        raw.resize(MANIFEST_LIMIT, b' ');
+        assert!(parse_manifest(&raw, &profile(&raw)).is_some());
+        raw.push(b' ');
+        assert!(parse_manifest(&raw, &profile(&raw)).is_none());
+        let mut os = serde_json::to_vec(&os_data()).unwrap();
+        os.resize(OS_CONTRACT_LIMIT, b' ');
+        assert!(parse_os_contract(&os, &digest(&os)).is_some());
+        os.push(b' ');
+        assert!(parse_os_contract(&os, &digest(&os)).is_none());
     }
     #[test]
     fn os_alias_contract_requires_exact_retained_canonical_destinations() {

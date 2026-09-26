@@ -1432,6 +1432,18 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.admit_installed_observation(tools)?;
         self.inner.bridge.preflight.admit_installed_observation(offline)
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_android_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.android_build.installed_android_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_android(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
+        self.inner.bridge.android_build.admit_installed_observation(token)
+    }
     fn project_selection_qualified(&self) -> bool {
         if self.inner.bridge.installed_project_selection_available() { return true; }
         // Preserve SG1's existing, separately consumed development permission.

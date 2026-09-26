@@ -368,3 +368,15 @@ test('component shares native-terminal-only output with Artifacts and provides r
   assert.match(androidBuildInputHelp.what, /observe-v2/); assert.match(androidBuildOutputHelp.failure, /Complete may contain FAIL/);
   assert.match(androidBuildCancelHelp.failure, /Unknown cleanup is sticky/);
 });
+
+test('prerequisite guidance distinguishes an unqualified gate from a missing SDK and limits Tools diagnostics', () => {
+  assert.match(androidBuildHelp.what, /user-installed JDK and Android SDK/);
+  assert.match(androidBuildHelp.what, /selected protected Gradle and pinned bundletool/);
+  assert.match(androidBuildHelp.what, /installs no tools and accepts no licenses/);
+  assert.match(androidBuildHelp.where, /Environment Requirements/);
+  assert.match(androidBuildHelp.format, /only Git, Java and Javac/);
+  assert.match(androidBuildHelp.format, /do not inspect the SDK/);
+  assert.match(androidBuildHelp.format, /Gradle readiness or authorize a build/);
+  for (const state of ['Missing', 'unselected', 'unsupported', 'not inspected', 'unqualified']) assert.ok(androidBuildHelp.failure.includes(state));
+  assert.match(androidBuildHelp.failure, /closed native gate does not mean your SDK is missing/);
+});

@@ -48,7 +48,8 @@ def manifest_data():
         "bundletool": {"version": subject.BUNDLETOOL_VERSION, "sha256": subject.BUNDLETOOL_SHA256},
         "roles": dict(subject.TOOL_ROLES),
         "files": [file_data("bundletool/bundletool.jar", digest=subject.BUNDLETOOL_SHA256),
-                  file_data("gradle/bin/gradle", mode=0o755), file_data("jdk/bin/java", mode=0o755),
+                  file_data("gradle/bin/gradle", mode=0o755), file_data(subject.AAPT2_PATH, mode=0o555),
+                  file_data("jdk/bin/java", mode=0o755),
                   file_data("jdk/bin/javac", mode=0o755), file_data("sdk/licenses/inert-license-data")],
         "osProfile": {"id": "inert-os-data-only", "inventorySha256": "c" * 64,
                       "shell": subject.OS_SHELL, "executableDirectory": subject.OS_EXECUTABLE_DIRECTORY,
@@ -270,6 +271,101 @@ class ManifestDataTests(unittest.TestCase):
         with self.assertRaises(subject.AndroidToolError):
             subject._parse_manifest(b" " * (subject.MAX_MANIFEST_BYTES + 1), subject._binding(encoded()[1]))
 
+    def test_fixed_aapt2_leaf_is_required_before_any_dispatch(self):
+        for change in ("missing", "empty", "not-executable"):
+            data = manifest_data()
+            leaf = next(row for row in data["files"] if row["path"] == subject.AAPT2_PATH)
+            if change == "missing":
+                data["files"].remove(leaf)
+            else:
+                leaf["size" if change == "empty" else "mode"] = 0 if change == "empty" else 0o444
+            with self.subTest(change=change), self.assertRaises(subject.AndroidToolError):
+                profile_data(data)
+
+    def test_native_configuration_paths_are_closed_direct_families(self):
+        allowed = ("/etc/fonts/fonts.conf", "/etc/fonts/conf.avail/50-user.conf",
+                   "/usr/share/fontconfig/conf.avail/10-hinting.conf",
+                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                   "/usr/share/fonts/truetype/lato/Lato-Regular.ttf",
+                   "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                   "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                   "/var/cache/fontconfig/CACHEDIR.TAG",
+                   "/var/cache/fontconfig/" + "0a" * 16 + "-le64.cache-9",
+                   "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf")
+        denied = ("/etc/passwd", "/etc/resolv.conf.bak", "/etc/fonts/conf.avail/.conf",
+                  "/etc/fonts/conf.avail/nested/file.conf", "/etc/fonts/conf.avail/FILE.CONF",
+                  "/etc/fonts/conf.avail/../outside.conf", "/etc/fonts/conf.d/50-user.conf",
+                  "/usr/share/fontconfig/conf.avail/nested/file.conf",
+                  "/usr/share/fonts/truetype/other/Font.ttf", "/usr/share/fonts/truetype/lato/Font.TTF",
+                  "/usr/share/fonts/truetype/lato/nested/Font.ttf", "/usr/local/share/fonts/Font.ttf",
+                  "/usr/share/fonts/truetype/noto/nested/Font.ttf", "/usr/share/fonts/truetype/noto/Font.otf",
+                  "/var/cache/fontconfig/" + "0A" * 16 + "-le64.cache-9",
+                  "/var/cache/fontconfig/" + "a" * 31 + "-le64.cache-9",
+                  "/var/cache/fontconfig/" + "a" * 32 + "-le64.cache-8",
+                  "/var/cache/fontconfig/nested/" + "a" * 32 + "-le64.cache-9",
+                  "/var/cache/fontconfig/cachedir.tag", "/var/cache/other/CACHEDIR.TAG",
+                  "/usr/share/arbitrary/data")
+        for path in allowed:
+            with self.subTest(allowed=path):
+                self.assertEqual(subject._file_specs([file_data(path)], native=True)[0].path, path)
+        for path in denied:
+            with self.subTest(denied=path), self.assertRaises(subject.AndroidToolError):
+                subject._file_specs([file_data(path)], native=True)
+
+    def test_os_file_capacity_does_not_expand_helper_or_json_budgets(self):
+        data = manifest_data()
+        files = data["osProfile"]["files"]
+        files.extend(file_data(f"/usr/lib/inert-{n:03}") for n in range(256 - len(files)))
+        self.assertEqual(len(profile_data(data).native_files), 256)
+        files.append(file_data("/usr/lib/overflow"))
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)
+        data = manifest_data()
+        helpers = [f"inert-{n:03}" for n in range(126)] + ["sed", "uname", "xargs"]
+        data["osProfile"]["helpers"] = helpers
+        data["osProfile"]["files"].extend(file_data(f"/usr/bin/{name}", mode=0o755) for name in helpers[:126])
+        data["osProfile"]["files"].sort(key=lambda item: item["path"])
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)
+        helpers.pop(0)
+        self.assertEqual(len(profile_data(data).helpers), 128)
+        self.assertEqual(67 + subject.MAX_OS_HELPERS + 9 * (subject.MAX_TOOL_FILES + subject.MAX_OS_FILES), 149_955)
+        self.assertLessEqual(149_955, subject.MAX_MANIFEST_NODES)
+
+    def test_complete_toolset_sized_data_and_new_manifest_edges(self):
+        data = manifest_data()
+        data["files"].extend(file_data(f"sdk/platforms/android-35/data/inert-{n:05}")
+                             for n in range(len(data["files"]), subject.MAX_TOOL_FILES))
+        data["files"].sort(key=lambda item: item["path"])
+        raw, binding = encoded(data)
+        self.assertGreater(len(raw), 2 * 1024**2)
+        self.assertLess(len(raw), subject.MAX_MANIFEST_BYTES)
+        self.assertEqual(len(subject._parse_manifest(raw, subject._binding(binding)).files), 16_384)
+        exact = raw + b" " * (subject.MAX_MANIFEST_BYTES - len(raw))
+        self.assertEqual(len(subject._parse_manifest(exact, subject._binding(binding_data(exact))).files), 16_384)
+        with self.assertRaises(subject.AndroidToolError):
+            subject._parse_manifest(exact + b" ", subject._binding(binding_data(exact + b" ")))
+        data["files"].append(file_data(f"sdk/platforms/android-35/data/inert-{subject.MAX_TOOL_FILES:05}"))
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)  # Unique/sorted one-over: refusal is the file bound, not duplicate names.
+        # Shape DATA only. Object keys still count and only this tool parser's
+        # node ceiling changes; this is not an executable/installed inventory.
+        value = [0] * (subject.MAX_MANIFEST_NODES - 1)
+        subject._shape(value)
+        value.append(0)
+        with self.assertRaises(subject.AndroidToolError):
+            subject._shape(value)
+
+    def test_complete_entry_limit_includes_directories_and_the_manifest(self):
+        spec = lambda path: subject._FileSpec(path, 1, "a" * 64, 0o644)
+        files = [spec(f"sdk/d{n:05}/a/b/file") for n in range(subject.MAX_ENTRIES // 4 - 1)]
+        files.extend((spec("sdk/z-extra-a"), spec("sdk/z-extra-b")))
+        directories = subject._directories(tuple(files))
+        self.assertEqual(len(files) + len(directories) + 1, subject.MAX_ENTRIES)
+        files.append(spec("sdk/z-extra-c"))
+        with self.assertRaises(subject.AndroidToolError):
+            subject._directories(tuple(files))
+
     def test_malformed_json_is_fixed_refusal(self):
         for raw in (b'{"schemaVersion":1,"schemaVersion":1}', b'{"n":1.2}', b'{"n":NaN}', b'{"n":true}',
                     b'{"n":null}', b'{"n":9007199254740992}', b'{"n":"\\ud800"}', b'\xef\xbb\xbf{}', b'\xff'):
@@ -339,6 +435,17 @@ class SelectionDataTests(unittest.TestCase):
         result = subject._selection_data(data, profile_data(), root_module=True)
         self.assertEqual(dict(result)["module_gradle_properties"], b"x=y")
 
+    def test_aapt2_and_jna_project_selection_cannot_override_fixed_launches(self):
+        conflicts = ("android.aapt2FromMavenOverride", "android.aapt2Version", "android.aapt2Platform",
+                     "jna.nosys", "jna.boot.library.path", "jna.boot.library.name", "jna.tmpdir",
+                     "jna.nounpack", "jnidispatch.path")
+        for field in ("local_properties", "root_gradle_properties", "module_gradle_properties"):
+            for key in conflicts:
+                for selection in (key, key.upper(), "systemProp." + key, "SYSTEMPROP." + key.upper()):
+                    data = selection_data(); data[field] = (selection + "=conflicting").encode("ascii")
+                    with self.subTest(field=field, key=selection), self.assertRaises(subject.AndroidToolError):
+                        subject._selection_data(data, profile_data(), root_module=False)
+
     def test_once_only_selection_retains_immutable_bytes_and_cannot_retry_failure(self):
         tools, data = inert_tools(selected=False), selection_data()
         with patch.object(tools, "check") as checked:
@@ -384,10 +491,12 @@ class OwnerAndCommandDataTests(unittest.TestCase):
         poison = {name: "ambient-not-forwarded" for name in ("JAVA_OPTS", "GRADLE_OPTS", "JAVA_TOOL_OPTIONS",
                   "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH", "PYTHONPATH", "ENV", "BASH_ENV",
                   "LD_PRELOAD", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "MOBILE_RELEASE_BUILD_NUMBER")}
-        with patch.object(subject.os, "environ", poison), patch.object(tools, "check"), \
+        with patch.object(subject.os, "environ", poison), patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK):
             env = tools.command_environment(WORK, tools.release)
+            self.assertEqual(checked.call_count, 1)
             another = tools.command_environment(WORK, tools.release)
+            self.assertEqual(checked.call_count, 2)
             self.assertIsNot(env, another)
             self.assertEqual({key: value for key, value in env.items() if key.startswith("MOBILE_RELEASE_")},
                              {"MOBILE_RELEASE_VERSION_NAME": "1.2.3", "MOBILE_RELEASE_BUILD_NUMBER": "7",
@@ -396,6 +505,10 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             self.assertEqual(env["PATH"], ROOT + "/jdk/bin:/usr/bin")
             self.assertEqual(env["ANDROID_SDK_ROOT"], ROOT + "/sdk")
             self.assertEqual(shlex.split(env["JAVA_OPTS"]), list(subject._jvm_arguments(WORK)))
+            for option in ("-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                           f"-Djna.tmpdir={WORK}"):
+                self.assertIn(option, shlex.split(env["JAVA_OPTS"]))
+            self.assertNotIn("-Djna.nounpack=true", shlex.split(env["JAVA_OPTS"]))
             self.assertFalse(set(poison).difference({"JAVA_OPTS", "MOBILE_RELEASE_BUILD_NUMBER"}).intersection(env))
             self.assertFalse(set(poison.values()).intersection(env.values()))
             env["HOME"] = "changed"
@@ -407,10 +520,11 @@ class OwnerAndCommandDataTests(unittest.TestCase):
 
     def test_gradle_argv_is_fixed_shell_installed_script_and_private_jvm_data(self):
         tools = inert_tools()
-        with patch.object(tools, "check"), \
+        with patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
              patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
             argv = tools.gradle_command(tools.task, WORK)
+            checked.assert_called_once_with()
             self.assertEqual(argv[:2], (subject.OS_SHELL, ROOT + "/gradle/bin/gradle"))
             self.assertEqual(argv[-1], ":app:bundleRelease")
             for flag in ("--no-daemon", "--no-watch-fs", "--no-parallel", "--console=plain", "--stacktrace", "--max-workers=2"):
@@ -423,6 +537,7 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             self.assertEqual(shlex.split(jvm), list(subject._jvm_arguments(WORK)))
             for key, value in subject._fixed_properties(ROOT):
                 self.assertIn(f"-D{key}={value}", argv); self.assertIn(f"-P{key}={value}", argv)
+            self.assertIn(f"-Pandroid.aapt2FromMavenOverride={ROOT}/gradle/native/aapt2/aapt2", argv)
             self.assertNotIn("gradlew", argv); self.assertNotIn("/usr/bin/env", argv)
             with self.assertRaises(subject.AndroidToolError):
                 tools.gradle_command(":other:bundleRelease", WORK)
@@ -433,11 +548,12 @@ class OwnerAndCommandDataTests(unittest.TestCase):
         artifact = object.__new__(OriginalAndroidArtifact)
         artifact.files, artifact._native, artifact._reader, artifact.check = tools.files, True, None, Mock()
         tools.files.artifact = tools.files._original_artifact = tools.operation._artifact = artifact
-        with patch.object(tools, "check"), \
+        with patch.object(tools, "check") as checked, \
              patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
              patch.object(OriginalAndroidArtifact, "path", new_callable=PropertyMock, return_value=snapshot), \
              patch("mobile_release.android.run_owned") as dispatched:
             argv = tools.bundletool_command(snapshot)
+            checked.assert_called_once_with()
             self.assertEqual(argv[0], ROOT + "/jdk/bin/java")
             self.assertEqual(argv[1:1 + len(subject._jvm_arguments(WORK, bundletool=True))],
                              subject._jvm_arguments(WORK, bundletool=True))
@@ -470,6 +586,60 @@ class OwnerAndCommandDataTests(unittest.TestCase):
 
 
 class OriginalLifetimeDataTests(unittest.TestCase):
+    def test_fourteen_metadata_rounds_fit_the_finite_checkpoint_budget(self):
+        # Actual accounting methods, but EVERY native boundary is doubled.
+        # No original descriptor, directory, file or process is acquired.
+        for directory, expected in ((False, 110), (True, 112)):
+            tools, slot = inert_tools(), Slot("counter-data", [])
+            slot.open = Mock(return_value=17)
+            tools._directories[ROOT] = 11
+            mode = (stat.S_IFDIR | 0o755) if directory else (stat.S_IFREG | 0o644)
+            data = observed(mode=mode)
+            with self.subTest(directory=directory), patch.object(subject, "_FD", return_value=slot), \
+                 patch.object(subject.os, "fstat", return_value=data), patch.object(subject.os, "stat", return_value=data), \
+                 patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")), \
+                 patch.object(subject.os, "lseek", return_value=0), patch.object(subject.os, "read", return_value=b"x" * 7):
+                record = tools._open_record(11, "inert", directory=directory)
+                if not directory:
+                    tools._read(record, 7)
+                for _ in range(14):
+                    tools._check_record(record)
+            self.assertEqual(tools.operation.counters["tool-checkpoints"], expected)  # 109+k or112.
+            tools.operation.counters["tool-checkpoints"] = subject.MAX_CHECKPOINTS - 1
+            tools._point()
+            with self.assertRaises(subject.AndroidToolError):
+                tools._point()
+            self.assertEqual(tools.operation.counters["tool-checkpoints"], subject.MAX_CHECKPOINTS)
+            tools._cleanup_mode = True
+            tools._point()
+            tools.operation.cleanup_checkpoint.assert_called_once_with()
+            self.assertEqual(tools.operation.counters["tool-checkpoints"], subject.MAX_CHECKPOINTS)
+        bound = (112 * subject.MAX_DESCRIPTORS + 5 * subject.MAX_ENTRIES
+                 + (subject.MAX_TOTAL_BYTES + subject.MAX_MANIFEST_BYTES) // subject.READ_CHUNK
+                 + subject.MAX_TOOL_FILES + subject.MAX_OS_FILES + 1024)
+        self.assertEqual(bound, 3_867_968)
+        self.assertEqual(subject.MAX_CHECKPOINTS - bound, 132_032)
+        # Bind the acquisition contribution to the ACTUAL success-path body.
+        # Ancestry/open/read/enumeration are inert doubles, not native custody.
+        tools = inert_tools()
+        raw, _ = encoded()
+        tools._directories[ROOT] = 17
+        ancestry = types.SimpleNamespace(slots=[Slot("inert-root", [])], fd=17,
+            bindings=[(11, "inert-data")], acquire=Mock())
+
+        def opened(_parent, _name, *, directory, stable_contents=True, spec=None):
+            return types.SimpleNamespace(slot=Slot("inert-record", []), spec=spec,
+                                         identity=(1, 50, 0o100644, 0, 0, 1, len(raw), 0, 0))
+
+        with patch.object(tools, "_platform"), patch.object(subject, "_Ancestry", return_value=ancestry), \
+                patch.object(tools, "_protected", return_value=tools.binding.identity), \
+                patch.object(tools, "_open_record", side_effect=opened), \
+                patch.object(tools, "_read", side_effect=lambda record, _size, **_: (
+                    record.spec.sha256 if record.spec else tools.binding.sha256, raw)), \
+                patch.object(tools, "_inventory_names"), patch.object(tools, "check") as checked:
+            tools.acquire()
+            checked.assert_called_once_with()
+
     def test_fixed_acl_and_capability_observations_require_explicit_absence(self):
         tools = inert_tools()
         with patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")) as attrs:
@@ -507,6 +677,20 @@ class OriginalLifetimeDataTests(unittest.TestCase):
             scan.assert_called_once_with(11)
             self.assertEqual(entries.closes, 1)
             self.assertEqual(tools.iterators[0].close_state, "CLOSED")
+            if names == ("java", "javac"):
+                self.assertEqual(tools.operation.counters["tool-directory-advances"], 3)
+                self.assertEqual(tools.operation.counters["tool-checkpoints"], 7)  # 2 entries*2 +3 per iterator.
+        tools, entries = inert_tools(), Entries(("java", "javac"))
+        tools._directories[ROOT] = 11
+        tools.operation.counters["tool-directory-advances"] = subject.MAX_DIRECTORY_ADVANCES - 3
+        with patch.object(subject.os, "scandir", return_value=entries):
+            tools._inventory_names(ROOT, {"java", "javac"})
+        self.assertEqual(tools.operation.counters["tool-directory-advances"], 2 * subject.MAX_ENTRIES)
+        self.assertEqual(entries.closes, 1)  # Final StopIteration consumed the inclusive last advance.
+        empty = Entries(())
+        with patch.object(subject.os, "scandir", return_value=empty), self.assertRaises(subject.AndroidToolError):
+            tools._inventory_names(ROOT, set())
+        self.assertEqual(empty.closes, 1)
         tools = inert_tools()
         tools._directories[ROOT] = 11
         tools.slots = [Slot("DATA-only", [])] * subject.MAX_DESCRIPTORS

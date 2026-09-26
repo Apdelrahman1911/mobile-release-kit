@@ -478,11 +478,11 @@ export class AndroidBuildController {
 
 export const androidBuildHelp: HelpContent = {
   label: 'Build saved Android app and inspect AAB', requiredness: 'optional', requiredWhen: 'Use only for an explicitly reviewed local Android build; it is separate from candidate evidence and Store release.',
-  what: 'Runs the saved application module/variant with the separately qualified native toolchain, then captures and inspects the one required post-run AAB.',
+  what: 'Uses a compatible user-installed JDK and Android SDK with the selected protected Gradle and pinned bundletool to build the saved app and inspect its required post-run AAB. It installs no tools and accepts no licenses.',
   why: 'Observe a known task outcome and bounded local AAB findings without mistaking completion for freshness, signing or release readiness.',
-  where: 'Save android.enabled, android.applicationId, explicit android.module and optional android.variant in release/mobile-release.json. Fix app or Gradle code in Android Studio or the project editor.',
-  format: 'Review a current saved configuration snapshot and its complete saved-version observation. The supported native profile is separately qualified Linux GNU x86_64; diagnostics or hashes alone do not qualify execution.',
-  failure: 'Known nonzero exit means command failure, not a hidden compiler diagnosis. Inspect private Build Output in your editor. Missing/ambiguous/unsafe/changing AABs refuse inspection; wait for original cleanup before a newly consented run.',
+  where: 'Save android.enabled, android.applicationId, explicit android.module and optional android.variant in release/mobile-release.json. Use Environment Requirements for setup guidance; fix app or Gradle code in Android Studio or your editor.',
+  format: 'The initial Linux GNU x86_64 profile still requires separate native qualification. Tools diagnostics observe only Git, Java and Javac: they do not inspect the SDK, establish Gradle readiness or authorize a build.',
+  failure: 'Missing, unselected, unsupported, not inspected and unqualified are different states. A closed native gate does not mean your SDK is missing. Known nonzero exit is command failure; check private Build Output and wait for original cleanup before new consent.',
 };
 export const androidBuildInputHelp: HelpContent = {
   label: 'Saved Android build inputs', requiredness: 'required', requiredWhen: 'Before each new build review, and after any save, refresh, version read or selection change.',

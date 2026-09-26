@@ -328,8 +328,8 @@ export const androidBuildAvailabilityText: Record<AndroidBuildAvailability, stri
   'cleanup-unknown': 'Original cleanup is unconfirmed. Keep the original owner; conflicting work and normal exit remain blocked.',
   'document-lost': 'The original native document is no longer available. A replacement view cannot adopt or reset its owner.',
   'unsupported-platform': 'This Android build action is unsupported on this host profile. There is no fallback runner.',
-  'runtime-unqualified': 'Android builds are disabled for this runtime and native document. Passive capability success does not qualify execution.',
-  'toolchain-unqualified': 'The separately qualified Android toolchain and original custody are unavailable. This action installs no tools and accepts no licenses.',
+  'runtime-unqualified': 'Android builds are disabled by the native qualification gate; this does not mean your JDK or SDK is missing. Passive capability success does not qualify execution.',
+  'toolchain-unqualified': 'The required protected toolchain is not selected, not inspected or not yet qualified; this is not a missing-SDK diagnosis. This action installs no tools and accepts no licenses.',
 };
 const savedConfigGuidance = 'Correct the saved configuration and refresh its saved input comparison after original cleanup settles; unsaved drafts are not used.';
 const savedVersionGuidance = 'Correct the version file selected by the saved configuration, then refresh both saved comparisons after original cleanup settles.';

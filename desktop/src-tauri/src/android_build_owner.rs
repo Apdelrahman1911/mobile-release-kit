@@ -18,6 +18,16 @@ impl AndroidBuildOwner {
     pub(crate) fn new(runtime: RuntimeConfig, toolchain: Option<crate::android_toolchain::AndroidToolchainProfile>) -> Self {
         Self { saved: SavedCommandOwner::android_build(runtime, toolchain) }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_android_identity(&self) -> std::sync::Weak<()> { self.saved.installed_android_identity() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+        self.saved.admit_installed_android_observation(token)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::AndroidSnapshot> {
+        self.saved.installed_android_snapshot()
+    }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

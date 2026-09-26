@@ -24,6 +24,28 @@ running the CLI or parsing console output.
   alone does not qualify it. The first profile targets Linux GNU x86_64; macOS
   and Windows require their own implementation and native verification.
 
+## Local prerequisites and availability
+
+Provide a compatible, user-installed **JDK and Android SDK**. Execution uses one
+selected, protected Gradle distribution and the pinned bundletool, not whichever
+wrapper, Java installation or cache happens to be found. The selected tools,
+their dependencies and required native helpers must be admitted into the exact
+protected profile. This action does **not** install/update an SDK or JDK,
+download tools, accept licenses, or repair a partial installation.
+
+Use **Environment Requirements** for setup guidance. **Tools** diagnostics only
+observe Git, Java and Javac; they do not inspect the Android SDK, prove Gradle or
+plugin/dependency readiness, or grant build authority. Keep these distinctions:
+
+- **Missing:** a required item was not found in an admitted lookup.
+- **Unselected:** an installation may exist but is not the selected profile.
+- **Unsupported:** the host or installation shape is outside the implemented profile.
+- **Not inspected:** there is no observation of that prerequisite.
+- **Unqualified:** the runtime/toolchain/native gate is closed, even if tools exist.
+
+A disabled action or closed qualification gate is **not evidence of a missing
+SDK**. Installing another SDK cannot itself qualify this action.
+
 ## Review before starting
 
 Building runs the project's Gradle scripts and plugins. Use only a project you
@@ -71,3 +93,49 @@ navigating elsewhere. Its result also appears in Artifacts without being promote
 to authenticated candidate evidence. A lost acknowledgement never automatically
 repeats Start; unknown cleanup remains blocking. These controls and contextual
 help do not replace actual runtime/toolchain and native platform qualification.
+
+## Installed-native engineering candidate (source only)
+
+The candidate appends four fixed GUI cases to the existing twenty:
+a real Java-only AAB build and inspection, a deliberate Gradle failure, cancellation
+after an observed active Gradle task, and consent-bound saved-version drift.
+They use the existing installed shell, core engine and original Android owner;
+they are not Tools/Offline tokens or a second build launcher.
+
+The fixture selects a **file-only** protected Maven repository at
+`gradle/repository`, including the authenticated AGP plugin marker and complete
+transitive dependencies. Those files/directories count in the existing manifest,
+custody and caps. Gradle offline mode is set before plugin resolution.
+This fixture policy is not network isolation: `PrivateNetwork=no` is unchanged,
+and trusted project code still has ordinary same-user effects.
+
+JDK17 / Gradle8.14.5 / AGP8.9.2 / android-35 / build-tools35.0.0 /
+bundletool1.18.3 is the **selected material tuple**, not a natively qualified
+combination or a complete authenticated OS closure. Concrete reviewed material
+selectors are absent (`SHELL_ANDROID_MATERIALS=None`); the compiled OS contract is
+also absent. Missing bindings refuse before fixture creation or compilation.
+There is no download, ambient-cache fallback, installer or guessed hash.
+
+The source-only root publication branch now accepts bounded references to the
+strict manifest, exact OS contract and complete source rows. It checks fresh
+root-owned tool copies, exact membership/bytes/modes/links/attributes, publishes
+the manifest last, and rechecks the same protected profile after its consumers
+settle. Partial failures retain accounting and never authorize app launch or
+cleanup of unrelated files. Its publication DATA is still absent; these source
+contracts and mocked failure tests are not an installed or native success.
+
+The saved-version refusal expects **zero Gradle/bundletool attempts**, not zero
+core children or zero custody. It changes the consent-bound version bytes, not a
+harmless wrapper comment, and does not claim native wrapper/property-policy
+coverage. Generated AAB/cache/compiler-output bodies are not scanned or exported
+by the fixture inventories; only25 original source controls and fixed generated
+root metadata are accounted for after original Exit.
+
+These four cases have not been executed or accepted as native evidence in this
+source stage. They do not discharge W3000 expiry, private-JVM/property policy,
+no-auto-install, or every native-helper obligation. Original consent300s,
+W3000/H3010, `min(H,F+10)`, the shell45s/outer60s limits, aggregate caps and
+original StopPost finality remain unchanged. Ordinary Android qualification flags
+stay false. Normal activation and a no-grant normal-app smoke check require their
+own later review and evidence; a local result is never freshness, signing,
+release readiness or Store authority.

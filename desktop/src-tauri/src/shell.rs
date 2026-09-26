@@ -226,14 +226,22 @@ async fn prepare_android_build(webview: Webview, request: tauri::ipc::Request<'_
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
     let value = android_build_request_body(request.body())?;
-    state.document.prepare_android_build(crate::android_build_protocol::prepare(&value)?)
+    let args = crate::android_build_protocol::prepare(&value)?;
+    installed_command_request!(state, AndroidPrepare, &value);
+    let result = state.document.prepare_android_build(args);
+    installed_command_result!(state, AndroidPrepare, &result);
+    result
 }
 #[tauri::command]
 async fn start_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
     let value = android_build_request_body(request.body())?;
-    state.document.start_android_build(crate::android_build_protocol::start(&value)?)
+    let args = crate::android_build_protocol::start(&value)?;
+    installed_command_request!(state, AndroidStart, &value);
+    let result = state.document.start_android_build(args);
+    installed_command_result!(state, AndroidStart, &result);
+    result
 }
 #[tauri::command]
 async fn android_build_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
@@ -248,7 +256,11 @@ async fn cancel_android_build(webview: Webview, request: tauri::ipc::Request<'_>
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
     let value = android_build_request_body(request.body())?;
-    state.document.cancel_android_build(crate::android_build_protocol::cancel(&value)?)
+    let args = crate::android_build_protocol::cancel(&value)?;
+    installed_command_request!(state, AndroidCancel, &value);
+    let result = state.document.cancel_android_build(args);
+    installed_command_result!(state, AndroidCancel, &result);
+    result
 }
 #[tauri::command]
 async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
