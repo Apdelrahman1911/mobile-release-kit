@@ -9,6 +9,7 @@ run here. A missing reviewed host policy refuses before acquisition or creation.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager, ExitStack
 import gzip
 import hashlib
 import importlib.util
@@ -50,6 +51,11 @@ PROVIDER_CLASSIFICATION = "android-fixed-loader-structure-v1"
 _PROVIDER_ELF_DATA = None
 _PROVIDER_LOADER_DATA = None
 FONT_CLASSIFICATION = "same-vm-font-consumer-correspondence-v1"
+STOCK_CLASSIFICATION = "stock-ca-consumer-correspondence-v1"
+STOCK_POLICY_SHA256 = "633273a983d53a4a493b96d949f35f2a82bcd9752f0239bb7e8f62e8d4c70f5c"
+STOCK_PEM = "/etc/ssl/certs/ca-certificates.crt"
+STOCK_JKS = "/etc/ssl/certs/java/cacerts"
+STOCK_CUSTOM = "/usr/local/share/ca-certificates"
 FONT_DIRECTORIES = ("/usr/local/share/fonts", "/usr/share/fonts", "/usr/share/fonts/truetype",
                     "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/lato",
                     "/usr/share/fonts/truetype/liberation", "/usr/share/fonts/truetype/noto")
@@ -204,7 +210,15 @@ def _protected_binding(binding, expected_path):
     return {"path": str(path), "size": expected["size"], "sha256": expected["sha256"], "mode": stat.S_IMODE(item.st_mode)}
 
 
-def _protected_namespace(binding, expected_path, *, children=None):
+def _empty_directory(path, deadline):
+    """Observe at most one entry; never collect or export an unexpected name."""
+    _point(deadline)
+    with os.scandir(path) as entries:
+        D.need(next(entries, None) is None, "Android expected-empty input contains an entry")
+    _point(deadline)
+
+
+def _protected_namespace(binding, expected_path, *, children=None, deadline=None):
     """Recheck the ordinary shell directory/absence companion, not a new census."""
     fields = {"path", "selectedPath", "links", "ancestry"}
     _keys(binding, fields | ({"directory"} if children is not None else {"absent", "absentAt"}),
@@ -231,8 +245,12 @@ def _protected_namespace(binding, expected_path, *, children=None):
     D.need(binding["directory"] == original and original[3:] == [0, 0] and not original[2] & 0o7022
            and Path(expected_path).resolve(strict=True) == path and not os.listxattr(path, follow_symlinks=False),
            "Android protected host directory changed")
-    D.need(sorted(entry.name for entry in path.iterdir()) == children and _directory_identity(path) == original,
-           "Android fixed directory original/membership changed")
+    if children:
+        D.need(sorted(entry.name for entry in path.iterdir()) == children,
+               "Android fixed directory membership changed")
+    else:
+        _empty_directory(path, deadline)
+    D.need(_directory_identity(path) == original, "Android fixed directory original changed")
     _protected_ancestry(binding)
 
 
@@ -280,11 +298,154 @@ def android_host_inputs(native, bindings, *, bind_path, deadline):
             _point(deadline)
             selected[name] = bind_path(Path(name), **options)
             _protected_namespace(selected[name], name,
-                                 children=inputs["directories"][name] if key == "androidDirectories" else None)
+                                 children=inputs["directories"][name] if key == "androidDirectories" else None,
+                                 deadline=deadline)
         host["bindings"][key] = selected
     _provider_host_inputs(policy(), host, bind_path, deadline)
     _point(deadline)
     return host
+
+
+@contextmanager
+def _stock_original_bytes(path, original, limit, deadline, recheck):
+    """One original read/close interval; the caller supplies a fixed role check.
+
+    No process, alternate reader, inherited handle, or successor owner exists.
+    A failed body keeps its primary exception; a failed close is never retried.
+    """
+    _point(deadline)
+    recheck()
+    stream, before = D._open(path, limit)
+    primary = None
+    try:
+        D.need(_identity(before) == original == _identity(os.fstat(stream.fileno())),
+               "Android stock input changed before original read")
+        raw = bytearray()
+        while True:
+            _point(deadline)
+            block = stream.read(min(CHUNK, limit + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+            D.need(len(raw) <= limit, "Android stock original read bound")
+        D.need(len(raw) == original[6] and _identity(os.fstat(stream.fileno())) == original,
+               "Android stock original extent/identity changed during read")
+        recheck()
+        yield bytes(raw)
+        _point(deadline)
+        D.need(_identity(os.fstat(stream.fileno())) == original,
+               "Android stock original changed during consumer")
+        recheck()
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            stream.close()
+        except BaseException:
+            if primary is None:
+                raise
+            primary.add_note("Android stock original close also failed; no retry or successor.")
+    _point(deadline)
+    recheck()  # Successful original close and final named check precede return.
+
+
+@contextmanager
+def _stock_host_original(binding, selected, limit, deadline):
+    _point(deadline)
+    D.need(type(binding.get("size")) is int and 0 < binding["size"] <= limit,
+           "Android stock input extent differs")
+    row = _protected_binding(binding, selected)
+    path = Path(row["path"])
+    original = _identity(path.lstat())
+    def recheck():
+        _point(deadline)
+        _protected_ancestry(binding)
+        item = path.lstat()
+        D.need(_identity(item) == original and list(D.state(item)) == binding["identity"]
+               and item.st_uid == item.st_gid == 0 and item.st_nlink == 1
+               and stat.S_ISREG(item.st_mode) and not item.st_mode & 0o7022
+               and not os.listxattr(path, follow_symlinks=False)
+               and Path(selected).resolve(strict=True) == path,
+               "Android stock original name/owner/alias changed")
+        _protected_ancestry(binding)
+    with _stock_original_bytes(path, original, limit, deadline, recheck) as raw:
+        D.need(len(raw) == row["size"] and _sha(raw) == row["sha256"],
+               "Android stock parser bytes differ from the bound original")
+        yield raw, {"binding": deepcopy(binding), "file": row, "identity": original}
+
+
+@contextmanager
+def _stock_private_original(path, owner, limit, deadline, *, mode=0o400, expected=None):
+    _point(deadline)
+    original = _private(path, owner, mode=mode)
+    parent = _private(path.parent, owner, directory=True, mode=0o700)[:5]
+    def recheck():
+        _point(deadline)
+        D.need(_private(path, owner, mode=mode) == original
+               and _private(path.parent, owner, directory=True, mode=0o700)[:5] == parent,
+               "Android stock private original/parent changed")
+    with _stock_original_bytes(path, original, limit, deadline, recheck) as raw:
+        pin = {"path": path.name, "size": len(raw), "sha256": _sha(raw), "identity": original}
+        D.need(expected is None or D.same(pin, expected), "Android stock retained original differs")
+        yield raw, pin
+
+
+def _stock_policy():
+    spec = importlib.util.spec_from_file_location("_android_stock_trust", Path(__file__).with_name("stock_trust_correspondence.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    D.need(module.POLICY_SHA256 == STOCK_POLICY_SHA256, "Android stock policy selector differs")
+    return module.Policy(D.read(Path(__file__).with_name("ubuntu_stock_ca_policy.json"), 64 << 10))
+
+
+def _stock_custom(host, deadline):
+    binding = host["bindings"]["androidDirectories"][STOCK_CUSTOM]
+    _protected_namespace(binding, STOCK_CUSTOM, children=[], deadline=deadline)
+    original = _identity(Path(binding["path"]).lstat())
+    _empty_directory(Path(binding["path"]), deadline)
+    D.need(_identity(Path(binding["path"]).lstat()) == original, "Android custom CA directory changed")
+    return {"binding": deepcopy(binding), "identity": original, "status": "empty",
+            "customBodiesRead": False, "customNamesExported": False}
+
+
+def _stock_trust_state(value, host, deadline):
+    rule = value["hostPolicy"]["generated"]["javaTrustStore"]
+    D.need(rule == {"path": STOCK_JKS, "classification": STOCK_CLASSIFICATION,
+        "policySha256": STOCK_POLICY_SHA256, "pemPath": STOCK_PEM, "customCaDirectory": STOCK_CUSTOM},
+        "Android stock consumer source rule differs")
+    inputs = _input_rules(value)
+    D.need({STOCK_PEM, STOCK_JKS} <= set(inputs["files"])
+           and inputs["directories"].get(STOCK_CUSTOM) == [], "Android stock input roster is incomplete")
+    policy = _stock_policy()
+    proof = {"classification": STOCK_CLASSIFICATION, "policySha256": STOCK_POLICY_SHA256,
+             "producerExecutionProven": False, "customCa": _stock_custom(host, deadline)}
+    for kind, name, limit in (("pem", STOCK_PEM, 4 << 20), ("jks", STOCK_JKS, 1 << 20)):
+        with _stock_host_original(host["bindings"]["files"][name], name, limit, deadline) as (raw, original):
+            summary = getattr(policy, kind)(raw, lambda: _point(deadline))
+        proof[kind] = {**original, "correspondence": summary}
+    D.need(_stock_custom(host, deadline) == proof["customCa"], "Android stock custom input changed")
+    _point(deadline)
+    return proof
+
+
+def _stock_jks_bytes(host, stock, deadline):
+    """Return only bytes parsed from the bound original, after positive close."""
+    with _stock_host_original(host["bindings"]["files"][STOCK_JKS], STOCK_JKS, 1 << 20, deadline) as (raw, original):
+        summary = _stock_policy().jks(raw, lambda: _point(deadline))
+        D.need(D.same({**original, "correspondence": summary}, stock["jks"]),
+               "Android staged JKS differs from its checked original")
+    return raw
+
+
+def _stock_staged_jks(root, owner, row, identity, jks, deadline):
+    """Compare the retained private staging original, not a publication copy."""
+    # _member_output and _tree keep every non-executable private leaf0400;
+    # row["mode"] describes only its later public manifest projection.
+    with _stock_private_original(root / "tools" / GENERATED[0], owner, 1 << 20, deadline, mode=0o400,
+        expected={"path": "cacerts", "size": row["size"], "sha256": row["sha256"],
+                  "identity": identity}) as (staged, _):
+        D.need(staged == jks, "Android staged JKS bytes differ from the checked original")
 
 
 def _host_state(value, host, deadline):
@@ -306,8 +467,7 @@ def _host_state(value, host, deadline):
            "Android target portable supplier provenance differs")
     provider_state = _provider_state(value, host, deadline)
     bindings, files, used = host["bindings"]["files"], [], set()
-    preparation_paths = {"/usr/bin/curl", "/usr/bin/bash", "/usr/bin/dpkg-deb", "/usr/bin/python3.12", "/usr/bin/fc-cat", "/usr/bin/fc-list",
-                         "/etc/ssl/certs/ca-certificates.crt"}
+    preparation_paths = {"/usr/bin/curl", "/usr/bin/bash", "/usr/bin/dpkg-deb", "/usr/bin/python3.12", "/usr/bin/fc-cat", "/usr/bin/fc-list"}
     D.need(type(rules["preparationFiles"]) is list and len(rules["preparationFiles"]) == len(preparation_paths)
            and {r["path"] for r in rules["preparationFiles"]} == preparation_paths,
            "Android fixed preparation tools/TLS source roster differs")
@@ -364,8 +524,11 @@ def _host_state(value, host, deadline):
                and os.readlink(p) == alias["target"] and p.resolve(strict=True) == _absolute(alias["canonical"]),
                "Android fixed OS alias differs")
     _keys(rules["generated"], {"javaTrustStore", "sdkLicense"}, "Android generated origins differ")
-    generated = {}
+    stock = _stock_trust_state(value, host, deadline)
+    generated = {"javaTrustStore": stock["jks"]["file"]}
     for role, rule in rules["generated"].items():
+        if role == "javaTrustStore":
+            continue  # Exact consumer contents, never an updater execution claim.
         _keys(rule, {"path", "producerSha256", "inputsSha256", "binding"}, "Android generated producer policy differs")
         D.need(rule["path"] in bindings and type(rule["binding"]) is dict,
                "Android fixed generated input is absent")
@@ -377,13 +540,9 @@ def _host_state(value, host, deadline):
                and proof["policy"] == rule["binding"] and proof["newConsent"] is False,
                "Android generated input producer/origin differs")
         generated[role] = _protected_binding(bindings[rule["path"]], rule["path"])
-        if role == "javaTrustStore":
-            D.need(rule["path"] == "/etc/ssl/certs/java/cacerts" and proof["customCaInputs"] == [],
-                   "Android Java trust store has unreviewed custom CA inputs")
-        else:
-            D.need(rule["path"] == "/usr/local/lib/android/sdk/licenses/android-sdk-license"
-                   and proof["preExistingHostedImageReceipt"] is True,
-                   "Android SDK receipt is not the fixed existing hosted-image input")
+        D.need(rule["path"] == "/usr/local/lib/android/sdk/licenses/android-sdk-license"
+               and proof["preExistingHostedImageReceipt"] is True,
+               "Android SDK receipt is not the fixed existing hosted-image input")
     return {"schemaVersion": 1, "id": rules["id"], "closure": "python-jdk-sdk-gradle-shell-loader-v1",
             "files": files, "aliases": aliases}, generated
 
@@ -503,7 +662,7 @@ def _provider_state(value, host, deadline):
            and all("/etc/ld.so.conf.d/" + leaf in inputs["files"] for leaf in inputs["directories"]["/etc/ld.so.conf.d"]),
            "Android original loader configuration roster is incomplete")
     configuration = host["bindings"]["androidDirectories"]["/etc/ld.so.conf.d"]
-    _protected_namespace(configuration, "/etc/ld.so.conf.d", children=inputs["directories"]["/etc/ld.so.conf.d"])
+    _protected_namespace(configuration, "/etc/ld.so.conf.d", children=inputs["directories"]["/etc/ld.so.conf.d"], deadline=deadline)
     bindings["/etc/ld.so.conf.d"] = configuration
     for name in ["/etc/ld.so.cache", *[name for name in inputs["files"] if name.startswith("/etc/ld.so.conf")]]:
         _point(deadline)
@@ -1017,7 +1176,7 @@ def _font_state(value, host, deadline):
            "Android original host directory/absence roster differs")
     for name, children in inputs["directories"].items():
         _point(deadline)
-        _protected_namespace(directories[name], name, children=children)
+        _protected_namespace(directories[name], name, children=children, deadline=deadline)
     for name, binding in absences.items():
         _point(deadline)
         _protected_namespace(binding, name)
@@ -1098,7 +1257,7 @@ def _font_private_empty(root, owner, directories):
 
 def _font_output(root, name, raw, owner, directories, deadline):
     """Fresh private copy bound to its original writer, including close errors."""
-    outputs = {**FONT_OUTPUTS, **PROVIDER_OUTPUTS}
+    outputs = {**FONT_OUTPUTS, **PROVIDER_OUTPUTS, "replay.curl": AUXILIARY["replay.curl"]}
     D.need(name in outputs and type(raw) is bytes and 0 < len(raw) <= outputs[name],
            "Android private consumer output bound/name differs")
     parent = _staging_parent(root, "private/" + name, directories, owner)
@@ -1304,20 +1463,39 @@ def _curl(root, url, size):
             "--write-out", HTTP_SUFFIX, "--url", url]
 
 
-def _download(check, root, suppliers, owner):
-    environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
-                   "HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
-    capath = _private(root / "empty-capath", owner, directory=True, mode=0o700)
-    D.need(not list((root / "empty-capath").iterdir()), "Android TLS fallback directory is not empty")
-    direct, assets, initial = [], [], {}
+def _stock_environment(root):
+    # The exact object is forwarded by Check to its existing owner. These are
+    # caller fields, not an invented independent kernel environment observation.
+    return {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+            "HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
+
+
+def _stock_capath(root, owner, directories, deadline):
+    D.need(_private(root, owner, directory=True, mode=0o700)[:5] == directories["."],
+           "Android stock private root changed")
+    path = root / "empty-capath"
+    original = _private(path, owner, directory=True, mode=0o700)
+    D.need(original[:5] == directories["empty-capath"], "Android original empty capath changed")
+    _empty_directory(path, deadline)
+    D.need(_private(path, owner, directory=True, mode=0o700) == original,
+           "Android empty capath changed during observation")
+    return original
+
+
+def _stock_partition(suppliers):
+    direct, assets = [], []
     for row in suppliers:
         parsed = urlsplit(row["url"])
         D.need(parsed.scheme == "https" and not parsed.username and not parsed.password and not parsed.fragment
                and not parsed.query and parsed.port is None and "\\" not in row["url"], "Android fixed source URL differs")
-        path = root / "bodies" / row["id"]
-        D.write(path, b"", 0o600)
-        initial[row["id"]] = _private(path, owner, mode=0o600)[:6]
         (assets if row["githubAsset"] else direct).append(row)
+    D.need(direct and [row["id"] for row in assets] == ["body-142", "body-143"]
+           and all(urlsplit(row["url"]).netloc == "github.com" for row in assets),
+           "Android fixed five-consumer supplier roles differ")
+    return direct, assets
+
+
+def _stock_replay_config(root, direct):
     # Every transfer keeps its own explicit bounds. One original curl owns the
     # bounded four-way batch; no Python thread pool or background workers.
     common = ["fail", "silent", "no-show-error", "globoff", "disallow-username-in-url", 'proto = "=https"',
@@ -1332,13 +1510,18 @@ def _download(check, root, suppliers, owner):
             + '"\noutput = "' + str(root / "bodies" / row["id"]) + '"\nwrite-out = "' + HTTP_RECEIPT + '"\n')
     config = "\n".join(blocks).encode("ascii")
     D.need(len(config) <= 512 << 10, "Android exact replay configuration bound")
-    D.write(root / "private/replay.curl", config, 0o400)
-    result = check.private_command("android-fixed-material-replay", ["/usr/bin/curl", "-q", "--parallel",
-        "--parallel-immediate", "--parallel-max", "4", "--config", str(root / "private/replay.curl")],
-        environment, root, timeout=600, limit=128 << 10)
-    D.need(result.stderr == b"" and result.stdout.endswith(b"\n"), "Android fixed replay receipt missing")
+    return config
+
+
+def _stock_replay_argv(root):
+    return ["/usr/bin/curl", "-q", "--parallel", "--parallel-immediate", "--parallel-max", "4",
+            "--config", str(root / "private/replay.curl")]
+
+
+def _stock_replay_receipt(stdout, stderr, direct):
+    D.need(stderr == b"" and stdout.endswith(b"\n"), "Android fixed replay receipt missing")
     seen = set()
-    for line in result.stdout.decode("ascii").splitlines():
+    for line in stdout.decode("ascii").splitlines():
         parts = line.split("\t")
         D.need(len(parts) == 6 and parts[0].isdigit(), "Android replay receipt shape differs")
         index = int(parts[0])
@@ -1347,54 +1530,154 @@ def _download(check, root, suppliers, owner):
                "Android replay HTTP/TLS/original result differs")
         seen.add(index)
     D.need(len(seen) == len(direct), "Android replay receipt inventory incomplete")
+
+
+def _stock_redirect_receipt(stdout, stderr):
+    header, separator, status = stdout.rpartition(b"\nMRK_HTTP=")
+    D.need(stderr == b"" and separator and re.fullmatch(rb"302\t0\t[0-9]{1,4}\t0\t0\n", status)
+           and header.endswith(b"\r\n\r\n") and header.count(b"\r\n\r\n") == 1,
+           "Android fixed asset initial HTTP/TLS response differs")
+    size = int(status.split(b"\t")[2])
+    lines = header[:-4].split(b"\r\n")
+    D.need(len(lines) <= 128 and re.fullmatch(rb"HTTP/(?:1\.[01]|2|3) 302(?: [\x20-\x7e]*)?", lines[0]),
+           "Android fixed asset header status differs")
+    headers = {}
+    for line in lines[1:]:
+        D.need(len(line) <= 8192 and b":" in line, "Android fixed asset header bound")
+        key, val = line.split(b":", 1)
+        D.need(re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key), "Android fixed asset header name differs")
+        key = key.lower()
+        if key in (b"location", b"content-length", b"content-encoding"):
+            D.need(key not in headers, "Android fixed asset header collision")
+            headers[key] = val.strip(b" \t")
+    D.need(headers.get(b"content-encoding", b"identity").lower() == b"identity", "Android fixed asset encoding differs")
+    if b"content-length" in headers:
+        D.need(re.fullmatch(rb"[0-9]{1,4}", headers[b"content-length"])
+               and int(headers[b"content-length"]) == size, "Android fixed asset header extent differs")
+    location = headers.get(b"location", b"").decode("ascii")
+    D.need(0 < len(location) <= 8192 and "\\" not in location and all(33 <= ord(c) <= 126 for c in location),
+           "Android fixed asset location differs")
+    parsed = urlsplit(location)
+    D.need(parsed.scheme == "https" and parsed.netloc == "release-assets.githubusercontent.com"
+           and re.fullmatch(r"/github-production-release-asset/[0-9]{1,20}/[0-9a-fA-F-]{36}", parsed.path)
+           and parsed.query and not parsed.fragment, "Android fixed asset redirected outside its one supplier")
+    return location, size
+
+
+def _stock_body_receipt(stdout, stderr, size):
+    D.need(stderr == b"" and stdout == ("\nMRK_HTTP=200\t0\t" + str(size) + "\t0\t0\n").encode(),
+           "Android fixed asset body response differs")
+
+
+def _stock_owner_records(compiler_root, label, owner, argv, timeout, limit, deadline, *, expected=None):
+    """Read the existing owner's actual private records, not a replacement owner."""
+    capture = compiler_root / "private-material"
+    identity = _private(capture, owner, directory=True, mode=0o700)[:5]
+    bodies, files = {}, []
+    for suffix, bound in (("request.json", 64 << 10), ("result.json", 128 << 10), ("stdout", limit), ("stderr", limit)):
+        with _stock_private_original(capture / (label + "." + suffix), owner, bound, deadline, mode=0o600) as (raw, pin):
+            bodies[suffix] = raw
+            files.append(pin)
+    request = _keys(D.decode(bodies["request.json"], 64 << 10), {"phase", "argv", "timeoutSeconds"},
+                    "Android stock original request differs")
+    record = {"directory": identity, "files": files, "request": request}
+    D.need(_private(capture, owner, directory=True, mode=0o700)[:5] == identity
+           and (expected is None or D.same(record, expected)), "Android stock original owner records changed")
+    D.need(request["phase"] == label and D.same(request["argv"], argv) and type(request["timeoutSeconds"]) is int
+           and 1 <= request["timeoutSeconds"] <= timeout and len(bodies["stdout"]) + len(bodies["stderr"]) <= limit,
+           "Android stock original command/bounds differ")
+    result = D.decode(bodies["result.json"], 128 << 10)
+    wanted = {**request, "exitCode": 0, "ordinaryOwnerReturned": True,
+              "captures": {suffix: {"size": len(bodies[suffix]), "sha256": _sha(bodies[suffix])}
+                           for suffix in ("stdout", "stderr")}}
+    D.need(D.same(result, wanted), "Android stock owner did not close on its original successful request")
+    _point(deadline)
+    return record, bodies["stdout"], bodies["stderr"]
+
+
+def _stock_consumer(check, root, owner, directories, host, stock, label, argv, timeout, limit, receipt, *, capath, replay=None):
+    D.need(not check.failed, "Android prior preparation failure is latched")
+    environment = _stock_environment(root)
+    expected_environment = dict(environment)
+    D.need(_stock_capath(root, owner, directories, check.end) == capath,
+           "Android original empty capath changed before the next consumer")
+    with ExitStack() as originals:
+        raw, pem = originals.enter_context(_stock_host_original(host["bindings"]["files"][STOCK_PEM],
+                                                               STOCK_PEM, 4 << 20, check.end))
+        D.need(D.same(pem, {k: stock["pem"][k] for k in ("binding", "file", "identity")}),
+               "Android curl original PEM differs from its checked stock input")
+        replay_pin = None
+        if replay is not None:
+            body, replay_pin = originals.enter_context(_stock_private_original(root / "private/replay.curl",
+                owner, AUXILIARY["replay.curl"], check.end, expected=replay[1]))
+            D.need(body == replay[0], "Android curl original replay configuration differs")
+        _point(check.end)
+        result = check.private_command(label, argv, environment, root, timeout=timeout, limit=limit)
+        D.need(D.same(environment, expected_environment), "Android curl fixed environment was changed")
+        records, stdout, stderr = _stock_owner_records(check.root, label, owner, argv, timeout, limit, check.end)
+        D.need(check.original_commands and D.same(check.original_commands[-1],
+                    {**records["request"], "exitCode": 0, "ordinaryOwnerReturned": True})
+               and D.same(check.private_metadata["material"][-2:],
+                    [{key: pin[key] for key in ("path", "size", "sha256")} for pin in records["files"][:2]])
+               and list(check.private_roots["material"]) == records["directory"],
+               "Android stock records differ from the original Check return/writer pins")
+        D.need(result.args == argv and type(result.returncode) is int and result.returncode == 0
+               and result.stdout == stdout and result.stderr == stderr,
+               "Android stock captured owner result differs from its actual return")
+        parsed = receipt(stdout, stderr)
+        D.need(_stock_capath(root, owner, directories, check.end) == capath,
+               "Android curl empty capath original changed")
+    # Both the original PEM and config must positively close before a successor.
+    proof = {"label": label, "environment": expected_environment, "cwd": str(root), "pem": pem,
+             "emptyCapath": capath, "replay": replay_pin, "ownerRecords": records}
+    D.need(len(D.canonical(proof)) <= 64 << 10, "Android stock consumer private proof bound")
+    _point(check.end)
+    return parsed, proof
+
+
+def _download(check, root, suppliers, owner, *, directories, host, stock):
+    D.need(not check.failed, "Android prior preparation failure is latched")
+    try:
+        return _download_owned(check, root, suppliers, owner, directories=directories, host=host, stock=stock)
+    except BaseException:
+        check.failed = True
+        raise
+
+
+def _download_owned(check, root, suppliers, owner, *, directories, host, stock):
+    _point(check.end)
+    direct, assets = _stock_partition(suppliers)
+    initial, consumers = {}, []
+    capath = _stock_capath(root, owner, directories, check.end)
+    for row in suppliers:
+        path = root / "bodies" / row["id"]
+        D.write(path, b"", 0o600)
+        initial[row["id"]] = _private(path, owner, mode=0o600)[:6]
+    config = _stock_replay_config(root, direct)
+    config_pin = _font_output(root, "replay.curl", config, owner, directories, check.end)
+    _, proof = _stock_consumer(check, root, owner, directories, host, stock, "android-fixed-material-replay",
+        _stock_replay_argv(root), 600, 128 << 10, lambda out, err: _stock_replay_receipt(out, err, direct),
+        capath=capath, replay=(config, config_pin))
+    consumers.append(proof)
     for row in assets:
         _point(check.end)
-        D.need(urlsplit(row["url"]).netloc == "github.com", "Android fixed asset authority differs")
         prefix = row["id"]
         redirect_body = root / "private" / (prefix + ".redirect")
         D.write(redirect_body, b"", 0o600)
         redirect_identity = _private(redirect_body, owner, mode=0o600)[:6]
-        result = check.private_command("android-asset-location-" + prefix,
+        (location, size), proof = _stock_consumer(check, root, owner, directories, host, stock,
+            "android-asset-location-" + prefix,
             _curl(root, row["url"], 4096) + ["--output", str(redirect_body), "--dump-header", "-"],
-            environment, root, timeout=195, limit=32 << 10)
-        header, separator, status = result.stdout.rpartition(b"\nMRK_HTTP=")
-        D.need(result.stderr == b"" and separator and re.fullmatch(rb"302\t0\t[0-9]{1,4}\t0\t0\n", status)
-               and header.endswith(b"\r\n\r\n") and header.count(b"\r\n\r\n") == 1,
-               "Android fixed asset initial HTTP/TLS response differs")
+            195, 32 << 10, _stock_redirect_receipt, capath=capath)
         D.need(_private(redirect_body, owner, mode=0o600)[:6] == redirect_identity
-               and redirect_body.lstat().st_size == int(status.split(b"\t")[2]),
-               "Android fixed asset response destination changed")
+               and redirect_body.lstat().st_size == size, "Android fixed asset response destination changed")
         os.chmod(redirect_body, 0o400, follow_symlinks=False)
-        lines = header[:-4].split(b"\r\n")
-        D.need(len(lines) <= 128 and re.fullmatch(rb"HTTP/(?:1\.[01]|2|3) 302(?: [\x20-\x7e]*)?", lines[0]),
-               "Android fixed asset header status differs")
-        headers = {}
-        for line in lines[1:]:
-            D.need(len(line) <= 8192 and b":" in line, "Android fixed asset header bound")
-            key, val = line.split(b":", 1)
-            D.need(re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key), "Android fixed asset header name differs")
-            key = key.lower()
-            if key in (b"location", b"content-length", b"content-encoding"):
-                D.need(key not in headers, "Android fixed asset header collision")
-                headers[key] = val.strip(b" \t")
-        D.need(headers.get(b"content-encoding", b"identity").lower() == b"identity", "Android fixed asset encoding differs")
-        if b"content-length" in headers:
-            D.need(re.fullmatch(rb"[0-9]{1,4}", headers[b"content-length"])
-                   and int(headers[b"content-length"]) == int(status.split(b"\t")[2]),
-                   "Android fixed asset header extent differs")
-        locations = [line.split(b":", 1)[1].strip().decode("ascii") for line in header.split(b"\r\n")
-                     if line.lower().startswith(b"location:")]
-        D.need(len(locations) == 1 and len(locations[0]) <= 8192 and "\\" not in locations[0]
-               and all(33 <= ord(c) <= 126 for c in locations[0]), "Android fixed asset location differs")
-        parsed = urlsplit(locations[0])
-        D.need(parsed.scheme == "https" and parsed.netloc == "release-assets.githubusercontent.com"
-               and re.fullmatch(r"/github-production-release-asset/[0-9]{1,20}/[0-9a-fA-F-]{36}", parsed.path)
-               and parsed.query and not parsed.fragment, "Android fixed asset redirected outside its one supplier")
-        result = check.private_command("android-asset-body-" + prefix,
-            _curl(root, locations[0], row["size"]) + ["--output", str(root / "bodies" / prefix)],
-            environment, root, timeout=195, limit=32 << 10)
-        D.need(result.stderr == b"" and result.stdout == ("\nMRK_HTTP=200\t0\t" + str(row["size"]) + "\t0\t0\n").encode(),
-               "Android fixed asset body response differs")
+        consumers.append(proof)
+        _, proof = _stock_consumer(check, root, owner, directories, host, stock,
+            "android-asset-body-" + prefix,
+            _curl(root, location, row["size"]) + ["--output", str(root / "bodies" / prefix)],
+            195, 32 << 10, lambda out, err: _stock_body_receipt(out, err, row["size"]), capath=capath)
+        consumers.append(proof)
     observations = []
     for row in suppliers:
         _point(check.end)
@@ -1415,9 +1698,50 @@ def _download(check, root, suppliers, owner):
         os.chmod(path, 0o400)
         observations.append({"id": row["id"], "size": row["size"], "sha256": row["sha256"],
                              "identity": _private(path, owner)})
-    D.need(_private(root / "empty-capath", owner, directory=True, mode=0o700) == capath
-           and not list((root / "empty-capath").iterdir()), "Android TLS fallback directory changed")
-    return observations
+    D.need(_stock_capath(root, owner, directories, check.end) == capath, "Android TLS fallback directory changed")
+    D.need(len(consumers) == 5 and len(D.canonical(consumers)) <= 5 * (64 << 10),
+           "Android complete private curl consumer proof bound")
+    return observations, consumers
+
+
+def _stock_readback(value, host, root, owner, directories, compiler_root, suppliers, stock, consumers, deadline):
+    """Command-free current originals and exact five consumed owner records."""
+    D.need(D.same(_stock_trust_state(value, host, deadline), stock), "Android stock original trust proof differs")
+    D.need(type(consumers) is list and len(consumers) == 5
+           and len(D.canonical(consumers)) <= 5 * (64 << 10), "Android original curl proof roster/bound differs")
+    direct, assets = _stock_partition(suppliers)
+    capath = _stock_capath(root, owner, directories, deadline)
+    pem = {key: stock["pem"][key] for key in ("binding", "file", "identity")}
+    with _stock_private_original(root / "private/replay.curl", owner, AUXILIARY["replay.curl"], deadline) as (raw, replay):
+        D.need(raw == _stock_replay_config(root, direct), "Android original curl replay body differs")
+        def read(index, label, argv, timeout, limit, receipt):
+            row = _keys(consumers[index], {"label", "environment", "cwd", "pem", "emptyCapath", "replay", "ownerRecords"},
+                        "Android original curl proof shape differs")
+            D.need(row["label"] == label and row["cwd"] == str(root)
+                   and D.same(row["environment"], _stock_environment(root)) and D.same(row["pem"], pem)
+                   and D.same(row["emptyCapath"], capath) and D.same(row["replay"], replay if index == 0 else None),
+                   "Android original curl environment/cwd/TLS/config binding differs")
+            _, out, err = _stock_owner_records(compiler_root, label, owner, argv, timeout, limit, deadline,
+                                              expected=row["ownerRecords"])
+            return receipt(out, err)
+        read(0, "android-fixed-material-replay", _stock_replay_argv(root), 600, 128 << 10,
+             lambda out, err: _stock_replay_receipt(out, err, direct))
+        for offset, row in enumerate(assets):
+            prefix = row["id"]
+            redirect = root / "private" / (prefix + ".redirect")
+            location, size = read(1 + 2 * offset, "android-asset-location-" + prefix,
+                _curl(root, row["url"], 4096) + ["--output", str(redirect), "--dump-header", "-"],
+                195, 32 << 10, _stock_redirect_receipt)
+            with _stock_private_original(redirect, owner, 4096, deadline) as (body, _):
+                D.need(len(body) == size, "Android original curl redirect output extent differs")
+            read(2 + 2 * offset, "android-asset-body-" + prefix,
+                _curl(root, location, row["size"]) + ["--output", str(root / "bodies" / prefix)],
+                195, 32 << 10, lambda out, err: _stock_body_receipt(out, err, row["size"]))
+    D.need(_stock_capath(root, owner, directories, deadline) == capath
+           and D.same(_stock_trust_state(value, host, deadline), stock),
+           "Android original trust inputs changed during curl readback")
+    _point(deadline)
+    return consumers
 
 
 def _parents(paths):
@@ -1833,6 +2157,7 @@ def _prepare(check, source: Path, material_root: Path, *, context: dict, host: d
            "Android material root/source/preparer differs")
     D.need(check.end == float(original["deadline"]), "Android original compiler endpoint differs")
     os_contract, generated = _host_state(value, host, check.end)  # Refuse BEFORE any creation/download.
+    stock = _stock_trust_state(value, host, check.end)
     D.need(check.root == _absolute(original["root"]), "Android font commands require the original compiler owner")
     suppliers = _control(value, "suppliers.json")["files"]
     layout = _control(value, "layout.json.gz")
@@ -1860,7 +2185,8 @@ def _prepare(check, source: Path, material_root: Path, *, context: dict, host: d
         references[key] = D.write(root / "private" / (key + ".json"), raw, 0o400)
     font_consumers = _font_consumers(check, value, host, root, owner, directories)
     provider_consumers = _provider_consumers(check, value, host, root, owner, directories)
-    observations = _download(check, root, suppliers, owner)
+    observations, curl_consumers = _download(check, root, suppliers, owner,
+        directories=directories, host=host, stock=stock)
     auxiliary = _auxiliary(root, owner, check.end)
     paths = [_tool_path(row["path"]) for row in files] + list(GENERATED)
     for name in _parents(paths):
@@ -1881,8 +2207,8 @@ def _prepare(check, source: Path, material_root: Path, *, context: dict, host: d
                                           for name in ("platforms;android-35", "build-tools;35.0.0")})
     D.need({name: {"size": len(body), "sha256": _sha(body)} for name, body in packages.items()} == value["generatedPackages"],
            "Android deterministic package metadata source commitment differs")
-    trust, receipt = generated["javaTrustStore"], generated["sdkLicense"]
-    packages[GENERATED[0]] = D.read(Path(trust["path"]), 1 << 20)
+    receipt = generated["sdkLicense"]
+    packages[GENERATED[0]] = _stock_jks_bytes(host, stock, check.end)
     packages[GENERATED[2]] = existing_license(D.read(Path(receipt["path"]), 4096), licence)
     for name, raw in sorted(packages.items()):
         row = {"path": name, "size": len(raw), "sha256": _sha(raw), "mode": 0o444}
@@ -1896,9 +2222,11 @@ def _prepare(check, source: Path, material_root: Path, *, context: dict, host: d
     inventory = _tree(root, files, owner, check.end, directories=directories, originals=originals)
     provider_consumers["graph"] = _provider_material_graph(value, root, owner, inventory, check.end)
     D.need(_host_state(value, host, check.end) == (os_contract, generated), "Android host inputs changed during preparation")
+    _stock_readback(value, host, root, owner, directories, check.root, suppliers, stock, curl_consumers, check.end)
     provenance = {"policySha256": POLICY_SHA256, "contextSha256": _sha(D.canonical(context)),
         "hostSha256": _sha(D.canonical(host)), "rootIdentity": root_identity, "suppliers": observations,
         "generated": generated, "fontConsumers": font_consumers, "providerConsumers": provider_consumers,
+        "stockTrust": stock, "curlConsumers": curl_consumers,
         "tools": inventory, "auxiliary": auxiliary, "namespace": namespace,
         "capacity": capacity, "newConsent": False,
         "compilerOrNativeExecuted": False, "qualification": False}
@@ -1946,7 +2274,7 @@ def validate(record, *, context: dict, host: dict, deadline: float):
         private[key] = D.decode(D.read(path, pin["size"]), PRIVATE_DOCS[key])
     D.need(D.same(private["context"], context) and D.same(private["host"], host), "Android original source/attempt/host input changed")
     provenance = private["provenance"]
-    _keys(provenance, {"policySha256", "contextSha256", "hostSha256", "rootIdentity", "suppliers", "generated", "fontConsumers", "providerConsumers", "tools", "auxiliary", "namespace",
+    _keys(provenance, {"policySha256", "contextSha256", "hostSha256", "rootIdentity", "suppliers", "generated", "fontConsumers", "providerConsumers", "stockTrust", "curlConsumers", "tools", "auxiliary", "namespace",
                       "capacity", "newConsent", "compilerOrNativeExecuted", "qualification"}, "Android original provenance shape differs")
     D.need(provenance["rootIdentity"] == _private(root, owner, directory=True, mode=0o700)[:5]
            and provenance["policySha256"] == POLICY_SHA256 and provenance["contextSha256"] == _sha(D.canonical(context))
@@ -1958,6 +2286,8 @@ def validate(record, *, context: dict, host: dict, deadline: float):
     _font_readback(value, host, root, owner, provenance["namespace"], _absolute(original["root"]),
                    provenance["fontConsumers"], deadline)
     suppliers = _control(value, "suppliers.json")["files"]
+    _stock_readback(value, host, root, owner, provenance["namespace"], _absolute(original["root"]),
+                    suppliers, provenance["stockTrust"], provenance["curlConsumers"], deadline)
     D.need(type(provenance["suppliers"]) is list and len(provenance["suppliers"]) == len(suppliers),
            "Android original supplier observation roster differs")
     for expected, observation in zip(suppliers, provenance["suppliers"]):
@@ -2006,9 +2336,10 @@ def validate(record, *, context: dict, host: dict, deadline: float):
                        tools, provenance["providerConsumers"], deadline)
     D.need(_auxiliary(root, owner, deadline) == provenance["auxiliary"], "Android original auxiliary inventory changed")
     D.need(_closed_namespace(root, owner, deadline) == provenance["namespace"], "Android original private namespace changed")
-    D.need(D.read(root / "tools" / GENERATED[0], 1 << 20) == D.read(Path(generated["javaTrustStore"]["path"]), 1 << 20)
-           and D.read(root / "tools" / GENERATED[2], 4096) == D.read(Path(generated["sdkLicense"]["path"]), 4096),
-           "Android generated trust/receipt input differs")
+    jks = _stock_jks_bytes(host, provenance["stockTrust"], deadline)
+    _stock_staged_jks(root, owner, actual[GENERATED[0]], originals[GENERATED[0]], jks, deadline)
+    D.need(D.read(root / "tools" / GENERATED[2], 4096) == D.read(Path(generated["sdkLicense"]["path"]), 4096),
+           "Android generated receipt input differs")
     _point(deadline)
     return record
 

@@ -2149,6 +2149,7 @@ ANDROID_PREPARATION_PINS = None
 
 def _android_source_pins():
     names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+             "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
              "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
              for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
     need(type(ANDROID_PREPARATION_PINS) is dict and set(ANDROID_PREPARATION_PINS) == names,
