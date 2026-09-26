@@ -92,6 +92,32 @@ class HostedAndroidDataContracts(unittest.TestCase):
         sums = S.package_members(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  usr/bin/echo\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  unrelated/private\n", paths, digests=True)
         self.assertEqual(sums["selectedMembers"], {"/usr/bin/echo": "a" * 32})
 
+    def test_documented_image_array_preserves_only_public_corresponding_identity(self):
+        value = [{"group": "Operating System", "detail": "Ubuntu\n24.04.3\nLTS"},
+                 {"group": "Runner Image", "detail": "Image: ubuntu-24.04\nVersion: 20260920.314.1\n"
+                  "Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md\n"
+                  "Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314"}]
+        result = S.image_identity(json.dumps(value).encode())
+        self.assertEqual(result, {"identity": {
+            "os_name": "Ubuntu 24.04.3 LTS", "image_name": "ubuntu-24.04", "image_version": "20260920.314.1",
+            "image_url": "https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md",
+            "image_release": "https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314"},
+            "producerExecutionProven": False})
+        raw = json.dumps(value)
+        for changed in (raw.replace('"group": "Operating System"', '"group": "Operating System", "private": "hidden"'),
+                        raw.replace('"group": "Runner Image"', '"group": "Operating System"'),
+                        raw.replace('"group": "Operating System"', '"group": "Operating System", "group": "Operating System"'),
+                        raw.replace('Ubuntu\\n', 'Ubuntu\\u0001\\n'),
+                        raw.replace('Version: ', 'Version: \\n'),
+                        raw.replace('Image: ubuntu-24.04', 'Image: ubuntu-22.04'),
+                        raw.replace('Version: 20260920.314.1', 'Version: 20260920.315.1'),
+                        raw.replace('https://github.com/', 'https://github.com.unreviewed.invalid/'),
+                        raw.replace('%2F', '%252F'), raw.replace('%2F', '%2f'),
+                        raw.replace('24.04.3\\nLTS', '24.04.3\\nLTS\\n'),
+                        json.dumps([*value, value[0]])):
+            with self.subTest(mutation=changed[:64]), self.assertRaises(S.Refused):
+                S.image_identity(changed.encode())
+
     def test_body_change_and_final_original_change_refuse_the_entire_file_row(self):
         raw = b"public"
         original = {"path": "/fixed", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
@@ -272,6 +298,14 @@ class HostedAndroidDataContracts(unittest.TestCase):
     def test_workflow_metadata_route_cannot_compile_or_invoke_native_observation(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
         steps = workflow.split("      - name: ")[1:]
+        prerequisites = next(s for s in steps if s.startswith("Prepare shared Ubuntu shell inputs only on this disposable runner\n"))
+        self.assertIn("packages=(libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy)", prerequisites)
+        self.assertIn('if [[ "$GITHUB_REF" == ' + S.METADATA_REF
+                      + ' || "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 ]]; then\n'
+                      + '            packages+=(libgif7)\n          fi\n', prerequisites)
+        self.assertEqual(prerequisites.count("libgif7"), 1)
+        self.assertIn('sudo apt-get install -y --no-install-recommends "${packages[@]}"', prerequisites)
+        self.assertIn('dpkg-query -W -f=\'${Package} ${Version}\\n\' "${packages[@]}"', prerequisites)
         observer = next(s for s in steps if s.startswith("Observe only the missing public Android and GitHub host DATA\n"))
         for item in ("if: github.ref == '" + S.METADATA_REF + "'", "timeout-minutes: 2", "/usr/bin/env -i",
                      "--signal=TERM --kill-after=2s 60s", "python3.12 -I -S -B desktop/tools/observe_hosted_android.py </dev/null",

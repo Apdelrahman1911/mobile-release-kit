@@ -104,6 +104,7 @@ def diagnostic_reason(error):
         "public-directory-roster", "supplier-ca-root", "supplier-ca-directory", "supplier-ca-member",
         "supplier-ca-roster-changed", "receipt-format", "receipt-roster", "image-duplicate", "image-object",
         "image-field", "image-origin-url", "image-public-label", "image-known-fields-missing",
+        "image-array-shape", "image-correspondence",
     }
     shared = {
         "Absolute native OS input required": "file-path",
@@ -314,6 +315,31 @@ def license_ids(raw):
     return {"existingIds": ids, "originProven": False, "newConsent": False}
 
 
+def image_array_identity(value):
+    """The documented runner-images ubuntu24/x64 report, not arbitrary JSON."""
+    need(len(value) == 2 and all(type(row) is dict and set(row) == {"group", "detail"} for row in value)
+         and [row["group"] for row in value] == ["Operating System", "Runner Image"], "image-array-shape")
+    details = [row["detail"] for row in value]
+    need(all(type(item) is str and 0 < len(item) <= 2048 and item.isascii()
+             and all(c == "\n" or 32 <= ord(c) < 127 for c in item) for item in details), "image-field")
+    os_lines, lines = (item.split("\n") for item in details)
+    need(1 <= len(os_lines) <= 8 and all(os_lines) and len(lines) == 4
+         and all(line.startswith(prefix) for line, prefix in zip(lines,
+             ("Image: ", "Version: ", "Included Software: ", "Image Release: "))), "image-array-shape")
+    name, version, software, release = (line.split(": ", 1)[1] for line in lines)
+    os_name = " ".join(os_lines)
+    need(len(os_name) <= 512 and re.fullmatch(r"[A-Za-z0-9 ._()+\-/]+", os_name), "image-public-label")
+    need(name == "ubuntu-24.04" and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", version),
+         "image-correspondence")
+    build = ".".join(version.split(".")[:2])
+    need(software == "https://github.com/actions/runner-images/blob/ubuntu24/" + build
+         + "/images/ubuntu/Ubuntu2404-Readme.md"
+         and release == "https://github.com/actions/runner-images/releases/tag/ubuntu24%2F" + build,
+         "image-origin-url")
+    return {"identity": {"os_name": os_name, "image_name": name, "image_version": version,
+                         "image_url": software, "image_release": release}, "producerExecutionProven": False}
+
+
 def image_identity(raw):
     # Do not reflect arbitrary JSON from even this public metadata file.
     def unique(pairs):
@@ -323,6 +349,8 @@ def image_identity(raw):
             result[key] = value
         return result
     value = json.loads(raw, object_pairs_hook=unique)
+    if type(value) is list:
+        return image_array_identity(value)
     need(type(value) is dict, "image-object")
     result = {}
     for key in ("image_version", "image_name", "os_name", "os_version", "image_url", "image_release"):
