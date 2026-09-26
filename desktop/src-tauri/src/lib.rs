@@ -79,6 +79,8 @@ pub mod github_connection_protocol;
 mod github_connection_session;
 mod github_preflight_protocol;
 mod github_preflight_session;
+mod github_release_protocol;
+mod github_release_session;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]
 pub mod shell;

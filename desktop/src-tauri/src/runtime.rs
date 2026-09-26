@@ -17,6 +17,8 @@ pub(crate) const GITHUB_TLS_PROFILE_QUALIFIED: bool = false;
 // A prior read-only/TLS profile does not qualify a durable intent + dispatch
 // handshake. Enable only after this exact installed source/profile is observed.
 pub(crate) const GITHUB_PREFLIGHT_NATIVE_QUALIFIED: bool = false;
+// Release dispatch needs its own original-journal/native qualification.
+pub(crate) const GITHUB_RELEASE_NATIVE_QUALIFIED: bool = false;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024;
 // Seven JSON nodes per payload entry; leave room under strict_json's 20k
@@ -31,10 +33,10 @@ const PYTHON_RESOURCE: &str = "python/bin/python3";
 
 // Canonical fixed inventory shared by packaging and installed-data validation.
 // Presence is not runtime, TLS, XML, or native-custody qualification.
-pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 12] = [
+pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 13] = [
     "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
     "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "ios_archive_bootstrap.py",
     "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
 ];
 
@@ -351,6 +353,26 @@ impl GitHubPreflightInstalledProfile {
         let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
             .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_preflight_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubReleaseInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReleaseInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        GITHUB_RELEASE_NATIVE_QUALIFIED && crate::github_release_protocol::publisher_bound()
+            && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_release_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
@@ -997,6 +1019,26 @@ impl RuntimeConfig {
     pub(crate) fn resolve_github_preflight_installed(&self, originals: &mut crate::installed_runtime::GitHubPreflightRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.github_preflight_installed_profile()?, end, stop)
+    }
+    pub(crate) fn github_release_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.github_release_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_release_installed_profile(&self) -> Result<GitHubReleaseInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubReleaseInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubReleaseInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The installed GitHub release action profile is not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_release_installed(&self, originals: &mut crate::installed_runtime::GitHubReleaseRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.github_release_installed_profile()?, end, stop)
     }
     /// SAME sealed metadata selector for capability and original-owner admission.
     /// Neither another edit profile nor a feature-off native test can select it.

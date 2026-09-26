@@ -23,6 +23,7 @@ fn rig_profile(profile: Profile, github_receipt: Option<Arc<Mutex<GitHubReadRece
     let owner = Arc::new(Owner {
         key: 1, id: "inert-only-1".into(), profile, github_receipt,
         preflight_receipt: None, preflight_request: None, preflight_gate: None, preflight_go_claimed: AtomicBool::new(false),
+        release_receipt: None, release_request: None, release_gate: None,
         state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
         driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -63,7 +64,7 @@ fn staged_tasks(rig: &Rig) -> (oneshot::Sender<()>, oneshot::Sender<()>) {
     let outcome = match rig.owner.profile {
         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
-        Profile::GitHubPreflight => panic!("preflight is not a passive/GitHub-read fixture"),
+        Profile::GitHubPreflight | Profile::GitHubRelease => panic!("action profiles are not passive/GitHub-read fixtures"),
     };
     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
         driver.await.unwrap();

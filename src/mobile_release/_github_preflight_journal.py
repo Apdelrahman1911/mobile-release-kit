@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 from ._desktop_github_engine import _decode_json
+from ._github_action_family import Family, journal_suffix, policy_for
 from .github_preflight import PROTOCOL, Prepared, _DIGEST, _id, _match, _object, _require
 
 MAX_RECORDS = 64
@@ -38,19 +39,23 @@ def canonical(value: object) -> bytes:
                       separators=(",", ":")).encode("utf-8")
 
 
-def intent_bytes(prepared: Prepared) -> bytes:
-    raw = canonical({"schemaVersion": 1, "protocol": PROTOCOL, "prepared": prepared.value()}) + b"\n"
+def intent_bytes(prepared: Prepared, *, family: Family = Family.PREFLIGHT) -> bytes:
+    policy = policy_for(family)
+    _require(type(prepared) is policy.Prepared)
+    policy.Prepared.parse(prepared.value())
+    raw = canonical({"schemaVersion": 1, "protocol": policy.PROTOCOL, "prepared": prepared.value()}) + b"\n"
     _require(len(raw) <= MAX_INTENT_BYTES)
     return raw
 
 
-def parse_intent(raw: bytes) -> Prepared:
+def parse_intent(raw: bytes, *, family: Family = Family.PREFLIGHT) -> Prepared:
+    policy = policy_for(family)
     _require(type(raw) is bytes and raw.endswith(b"\n") and raw.count(b"\n") == 1)
     row = _object(_decode_json(raw[:-1], limit=MAX_INTENT_BYTES - 1, nodes=512, depth=8, exact=True),
                   {"schemaVersion", "protocol", "prepared"})
-    _require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1 and row["protocol"] == PROTOCOL)
-    prepared = Prepared.parse(row["prepared"])
-    _require(intent_bytes(prepared) == raw)
+    _require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1 and row["protocol"] == policy.PROTOCOL)
+    prepared = policy.Prepared.parse(row["prepared"])
+    _require(intent_bytes(prepared, family=family) == raw)
     return prepared
 
 
@@ -90,7 +95,9 @@ class Journal:
     waiting namespace lock, finite enumeration and postconditions cover every
     write; a collision or malformed unrelated record is preserved and refused.
     """
-    def __init__(self, home: str, *, end: float) -> None:
+    def __init__(self, home: str, *, end: float, family: Family = Family.PREFLIGHT) -> None:
+        self.family = family
+        self.suffix = journal_suffix(family)
         # Construction is DATA only. open() is called after the helper itself is
         # registered in the original native Supervisor's resource roster.
         if (type(home) is not str or not home.startswith("/") or home == "/"
@@ -98,7 +105,7 @@ class Journal:
                 or any(ord(char) < 32 or ord(char) == 127 for char in home)):
             raise JournalError("Private preflight journal is unavailable")
         self.parts = home.split("/")[1:]
-        if (not self.parts or len(self.parts) + len(_SUFFIX) > MAX_PATH_COMPONENTS
+        if (not self.parts or len(self.parts) + len(self.suffix) > MAX_PATH_COMPONENTS
                 or any(part in {"", ".", ".."} for part in self.parts)):
             raise JournalError("Private preflight journal is unavailable")
         self.end = end
@@ -143,7 +150,7 @@ class Journal:
         self.ancestors[-1] = (root, None, None, _directory(state))
         self._dir(state)
         parent = root
-        all_parts = [*self.parts, *_SUFFIX]
+        all_parts = [*self.parts, *self.suffix]
         for index, name in enumerate(all_parts):
             self._time()
             create = index >= len(self.parts)
@@ -223,7 +230,7 @@ class Journal:
         for name in intents:
             raw = self._read(name)
             total += len(raw)
-            prepared = parse_intent(raw)
+            prepared = parse_intent(raw, family=self.family)
             marker = name[:32]
             if prepared.target.marker != marker:
                 raise JournalError("Private preflight intent identity differs")
@@ -300,7 +307,7 @@ class Journal:
         marker = prepared.target.marker
         if marker in self.records or len(self.records) >= MAX_RECORDS:
             raise JournalError("Private preflight request was already used or capacity is full")
-        raw = intent_bytes(prepared)
+        raw = intent_bytes(prepared, family=self.family)
         digest = hashlib.sha256(raw).hexdigest()
         self._create(marker + ".intent.json", raw)
         self.records[marker] = prepared, None, digest

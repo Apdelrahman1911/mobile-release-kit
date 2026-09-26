@@ -134,6 +134,28 @@ fn github_preflight_tooling() {
     println!("cargo:rustc-env=MRK_GITHUB_PREFLIGHT_CALLER_SHA256={:x}", Sha256::digest(caller.as_bytes()));
 }
 
+fn github_release_tooling() {
+    const SELECTOR: &str = "MRK_GITHUB_RELEASE_TOOLING_SHA";
+    println!("cargo:rerun-if-env-changed={SELECTOR}");
+    let templates = [
+        ("CANDIDATE", "mobile-candidate.yml", include_str!("../../templates/workflows/mobile-candidate.yml")),
+        ("EXTERNAL", "mobile-external-testing.yml", include_str!("../../templates/workflows/mobile-external-testing.yml")),
+        ("PRODUCTION", "mobile-production-submit.yml", include_str!("../../templates/workflows/mobile-production-submit.yml")),
+    ];
+    for (_, path, _) in templates { println!("cargo:rerun-if-changed=../../templates/workflows/{path}"); }
+    let Some(value) = env::var_os(SELECTOR) else { return; };
+    let value = value.to_str().expect("Release tooling commit must be UTF-8");
+    if value.len() != 40 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        panic!("Release tooling commit must be a reviewed lowercase full immutable commit");
+    }
+    println!("cargo:rustc-env={SELECTOR}={value}");
+    for (stage, _, template) in templates {
+        let caller = template.replace("__MOBILE_RELEASE_KIT_REPOSITORY__", "Apdelrahman1911/mobile-release-kit")
+            .replace("__MOBILE_RELEASE_KIT_SHA__", value);
+        println!("cargo:rustc-env=MRK_GITHUB_RELEASE_{stage}_SHA256={:x}", Sha256::digest(caller.as_bytes()));
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
@@ -169,6 +191,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     android_compile_data(&target);
     github_preflight_tooling();
+    github_release_tooling();
     println!("cargo:rustc-env=MRK_COMPILED_TARGET={target}");
     #[cfg(feature = "desktop-shell")]
     {
@@ -194,6 +217,8 @@ fn main() {
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
+            "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
+            "github_release_reconcile", "github_release_pending", "github_release_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

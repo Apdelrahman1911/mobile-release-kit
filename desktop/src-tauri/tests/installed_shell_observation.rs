@@ -65,6 +65,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/github_connection_session.rs"] mod github_connection_session;
 #[path = "../src/github_preflight_protocol.rs"] mod github_preflight_protocol;
 #[path = "../src/github_preflight_session.rs"] mod github_preflight_session;
+#[path = "../src/github_release_protocol.rs"] mod github_release_protocol;
+#[path = "../src/github_release_session.rs"] mod github_release_session;
 #[path = "../src/edit_owner.rs"] mod edit_owner;
 #[path = "../src/shell.rs"] mod shell;
 fn main() -> std::process::ExitCode { shell::installed_observation::main() }

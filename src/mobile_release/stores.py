@@ -34,6 +34,7 @@ from ._store_lane_files import StoreLaneAttempt, StoreLaneFiles
 from .discovery import GitContext, valid_observed_source
 from .errors import MutationGuardError, StoreOperationError, ValidationError
 from .reporting import FAILING_STATUSES, Finding, Status
+from .release_confirmation import expected_confirmation
 from .provenance import (
     _reject_duplicate_pairs,
     load_store_receipt,
@@ -147,10 +148,6 @@ class StoreRequest:
     operation_intent: Path | None = None
     recovery_run_id: str | None = None
     recovery_confirmation: str | None = None
-
-
-def expected_confirmation(stage: str, platform: str, release: ReleaseVersion) -> str:
-    return f"{stage}:{platform}:{release.name}:{release.build}"
 
 
 def guard_ci_mutation(

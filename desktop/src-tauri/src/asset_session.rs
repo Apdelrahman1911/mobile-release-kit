@@ -849,6 +849,31 @@ impl GitHubPreflightGoGate {
     }
 }
 
+/// Nonsecret weak reference to the actual document. Only that document may
+/// create this gate; the original Supervisor calls it after durable READY.
+pub(crate) struct GitHubReleaseGoGate { inner: Weak<Inner> }
+impl GitHubReleaseGoGate {
+    pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_release_protocol::Request,
+        claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
+        use crate::{github_release_protocol as p, github_release_session as s};
+        let document = DocumentBinding { inner: self.inner.upgrade().ok_or_else(|| s::refused(p::Reason::Cancelled))? };
+        let mut state = document.lock(); let now = Instant::now(); document.expire(&mut state, now);
+        let gate = document.github_gate(&state);
+        if gate != GitHubReason::None { return Err(s::refused(s::connection_reason(gate))); }
+        if !document.inner.bridge.supervisor.github_release_profile_available() || !p::publisher_bound() {
+            return Err(s::refused(p::Reason::Unqualified));
+        }
+        let original = state.github.release_active_registration().map(|(id, generation, root)| (id.to_owned(), generation, root.clone()))
+            .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+        let current = document.registry_result(&mut state, document.inner.bridge.native_project(&original.0), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if current.0 != original.1 || current.1 != original.2 { return Err(s::refused(p::Reason::TargetChanged)); }
+        // This mutex remains held through original session expiry/pin checks,
+        // one-use owner claim and private-buffer transfer. No post-send check.
+        state.github.release_go(id, digest, request, Instant::now(), claim)
+    }
+}
+
 fn github_preflight_project_binding(root: &asset_source::RegisteredRoot) -> Result<String, BridgeError> {
     use sha2::{Digest, Sha256};
     let identity = root.identity.posix().map_err(|_| BridgeError::invalid())?.preflight_identity();
@@ -2516,6 +2541,51 @@ impl DocumentBinding {
             p::Command::Reconcile(args) => state.github.preflight_observe(p::Kind::Reconcile, args, generation, root, &project_binding,
                 home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
             p::Command::Pending(args) => state.github.preflight_pending(args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Status | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
+        }
+    }
+    pub(crate) fn github_release_status(&self) -> crate::github_release_protocol::Status {
+        let mut state = self.lock(); let now = Instant::now(); self.expire(&mut state, now);
+        let gate = self.github_gate(&state);
+        state.github.release_status(self.inner.bridge.supervisor.github_release_profile_available(), now, gate)
+    }
+    pub(crate) fn github_release_command(&self, name: &str, value: &Value) -> Result<crate::github_release_protocol::Status, BridgeError> {
+        use crate::{github_release_protocol as p, github_release_session as s};
+        let command = p::decode_command(name, value).map_err(|_| s::refused(p::Reason::InvalidInput))?;
+        if matches!(command, p::Command::Status) { return Ok(self.github_release_status()); }
+        // Native entropy/account DATA before locking. No filesystem traversal,
+        // helper, token copy or network occurs at this preparation boundary.
+        let marker = if matches!(command, p::Command::Prepare(_)) {
+            let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?;
+            Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        } else { None };
+        let home = if matches!(command, p::Command::Dispatch(_) | p::Command::Track(_) | p::Command::Reconcile(_) | p::Command::Pending(_)) {
+            Some(github_preflight_home().map_err(|_| s::refused(p::Reason::RuntimeUnavailable))?)
+        } else { None };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        if let p::Command::Cancel(args) = command { return state.github.release_cancel(&args.operation_id); }
+        let gate = self.github_gate(&state);
+        let available = state.github.release_status(self.inner.bridge.supervisor.github_release_profile_available(), Instant::now(), gate);
+        if !available.available { return Err(s::refused(available.reason)); }
+        let (project_id, original_generation) = state.github.registration().map(|(id, generation)| (id.to_owned(), generation))
+            .ok_or_else(|| s::refused(p::Reason::NotConnected))?;
+        let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&project_id), None)
+            .map_err(|error| s::refused(if error.reason == Reason::CleanupUnknown { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
+        if generation != original_generation { return Err(s::refused(p::Reason::TargetChanged)); }
+        let project_binding = github_preflight_project_binding(&root)?;
+        let gate = GitHubReleaseGoGate { inner: Arc::downgrade(&self.inner) };
+        let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
+        match command {
+            p::Command::Prepare(args) => state.github.release_prepare(args, generation, root, &project_binding,
+                marker.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Dispatch(args) => state.github.release_dispatch(args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Track(args) => state.github.release_observe(p::Kind::Track, args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Reconcile(args) => state.github.release_observe(p::Kind::Reconcile, args, generation, root, &project_binding,
+                home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
+            p::Command::Pending(args) => state.github.release_pending(args, generation, root, &project_binding,
                 home.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),
             p::Command::Status | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
         }
