@@ -334,6 +334,11 @@ impl DesktopBridge {
         let value = self.supervisor.query(Method::CandidateEvidenceObserve, params).await?;
         crate::candidate_evidence_protocol::result(value)
     }
+    pub(crate) async fn observe_release_evidence(&self, root: &crate::asset_source::RegisteredRoot, stage: crate::lifecycle_evidence_protocol::Stage) -> Result<crate::lifecycle_evidence_protocol::Observation, BridgeError> {
+        let params = crate::lifecycle_evidence_protocol::params(root, stage)?;
+        let value = self.supervisor.query(Method::ReleaseEvidenceObserve, params).await?;
+        crate::lifecycle_evidence_protocol::result(value, stage)
+    }
     pub(crate) async fn observe_metadata_text(&self, document: &crate::asset_session::DocumentBinding, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
         // Only the native-selected root reaches this bounded named-file query.
         // No checkout/write authority is created by a passive observation.

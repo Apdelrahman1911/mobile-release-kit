@@ -129,6 +129,42 @@ class CandidateEvidenceResult(TypedDict):
     assurance: CandidateEvidenceAssurance
 
 
+LifecycleStage = Literal["candidate", "external-testing", "production-submit"]
+
+
+class LifecycleEvidenceDocument(TypedDict):
+    path: str  # Exact stage-specific fixed relative name, never a supplied path.
+    state: Literal["missing", "invalid", "valid"]
+
+
+class LifecycleEvidenceHistory(TypedDict):
+    stage: LifecycleStage
+    recordedOutcome: Literal["mutated", "reconciled", "already-present", "operator-authorized-reconciliation", "operator-authorized-retry", "operator-authorized-create-retry"]
+    recordedReadback: str
+    recordedRuns: CandidateEvidenceRuns
+    receiptSha256: str
+    intentSha256: str
+    previousReceiptSha256: str | None
+
+
+class LifecycleEvidenceGuidance(TypedDict):
+    code: Literal["evidence-invalid", "evidence-incomplete", "evidence-inconsistent", "candidate-only",
+                  "ios-external-not-available", "android-external-observation-only",
+                  "recorded-external-gate", "production-recorded"]
+    message: str  # Bounded fixed core explanation, never validator exception text.
+
+
+class LifecycleEvidenceResult(TypedDict):
+    schemaVersion: Literal[1]
+    stage: LifecycleStage
+    outcome: Literal["consistent", "incomplete", "invalid", "inconsistent"]
+    documents: list[LifecycleEvidenceDocument]
+    summary: CandidateEvidenceSummary | None
+    history: list[LifecycleEvidenceHistory]  # Only a complete locally consistent selected chain.
+    guidance: LifecycleEvidenceGuidance
+    assurance: CandidateEvidenceAssurance
+
+
 EnvironmentPlatform = Literal["android", "ios"]
 EnvironmentOperation = Literal["build", "artifact-validation"]
 EnvironmentRole = Literal["android-jdk", "android-gradle-wrapper", "android-sdk", "android-bundletool",

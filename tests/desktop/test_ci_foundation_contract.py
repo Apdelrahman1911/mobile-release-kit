@@ -1292,6 +1292,7 @@ class WorkflowNativeHelperTests(unittest.TestCase):
         self.assertEqual(helper.WORKFLOW_TRANSACTION_EOF_SOURCES["transactionEofShim"], "tests/native_desktop_config_eof.py")
         for path in (helper.WORKFLOW_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/src-tauri/src/document_lifetime.rs",
                      "desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/tests/fixtures/candidate-evidence.json",
+                     "desktop/src-tauri/src/lifecycle_evidence_protocol.rs", "desktop/tests/fixtures/lifecycle-evidence.json",
                      "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/github_workflow_edit_protocol.rs",
                      "desktop/native/linux-mount-observation/src/lib.rs", "tests/native_desktop_config.py",
                      "src/mobile_release/api/data/github-setup-v1.json", "templates/workflows/mobile-production-submit.yml"):
@@ -1299,7 +1300,8 @@ class WorkflowNativeHelperTests(unittest.TestCase):
         for path in ("desktop/package-lock.json", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/tests/session_gtk_qualification.rs"):
             self.assertNotIn(path, helper.WORKFLOW_NATIVE_SOURCES)
         self.assertEqual(helper.WORKFLOW_NATIVE_SOURCES, tuple(sorted(set(helper.WORKFLOW_NATIVE_SOURCES))))
-        for path in ("desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/tests/fixtures/candidate-evidence.json"):
+        for path in ("desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/tests/fixtures/candidate-evidence.json",
+                     "desktop/src-tauri/src/lifecycle_evidence_protocol.rs", "desktop/tests/fixtures/lifecycle-evidence.json"):
             self.assertNotIn(path, helper.WORKFLOW_OWNER_SOURCES.values())
             self.assertNotIn(path, helper.CONFIG_OWNER_SOURCES.values())
         self.assertEqual(helper.WORKFLOW_PAYLOAD_BINDINGS["templateSet"]["resourceSha256"], "4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c")
@@ -5919,6 +5921,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     "mobile_release/api/data/metadata-text-help-v1.json",
                     "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py",
                     "mobile_release/api/_candidate_evidence.py",
+                    "mobile_release/api/_lifecycle_evidence.py", "mobile_release/evidence_layout.py",
                     "mobile_release/api/_release_version.py",
                     "mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py",
                     "mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
@@ -5932,7 +5935,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
             inventory = helper.workflow_core_inventory(SOURCE)
-            self.assertEqual(len(inventory), 106)
+            self.assertEqual(len(inventory), 108)
             self.assertTrue(metadata <= {row["path"] for row in inventory})
             helper.validate_gtk_core_inventory(inventory)
             with patch.multiple(helper, Path=PurePosixPath, ordinary=forbidden, hash_file=forbidden,
@@ -5964,6 +5967,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                         "mobile_release/environment_diagnostics_tools.py"}
         release_version = {"mobile_release/api/_release_version.py"}
         candidate_evidence = {"mobile_release/api/_candidate_evidence.py"}
+        lifecycle_evidence = {"mobile_release/api/_lifecycle_evidence.py", "mobile_release/evidence_layout.py"}
         version_edit = {"mobile_release/release_version_edit.py", "mobile_release/version_text.py",
                         "mobile_release/api/data/release-version-help-v1.json"}
         saved_commands = {
@@ -5980,14 +5984,15 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         }
         inventory = [{"path": name, "size": 1, "sha256": "4" * 64} for name in helper.GTK_CORE_PATHS]
         # Historical snapshots exclude every later addition; do not relabel
-        # their original72/76/78/83/84/85/103-file coverage as a new larger inventory.
-        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
-        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
-        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version | candidate_evidence | version_edit | saved_commands]
-        pre_version = [row for row in inventory if row["path"] not in release_version | candidate_evidence | version_edit | saved_commands]
-        pre_candidate = [row for row in inventory if row["path"] not in candidate_evidence | version_edit | saved_commands]
-        pre_saved_commands = [row for row in inventory if row["path"] not in version_edit | saved_commands]
-        pre_version_edit = [row for row in inventory if row["path"] not in version_edit]
+        # their original72/76/78/83/84/85/103/106-file coverage as a new larger inventory.
+        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands | lifecycle_evidence]
+        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version | candidate_evidence | version_edit | saved_commands | lifecycle_evidence]
+        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version | candidate_evidence | version_edit | saved_commands | lifecycle_evidence]
+        pre_version = [row for row in inventory if row["path"] not in release_version | candidate_evidence | version_edit | saved_commands | lifecycle_evidence]
+        pre_candidate = [row for row in inventory if row["path"] not in candidate_evidence | version_edit | saved_commands | lifecycle_evidence]
+        pre_saved_commands = [row for row in inventory if row["path"] not in version_edit | saved_commands | lifecycle_evidence]
+        pre_version_edit = [row for row in inventory if row["path"] not in version_edit | lifecycle_evidence]
+        pre_lifecycle_evidence = [row for row in inventory if row["path"] not in lifecycle_evidence]
         self.assertEqual(len(stale), 72)
         self.assertEqual(len(pre_environment), 76)
         self.assertEqual(len(pre_diagnostics), 78)
@@ -5995,6 +6000,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         self.assertEqual(len(pre_candidate), 84)
         self.assertEqual(len(pre_saved_commands), 85)
         self.assertEqual(len(pre_version_edit), 103)
+        self.assertEqual(len(pre_lifecycle_evidence), 106)
         extra = [*inventory, {"path": "mobile_release/unreviewed.py", "size": 1, "sha256": "4" * 64}]
         context, forbidden = self.context(), self.forbidden
         before = deepcopy(context)
@@ -6004,11 +6010,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
-            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (pre_candidate, 84), (pre_saved_commands, 85), (pre_version_edit, 103), (extra, 107)):
+            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (pre_candidate, 84), (pre_saved_commands, 85), (pre_version_edit, 103), (pre_lifecycle_evidence, 106), (extra, 109)):
                 with self.subTest(count=count), self.assertRaises(helper.CheckFailure) as refused:
                     helper.prepare_github_tls_context(context, value)
                 self.assertEqual(str(refused.exception),
-                    f"Reviewed core inventory count differs: expected 106 files, observed {count}")
+                    f"Reviewed core inventory count differs: expected 108 files, observed {count}")
                 self.assertEqual(context, before)
 
     def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):

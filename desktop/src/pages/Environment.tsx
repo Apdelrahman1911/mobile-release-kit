@@ -13,6 +13,7 @@ const methodLabels: Record<string, string> = {
   'github.setup.propose': 'Prepare a GitHub setup preview', 'credentials.assess': 'Assess explicitly supplied credential data',
   'metadata.text.observe': 'Read selected public metadata text', 'metadata.text.validate': 'Validate supplied public text',
   'environment.requirements': 'Explain project toolchain requirements',
+  'release.evidence.observe': 'Inspect selected local release documents',
 };
 
 // Control instructions remain useful before a valid draft/service response.

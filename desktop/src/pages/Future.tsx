@@ -2,16 +2,16 @@ import type { ReactNode } from 'react';
 import type { AppInfo, HelpContent } from '../types.ts';
 import type { RetainedEditAttention } from '../drafts.ts';
 import { futureReason } from '../certainty.ts';
-import { Badge, DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+import { DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
-export function Releases({ info, offlineChecks, androidBuild }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode }) {
+export function Releases({ info, offlineChecks, androidBuild, evidence }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode; evidence: ReactNode }) {
   return <>
-    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Review saved checks and Android build inputs separately. Local output is not an authenticated release candidate; protected promotion remains a future stage." />
+    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, then review local checks and Android build inputs separately. Protected workflow dispatch is not available here." />
+    {evidence}
     {offlineChecks}
     {androidBuild}
-    <section className="card"><SectionHeading title="Release lifecycle" description="Planned stages, not a completed timeline. No runs or authenticated release evidence have been loaded."><Badge>Not implemented</Badge></SectionHeading><div className="lifecycle">{[{ name: 'Candidate', description: 'Build, sign, validate, and retain immutable evidence.' }, { name: 'Internal testing', description: 'Distribute the same verified candidate to internal testers.' }, { name: 'External testing', description: 'Use protected promotion and authentic predecessor evidence.' }, { name: 'Production preparation', description: 'Prepare a reviewed submission. Never auto-publish publicly.' }].map((stage, index) => <div className="lifecycle-stage" key={stage.name}><div className="lifecycle-node">{index + 1}</div><strong>{stage.name}</strong><p>{stage.description}</p><Badge>Planned · unavailable</Badge></div>)}</div></section>
-    <section className="card"><EmptyState icon="rocket" title="No release history loaded" description="This app has not retrieved or authenticated release records. An empty view does not mean the project has never released."><DisabledAction label="Create release candidate" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Native builds, signed artifacts, GitHub dispatch, and release evidence are not implemented.')} /></EmptyState></section>
+    <section className="card"><EmptyState icon="rocket" title="Authenticated release history is not loaded" description="A selected local folder is not authenticated or global history. Missing desktop records do not mean the project has never released."><DisabledAction label="Create release candidate" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Protected GitHub dispatch and authenticated release history are not implemented.')} /></EmptyState></section>
   </>;
 }
 
@@ -25,8 +25,9 @@ const editAttentionHelp: HelpContent = {
   failure: 'An empty list, changing projects, or restarting the app does not prove that files are clean or a retry is safe. Recovery assessment is not implemented.',
 };
 
-export function Recovery({ info, attention, choosingProject, onOpenProject, onHelp }: {
+export function Recovery({ info, attention, choosingProject, onOpenProject, onHelp, evidenceGuidance }: {
   info: AppInfo | null;
+  evidenceGuidance: ReactNode;
   attention: readonly RetainedEditAttention[];
   choosingProject: boolean;
   onOpenProject: (attention: RetainedEditAttention) => void;
@@ -34,7 +35,8 @@ export function Recovery({ info, attention, choosingProject, onOpenProject, onHe
 }) {
   return <>
     <PageHeading eyebrow="RECOVERY" title="An interruption shouldn’t leave you guessing." description="Recovery must know what really happened, preserve original ownership, and never mistake partial success for a clean restart." />
-    <div className="notice notice-warning"><Icon name="shield" /><div><strong>Recovery has not been assessed</strong><p>The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. This screen does not establish that a project is clean or an operation can safely be retried.</p></div></div>
+    {evidenceGuidance}
+    <div className="notice notice-warning"><Icon name="shield" /><div><strong>Project recovery remains unassessed</strong><p>The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. This screen does not establish that a project is clean or an operation can safely be retried.</p></div></div>
     <section className="card">
       <SectionHeading title="File-edit alerts from this session" description="Earlier alerts stay visible even after another edit replaces the latest result. Original active or uncertain operations keep their existing status controls.">
         <HelpButton content={editAttentionHelp} onHelp={onHelp} />
@@ -56,7 +58,7 @@ export function Recovery({ info, attention, choosingProject, onOpenProject, onHe
           </div>
         </li>)}</ul>}
     </section>
-    <section className="card"><EmptyState icon="recovery" title="Recovery assessment is not implemented" description="A future reviewed core flow will supply session-bound recovery challenges and distinguish interrupted, partially completed, and settled operations."><DisabledAction label="Assess recovery state" icon="recovery" reason={futureReason(info?.capabilities, 'recovery.assess', 'Owned-operation recovery, authenticated journals, and session-bound decisions are not implemented.')} /></EmptyState></section>
+    <section className="card"><EmptyState icon="recovery" title="Project recovery assessment is not implemented" description="A future reviewed core flow will supply session-bound recovery challenges and distinguish interrupted, partially completed, and settled operations."><DisabledAction label="Assess recovery state" icon="recovery" reason={futureReason(info?.capabilities, 'recovery.assess', 'Owned-operation recovery, authenticated journals, and session-bound decisions are not implemented.')} /></EmptyState></section>
     <p className="review-caution">Cancelling saved checks or an Android build cannot undo effects already performed by project code. A retained work folder is not a successful artifact or a safe retry. Project admission refusal does not establish a recoverable signing session or distinguish busy ownership from recovery need. Keep the original operation and its status; this page cannot inspect, clean or reset it.</p>
     <section className="card"><SectionHeading title="Until recovery is available" /><ul className="plain-list"><li><Icon name="shield" size={17} /><span>Do not infer a safe retry from a missing desktop record.</span></li><li><Icon name="box" size={17} /><span>Keep original files, artifacts, and existing release evidence intact.</span></li><li><Icon name="github" size={17} /><span>Check the actual protected workflow or Store operation before considering another mutation.</span></li></ul></section>
   </>;

@@ -449,7 +449,7 @@ fn macos_installed_passive_method(name: &str) -> bool {
 }
 fn linux_installed_passive_method(name: &str) -> bool {
     macos_installed_passive_method(name) || matches!(name,
-        "release.version.observe" | "metadata.text.observe" | "metadata.text.validate" | "artifacts.candidate.observe")
+        "release.version.observe" | "metadata.text.observe" | "metadata.text.validate" | "artifacts.candidate.observe" | "release.evidence.observe")
 }
 fn installed_passive_method(name: &str) -> bool {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1305,7 +1305,7 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     assert_eq!(runtime.configuration_edit_profile_available(), bindings);
     assert_eq!(runtime.github_workflow_edit_profile_available(), bindings);
     for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-        "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe"] {
+        "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
         assert_eq!(runtime.passive_method_available(name), bindings);
     }
     for name in ["credentials.assess", "config.save", "metadata.text.prepare",
@@ -1354,11 +1354,11 @@ mod tests {
     #[test]
     fn installed_allowlist_is_exactly_the_read_only_project_draft_guidance_and_saved_services() {
         for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-            "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe"] {
+            "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
             assert!(linux_installed_passive_method(name));
         }
         for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "metadata.text.prepare",
-            "metadata.text.apply", "credentials.assess", "artifacts.candidate.observe ", "Artifacts.Candidate.Observe",
+            "metadata.text.apply", "credentials.assess", "artifacts.candidate.observe ", "Artifacts.Candidate.Observe", "release.evidence.observe ", "Release.Evidence.Observe",
             "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose",
             "Release.Version.Observe", "metadata.text.observe ", "Metadata.Text.Validate"] {
             assert!(!linux_installed_passive_method(name));
@@ -1372,7 +1372,7 @@ mod tests {
         }
         for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "credentials.assess",
             "release.version.observe", "metadata.text.observe", "metadata.text.validate", "metadata.text.prepare",
-            "metadata.text.apply", "artifacts.candidate.observe", "environment.diagnostics", "github.connection.refresh",
+            "metadata.text.apply", "artifacts.candidate.observe", "release.evidence.observe", "environment.diagnostics", "github.connection.refresh",
             "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose"] {
             assert!(!macos_installed_passive_method(name));
         }
@@ -2263,7 +2263,7 @@ pub(crate) mod windows_version {
             }
             for method in ["", "project.snapshot ", "Config.Validate", "config.save", "credentials.assess",
                 "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe",
-                "metadata.text.validate", "artifacts.candidate.observe", "environment.diagnostics", "android.build"] {
+                "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe", "environment.diagnostics", "android.build"] {
                 assert!(!passive_method(method));
                 assert!(!Selection::Normal.permits(method));
                 assert!(!Selection::HeadlessCandidate.permits(method));
@@ -2292,7 +2292,7 @@ pub(crate) mod windows_version {
                 assert_eq!(runtime.passive_method_available(method), available);
             }
             for method in ["config.save", "credentials.assess", "environment.requirements", "github.setup.propose",
-                "artifacts.candidate.observe", "android.build"] { assert!(!runtime.passive_method_available(method)); }
+                "artifacts.candidate.observe", "release.evidence.observe", "android.build"] { assert!(!runtime.passive_method_available(method)); }
             assert!(!runtime.configuration_edit_profile_available());
             assert!(!runtime.project_path_selection_profile_available());
             assert!(!runtime.evidence_selection_profile_available());

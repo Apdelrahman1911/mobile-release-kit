@@ -3,6 +3,8 @@ import { environmentError, environmentRequestFits, parseEnvironmentResult } from
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
 import { evidenceError, evidenceRequestFits, parseEvidenceStatus } from './candidateEvidence.ts';
 import type { EvidenceCommand, EvidenceStatus } from './candidateEvidence.ts';
+import { lifecycleEvidenceRequestFits, parseLifecycleEvidenceStatus } from './lifecycleEvidence.ts';
+import type { LifecycleEvidenceCommand, LifecycleEvidenceStatus } from './lifecycleEvidence.ts';
 import { ENVIRONMENT_DIAGNOSTICS_EVENT, environmentDiagnosticsError, environmentDiagnosticsRequestFits, parseEnvironmentDiagnosticsStatus } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentDiagnosticsCommand } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentDiagnosticsStatus } from './environmentDiagnosticsTypes.ts';
@@ -82,6 +84,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!evidenceRequestFits(command, args)) throw { code: 'artifact_evidence_invalid' };
       const result = parseEvidenceStatus(await invoke<unknown>(command, structuredClone(args)));
       if (!result) throw { code: 'artifact_evidence_protocol' };
+      return result;
+    } catch (error) { throw evidenceError(error); }
+  };
+  const releaseEvidenceCall = async (command: LifecycleEvidenceCommand, args: Record<string, unknown>): Promise<LifecycleEvidenceStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'artifact_evidence_unavailable' };
+      if (!lifecycleEvidenceRequestFits(command, args)) throw { code: 'artifact_evidence_invalid' };
+      const result = parseLifecycleEvidenceStatus(await invoke<unknown>(command, structuredClone(args)));
+      if (!result || command === 'release_evidence_choose' && (result.operation?.kind !== 'choose' || result.operation.stage !== args.stage)
+          || command === 'release_evidence_observe' && (result.operation?.kind !== 'observe' || result.operation.selectionId !== args.selectionId)
+          || command === 'release_evidence_cancel' && (!result.operation || result.operation.operationId !== args.operationId || result.operation.selectionId !== args.selectionId)) throw { code: 'artifact_evidence_protocol' };
       return result;
     } catch (error) { throw evidenceError(error); }
   };
@@ -173,6 +186,10 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     evidenceStatus: () => evidenceCall('artifact_evidence_status', {}),
     observeEvidence: (selectionId) => evidenceCall('artifact_evidence_observe', { selectionId }),
     cancelEvidence: (operationId, selectionId) => evidenceCall('artifact_evidence_cancel', { operationId, selectionId }),
+    chooseReleaseEvidenceFolder: (stage) => releaseEvidenceCall('release_evidence_choose', { stage }),
+    releaseEvidenceStatus: () => releaseEvidenceCall('release_evidence_status', {}),
+    observeReleaseEvidence: (selectionId) => releaseEvidenceCall('release_evidence_observe', { selectionId }),
+    cancelReleaseEvidence: (operationId, selectionId) => releaseEvidenceCall('release_evidence_cancel', { operationId, selectionId }),
     snapshot: (projectId) => call<ProjectSnapshot>('project_snapshot', { projectId }),
     observeReleaseVersion: async (projectId) => {
       try {

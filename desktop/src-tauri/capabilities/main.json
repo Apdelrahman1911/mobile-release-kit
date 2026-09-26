@@ -8,6 +8,7 @@
     "allow-app-info", "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
     "allow-environment-requirements", "allow-release-version-observe",
     "allow-artifact-evidence-choose", "allow-artifact-evidence-status", "allow-artifact-evidence-observe", "allow-artifact-evidence-cancel",
+    "allow-release-evidence-choose", "allow-release-evidence-status", "allow-release-evidence-observe", "allow-release-evidence-cancel",
     "allow-start-environment-diagnostics", "allow-environment-diagnostics-status", "allow-cancel-environment-diagnostics",
     "allow-prepare-offline-preflight", "allow-start-offline-preflight", "allow-offline-preflight-status", "allow-cancel-offline-preflight",
     "allow-prepare-android-build", "allow-start-android-build", "allow-android-build-status", "allow-cancel-android-build",

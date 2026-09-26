@@ -47,7 +47,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
-        self.assertEqual(len(original), 103)
+        self.assertEqual(len(original), 108)
         variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
                     [original[0]] + original[:-1], list(reversed(original)))
         for value in variants:
@@ -80,7 +80,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 268)
+        self.assertEqual(len(python_paths), 290)
         # Exercise the real bounded DATA parser without importing the native
         # driver or its process/IO definitions. Roster growth must fit the DATA
         # map while preserving the smaller native-protocol collection limit.
@@ -95,7 +95,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         source_map = {path: "a" * 64 for path in python_paths}
         raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
         self.assertEqual(parser(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
-        for native, limit in ((False, 268), (True, 128)):
+        for native, limit in ((False, 290), (True, 128)):
             value = {f"k{i}": 0 for i in range(limit)}
             suffix = b"\n" if native else b""
             raw = json.dumps(value, separators=(",", ":")).encode("ascii") + suffix
@@ -112,8 +112,9 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         self.assertNotIn("len(SOURCES) == 217", driver)
         self.assertNotIn("len(SOURCES) == 223", driver)
         self.assertNotIn("len(SOURCES) == 228", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 268"), 2)
-        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 64)
+        self.assertNotIn("len(SOURCES) == 268", driver)
+        self.assertEqual(driver.count("len(SOURCES) == 290"), 2)
+        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 73)
         for relative in (
                 "desktop/offline_preflight_bootstrap.py",
                 "desktop/src-tauri/src/offline_preflight_owner.rs",
@@ -182,14 +183,26 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         integration = (root / "desktop/src-tauri/tests/session_gtk_qualification.rs").read_text(encoding="utf-8")
         modules = re.findall(r"^(?:pub )?mod ([a-z_]+);$", library, re.MULTILINE)
         registrations = re.findall(r'#\[path = "\.\./src/([a-z_]+)\.rs"\] mod ([a-z_]+);', integration)
-        self.assertEqual(sorted(modules), sorted(name for _, name in registrations))
+        # This is the fixed Linux debug development SG1 target, not an
+        # unqualified union of all platform/publisher module declarations.
+        excluded = {"macos_install_paths", "installed_runtime_windows", "runtime_publication", "runtime_publication_windows"}
+        for module, gate in (
+            ("pub mod macos_install_paths;", 'all(target_os = "macos", target_arch = "aarch64")'),
+            ("mod installed_runtime_windows;", 'all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")'),
+            ("pub mod runtime_publication;", 'all(feature = "ubuntu-runtime-publisher", target_os = "linux", target_arch = "x86_64", target_env = "gnu")'),
+            ("pub mod runtime_publication_windows;", 'all(feature = "windows-runtime-publisher", target_os = "windows", target_arch = "x86_64", target_env = "msvc")'),
+        ):
+            self.assertIn(f"#[cfg({gate})]\n{module}", library)
+        self.assertEqual(modules.count("installed_runtime"), 2)  # Separate Linux/Mac implementation, same logical name.
+        self.assertEqual(sorted(set(modules) - excluded), sorted(name for _, name in registrations))
         for filename, name in registrations:
             self.assertEqual(filename, name)
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", python_paths)
         for name in ("environment", "environment_diagnostics_protocol", "environment_diagnostics_owner",
                      "github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session",
                       "metadata_text_commands", "metadata_text_edit_protocol", "release_version_protocol",
-                      "candidate_evidence_protocol"):
+                      "candidate_evidence_protocol", "lifecycle_evidence_protocol", "release_version_edit_commands",
+                      "release_version_edit_protocol", "vault_keyring_linux", "windows_startup"):
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", helper.GTK_COMPILE_SOURCES)
         for relative in ("desktop/environment_bootstrap.py",
                          ".github/workflows/desktop-environment-diagnostics-native.yml",
@@ -202,12 +215,20 @@ class SessionGtkCompileContractTests(unittest.TestCase):
                          "desktop/src/environmentDiagnosticsController.ts", "desktop/src/environment.ts", "desktop/src/components/MetadataTextEditor.tsx", "desktop/src/metadataText.ts",
                           "desktop/src/metadataTextEditController.ts", "desktop/src/metadataTextProtocol.ts", "desktop/src/releaseVersion.ts",
                          "desktop/src/candidateEvidence.ts", "desktop/src/pages/Artifacts.tsx",
-                         "src/mobile_release/api/_candidate_evidence.py"):
+                         "src/mobile_release/api/_candidate_evidence.py", "src/mobile_release/api/_lifecycle_evidence.py",
+                         "src/mobile_release/evidence_layout.py", "desktop/src/lifecycleEvidence.ts",
+                         "desktop/src/components/ReleaseEvidence.tsx", "desktop/src/components/ReleaseVersionEditor.tsx",
+                         "desktop/src/offlinePreflightFindings.ts", "desktop/src/projectPaths.ts", "desktop/src/setupGuidance.ts",
+                         "desktop/src/releaseVersionEdit.ts", "desktop/src/releaseVersionEditController.ts"):
             self.assertIn(relative, python_paths)
         # These test-cfg owners and includes also compile in the SG1 target;
         # do not infer completeness from the consumer's own roster constant.
         for relative in ("desktop/github_connection_bootstrap.py",
                          "desktop/tests/fixtures/candidate-evidence.json",
+                         "desktop/tests/fixtures/lifecycle-evidence.json",
+                         "desktop/native/windows-installed-native/src/ui.rs",
+                         "desktop/native/windows-installed-native/src/ui_startup_data.rs",
+                         "desktop/src-tauri/src/shell_windows.rs",
                          "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
                          ".github/workflows/desktop-github-connection-tls.yml",
                          ".github/workflows/desktop-github-workflow-apply-native.yml",

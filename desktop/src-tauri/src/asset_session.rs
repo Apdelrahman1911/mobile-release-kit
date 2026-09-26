@@ -10,6 +10,7 @@ use crate::{asset_commands::{self as commands, AssetError, CommandError, Fields,
     bridge::{DesktopBridge, Project, ProjectRoster}, credential_assessment::{AssessmentRequest, AssessmentResult, assess_supplied}, credential_format::{self, FileObservation},
     document_lifetime::{DocumentAction, DocumentLifetime}, error::BridgeError,
     candidate_evidence_protocol::{self as evidence_wire, Problem as EvidenceProblem},
+    lifecycle_evidence_protocol as lifecycle_wire,
     github_connection_protocol::{self as github_wire, Reason as GitHubReason},
     github_connection_session::{self as github_session, ConnectionState}};
 
@@ -32,10 +33,10 @@ const NATIVE_QUALIFIED: bool = false;
 #[path = "asset_session_gnome_transport_fixture.rs"]
 mod gnome_transport_fixture;
 
-fn installed_evidence_profile(evidence_selection: bool, candidate_method: bool) -> bool {
+fn installed_evidence_profile(evidence_selection: bool, selected_method: bool) -> bool {
     // An advertised development method or broad asset fixture is not authority
     // for this separate installed, documents-only picker.
-    evidence_selection && candidate_method
+    evidence_selection && selected_method
 }
 
 fn evidence_selection_gate(state: &DocumentState) -> Result<(), BridgeError> {
@@ -508,17 +509,34 @@ fn project_path_pending(state: &DocumentState) -> bool {
 
 // One purpose-bound selection for this original document. It is never inserted
 // into DesktopBridge.projects and cannot change source drafts or GitHub context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidencePurpose { Candidate, Lifecycle(lifecycle_wire::Stage) }
+impl EvidencePurpose {
+    fn lifecycle(self) -> bool { matches!(self, Self::Lifecycle(_)) }
+    fn method(self) -> &'static str { if self.lifecycle() { "release.evidence.observe" } else { "artifacts.candidate.observe" } }
+}
+#[derive(Clone)]
+enum EvidenceResult { Candidate(evidence_wire::Observation), Lifecycle(lifecycle_wire::Observation) }
+impl EvidenceResult {
+    fn purpose(&self) -> EvidencePurpose { match self {
+        Self::Candidate(_) => EvidencePurpose::Candidate, Self::Lifecycle(result) => EvidencePurpose::Lifecycle(result.stage),
+    } }
+}
 #[derive(Clone, PartialEq, Eq)]
-struct EvidenceBinding { operation_id: u32, kind: evidence_wire::OperationKind, selection_id: Option<String>, epoch: u64 }
+struct EvidenceBinding { operation_id: u32, kind: evidence_wire::OperationKind, selection_id: Option<String>, epoch: u64, purpose: EvidencePurpose }
 impl EvidenceBinding {
     fn public(&self) -> evidence_wire::Operation {
         evidence_wire::Operation { operation_id: self.operation_id.to_string(), kind: self.kind, selection_id: self.selection_id.clone() }
     }
+    fn lifecycle_public(&self) -> Option<lifecycle_wire::Operation> {
+        let EvidencePurpose::Lifecycle(stage) = self.purpose else { return None; };
+        Some(lifecycle_wire::Operation { operation_id: self.operation_id.to_string(), kind: self.kind, selection_id: self.selection_id.clone(), stage })
+    }
 }
-struct EvidenceSelection { view: evidence_wire::Selection, root: asset_source::RegisteredRoot, epoch: u64 }
+struct EvidenceSelection { view: evidence_wire::Selection, root: asset_source::RegisteredRoot, epoch: u64, purpose: EvidencePurpose }
 struct EvidenceRegistry {
     revision: u64, epoch: u64, revoked: bool, selection: Option<EvidenceSelection>, operation: Option<EvidenceBinding>,
-    phase: evidence_wire::Phase, result: Option<evidence_wire::Observation>, problem: Option<EvidenceProblem>,
+    phase: evidence_wire::Phase, result: Option<EvidenceResult>, problem: Option<EvidenceProblem>,
 }
 impl EvidenceRegistry {
     fn new() -> Self { Self { revision: 0, epoch: 0, revoked: false, selection: None, operation: None,
@@ -535,8 +553,12 @@ impl EvidenceRegistry {
             && matches!((slot.operation, binding.kind), (Operation::ChooseEvidenceFolder, evidence_wire::OperationKind::Choose)
                 | (Operation::InspectEvidence, evidence_wire::OperationKind::Observe))
     }
+    fn accepts_result(&self, slot: &Slot, result: &EvidenceResult) -> bool {
+        self.matches(slot) && slot.operation == Operation::InspectEvidence
+            && slot.evidence.as_ref().is_some_and(|binding| self.selection_matches(binding) && binding.purpose == result.purpose())
+    }
     fn selection_matches(&self, binding: &EvidenceBinding) -> bool {
-        !self.revoked && self.selection.as_ref().is_some_and(|selection| selection.epoch == binding.epoch
+        !self.revoked && self.selection.as_ref().is_some_and(|selection| selection.epoch == binding.epoch && selection.purpose == binding.purpose
             && binding.selection_id.as_deref() == Some(selection.view.selection_id.as_str()))
     }
 }
@@ -553,12 +575,12 @@ fn evidence_reason(reason: Reason) -> EvidenceProblem {
         _ => EvidenceProblem::ObservationFailed,
     }
 }
-fn cancel_evidence_locked(state: &mut DocumentState, args: &evidence_wire::Cancel, at: Instant) -> Result<bool, BridgeError> {
+fn cancel_evidence_locked(state: &mut DocumentState, purpose: EvidencePurpose, args: &evidence_wire::Cancel, at: Instant) -> Result<bool, BridgeError> {
     // A STOP identifies the exact original job, not merely its folder. Match
     // before clock reconciliation or any change to unrelated shared state.
     let id = evidence_wire::operation_id(&args.operation_id).ok_or_else(evidence_wire::invalid)?;
     let binding = state.evidence.operation.as_ref().filter(|binding| binding.operation_id == id
-        && binding.selection_id == args.selection_id && binding.epoch == state.evidence.epoch)
+        && binding.selection_id == args.selection_id && binding.epoch == state.evidence.epoch && binding.purpose == purpose)
         .ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?.clone();
     let matching = state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot) && slot.evidence.as_ref() == Some(&binding));
     if !matching {
@@ -594,9 +616,16 @@ fn evidence_display_name(path: &std::path::Path) -> String {
         evidence_wire::display_text(name, 128, 512) && !name.contains(['/', '\\']))
         .unwrap_or("Selected evidence folder").to_owned()
 }
-fn evidence_snapshot(state: &DocumentState, available: bool) -> evidence_wire::Status {
+fn evidence_route_gate(state: &DocumentState, lifecycle: bool) -> Result<(), BridgeError> {
+    if state.evidence.operation.as_ref().is_some_and(|op| op.purpose.lifecycle() != lifecycle)
+        && (state.retiring || state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot)
+            && (slot.phase != Phase::Idle || !slot.owner.resources_settled()))) {
+        return Err(evidence_wire::refused(EvidenceProblem::Busy));
+    }
+    Ok(())
+}
+fn evidence_phase(state: &DocumentState) -> (evidence_wire::Phase, Option<EvidenceProblem>) {
     let registry = &state.evidence;
-    if !available { return evidence_wire::Status::unavailable(registry.revision); }
     let mut phase = registry.phase;
     let mut problem = registry.problem;
     if state.unknown || state.exhausted {
@@ -613,16 +642,41 @@ fn evidence_snapshot(state: &DocumentState, available: bool) -> evidence_wire::S
             problem = Some(problem.unwrap_or_else(|| evidence_reason(slot.reason)));
         }
     }
+    (phase, problem)
+}
+fn evidence_projection(state: &DocumentState, lifecycle: bool) -> (evidence_wire::Phase, Option<EvidenceProblem>, bool) {
+    let (phase, problem) = evidence_phase(state);
+    let compatible = state.evidence.operation.as_ref().is_none_or(|op| op.purpose.lifecycle() == lifecycle);
+    if !compatible && phase != evidence_wire::Phase::Unknown {
+        (evidence_wire::Phase::Refused, Some(EvidenceProblem::StaleSelection), false)
+    } else { (phase, problem, compatible) }
+}
+fn evidence_snapshot(state: &DocumentState, available: bool) -> evidence_wire::Status {
+    let registry = &state.evidence;
+    if !available { return evidence_wire::Status::unavailable(registry.revision); }
+    let (phase, problem, compatible) = evidence_projection(state, false);
     evidence_wire::Status { schema_version: 1, revision: registry.revision.to_string(), availability: "available", phase,
-        selection: if registry.revoked { None } else { registry.selection.as_ref().map(|selection| selection.view.clone()) },
-        operation: registry.operation.as_ref().map(EvidenceBinding::public),
-        result: if phase == evidence_wire::Phase::Observed { registry.result.clone() } else { None }, problem }
+        selection: if registry.revoked || !compatible { None } else { registry.selection.as_ref().filter(|s| s.purpose == EvidencePurpose::Candidate).map(|s| s.view.clone()) },
+        operation: registry.operation.as_ref().filter(|op| op.purpose == EvidencePurpose::Candidate).map(EvidenceBinding::public),
+        result: if phase == evidence_wire::Phase::Observed { match &registry.result { Some(EvidenceResult::Candidate(result)) => Some(result.clone()), _ => None } } else { None }, problem }
+}
+fn release_evidence_snapshot(state: &DocumentState, available: bool) -> lifecycle_wire::Status {
+    let registry = &state.evidence;
+    if !available { return lifecycle_wire::Status::unavailable(registry.revision); }
+    let (phase, problem, compatible) = evidence_projection(state, true);
+    lifecycle_wire::Status { schema_version: 1, revision: registry.revision.to_string(), availability: "available", phase,
+        selection: if registry.revoked || !compatible { None } else { registry.selection.as_ref().and_then(|s| {
+            let EvidencePurpose::Lifecycle(stage) = s.purpose else { return None; };
+            Some(lifecycle_wire::Selection { selection_id: s.view.selection_id.clone(), display_name: s.view.display_name.clone(), stage })
+        }) },
+        operation: registry.operation.as_ref().and_then(EvidenceBinding::lifecycle_public),
+        result: if phase == evidence_wire::Phase::Observed { match &registry.result { Some(EvidenceResult::Lifecycle(result)) => Some(result.clone()), _ => None } } else { None }, problem }
 }
 fn settle_evidence_status(state: &mut DocumentState) {
     if state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot) && slot.phase == Phase::Idle && slot.owner.resources_settled()) {
-        let status = evidence_snapshot(state, true);
-        state.evidence.phase = status.phase; state.evidence.problem = status.problem;
-        if status.phase != evidence_wire::Phase::Observed { state.evidence.result = None; }
+        let (phase, problem) = evidence_phase(state);
+        state.evidence.phase = phase; state.evidence.problem = problem;
+        if phase != evidence_wire::Phase::Observed { state.evidence.result = None; }
     }
 }
 // A late observer/lifecycle callback cannot move an already-due work or review
@@ -1272,7 +1326,7 @@ mod lookup_memory {
         fn lookup_census_refuses_unsupported_retained_dto_shapes() {
             let owner = OriginalWork::new(1, false, Weak::new()); let mut state = crate::asset_session::tests::empty_state();
             let mut slot = Slot::new(owner.clone(), Operation::Prepare, None, None, None);
-            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe, selection_id: None, epoch: 1 });
+            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe, selection_id: None, epoch: 1, purpose: EvidencePurpose::Candidate });
             state.slot = Some(slot);
             assert_eq!(live(&state, &owner), Err(Problem::Unavailable));
             state.slot.as_mut().unwrap().evidence = None;
@@ -1451,10 +1505,10 @@ impl DocumentBinding {
         // nor SG1 nor the still-false asset capability qualifies this purpose.
         self.inner.bridge.installed_project_path_selection_available()
     }
-    fn evidence_qualified(&self) -> bool {
+    fn evidence_qualified(&self, purpose: EvidencePurpose) -> bool {
         // Existing fixture permits do NOT authorize the new picker/query route.
         installed_evidence_profile(self.inner.bridge.installed_evidence_selection_available(),
-            self.inner.bridge.supervisor.passive_method_available("artifacts.candidate.observe"))
+            self.inner.bridge.supervisor.passive_method_available(purpose.method()))
     }
     fn lock(&self) -> MutexGuard<'_, DocumentState> {
         match self.inner.state.lock() {
@@ -1866,8 +1920,9 @@ impl DocumentBinding {
         }
         Ok(())
     }
-    fn evidence_gate(&self, state: &DocumentState) -> Result<(), BridgeError> {
-        if !self.evidence_qualified() { return Err(evidence_wire::refused(EvidenceProblem::Unavailable)); }
+    fn evidence_gate(&self, state: &DocumentState, purpose: EvidencePurpose) -> Result<(), BridgeError> {
+        evidence_route_gate(state, purpose.lifecycle())?;
+        if !self.evidence_qualified(purpose) { return Err(evidence_wire::refused(EvidenceProblem::Unavailable)); }
         // Reuse lifecycle/Android/diagnostic gates without granting the broad
         // private-asset profile or requiring a credential session/source project.
         self.common_gate(state, false).map_err(|error| evidence_wire::refused(evidence_reason(error.reason)))?;
@@ -1880,9 +1935,10 @@ impl DocumentBinding {
         Ok(())
     }
     pub(crate) fn artifact_evidence_status(&self) -> Result<evidence_wire::Status, BridgeError> {
-        self.reconcile();
-        let mut state = self.lock(); self.expire(&mut state, Instant::now());
-        evidence_snapshot(&state, self.evidence_qualified()).checked()
+        evidence_route_gate(&self.lock(), false)?;
+        self.reconcile_scope(Some(false));
+        let mut state = self.lock(); evidence_route_gate(&state, false)?; self.expire(&mut state, Instant::now());
+        evidence_snapshot(&state, self.evidence_qualified(EvidencePurpose::Candidate)).checked()
     }
     pub(crate) fn artifact_evidence_cancel(&self, args: evidence_wire::Cancel) -> Result<evidence_wire::Status, BridgeError> {
         // Match before expire/reconcile: a wrong cancellation is not authority
@@ -1890,8 +1946,27 @@ impl DocumentBinding {
         let mut state = self.lock();
         // Do not alter credentials/source/G state or invoke Supervisor STOP.
         // The existing coordinator retains the exact in-progress query future.
-        if cancel_evidence_locked(&mut state, &args, Instant::now())? { self.bump(&mut state); }
-        evidence_snapshot(&state, self.evidence_qualified()).checked()
+        if cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &args, Instant::now())? { self.bump(&mut state); }
+        evidence_snapshot(&state, self.evidence_qualified(EvidencePurpose::Candidate)).checked()
+    }
+    pub(crate) fn release_evidence_status(&self) -> Result<lifecycle_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), true)?;
+        self.reconcile_scope(Some(true));
+        let mut state = self.lock(); evidence_route_gate(&state, true)?; self.expire(&mut state, Instant::now());
+        release_evidence_snapshot(&state, self.evidence_qualified(EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate))).checked()
+    }
+    pub(crate) fn release_evidence_cancel(&self, args: lifecycle_wire::Cancel) -> Result<lifecycle_wire::Status, BridgeError> {
+        let mut state = self.lock();
+        let purpose = state.evidence.operation.as_ref().filter(|op| op.purpose.lifecycle())
+            .map(|op| op.purpose).ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
+        if cancel_evidence_locked(&mut state, purpose, &args, Instant::now())? { self.bump(&mut state); }
+        release_evidence_snapshot(&state, self.evidence_qualified(purpose)).checked()
+    }
+    #[cfg(feature = "desktop-shell")]
+    fn evidence_job_matches(&self, owner: &Arc<OriginalWork>, purpose: EvidencePurpose) -> bool {
+        let state = self.lock();
+        state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && state.evidence.matches(slot)
+            && slot.evidence.as_ref().is_some_and(|binding| binding.purpose == purpose))
     }
     #[cfg(feature = "desktop-shell")]
     fn evidence_failed(&self, owner: &Arc<OriginalWork>, problem: EvidenceProblem) {
@@ -2308,7 +2383,7 @@ enum Staged {
     Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
     ProjectPath { proof: asset_source::ProjectPathProbe, binding: Arc<ProjectPathBinding> },
-    EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch }, EvidenceObserved(evidence_wire::Observation),
+    EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch, purpose: EvidencePurpose }, EvidenceObserved(EvidenceResult),
     Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
 }
 #[cfg(feature = "desktop-shell")]
@@ -2316,7 +2391,7 @@ enum Job {
     Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
     Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>> },
     ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
-    ChooseEvidenceFolder { app: tauri::AppHandle }, InspectEvidence { root: asset_source::RegisteredRoot },
+    ChooseEvidenceFolder { app: tauri::AppHandle, purpose: EvidencePurpose }, InspectEvidence { root: asset_source::RegisteredRoot, purpose: EvidencePurpose },
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
 }
 
@@ -2525,9 +2600,14 @@ impl DocumentBinding {
 
     /// Joins only ended originals and drains closed data outside this real
     /// admission mutex. No task, picker, syscall or assessment is started here.
-    fn reconcile(&self) {
+    fn reconcile(&self) { self.reconcile_scope(None); }
+    fn reconcile_scope(&self, evidence_family: Option<bool>) {
         let mut release: Option<Arc<OriginalWork>> = None;
         let mut state = self.lock();
+        // A request may have waited for this mutex since its initial route
+        // check. Never expire/join the other family's newly installed owner.
+        // Both families still use this one original reconciliation algorithm.
+        if evidence_family.is_some_and(|family| evidence_route_gate(&state, family).is_err()) { return; }
         self.expire(&mut state, Instant::now());
         if state.retiring { return; }
 
@@ -2720,20 +2800,20 @@ impl DocumentBinding {
                     Err(error) => slot.stop(error.reason, Instant::now()),
                 }
             }
-            Staged::EvidenceFolder { proof, tokens } => {
-                if state.evidence.revoked || !state.evidence.matches(slot) || slot.operation != Operation::ChooseEvidenceFolder || !tokens_distinct(&tokens) {
+            Staged::EvidenceFolder { proof, tokens, purpose } => {
+                if state.evidence.revoked || !state.evidence.matches(slot) || slot.operation != Operation::ChooseEvidenceFolder || !tokens_distinct(&tokens)
+                    || !slot.evidence.as_ref().is_some_and(|binding| binding.purpose == purpose) {
                     slot.stop(Reason::ContextStale, Instant::now()); return;
                 }
                 let selection_id = format!("evidence-{}", tokens.selection.0);
                 let display_name = evidence_display_name(proof.path());
                 state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id, display_name },
-                    root: asset_source::RegisteredRoot { path: proof.path().to_path_buf(), identity: proof.identity() }, epoch: state.evidence.epoch });
+                    root: asset_source::RegisteredRoot { path: proof.path().to_path_buf(), identity: proof.identity() }, epoch: state.evidence.epoch, purpose });
                 state.evidence.phase = evidence_wire::Phase::Selected; state.evidence.problem = None; state.evidence.result = None;
                 slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
             }
             Staged::EvidenceObserved(result) => {
-                if !state.evidence.matches(slot) || slot.operation != Operation::InspectEvidence
-                    || !slot.evidence.as_ref().is_some_and(|binding| state.evidence.selection_matches(binding)) {
+                if !state.evidence.accepts_result(slot, &result) {
                     slot.stop(Reason::ContextStale, Instant::now()); return;
                 }
                 state.evidence.result = Some(result); state.evidence.phase = evidence_wire::Phase::Observed; state.evidence.problem = None;
@@ -3059,7 +3139,8 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
     match job {
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
-        Job::ChooseEvidenceFolder { app } => {
+        Job::ChooseEvidenceFolder { app, purpose } => {
+            if !document.evidence_job_matches(owner, purpose) { owner.gui.not_created(Reason::ContextStale); return Staged::Refused(Reason::ContextStale); }
             let tokens = match child(owner, ChildJob::Tokens).await {
                 Ok(ChildEnd::Tokens(tokens)) => tokens,
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => { owner.gui.not_created(reason); return Staged::Refused(reason); },
@@ -3072,14 +3153,18 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             // Ordinary directory metadata only, no project publication and no
             // credential-source capture or user-selected document paths.
             match child(owner, ChildJob::Probe { path, origins: Vec::new() }).await {
-                Ok(ChildEnd::Probed(proof)) => Staged::EvidenceFolder { proof, tokens },
+                Ok(ChildEnd::Probed(proof)) => Staged::EvidenceFolder { proof, tokens, purpose },
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
             }
         }
-        Job::InspectEvidence { root } => {
+        Job::InspectEvidence { root, purpose } => {
+            if !document.evidence_job_matches(owner, purpose) { return Staged::Refused(Reason::ContextStale); }
             if let Err(reason) = document.phase(owner, Phase::Assessing) { return Staged::Refused(reason); }
             if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
-            let result = document.inner.bridge.observe_candidate_evidence(&root).await;
+            let result = match purpose {
+                EvidencePurpose::Candidate => document.inner.bridge.observe_candidate_evidence(&root).await.map(EvidenceResult::Candidate),
+                EvidencePurpose::Lifecycle(stage) => document.inner.bridge.observe_release_evidence(&root, stage).await.map(EvidenceResult::Lifecycle),
+            };
             if let Err(error) = &result { document.evidence_failed(owner, evidence_wire::core_problem(error)); }
             // Keep the same query/coordinator if its Supervisor reported
             // unknown cleanup. No new wait lease, global cancel or clock.
@@ -3163,34 +3248,57 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
 
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
-    pub(crate) fn artifact_evidence_choose(&self, app: tauri::AppHandle) -> Result<evidence_wire::Status, BridgeError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.evidence_gate(&state)?;
-        let Some(epoch) = state.evidence.epoch.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); };
-        let id = self.next_operation(&mut state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
-        if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+    fn choose_evidence_locked(&self, state: &mut DocumentState, app: tauri::AppHandle, purpose: EvidencePurpose) -> Result<oneshot::Sender<()>, BridgeError> {
+        self.evidence_gate(state, purpose)?;
+        let Some(epoch) = state.evidence.epoch.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); };
+        let id = self.next_operation(state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        if id == u32::MAX { self.exhaust(state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
-        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Choose, selection_id: None, epoch };
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Choose, selection_id: None, epoch, purpose };
         let mut slot = Slot::new(owner, Operation::ChooseEvidenceFolder, None, None, None); slot.evidence = Some(binding.clone());
-        // Only an accepted evidence choose revokes the previous evidence ID.
-        // Source-project selection, drafts, assignments and G are untouched.
+        // Only an accepted new native choice changes stage/purpose and revokes
+        // the previous ID. Source drafts, assignments and G remain untouched.
         state.evidence.epoch = epoch; state.evidence.selection = None; state.evidence.result = None; state.evidence.problem = None;
         state.evidence.phase = evidence_wire::Phase::Choosing; state.evidence.operation = Some(binding);
-        let start = self.install(&mut state, slot, Job::ChooseEvidenceFolder { app }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        self.install(state, slot, Job::ChooseEvidenceFolder { app, purpose }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))
+    }
+    fn observe_evidence_locked(&self, state: &mut DocumentState, args: evidence_wire::Observe, lifecycle: bool) -> Result<oneshot::Sender<()>, BridgeError> {
+        let selected = state.evidence.selection.as_ref().filter(|selection| selection.view.selection_id == args.selection_id
+            && selection.epoch == state.evidence.epoch && selection.purpose.lifecycle() == lifecycle)
+            .ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
+        let root = selected.root.clone(); let epoch = selected.epoch; let purpose = selected.purpose;
+        self.evidence_gate(state, purpose)?;
+        let id = self.next_operation(state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        if id == u32::MAX { self.exhaust(state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe, selection_id: Some(args.selection_id), epoch, purpose };
+        let mut slot = Slot::new(owner, Operation::InspectEvidence, None, None, None); slot.evidence = Some(binding.clone());
+        state.evidence.result = None; state.evidence.problem = None; state.evidence.phase = evidence_wire::Phase::Observing; state.evidence.operation = Some(binding);
+        self.install(state, slot, Job::InspectEvidence { root, purpose }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))
+    }
+    pub(crate) fn artifact_evidence_choose(&self, app: tauri::AppHandle) -> Result<evidence_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), false)?;
+        self.reconcile_scope(Some(false)); let mut state = self.lock(); evidence_route_gate(&state, false)?; self.expire(&mut state, Instant::now());
+        let start = self.choose_evidence_locked(&mut state, app, EvidencePurpose::Candidate)?;
         let status = evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
     }
     pub(crate) fn artifact_evidence_observe(&self, args: evidence_wire::Observe) -> Result<evidence_wire::Status, BridgeError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.evidence_gate(&state)?;
-        let selected = state.evidence.selection.as_ref().filter(|selection| selection.view.selection_id == args.selection_id
-            && selection.epoch == state.evidence.epoch).ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
-        let root = selected.root.clone(); let epoch = selected.epoch;
-        let id = self.next_operation(&mut state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
-        if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
-        let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
-        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe, selection_id: Some(args.selection_id), epoch };
-        let mut slot = Slot::new(owner, Operation::InspectEvidence, None, None, None); slot.evidence = Some(binding.clone());
-        state.evidence.result = None; state.evidence.problem = None; state.evidence.phase = evidence_wire::Phase::Observing; state.evidence.operation = Some(binding);
-        let start = self.install(&mut state, slot, Job::InspectEvidence { root }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        evidence_route_gate(&self.lock(), false)?;
+        self.reconcile_scope(Some(false)); let mut state = self.lock(); evidence_route_gate(&state, false)?; self.expire(&mut state, Instant::now());
+        let start = self.observe_evidence_locked(&mut state, args, false)?;
         let status = evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    pub(crate) fn release_evidence_choose(&self, app: tauri::AppHandle, args: lifecycle_wire::Choose) -> Result<lifecycle_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), true)?;
+        self.reconcile_scope(Some(true)); let mut state = self.lock(); evidence_route_gate(&state, true)?; self.expire(&mut state, Instant::now());
+        let start = self.choose_evidence_locked(&mut state, app, EvidencePurpose::Lifecycle(args.stage))?;
+        let status = release_evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    pub(crate) fn release_evidence_observe(&self, args: lifecycle_wire::Observe) -> Result<lifecycle_wire::Status, BridgeError> {
+        evidence_route_gate(&self.lock(), true)?;
+        self.reconcile_scope(Some(true)); let mut state = self.lock(); evidence_route_gate(&state, true)?; self.expire(&mut state, Instant::now());
+        let start = self.observe_evidence_locked(&mut state, args, true)?;
+        let status = release_evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
     }
     fn consume_preview(&self, state: &mut DocumentState, token: &str, bind: bool) -> Result<Preview, AssetError> {
         if state.slot.as_ref().is_some_and(|slot| slot.preview.as_ref().is_some_and(|preview| !preview_subject_valid(state, slot, preview))) {
@@ -4083,7 +4191,7 @@ mod installed_project_observation {
                 || selected.view.display_name != evidence.selection.display_name { return None; }
             // Publication follows the original passive query's successful
             // retirement, plus the real evidence coordinator/slot retirement.
-            state.evidence.result.clone()
+            match &state.evidence.result { Some(EvidenceResult::Candidate(result)) => Some(result.clone()), _ => None }
         }
         pub(crate) fn installed_observation_candidate_final(&self, project: &ProjectWitness) -> bool {
             let state = self.lock();
@@ -4819,12 +4927,79 @@ mod tests {
         let mut state = empty_state();
         let owner = OriginalWork::new(id, false, Weak::new());
         let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe,
-            selection_id: Some("evidence-model".to_owned()), epoch: 4 };
+            selection_id: Some("evidence-model".to_owned()), epoch: 4, purpose: EvidencePurpose::Candidate };
         let mut work = Slot::new(owner.clone(), Operation::InspectEvidence, None, None, None); work.evidence = Some(binding.clone());
         state.evidence.epoch = 4; state.evidence.operation = Some(binding); state.evidence.phase = evidence_wire::Phase::Observing;
         state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id: "evidence-model".to_owned(), display_name: "Model".to_owned() },
-            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) }, epoch: 4 });
+            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) }, epoch: 4, purpose: EvidencePurpose::Candidate });
         state.slot = Some(work); (state, owner)
+    }
+    fn lifecycle_model(id: u32, stage: lifecycle_wire::Stage) -> (DocumentState, Arc<OriginalWork>) {
+        let (mut state, owner) = evidence_model(id);
+        let purpose = EvidencePurpose::Lifecycle(stage);
+        state.evidence.operation.as_mut().unwrap().purpose = purpose;
+        state.evidence.selection.as_mut().unwrap().purpose = purpose;
+        state.slot.as_mut().unwrap().evidence.as_mut().unwrap().purpose = purpose;
+        (state, owner)
+    }
+    #[test]
+    fn lifecycle_evidence_wrong_purpose_or_stage_cannot_stop_or_replace_original() {
+        let stage = lifecycle_wire::Stage::ExternalTesting;
+        let (mut state, owner) = lifecycle_model(9, stage); let at = Instant::now();
+        let before = serde_json::to_value(release_evidence_snapshot(&state, true).checked().unwrap()).unwrap();
+        for purpose in [EvidencePurpose::Candidate, EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate), EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ProductionSubmit)] {
+            assert!(cancel_evidence_locked(&mut state, purpose, &evidence_cancel(9), at).is_err());
+            assert!(!owner.stopped());
+            assert_eq!(serde_json::to_value(release_evidence_snapshot(&state, true).checked().unwrap()).unwrap(), before);
+        }
+        assert!(evidence_route_gate(&state, false).is_err());
+        assert!(evidence_selection_gate(&state).is_err());
+        assert!(!owner.stopped());
+        // Legacy status never reinterprets the lifecycle result/selection.
+        let legacy = evidence_snapshot(&state, true).checked().unwrap();
+        assert!(legacy.selection.is_none() && legacy.operation.is_none() && legacy.result.is_none());
+        // Even the off-lock original-data retirement window is not authority
+        // for a mismatched route to run expiry/reconciliation on that family.
+        state.retiring = true; state.slot = None;
+        assert!(evidence_route_gate(&state, false).is_err());
+        assert!(evidence_route_gate(&state, true).is_ok());
+        assert!(!owner.stopped());
+    }
+    #[test]
+    fn lifecycle_evidence_result_requires_exact_original_selection_stage_and_epoch() {
+        let (mut state, _) = lifecycle_model(10, lifecycle_wire::Stage::Candidate);
+        let fixture: Value = serde_json::from_str(include_str!("../../tests/fixtures/lifecycle-evidence.json")).unwrap();
+        let candidate = EvidenceResult::Lifecycle(lifecycle_wire::result(fixture["androidCandidate"].clone(), lifecycle_wire::Stage::Candidate).unwrap());
+        let external = EvidenceResult::Lifecycle(lifecycle_wire::result(fixture["androidExternal"].clone(), lifecycle_wire::Stage::ExternalTesting).unwrap());
+        let slot = state.slot.as_ref().unwrap(); assert!(state.evidence.accepts_result(slot, &candidate));
+        assert!(!state.evidence.accepts_result(slot, &external));
+        state.evidence.selection.as_mut().unwrap().purpose = EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ProductionSubmit);
+        assert!(!state.evidence.accepts_result(state.slot.as_ref().unwrap(), &candidate));
+        assert!(release_evidence_snapshot(&state, true).checked().is_err());
+        state.evidence.selection.as_mut().unwrap().purpose = EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate);
+        state.evidence.epoch += 1; assert!(!state.evidence.accepts_result(state.slot.as_ref().unwrap(), &candidate));
+        state.evidence.epoch -= 1; state.evidence.revoke(false);
+        assert!(!state.evidence.accepts_result(state.slot.as_ref().unwrap(), &candidate));
+    }
+    #[test]
+    fn lifecycle_evidence_stopping_waits_on_original_and_status_never_inspects_again() {
+        let stage = lifecycle_wire::Stage::ProductionSubmit;
+        let (mut state, owner) = lifecycle_model(11, stage); let at = Instant::now();
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Lifecycle(stage), &evidence_cancel(11), at).unwrap());
+        let first_end = state.slot.as_ref().unwrap().cleanup_end;
+        for _ in 0..3 {
+            let status = release_evidence_snapshot(&state, true).checked().unwrap();
+            assert_eq!(status.phase, evidence_wire::Phase::Stopping); assert!(status.result.is_none());
+            assert!(evidence_selection_gate(&state).is_err());
+            assert_eq!(state.slot.as_ref().unwrap().cleanup_end, first_end);
+        }
+        // Synthetic original join facts only; no native syscall/worker fixture.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        state.slot.as_mut().unwrap().phase = Phase::Idle;
+        settle_evidence_status(&mut state);
+        assert_eq!(release_evidence_snapshot(&state, true).checked().unwrap().phase, evidence_wire::Phase::Cancelled);
+        state.unknown = true;
+        assert_eq!(release_evidence_snapshot(&state, true).checked().unwrap().phase, evidence_wire::Phase::Unknown);
     }
     fn evidence_cancel(id: u32) -> evidence_wire::Cancel {
         evidence_wire::Cancel { operation_id: id.to_string(), selection_id: Some("evidence-model".to_owned()) }
@@ -4837,15 +5012,15 @@ mod tests {
         let (mut state, owner) = evidence_model(2); let at = Instant::now();
         let before = serde_json::to_value(evidence_snapshot(&state, true)).unwrap();
         // Observe1's delayed STOP cannot affect Observe2 under the same folder.
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(1), at).is_err());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(1), at).is_err());
         let mut wrong = evidence_cancel(2); wrong.selection_id = Some("evidence-other".to_owned());
-        assert!(cancel_evidence_locked(&mut state, &wrong, at).is_err());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &wrong, at).is_err());
         assert_eq!(serde_json::to_value(evidence_snapshot(&state, true)).unwrap(), before); assert!(!owner.stopped());
         state.slot.as_mut().unwrap().operation = Operation::Prepare;
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
         state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
         state.evidence.epoch += 1;
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
     }
 
     #[test]
@@ -4860,9 +5035,9 @@ mod tests {
         state.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false });
         state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: token('a'), record_revision: 1, context_revision: 9, availability: AssignmentAvailability::Available });
         let github = serde_json::to_value(state.github.snapshot()).unwrap(); let original_endpoint = owner.endpoint();
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(3), at).unwrap());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(3), at).unwrap());
         let cleanup = state.slot.as_ref().unwrap().cleanup_end;
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(3), at + WORK).unwrap());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(3), at + WORK).unwrap());
         assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup); assert_eq!(owner.endpoint(), original_endpoint);
         assert!(Arc::ptr_eq(state.context.as_ref().unwrap(), &context)); assert_eq!(state.records.len(), 1); assert!(!state.records[0].mutation_pending);
         assert_eq!(state.assignments.len(), 1); assert!(state.assignments[0].availability == AssignmentAvailability::Available);
@@ -4878,7 +5053,7 @@ mod tests {
         assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Cancelled));
         let unrelated = OriginalWork::new(4, false, Weak::new());
         state.slot = Some(Slot::new(unrelated.clone(), Operation::Prepare, None, None, None));
-        assert!(!cancel_evidence_locked(&mut state, &evidence_cancel(3), at).unwrap()); assert!(!unrelated.stopped());
+        assert!(!cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(3), at).unwrap()); assert!(!unrelated.stopped());
     }
 
     #[test]
@@ -4899,7 +5074,7 @@ mod tests {
         assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Deadline));
         assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end + CLEANUP));
         let (mut state, owner) = evidence_model(7); let end = owner.endpoint().unwrap();
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(7), end + WORK).unwrap());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(7), end + WORK).unwrap());
         assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Deadline));
         assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end + CLEANUP));
     }
@@ -4909,11 +5084,11 @@ mod tests {
 
     pub(super) fn evidence_unknown_retains_original_binding_and_cannot_become_late_success_body() {
         let (mut state, owner) = evidence_model(8); let at = Instant::now();
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(8), at).unwrap());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(8), at).unwrap());
         let cleanup = state.slot.as_ref().unwrap().cleanup_end;
         assert!(record_evidence_failure(&mut state, &owner, EvidenceProblem::CleanupUnknown, at + WORK));
         state.evidence.revoke(true);
-        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(8), at + WORK).unwrap());
+        assert!(cancel_evidence_locked(&mut state, EvidencePurpose::Candidate, &evidence_cancel(8), at + WORK).unwrap());
         assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup);
         owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
         let slot = state.slot.as_mut().unwrap(); slot.phase = Phase::Idle; slot.settlement = Settlement::LateKnown;

@@ -50,6 +50,7 @@ fn main() {
             "app_info", "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
+            "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",

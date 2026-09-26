@@ -291,6 +291,30 @@ async fn artifact_evidence_cancel(webview: Webview, request: tauri::ipc::Request
     if let Some(q) = &state.observation { q.unexpected(); } // This case uses the real chooser's Cancel widget, not STOP IPC.
     state.document.artifact_evidence_cancel(args)
 }
+#[tauri::command]
+async fn release_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    state.document.release_evidence_choose(app, crate::lifecycle_evidence_protocol::choose_request(request_body(&request)?)?)
+}
+#[tauri::command]
+async fn release_evidence_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?; crate::lifecycle_evidence_protocol::empty_request(request_body(&request)?)?;
+    state.document.release_evidence_status()
+}
+#[tauri::command]
+async fn release_evidence_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    state.document.release_evidence_observe(crate::lifecycle_evidence_protocol::observe_request(request_body(&request)?)?)
+}
+#[tauri::command]
+async fn release_evidence_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    state.document.release_evidence_cancel(crate::lifecycle_evidence_protocol::cancel_request(request_body(&request)?)?)
+}
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -1257,7 +1281,7 @@ mod owned_gtk {
                 Object::File(gtk::FileChooserDialog::with_buttons(Some(title), Some(&parent), action,
                     &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)]))
             }
-            DialogChoice::EvidenceFolder => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a candidate evidence folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
+            DialogChoice::EvidenceFolder => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a release evidence folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
                 &[("Cancel", gtk::ResponseType::Cancel), ("Select evidence folder", gtk::ResponseType::Accept)])),
             DialogChoice::Quit => Object::Message(gtk::MessageDialog::new(Some(&parent), gtk::DialogFlags::MODAL, gtk::MessageType::Question, gtk::ButtonsType::OkCancel,
                 "Unsaved in-memory changes will be lost. Choose Cancel to keep working, or OK to stop owned operations and wait for cleanup before quitting. A save already accepted may still complete; quitting does not undo committed files.")),
@@ -1496,7 +1520,7 @@ mod owned_gtk {
                 && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none()) { return Err(()); }
         let main = app.get_webview_window(MAIN_WINDOW).ok_or(())?;
         let parent: gtk::Window = main.gtk_window().map_err(|_| ())?.upcast();
-        let title = if evidence { "Choose a candidate evidence folder" } else { "Choose a mobile project folder" };
+        let title = if evidence { "Choose a release evidence folder" } else { "Choose a mobile project folder" };
         if dialog.title().as_deref() != Some(title) || !dialog.is_visible() || !dialog.is_modal()
             || dialog.transient_for().as_ref() != Some(&parent)
             || dialog.property::<gtk::FileChooserAction>("action") != gtk::FileChooserAction::SelectFolder
@@ -2340,6 +2364,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 tauri::generate_handler![
             app_info, choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
+            release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,

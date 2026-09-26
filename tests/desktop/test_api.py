@@ -233,6 +233,9 @@ class ApiPureTests(unittest.TestCase):
                     with self.assertRaises(fresh.ApiError) as evidence_refused:
                         fresh.execute("artifacts.candidate.observe", {})
                     self.assertEqual(evidence_refused.exception.code, "invalid_params")
+                    with self.assertRaises(fresh.ApiError) as lifecycle_refused:
+                        fresh.execute("release.evidence.observe", {})
+                    self.assertEqual(lifecycle_refused.exception.code, "invalid_params")
                 # Positive actual fixed-three/chain validation, not merely an
                 # early refusal which could hide a forbidden lazy import.
                 if sys.platform.startswith("linux"):
@@ -248,6 +251,12 @@ class ApiPureTests(unittest.TestCase):
                         evidence_result = fresh.execute("artifacts.candidate.observe", params)
                         self.assertEqual(evidence_result["outcome"], "consistent")
                         self.assertFalse(evidence_result["assurance"]["workflowAuthenticated"])
+                        lifecycle_result = fresh.execute("release.evidence.observe", {**params, "stage": "candidate"})
+                        self.assertEqual(lifecycle_result["outcome"], "consistent")
+                        self.assertEqual([row["stage"] for row in lifecycle_result["history"]], ["candidate"])
+                        for flag in ("artifactBytesVerified", "workflowAuthenticated", "storeStateObserved",
+                                     "comparedWithSourceProject", "releaseReady", "recoveryAuthorized"):
+                            self.assertIs(lifecycle_result["assurance"][flag], False)
                 self.assertFalse(forbidden & set(sys.modules))
                 # Negative control: the guard actually rejects a forbidden route.
                 with self.assertRaisesRegex(AssertionError, "forbidden runtime import"):
@@ -265,7 +274,7 @@ class ApiPureTests(unittest.TestCase):
                                        "github.setup.propose": True, "credentials.assess": True,
                                        "metadata.text.observe": False, "metadata.text.validate": True,
                                         "environment.requirements": True, "release.version.observe": False,
-                                        "artifacts.candidate.observe": False})
+                                        "artifacts.candidate.observe": False, "release.evidence.observe": False})
             self.assertTrue(execute("config.validate", {"draft": draft()})["valid"])
             with self.assertRaises(ApiError) as caught:
                 execute("project.snapshot", {"root": "C:\\selected"})

@@ -23,7 +23,7 @@ capabilities/help, native project selection, a static project snapshot, and
 in-memory configuration suggestion, validation and redacted review, plus
 draft-based Environment prerequisites and read-only GitHub workflow proposals,
 saved release-version reads, public locale-text observation/validation, and a
-separate candidate-document inspector.
+separate stage-bound local release-document inspector.
 Prerequisites do not inspect tools; proposals do not read or write repository
 files, verify remote refs or contact GitHub. The installed-shell and
 project/draft/guidance native checks are still pending; this is not general Linux
@@ -72,8 +72,8 @@ stay in memory until a separately reviewed and confirmed native Save.
 | Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
 | Saved Android offline checks implementation (disabled) | Saved-input consent, the existing shared offline core policy and original cancellation/finality ownership; core builds disabled | Enabled execution, a sandbox, no-network/no-write behavior, native/runtime qualification or release readiness |
 | Saved Android build implementation (disabled) | Guided saved-input review, one explicit app/variant, build progress/cancellation and captured AAB observations through the existing core | Enabled execution, fresh-source provenance, verified signing, a release candidate, qualified tools or Store approval |
-| Candidate evidence inspector (installed verification pending) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
-| Credentials, releases, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
+| Local release evidence (installed verification pending) | Separate stage-bound evidence-folder picker, fixed candidate/external/production documents, core-owned consistency checks, recorded stages and documents-only recovery guidance shared by Releases, Artifacts and Recovery | Artifact-byte inspection, authenticated/global history, source-project comparison, live Store state, release readiness or retry authority |
+| Credentials and release/recovery execution | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use the portable passive services. Its original-parent static reader
 is staged in source but **disabled pending independent ABI/native W1–W6
@@ -94,7 +94,7 @@ separate closed gates; this reader does not implement or enable them.
 The UI distinguishes *configured*, *format-valid*, *observed hint*, *unknown*,
 *partial*, *stale*, *unavailable*, *native-verified*, and *service-verified*.
 
-Recovery also lists the three file-edit controllers' retained per-project alerts
+Recovery also lists the four file-edit controllers' retained per-project alerts
 from the current app session, including alerts older than the latest result.
 This is not persistent history, journal inspection or a recovery action. Loaded
 projects can be opened through ordinary navigation without discarding drafts;
@@ -156,6 +156,13 @@ methods are:
   requests contain only the opaque selection ID. Reuses the existing provenance
   validators for document consistency, without opening artifact payloads,
   following document-directed paths, contacting services or changing files.
+- `release.evidence.observe`, `{root, expectedRoot, stage}` — separate closed
+  local-evidence contract for `candidate`, `external-testing` or
+  `production-submit`. It reads only the fixed JSON projection of that final
+  evidence folder: respectively 3, 5 or 10 documents, including nested
+  predecessor copies. Native binds the stage to its selected folder, operation
+  and result; renderer requests cannot provide paths or reclassify an old ID.
+  The legacy candidate method and wire shape remain distinct and strict.
 - `credentials.assess`, `{schemaVersion, policyVersion, context, input}` — pure
   assessment of supplied scalars and closed mechanical observations, not a
   credential reader. This does not add a renderer command or enable the vault.
@@ -172,16 +179,50 @@ gate are documented in [saved offline checks (Android)](desktop-offline-prefligh
 The separate build flow and its artifact/safety limits are documented in
 [saved Android build and inspection](desktop-android-build.md).
 
-The Artifacts screen always labels its result **“Local document consistency;
-provenance and artifact bytes unverified.”** Choosing evidence never replaces the
-source project, discards a draft or changes GitHub context. The separate original
-operation ID permits exact cancellation and status recovery after a lost reply;
-“Stopping” is not proof of settlement, and cleanup-unknown remains blocking.
-Earlier observations are shown only as stale. The inspector now has a separate
-fixed installed Linux profile, without granting private-asset authority. Its
-installed native verification is pending; preview/development builds and older
-native fixtures cannot run it. macOS/Windows evidence adapters and general
-production runtime admission remain outstanding.
+### Inspect local release evidence
+
+Releases and Artifacts share one **Choose evidence folder → Inspect documents**
+controller; Recovery displays guidance from that same observation without
+automatically choosing or reading anything. Choose a stage, then select the
+extracted **final evidence folder** from the protected release workflow, not a
+project folder, ZIP or standalone intent artifact. Keep its nested folders
+unchanged. Changing stage requires a new native choice; an existing folder ID
+cannot be reclassified.
+
+Results are labeled **“Saved documents only, not live Store status or retry
+approval.”** A complete consistent chain may show the recorded outcomes, readback
+states and authorization/execution/production runs. These are untrusted saved
+declarations, not verified operations or a global timeline. The existing core
+external-to-production predicate supplies the limited guidance; no new renderer
+release-policy evaluator, Store query, recovery journal scan or retry is added.
+Invalid, missing or inconsistent evidence withholds both summary and history.
+Missing evidence is not proof that no Store mutation occurred. Project recovery
+remains unassessed, separately from retained file-edit alerts.
+
+Reads are limited to 2 MiB per document and 6 MiB accepted bytes in total,
+including repeated predecessor copies; structural bounds are 20,000 decoded
+values per document and 60,000 total. Exact byte limits require actual EOF.
+Production's repeated selected candidate documents must agree byte-for-byte,
+but this does **not** authenticate the complete bundle inventory. Artifact
+payloads, proof documents, raw Store readbacks, ZIPs and document-directed paths
+are not opened. Artifact bytes, workflow provenance, source-project association,
+current configuration, Store state and recovery safety all remain unverified.
+
+Choosing evidence never replaces the source project, discards a draft or changes
+GitHub context. One native evidence registry and the existing original-work and
+query owners serve both strict wire families. Exact original IDs govern Stop;
+status/lost-reply reconciliation never repeats inspection. **Stopping** is not
+settlement, and unknown cleanup blocks new evidence and saved-command work.
+Earlier observations are shown only as stale.
+
+Availability intersects the installed Linux project-selection profile with the
+new exact passive method, without granting private-asset authority. macOS,
+Windows, preview/development and old fixture profiles do not gain this route.
+Pure tests and source/compiler inventory updates do not qualify the new native
+picker/route/UI path; the old candidate-only native witness is not lifecycle
+evidence. A separately reviewed source-bound installed observation remains
+required. Previous conventional payload hash admissions deliberately reject
+these changed core bytes until the final reviewed package freeze.
 
 Typed saving does **not** expand this passive method list. Configuration's separate
 finite owner and core transaction contract are documented in

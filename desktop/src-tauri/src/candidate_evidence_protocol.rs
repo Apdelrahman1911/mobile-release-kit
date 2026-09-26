@@ -44,7 +44,7 @@ pub(crate) fn selection_id(value: &str) -> bool {
     value.strip_prefix("evidence-").is_some_and(|tail| !tail.is_empty() && tail.len() <= 55
         && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
 }
-fn decimal(value: &str, positive: bool, limit: usize) -> bool {
+pub(crate) fn decimal(value: &str, positive: bool, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit && value.bytes().all(|b| b.is_ascii_digit())
         && (value == "0" && !positive || !value.starts_with('0'))
 }
@@ -52,7 +52,7 @@ pub(crate) fn operation_id(value: &str) -> Option<u32> {
     if !decimal(value, true, 10) { return None; }
     value.parse::<u32>().ok().filter(|id| *id < u32::MAX)
 }
-fn hex(value: &str, size: usize) -> bool {
+pub(crate) fn hex(value: &str, size: usize) -> bool {
     value.len() == size && value.bytes().all(|b| if size == 40 { b.is_ascii_hexdigit() } else { b.is_ascii_digit() || (b'a'..=b'f').contains(&b) })
 }
 pub(crate) fn display_text(value: &str, characters: usize, bytes: usize) -> bool {
@@ -119,13 +119,13 @@ pub(crate) fn params(root: &RegisteredRoot) -> Result<Value, BridgeError> {
 enum Kind { Manifest, Receipt, Intent }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum DocumentState { Missing, Invalid, Valid }
+pub(crate) enum DocumentState { Missing, Invalid, Valid }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document { kind: Kind, state: DocumentState }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Outcome { Consistent, Incomplete, Invalid, Inconsistent }
+pub(crate) enum Outcome { Consistent, Incomplete, Invalid, Inconsistent }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Version { marketing: String, build: u32 }
@@ -141,13 +141,19 @@ struct Artifact { logical_name: String, declared_bytes: String, sha256: String }
 struct RecordedRun { run_id: String, attempt: String }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Runs { authorized_by: RecordedRun, executed_by: RecordedRun, produced_by: RecordedRun }
+pub(crate) struct Runs { authorized_by: RecordedRun, executed_by: RecordedRun, produced_by: RecordedRun }
+impl Runs {
+    pub(crate) fn valid(&self) -> bool {
+        [&self.authorized_by, &self.executed_by, &self.produced_by].into_iter()
+            .all(|run| decimal(&run.run_id, true, 64) && decimal(&run.attempt, true, 64))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Digests { manifest: String, receipt: String, intent: String }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Summary {
+pub(crate) struct Summary {
     platform: String, application_id: String, version: Version, source: Source,
     artifacts: Vec<Artifact>, recorded_runs: Runs, document_payload_sha256: Digests,
 }
@@ -161,7 +167,11 @@ fn marketing_format(value: &str) -> bool {
     (2..=4).contains(&parts.len()) && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 impl Summary {
-    fn valid(&self) -> bool {
+    pub(crate) fn platform(&self) -> &str { &self.platform }
+    pub(crate) fn candidate_history_matches(&self, receipt: &str, intent: &str) -> bool {
+        self.document_payload_sha256.receipt == receipt && self.document_payload_sha256.intent == intent
+    }
+    pub(crate) fn valid(&self) -> bool {
         if !matches!(self.platform.as_str(), "android" | "ios") || !display_text(&self.application_id, 255, 1024)
             || self.application_id.chars().count() < 3 || !display_text(&self.version.marketing, 64, 256) || !marketing_format(&self.version.marketing)
             || !(1..=2_100_000_000).contains(&self.version.build)
@@ -177,19 +187,18 @@ impl Summary {
         if self.platform == "android" {
             if !present("android-aab") || self.artifacts.iter().any(|a| a.logical_name.starts_with("ios-")) { return false; }
         } else if !present("ios-ipa") || !present("ios-archive") || self.artifacts.iter().any(|a| a.logical_name.starts_with("android-")) { return false; }
-        [&self.recorded_runs.authorized_by, &self.recorded_runs.executed_by, &self.recorded_runs.produced_by].into_iter()
-            .all(|run| decimal(&run.run_id, true, 64) && decimal(&run.attempt, true, 64))
+        self.recorded_runs.valid()
             && [&self.document_payload_sha256.manifest, &self.document_payload_sha256.receipt, &self.document_payload_sha256.intent].into_iter().all(|sha| hex(sha, 64))
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Assurance {
+pub(crate) struct Assurance {
     level: String, documents_only: bool, artifact_bytes_verified: bool, workflow_authenticated: bool,
     store_state_observed: bool, compared_with_source_project: bool, release_ready: bool, recovery_authorized: bool,
 }
 impl Assurance {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.level == "local-document-consistency" && self.documents_only && !self.artifact_bytes_verified && !self.workflow_authenticated
             && !self.store_state_observed && !self.compared_with_source_project && !self.release_ready && !self.recovery_authorized
     }
@@ -211,7 +220,7 @@ impl Observation {
         }
     }
 }
-fn bounds(value: &Value) -> Result<(), BridgeError> {
+pub(crate) fn bounds(value: &Value) -> Result<(), BridgeError> {
     let mut pending = vec![(value, 1usize)]; let mut nodes = 0usize;
     while let Some((item, depth)) = pending.pop() {
         nodes += 1;
