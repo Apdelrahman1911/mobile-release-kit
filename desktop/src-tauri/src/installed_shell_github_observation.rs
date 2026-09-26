@@ -89,6 +89,321 @@ impl Step {
         }
     }
 }
+
+// Closed diagnostic DATA from this original Entry tick/callback only. A cache
+// is not a first-failure receipt: only the winner of the existing failure latch
+// freezes a separate copy. No Status, DOM text, token, owner or new clock lives here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntryOrigin { EvaluationBudget, Deadline, CallbackShape, ScriptError, ReadyRefused }
+impl EntryOrigin {
+    fn token(self) -> &'static str { match self {
+        Self::EvaluationBudget => "evaluation-budget", Self::Deadline => "deadline",
+        Self::CallbackShape => "callback-shape", Self::ScriptError => "script-error",
+        Self::ReadyRefused => "ready-refused",
+    }}
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EntryPresence { #[default] NotObserved, Absent, Present }
+impl EntryPresence {
+    fn token(self) -> &'static str { match self { Self::NotObserved => "not-observed", Self::Absent => "absent", Self::Present => "present" } }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EntryNative {
+    presence: EntryPresence, available: Option<bool>, reason: Option<wire::Reason>, session: Option<bool>,
+}
+impl EntryNative {
+    fn sample(status: Option<&wire::Status>) -> Self {
+        match status {
+            None => Self { presence: EntryPresence::Absent, ..Self::default() },
+            Some(status) => Self { presence: EntryPresence::Present,
+                available: Some(status.capability.read_only_session_available),
+                reason: Some(status.capability.reason), session: Some(status.session.is_some()) },
+        }
+    }
+    fn ready(self) -> bool { self.presence == EntryPresence::Present && self.available == Some(true) && self.session == Some(false) }
+    fn valid(self) -> bool {
+        match self.presence {
+            EntryPresence::NotObserved | EntryPresence::Absent => self.available.is_none() && self.reason.is_none() && self.session.is_none(),
+            EntryPresence::Present => match (self.available, self.reason, self.session) {
+                (Some(available), Some(reason), Some(_)) => available == (reason == wire::Reason::None),
+                _ => false,
+            },
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EntryDomState { #[default] NotObserved, Wait, Ready, Error }
+impl EntryDomState {
+    fn token(self) -> &'static str { match self {
+        Self::NotObserved => "not-observed", Self::Wait => "wait", Self::Ready => "ready", Self::Error => "error",
+    }}
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EntryDom {
+    state: EntryDomState, selected: Option<bool>, form: Option<bool>, submit: Option<bool>, enabled: Option<bool>,
+    help: Option<bool>, repository: Option<bool>, guide: Option<bool>,
+}
+impl EntryDom {
+    fn error() -> Self { Self { state: EntryDomState::Error, ..Self::default() } }
+    fn ready_bits(self) -> bool { self.selected == Some(true) && self.form == Some(true) && self.submit == Some(true) && self.enabled == Some(true) }
+    fn valid(self) -> bool {
+        let fields = [self.selected, self.form, self.submit, self.enabled, self.help, self.repository, self.guide];
+        match self.state {
+            EntryDomState::NotObserved | EntryDomState::Error => fields.iter().all(Option::is_none),
+            EntryDomState::Wait | EntryDomState::Ready => {
+                self.selected.is_some() && self.form.is_some() && self.submit.is_some()
+                    && (self.submit != Some(true) || self.form == Some(true))
+                    && self.enabled.is_some() == (self.submit == Some(true))
+                    && (self.form != Some(true) || self.guide.is_some())
+                    && (self.help != Some(true) || self.guide == Some(true))
+                    && if self.state == EntryDomState::Wait { !self.ready_bits() && self.help.is_none() }
+                       else { self.ready_bits() && self.help.is_some() }
+            },
+        }
+    }
+    fn parse(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.len() == 1 && value["state"] == "error" { return Some(Self::error()); }
+        const KEYS: [&str; 9] = ["state", "entryAvailable", "helpPresent", "selected", "formPresent",
+            "submitPresent", "submitEnabled", "repositoryExpected", "helpContainerPresent"];
+        if object.len() != KEYS.len() || !KEYS.iter().all(|key| object.contains_key(*key)) { return None; }
+        let nullable = |key: &str| match object.get(key) {
+            Some(Value::Null) => Some(None), Some(Value::Bool(value)) => Some(Some(*value)), _ => None,
+        };
+        let state = if value["state"] == "wait" { EntryDomState::Wait }
+            else if value["state"] == "ready" { EntryDomState::Ready } else { return None; };
+        let sample = Self { state, selected: Some(value["selected"].as_bool()?), form: Some(value["formPresent"].as_bool()?),
+            submit: Some(value["submitPresent"].as_bool()?), enabled: nullable("submitEnabled")?,
+            help: nullable("helpPresent")?, repository: nullable("repositoryExpected")?, guide: nullable("helpContainerPresent")? };
+        (sample.valid() && value["entryAvailable"].as_bool()? == sample.ready_bits()).then_some(sample)
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EntrySamples {
+    native: EntryNative, native_eval: Option<u16>, dom: EntryDom, dom_eval: Option<u16>,
+}
+impl EntrySamples {
+    fn valid(self, evaluations: u16) -> bool {
+        self.native.valid() && self.dom.valid()
+            && self.native_eval.is_some() == (self.native.presence != EntryPresence::NotObserved)
+            && self.dom_eval.is_some() == (self.dom.state != EntryDomState::NotObserved)
+            && self.native_eval.is_none_or(|value| value <= evaluations)
+            && self.dom_eval.is_none_or(|value| value > 0 && value <= evaluations)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EntryFailure { origin: EntryOrigin, evaluations: u16, samples: EntrySamples }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct EntryDiagnostic { cache: EntrySamples, frozen: Option<EntryFailure> }
+impl EntryDiagnostic {
+    fn native(&mut self, sample: EntryNative, evaluations: u16) {
+        if self.frozen.is_none() { self.cache.native = sample; self.cache.native_eval = Some(evaluations); }
+    }
+    fn dom(&mut self, sample: EntryDom, evaluations: u16) {
+        if self.frozen.is_none() { self.cache.dom = sample; self.cache.dom_eval = Some(evaluations); }
+    }
+    pub(super) fn freeze(&mut self, evaluations: u16, origin: EntryOrigin) {
+        if self.frozen.is_none() { self.frozen = Some(EntryFailure { origin, evaluations, samples: self.cache }); }
+    }
+}
+pub(super) fn latch_entry_diagnostic(failed: &AtomicBool, diagnostic: &mut EntryDiagnostic, evaluations: u16, origin: EntryOrigin) {
+    // Caller holds the existing parent Record. A generic or other first winner
+    // leaves frozen absent: reporting must not substitute the live cache.
+    if !failed.swap(true, Ordering::SeqCst) { diagnostic.freeze(evaluations, origin); }
+}
+fn entry_bool(value: Option<bool>) -> &'static str { match value { None => "na", Some(false) => "0", Some(true) => "1" } }
+fn entry_reason(value: Option<wire::Reason>) -> &'static str {
+    let Some(value) = value else { return "na"; };
+    match value {
+        wire::Reason::None => "none", wire::Reason::Unqualified => "unqualified", wire::Reason::RuntimeUnavailable => "runtime-unavailable",
+        wire::Reason::PublisherUnconfigured => "publisher-unconfigured", wire::Reason::NotConnected => "not-connected",
+        wire::Reason::InvalidInput => "invalid-input", wire::Reason::Busy => "busy", wire::Reason::Unauthorized => "unauthorized",
+        wire::Reason::Forbidden => "forbidden", wire::Reason::NotFoundOrInaccessible => "not-found-or-inaccessible",
+        wire::Reason::TargetChanged => "target-changed", wire::Reason::RateLimited => "rate-limited",
+        wire::Reason::NetworkUnavailable => "network-unavailable", wire::Reason::TlsFailed => "tls-failed",
+        wire::Reason::ResponseInvalid => "response-invalid", wire::Reason::ResponseLimit => "response-limit",
+        wire::Reason::Expired => "expired", wire::Reason::Stale => "stale", wire::Reason::Cancelled => "cancelled",
+        wire::Reason::CleanupUnknown => "cleanup-unknown",
+    }
+}
+pub(super) fn entry_failure_pair(trace: (ShellStep, Boundary), progress: super::BootstrapProgress,
+    diagnostic: EntryDiagnostic) -> Option<([u8; super::FAILURE_PAIR_LIMIT], usize)> {
+    if trace.0 != ShellStep::GitHubReadOnly(Step::Entry) { return None; }
+    let first = diagnostic.frozen;
+    if first.is_some_and(|first| first.evaluations > 128 || !first.samples.valid(first.evaluations)
+        || first.origin == EntryOrigin::EvaluationBudget && first.evaluations != 128
+        || matches!(first.origin, EntryOrigin::CallbackShape | EntryOrigin::ScriptError) && first.samples.dom.state != EntryDomState::Error
+        || first.origin == EntryOrigin::ReadyRefused && (first.samples.dom.state != EntryDomState::Ready || first.samples.dom.help != Some(false))
+        || matches!(first.origin, EntryOrigin::CallbackShape | EntryOrigin::ScriptError | EntryOrigin::ReadyRefused)
+            && (first.samples.dom_eval != Some(first.evaluations) || trace.1 != Boundary::Dom)
+        || first.origin == EntryOrigin::EvaluationBudget && trace.1 != Boundary::Settlement
+        || first.origin == EntryOrigin::Deadline && trace.1 != Boundary::Deadline) {
+        return None;
+    }
+    // An absent frozen copy emits no cached native/DOM facts or invented count.
+    let sample = first.map(|first| first.samples).unwrap_or_default();
+    let (labels, labels_len) = super::failure_pair(trace, progress, None, None)?;
+    let mut bytes = [0_u8; super::FAILURE_PAIR_LIMIT]; let mut length = 0;
+    fn append(bytes: &mut [u8; super::FAILURE_PAIR_LIMIT], length: &mut usize, part: &[u8]) -> Option<()> {
+        let end = length.checked_add(part.len())?; bytes.get_mut(*length..end)?.copy_from_slice(part); *length = end; Some(())
+    }
+    fn count(bytes: &mut [u8; super::FAILURE_PAIR_LIMIT], length: &mut usize, value: Option<u16>) -> Option<()> {
+        let Some(mut value) = value else { return append(bytes, length, b"na"); };
+        if value > 128 { return None; }
+        let mut digits = [b'0'; 3]; let mut begin = 2;
+        loop { digits[begin] += (value % 10) as u8; value /= 10; if value == 0 { break; } begin -= 1; }
+        append(bytes, length, &digits[begin..])
+    }
+    // Prefix first: a proper prefix can never masquerade as three old labels.
+    append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;o=")?;
+    append(&mut bytes, &mut length, first.map(|first| first.origin.token()).unwrap_or("not-recorded").as_bytes())?;
+    for (label, value) in [(b";eval=".as_slice(), first.map(|first| first.evaluations)), (b";ne=".as_slice(), sample.native_eval)] {
+        append(&mut bytes, &mut length, label)?; count(&mut bytes, &mut length, value)?;
+    }
+    for (label, value) in [(b";ns=".as_slice(), sample.native.presence.token()), (b";cap=".as_slice(), entry_bool(sample.native.available)),
+        (b";reason=".as_slice(), entry_reason(sample.native.reason)), (b";sess=".as_slice(), entry_bool(sample.native.session))] {
+        append(&mut bytes, &mut length, label)?; append(&mut bytes, &mut length, value.as_bytes())?;
+    }
+    append(&mut bytes, &mut length, b";de=")?; count(&mut bytes, &mut length, sample.dom_eval)?;
+    for (label, value) in [(b";dom=".as_slice(), sample.dom.state.token()), (b";sel=".as_slice(), entry_bool(sample.dom.selected)),
+        (b";form=".as_slice(), entry_bool(sample.dom.form)), (b";submit=".as_slice(), entry_bool(sample.dom.submit)),
+        (b";enabled=".as_slice(), entry_bool(sample.dom.enabled)), (b";help=".as_slice(), entry_bool(sample.dom.help)),
+        (b";repo=".as_slice(), entry_bool(sample.dom.repository)), (b";guide=".as_slice(), entry_bool(sample.dom.guide))] {
+        append(&mut bytes, &mut length, label)?; append(&mut bytes, &mut length, value.as_bytes())?;
+    }
+    append(&mut bytes, &mut length, b"\n")?; append(&mut bytes, &mut length, labels.get(..labels_len)?)?;
+    Some((bytes, length))
+}
+
+fn assert_entry_diagnostic_contracts() {
+    // Inert closed DATA only. These assertions open no owner, GUI, clock or FD.
+    let mut status = crate::github_connection_session::ConnectionState::new().snapshot();
+    status.capability.read_only_session_available = true; status.capability.reason = wire::Reason::None;
+    let native = EntryNative::sample(Some(&status));
+    let absent = EntryNative::sample(None);
+    assert!(native.valid() && native.ready() && absent.valid() && !absent.ready());
+    assert!(absent.presence == EntryPresence::Absent && absent.available.is_none()
+        && EntryNative::default().presence == EntryPresence::NotObserved);
+    let ready_value = json!({"state":"ready","entryAvailable":true,"helpPresent":true,
+        "selected":true,"formPresent":true,"submitPresent":true,"submitEnabled":true,
+        "repositoryExpected":false,"helpContainerPresent":true});
+    let ready = EntryDom::parse(&ready_value).unwrap();
+    assert!(ready.ready_bits() && ready.repository == Some(false)); // Not another readiness gate.
+    let wait_value = json!({"state":"wait","entryAvailable":false,"helpPresent":null,
+        "selected":true,"formPresent":true,"submitPresent":true,"submitEnabled":false,
+        "repositoryExpected":true,"helpContainerPresent":true});
+    let waiting = EntryDom::parse(&wait_value).unwrap();
+    assert!(waiting.state == EntryDomState::Wait && waiting.enabled == Some(false) && waiting.help.is_none());
+    assert_eq!(EntryDom::parse(&json!({"state":"error"})), Some(EntryDom::error()));
+    for invalid in [json!({"state":"wait"}), json!({"state":"error","extra":true}), json!(null)] {
+        assert!(EntryDom::parse(&invalid).is_none());
+    }
+    for (key, value) in [("entryAvailable", json!(false)), ("selected", json!(null)),
+        ("submitEnabled", json!(false)), ("helpContainerPresent", json!(false)),
+        ("repositoryExpected", json!("never export a value")), ("extra", json!(true))] {
+        let mut invalid = ready_value.clone(); invalid[key] = value;
+        assert!(EntryDom::parse(&invalid).is_none());
+    }
+    let mut false_help = ready_value.clone(); false_help["helpPresent"] = json!(false);
+    let refused = EntryDom::parse(&false_help).unwrap();
+    let trace = (ShellStep::GitHubReadOnly(Step::Entry), Boundary::Settlement);
+    let progress = super::BootstrapProgress::Advanced;
+    let mut diagnostic = EntryDiagnostic::default();
+    diagnostic.native(native, 128); diagnostic.dom(waiting, 128);
+    let failed = AtomicBool::new(false);
+    latch_entry_diagnostic(&failed, &mut diagnostic, 128, EntryOrigin::EvaluationBudget);
+    let first = diagnostic;
+    let (bytes, length) = entry_failure_pair(trace, progress, diagnostic).unwrap();
+    let frame = std::str::from_utf8(&bytes[..length]).unwrap();
+    assert!(frame.contains(";o=evaluation-budget;eval=128;ne=128;")
+        && frame.contains(";de=128;dom=wait;") && frame.contains(";enabled=0;help=na;repo=1;guide=1\n"));
+    diagnostic.native(absent, 128); diagnostic.dom(EntryDom::error(), 128);
+    latch_entry_diagnostic(&failed, &mut diagnostic, 128, EntryOrigin::ScriptError);
+    let mut late_trace = trace; let mut late_progress = progress;
+    if super::latch_failure(&failed, &mut late_trace, &mut late_progress,
+        (trace.0, Boundary::Deadline), progress) { diagnostic.freeze(128, EntryOrigin::Deadline); }
+    assert_eq!(diagnostic, first);
+    assert!(late_trace == trace && late_progress == progress);
+
+    // An earlier generic winner freezes NOTHING; never promote its live cache.
+    let mut generic = EntryDiagnostic::default();
+    generic.native(native, 128); generic.dom(waiting, 128);
+    let generic_failed = AtomicBool::new(true);
+    latch_entry_diagnostic(&generic_failed, &mut generic, 128, EntryOrigin::EvaluationBudget);
+    generic.dom(refused, 128);
+    assert!(generic.frozen.is_none());
+    assert_eq!(entry_failure_pair(trace, progress, generic),
+        entry_failure_pair(trace, progress, EntryDiagnostic::default()));
+    let (bytes, length) = entry_failure_pair(trace, progress, generic).unwrap();
+    assert!(std::str::from_utf8(&bytes[..length]).unwrap().starts_with(
+        "MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;o=not-recorded;eval=na;ne=na;ns=not-observed;cap=na;reason=na;sess=na;de=na;dom=not-observed;sel=na;form=na;submit=na;enabled=na;help=na;repo=na;guide=na\n"));
+
+    let deadline_failed = AtomicBool::new(false);
+    let mut deadline = EntryDiagnostic::default(); deadline.native(absent, 127);
+    let mut deadline_trace = trace; let mut deadline_progress = progress;
+    if super::latch_failure(&deadline_failed, &mut deadline_trace, &mut deadline_progress,
+        (trace.0, Boundary::Deadline), progress) { deadline.freeze(127, EntryOrigin::Deadline); }
+    let deadline_first = deadline;
+    deadline.dom(waiting, 128);
+    latch_entry_diagnostic(&deadline_failed, &mut deadline, 128, EntryOrigin::EvaluationBudget);
+    assert_eq!(deadline, deadline_first);
+    let (bytes, length) = entry_failure_pair(deadline_trace, deadline_progress, deadline).unwrap();
+    assert!(std::str::from_utf8(&bytes[..length]).unwrap().contains(
+        ";o=deadline;eval=127;ne=127;ns=absent;cap=na;reason=na;sess=na;de=na;dom=not-observed;"));
+    let mut invalid = first; invalid.frozen.as_mut().unwrap().evaluations = 127;
+    assert!(entry_failure_pair(trace, progress, invalid).is_none());
+    assert!(entry_failure_pair((ShellStep::GitHubReadOnly(Step::Token), trace.1), progress, first).is_none());
+
+    // Maximal representatives for each closed native/DOM shape: all bounded
+    // counters use three digits; nullable DOM fields use na whenever legal.
+    // 0/1 have equal length, and every shorter count/field only shrinks a frame.
+    let reasons = [wire::Reason::None, wire::Reason::Unqualified, wire::Reason::RuntimeUnavailable,
+        wire::Reason::PublisherUnconfigured, wire::Reason::NotConnected, wire::Reason::InvalidInput,
+        wire::Reason::Busy, wire::Reason::Unauthorized, wire::Reason::Forbidden, wire::Reason::NotFoundOrInaccessible,
+        wire::Reason::TargetChanged, wire::Reason::RateLimited, wire::Reason::NetworkUnavailable, wire::Reason::TlsFailed,
+        wire::Reason::ResponseInvalid, wire::Reason::ResponseLimit, wire::Reason::Expired, wire::Reason::Stale,
+        wire::Reason::Cancelled, wire::Reason::CleanupUnknown];
+    let mut natives = vec![EntryNative::default(), absent];
+    natives.extend(reasons.into_iter().map(|reason| EntryNative { presence: EntryPresence::Present,
+        available: Some(reason == wire::Reason::None), reason: Some(reason), session: Some(false) }));
+    let doms = [EntryDom::default(), EntryDom::error(),
+        EntryDom { state: EntryDomState::Wait, selected: Some(false), form: Some(false), submit: Some(false), ..EntryDom::default() },
+        EntryDom { state: EntryDomState::Ready, selected: Some(true), form: Some(true), submit: Some(true),
+            enabled: Some(true), help: Some(false), guide: Some(false), ..EntryDom::default() }];
+    let longest_progress = super::BootstrapProgress::AppInfoReturnedBeforeHold;
+    for boundary in [Boundary::Bootstrap, Boundary::Request, Boundary::Result, Boundary::Dom,
+        Boundary::Gtk, Boundary::Settlement, Boundary::Deadline, Boundary::Exit] {
+        assert!(boundary.failure_line().len() <= Boundary::Settlement.failure_line().len());
+    }
+    for sample in [super::BootstrapProgress::NotSampled, super::BootstrapProgress::Attachment,
+        super::BootstrapProgress::PageLoad, super::BootstrapProgress::OriginalRegistrySample,
+        super::BootstrapProgress::AppInfoCatalog, super::BootstrapProgress::HeldAppInfo,
+        super::BootstrapProgress::Advanced, longest_progress] {
+        assert!(sample.failure_line().len() <= longest_progress.failure_line().len());
+    }
+    let mut maximum = 0;
+    for native in natives {
+        for dom in doms {
+            for origin in [EntryOrigin::EvaluationBudget, EntryOrigin::Deadline, EntryOrigin::CallbackShape,
+                EntryOrigin::ScriptError, EntryOrigin::ReadyRefused] {
+                let boundary = match origin { EntryOrigin::EvaluationBudget => Boundary::Settlement,
+                    EntryOrigin::Deadline => Boundary::Deadline, _ => Boundary::Dom };
+                let samples = EntrySamples { native, native_eval: (native.presence != EntryPresence::NotObserved).then_some(128),
+                    dom, dom_eval: (dom.state != EntryDomState::NotObserved).then_some(128) };
+                let diagnostic = EntryDiagnostic { cache: EntrySamples::default(),
+                    frozen: Some(EntryFailure { origin, evaluations: 128, samples }) };
+                if let Some((_, length)) = entry_failure_pair((trace.0, boundary), longest_progress, diagnostic) {
+                    maximum = maximum.max(length);
+                }
+            }
+        }
+    }
+    let (_, unrecorded) = entry_failure_pair(trace, longest_progress, EntryDiagnostic::default()).unwrap();
+    assert!(unrecorded <= maximum);
+    // Includes repo and guide, plus the longest existing three label lines.
+    assert_eq!(maximum, 380); assert!(maximum <= super::FAILURE_PAIR_LIMIT);
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Command { Status, Connect, Refresh, Disconnect }
 #[derive(Default)]
@@ -113,6 +428,9 @@ impl Control {
     }
     fn original(&self)->Option<Arc<Observation>> { self.original.lock().ok()?.as_ref()?.upgrade() }
     fn fail(&self) { self.failed.store(true,Ordering::SeqCst);if let Some(q)=self.original(){q.fail();} }
+    fn entry_fail(&self, q: &Observation, shell: &mut super::Record, origin: EntryOrigin) {
+        self.failed.store(true, Ordering::SeqCst); q.github_entry_fail(shell, origin);
+    }
     fn record(&self)->Option<std::sync::MutexGuard<'_,Record>> {
         match self.record.lock(){Ok(record)=>Some(record),Err(_)=>{self.fail();None}}
     }
@@ -210,10 +528,20 @@ impl Control {
         drop(shell);
         let Some(mut r)=self.record() else{return false;};
         if r.project_id.is_none(){r.project_id=project;}
+        if step == Step::Entry {
+            let sample = EntryNative::sample(r.latest.as_ref());
+            let ready = sample.ready();
+            drop(r); // Never acquire the parent Record under this Control guard.
+            let Some(mut shell) = q.record() else { return false; };
+            if shell.step == ShellStep::GitHubReadOnly(Step::Entry) && !q.failed.load(Ordering::SeqCst) {
+                let evaluations = shell.evaluations;
+                shell.github_entry.native(sample, evaluations);
+            }
+            return ready;
+        }
         let Some(status)=r.latest.as_ref() else{return false;};
         let state=app.state::<super::super::ShellState>();
         match step {
-            Step::Entry=>status.capability.read_only_session_available && status.session.is_none(),
             Step::Connect=>r.peer_ready && r.token_supplied && r.replies[0]==0,
             Step::Observe if self.case.active_control()=>r.replies[0]==1
                 && status.operation.as_ref().is_some_and(|o|o.phase==wire::Phase::Running)
@@ -236,6 +564,27 @@ impl Control {
         let Some(q)=self.original() else{self.fail();return;};
         let Some(mut shell)=q.record_at(Boundary::Dom) else{return;};
         if shell.step!=ShellStep::GitHubReadOnly(step)||shell.pending.take()!=Some(Pending::Dom(ShellStep::GitHubReadOnly(step))){self.fail();return;}
+        if step == Step::Entry {
+            // Capture the existing wait callback before its generic early return.
+            // No Control lock or native resample is taken under this parent guard.
+            let (sample, origin) = match EntryDom::parse(value) {
+                None => (EntryDom::error(), Some(EntryOrigin::CallbackShape)),
+                Some(sample) => {
+                    let origin = match sample.state {
+                        EntryDomState::Error => Some(EntryOrigin::ScriptError),
+                        EntryDomState::Ready if sample.help != Some(true) => Some(EntryOrigin::ReadyRefused),
+                        _ => None,
+                    };
+                    (sample, origin)
+                },
+            };
+            if !q.failed.load(Ordering::SeqCst) {
+                let evaluations = shell.evaluations;
+                shell.github_entry.dom(sample, evaluations);
+            }
+            if let Some(origin) = origin { self.entry_fail(&q, &mut shell, origin); return; }
+            if sample.state == EntryDomState::Wait { return; }
+        }
         let Some(object)=value.as_object() else{self.fail();return;};
         if value["state"]=="wait"&&object.len()==1{return;}
         if value["state"]!="ready"{self.fail();return;}
@@ -249,7 +598,7 @@ impl Control {
             }
         }
         let valid=match step {
-            Step::Entry=>object.len()==3&&value["entryAvailable"]==true&&value["helpPresent"]==true,
+            Step::Entry=>object.len()==9&&value["entryAvailable"]==true&&value["helpPresent"]==true,
             Step::Token=>object.len()==2&&value["supplied"]==true,
             Step::Observe|Step::ObserveRefresh|Step::ReadStatus|Step::Disconnected|Step::Unknown=>true,
             _=>object.len()==1,
@@ -413,6 +762,7 @@ fn dom_observation(value:&Value,status:&wire::Status)->DomObservation {
     }
 }
 pub(super) fn assert_contracts() {
+    assert_entry_diagnostic_contracts();
     crate::supervisor::github_tls_peer_owner::installed::assert_contracts();
     let mut status=crate::github_connection_session::ConnectionState::new().snapshot();
     status.revision=2;
@@ -458,9 +808,13 @@ pub(super) fn script(step:Step)->Option<String> {
             if(!b||b.disabled)return {state:'wait'};show(b);b.click();return {state:'ready'};"#,
         Step::EnterRepository=>r#"if(!selected())return {state:'wait'};const input=card()?.querySelector('input[placeholder="OWNER/REPO"]');
             if(!input||input.disabled)return {state:'wait'};edit(input,'owner/app');return {state:'ready'};"#,
-        Step::Entry=>r#"const c=card(),form=c?.querySelector('form.github-form'),b=form?.querySelector('button[type="submit"]');
-            if(!selected()||!form||!b||b.disabled)return {state:'wait'};show(form);
-            return {state:'ready',entryAvailable:true,helpPresent:!!c.querySelector('[aria-label="Core GitHub connection help"]')&&text(c).includes('No GitHub App registration is needed')};"#,
+        Step::Entry=>r#"const c=card(),form=c?.querySelector('form.github-form'),b=form?.querySelector('button[type="submit"]'),s=!!selected();
+            const input=c?.querySelector('input[placeholder="OWNER/REPO"]');
+            const sample={entryAvailable:s&&!!form&&!!b&&!b.disabled,helpPresent:null,selected:s,formPresent:!!form,submitPresent:!!b,
+                submitEnabled:b?!b.disabled:null,repositoryExpected:input?input.value==='owner/app':null,
+                helpContainerPresent:c?!!c.querySelector('[aria-label="Core GitHub connection help"]'):null};
+            if(!s||!form||!b||b.disabled)return {state:'wait',...sample};show(form);
+            return {state:'ready',...sample,helpPresent:!!c.querySelector('[aria-label="Core GitHub connection help"]')&&text(c).includes('No GitHub App registration is needed')};"#,
         Step::EnterToken=>r#"const input=card()?.querySelector('form.github-form input[type="password"]');
             if(!input||input.disabled)return {state:'wait'};edit(input,'INERT_NOT_A_CREDENTIAL');return {state:'ready'};"#,
         Step::Token=>r#"const input=card()?.querySelector('form.github-form input[type="password"]');

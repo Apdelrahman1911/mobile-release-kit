@@ -2866,6 +2866,82 @@ class InstalledToolsNamespaceContracts(unittest.TestCase):
             namespace.assert_not_called()
 
 
+
+class InstalledGitHubEntryDiagnosticSourceContracts(unittest.TestCase):
+    def test_entry_samples_existing_tick_and_wait_without_a_new_nested_record_lock(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        tick = source.split("    pub(super) fn tick(", 1)[1].split("    pub(super) fn dom(", 1)[0]
+        entry = tick.split("        if step == Step::Entry {", 1)[1].split("        let Some(status)", 1)[0]
+        self.assertLess(entry.index("EntryNative::sample(r.latest.as_ref())"), entry.index("drop(r);"))
+        self.assertLess(entry.index("drop(r);"), entry.index("q.record()"))
+        self.assertIn("shell.step == ShellStep::GitHubReadOnly(Step::Entry) && !q.failed.load(Ordering::SeqCst)", entry)
+        self.assertIn("let evaluations = shell.evaluations;", entry)
+        self.assertIn("shell.github_entry.native(sample, evaluations);", entry)
+        self.assertIn("return ready;", entry)
+        dom = source.split("    pub(super) fn dom(", 1)[1].split("    pub(super) fn ready_to_close(", 1)[0]
+        capture = dom.split("        if step == Step::Entry {", 1)[1].split("        let Some(object)", 1)[0]
+        self.assertNotIn("self.record()", capture)
+        self.assertNotIn("r.latest", capture)
+        self.assertIn("EntryDom::parse(value)", capture)
+        self.assertLess(capture.index("shell.github_entry.dom(sample, evaluations);"),
+                        capture.index("if sample.state == EntryDomState::Wait { return; }"))
+        self.assertLess(dom.index("EntryDom::parse(value)"), dom.index('if value["state"]=="wait"&&object.len()==1{return;}'))
+        self.assertIn('Step::Entry=>object.len()==9&&value["entryAvailable"]==true&&value["helpPresent"]==true,', dom)
+        self.assertIn("Step::Entry=>{r.entry=true;Step::EnterToken}", dom)
+
+    def test_entry_first_winner_uses_original_budget_deadline_and_single_frame_write(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        github = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        self.assertIn("fn fail(&self) { self.failed.store(true, Ordering::SeqCst); }", source)
+        self.assertIn("let end = start + Duration::from_secs(45);", source)
+        helper = source.split("    fn github_entry_fail(", 1)[1].split("    fn session_wait(", 1)[0]
+        self.assertIn("r.step == Step::GitHubReadOnly(github::Step::Entry) && r.trace.0 == r.step", helper)
+        self.assertIn("github::latch_entry_diagnostic(&self.failed, &mut r.github_entry, evaluations, origin);", helper)
+        budget = source.split("                    if r.evaluations >= 128 {", 1)[1].split("Pending::Dom(step)", 1)[0]
+        self.assertIn("if step == Step::GitHubReadOnly(github::Step::Entry)", budget)
+        self.assertIn("self.github_entry_fail(&mut r, github::EntryOrigin::EvaluationBudget);", budget)
+        self.assertIn("} else { self.fail(); }", budget)
+        self.assertIn("r.evaluations += 1;", budget)
+        report = source.split("    fn report_failure(&self)", 1)[1].split("    fn report_failure_handoff(", 1)[0]
+        self.assertIn("self.record.try_lock()", report)
+        self.assertIn("r.paths.diagnostic, r.github_entry), Err(_) => return", report)
+        self.assertLess(report.index("Err(_) => return"), report.index("github::entry_failure_pair("))
+        self.assertEqual(report.count("rustix::io::write(&self.failure_sink, pair)"), 1)
+        self.assertIn("} else { failure_pair(trace, progress, session, path) };", report)
+        self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
+        latch = github.split("pub(super) fn latch_entry_diagnostic(", 1)[1].split("fn entry_bool(", 1)[0]
+        self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
+        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { diagnostic.freeze(evaluations, origin); }", latch)
+        frame = github.split("pub(super) fn entry_failure_pair(", 1)[1].split("fn assert_entry_diagnostic_contracts(", 1)[0]
+        self.assertIn("let first = diagnostic.frozen;", frame)
+        self.assertNotIn("diagnostic.cache", frame)
+        self.assertNotIn("serde_json", frame)
+        self.assertNotIn("format!", frame)
+        self.assertIn('unwrap_or("not-recorded")', frame)
+        self.assertIn("first.map(|first| first.samples).unwrap_or_default()", frame)
+        self.assertIn("assert_eq!(maximum, 380); assert!(maximum <= super::FAILURE_PAIR_LIMIT);", github)
+        self.assertIn("    assert_entry_diagnostic_contracts();", github)
+
+    def test_entry_script_adds_only_boolean_bits_on_the_same_wait_ready_callback(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        script = source.split("pub(super) fn script(step:Step)", 1)[1]
+        entry = script.split('Step::Entry=>r#"', 1)[1].split('        Step::EnterToken=>r#"', 1)[0]
+        self.assertIn("const input=c?.querySelector('input[placeholder=\"OWNER/REPO\"]');", entry)
+        self.assertIn("repositoryExpected:input?input.value==='owner/app':null", entry)
+        self.assertIn("helpContainerPresent:c?!!c.querySelector('[aria-label=\"Core GitHub connection help\"]'):null", entry)
+        self.assertIn("entryAvailable:s&&!!form&&!!b&&!b.disabled,helpPresent:null", entry)
+        self.assertIn("submitEnabled:b?!b.disabled:null", entry)
+        self.assertIn("if(!s||!form||!b||b.disabled)return {state:'wait',...sample};show(form);", entry)
+        self.assertIn("return {state:'ready',...sample,helpPresent:!!c.querySelector(", entry)
+        for forbidden in ("password", "setTimeout", "setInterval", "fetch(", "invoke(", "console.", "token", "input.value,"):
+            self.assertNotIn(forbidden, entry)
+        diagnostic = source.split("// Closed diagnostic DATA", 1)[1].split("fn assert_entry_diagnostic_contracts(", 1)[0]
+        self.assertIn('const KEYS: [&str; 9]', diagnostic)
+        self.assertIn("EntryPresence::NotObserved | EntryPresence::Absent", diagnostic)
+        self.assertIn("self.help.is_none()", diagnostic)
+        # Source correspondence is not Rust execution or installed GTK evidence.
+
+
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_fixture_parent_is_readable_but_diagnostic_parent_stays_control_bound(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
@@ -3866,7 +3942,8 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn(winner, deadline)
         self.assertLess(deadline.index("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)"), deadline.index(winner))
         self.assertLess(deadline.index("PathDiagnostic::sample(r.step,self.start.elapsed().as_millis(),r.paths.diagnostic)"), deadline.index(winner))
-        self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;\n                }", deadline)
+        self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;\n                    if r.step == Step::GitHubReadOnly(github::Step::Entry) {", deadline)
+        self.assertIn("r.github_entry.freeze(evaluations, github::EntryOrigin::Deadline);", deadline)
         latch = source.split("fn latch_failure(", 1)[1].split("fn latch_session_diagnostic(", 1)[0]
         self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
         self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", latch)

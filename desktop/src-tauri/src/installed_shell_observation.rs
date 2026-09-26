@@ -3262,7 +3262,7 @@ struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
     project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord, version: VersionRecord,
-    session: SessionRecord,
+    session: SessionRecord, github_entry: github::EntryDiagnostic,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
     capability: bool, generation: Option<String>, native_revision: Option<u32>, sessions: Vec<SaveSession>, requests: [u8; 4],
@@ -3328,7 +3328,7 @@ impl Observation {
                 bootstrap: BootstrapProgress::NotSampled,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
                 project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
-                session: SessionRecord::new(case.session()),
+                session: SessionRecord::new(case.session()), github_entry: github::EntryDiagnostic::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
                 capability: false, generation: None, native_revision: None, sessions: Vec::new(), requests: [0; 4],
@@ -3352,6 +3352,12 @@ impl Observation {
             self.path_sample(&mut r);
         }
         Some(r)
+    }
+    fn github_entry_fail(&self, r: &mut Record, origin: github::EntryOrigin) {
+        if r.step == Step::GitHubReadOnly(github::Step::Entry) && r.trace.0 == r.step {
+            let evaluations = r.evaluations;
+            github::latch_entry_diagnostic(&self.failed, &mut r.github_entry, evaluations, origin);
+        } else { self.fail(); }
     }
     fn session_wait(&self, r: &mut Record, wait: SessionWait) {
         if !self.failed.load(Ordering::SeqCst) {
@@ -3407,13 +3413,18 @@ impl Observation {
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let (trace, progress, session, path) = match self.record.try_lock() { Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic), Err(_) => return };
+        let (trace, progress, session, path, github_entry) = match self.record.try_lock() {
+            Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.github_entry), Err(_) => return };
+
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed enums and bounded cached counters/recipe indices, outside every
         // record/GTK lock. No identifiers, DTOs, inputs or exception bodies.
         // One unbuffered attempt before stderr: partial/EINTR/error is not
         // retried, formatted or allowed to affect the original failure latch.
-        if let Some((bytes, length)) = failure_pair(trace, progress, session, path) {
+        let frame = if trace.0 == Step::GitHubReadOnly(github::Step::Entry) {
+            github::entry_failure_pair(trace, progress, github_entry)
+        } else { failure_pair(trace, progress, session, path) };
+        if let Some((bytes, length)) = frame {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
         }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
@@ -5077,6 +5088,10 @@ impl Observation {
                 if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {
                     r.session.diagnostic = diagnostic;
                     r.paths.diagnostic = path_diagnostic;
+                    if r.step == Step::GitHubReadOnly(github::Step::Entry) {
+                        let evaluations = r.evaluations;
+                        r.github_entry.freeze(evaluations, github::EntryOrigin::Deadline);
+                    }
                 }
             }
             self.failure_tick(app); return;
@@ -5282,7 +5297,12 @@ impl Observation {
                 Step::Cancel | Step::SetProject | Step::SelectProject => Pending::Project(step),
                 Step::CancelEvidence | Step::SetEvidence | Step::SelectEvidence => Pending::Evidence(step),
                 _ => {
-                    if r.evaluations >= 128 { self.fail(); return; }
+                    if r.evaluations >= 128 {
+                        if step == Step::GitHubReadOnly(github::Step::Entry) {
+                            self.github_entry_fail(&mut r, github::EntryOrigin::EvaluationBudget);
+                        } else { self.fail(); }
+                        return;
+                    }
                     r.evaluations += 1; Pending::Dom(step)
                 },
             });

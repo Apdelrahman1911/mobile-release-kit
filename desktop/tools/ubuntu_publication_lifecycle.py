@@ -5824,10 +5824,90 @@ def _shell_session_assessment_failure(rejection, origin, classification, cause):
     return {"origin": origin.decode("ascii"), "class": classification.decode("ascii"), "cause": cause.decode("ascii")}
 
 
+
+def _shell_github_entry_labels(lines):
+    """Closed first-failure DATA; sample counters are not an atomic native/DOM view."""
+    if (len(lines) != 4 or lines[1] != b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubEntry\n"
+            or lines[2] not in SHELL_FAILURE_BOUNDARIES or lines[3] not in SHELL_BOOTSTRAP_PROGRESS):
+        return None
+    match = re.fullmatch(
+        rb"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;o=(not-recorded|evaluation-budget|deadline|callback-shape|script-error|ready-refused)"
+        rb";eval=(na|0|[1-9][0-9]{0,2});ne=(na|0|[1-9][0-9]{0,2});ns=(not-observed|absent|present)"
+        rb";cap=(na|0|1);reason=([a-z-]{2,25});sess=(na|0|1);de=(na|0|[1-9][0-9]{0,2})"
+        rb";dom=(not-observed|wait|ready|error);sel=(na|0|1);form=(na|0|1);submit=(na|0|1)"
+        rb";enabled=(na|0|1);help=(na|0|1);repo=(na|0|1);guide=(na|0|1)\n", lines[0])
+    if match is None:
+        return None
+    origin, evaluations, native_eval, presence, capability, reason, session, dom_eval, dom, *bits = match.groups()
+    reasons = {b"none", b"unqualified", b"runtime-unavailable", b"publisher-unconfigured", b"not-connected",
+               b"invalid-input", b"busy", b"unauthorized", b"forbidden", b"not-found-or-inaccessible",
+               b"target-changed", b"rate-limited", b"network-unavailable", b"tls-failed", b"response-invalid",
+               b"response-limit", b"expired", b"stale", b"cancelled", b"cleanup-unknown"}
+    if reason not in reasons | {b"na"}:
+        return None
+    evaluations, native_eval, dom_eval = (None if value == b"na" else int(value)
+                                         for value in (evaluations, native_eval, dom_eval))
+    boolean = {b"na": None, b"0": False, b"1": True}
+    capability, session = boolean[capability], boolean[session]
+    selected, form, submit, enabled, help_present, repository, guide = (boolean[value] for value in bits)
+    observed = (selected, form, submit, enabled, help_present, repository, guide)
+    if origin == b"not-recorded":
+        if (any(value is not None for value in (evaluations, native_eval, dom_eval, capability, session, *observed))
+                or presence != b"not-observed" or dom != b"not-observed" or reason != b"na"):
+            return None
+    elif (evaluations is None or evaluations > 128
+          or native_eval is not None and native_eval > evaluations
+          or dom_eval is not None and not 1 <= dom_eval <= evaluations
+          or origin == b"evaluation-budget" and evaluations != 128):
+        return None
+    if ((native_eval is None) != (presence == b"not-observed")
+            or (dom_eval is None) != (dom == b"not-observed")):
+        return None
+    if presence == b"present":
+        if capability is None or session is None or reason == b"na" or capability != (reason == b"none"):
+            return None
+    elif capability is not None or session is not None or reason != b"na":
+        return None
+    if dom in {b"not-observed", b"error"}:
+        if any(value is not None for value in observed):
+            return None
+    else:
+        ready = selected is True and form is True and submit is True and enabled is True
+        if (any(value is None for value in (selected, form, submit))
+                or submit is True and form is not True
+                or (enabled is not None) != (submit is True)
+                or form is True and guide is None
+                or help_present is True and guide is not True
+                or dom == b"wait" and (ready or help_present is not None)
+                or dom == b"ready" and (not ready or help_present is None)):
+            return None
+    boundary = lines[2][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii")
+    if (origin == b"evaluation-budget" and boundary != "settlement"
+            or origin == b"deadline" and boundary != "deadline"
+            or origin in {b"callback-shape", b"script-error", b"ready-refused"}
+            and (boundary != "dom" or dom_eval != evaluations)
+            or origin in {b"callback-shape", b"script-error"} and dom != b"error"
+            or origin == b"ready-refused" and (dom != b"ready" or help_present is not False)):
+        return None
+    return {"step": "GitHubEntry", "boundary": boundary,
+            "bootstrapProgress": lines[3][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii"),
+            "githubEntry": {"origin": origin.decode("ascii"), "evaluations": evaluations,
+                            "native": {"sampleEvaluations": native_eval, "status": presence.decode("ascii"),
+                                       "capabilityAvailable": capability, "capabilityReason": None if reason == b"na" else reason.decode("ascii"),
+                                       "sessionPresent": session},
+                            "dom": {"sampleEvaluations": dom_eval, "state": dom.decode("ascii"),
+                                    "pageSelected": selected, "formPresent": form, "submitPresent": submit,
+                                    "submitEnabled": enabled, "helpPresent": help_present,
+                                    "repositoryExpected": repository, "helpContainerPresent": guide}}}
+
+
 def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
     lines = raw.splitlines(keepends=True)
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE="):
+        # Only an entire prefix-first four-line GitHubEntry frame is admitted.
+        return _shell_github_entry_labels(lines)
     path_detail = None
     if lines[0].startswith(b"MRK_INSTALLED_SHELL_PATH_FAILURE="):
         # Prefix first, so no proper prefix of this new frame can masquerade

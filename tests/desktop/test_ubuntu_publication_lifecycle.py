@@ -5165,6 +5165,143 @@ class SessionFixtureContracts(unittest.TestCase):
         self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(session)))
 
 
+
+class GitHubEntryFailureLabelContracts(unittest.TestCase):
+    @staticmethod
+    def frame(*, boundary=b"settlement", progress=b"advanced", **changes):
+        fields = {
+            "o": b"evaluation-budget", "eval": b"128", "ne": b"128", "ns": b"present",
+            "cap": b"1", "reason": b"none", "sess": b"0", "de": b"128", "dom": b"wait",
+            "sel": b"1", "form": b"1", "submit": b"1", "enabled": b"0", "help": b"na",
+            "repo": b"1", "guide": b"1",
+        }
+        fields.update(changes)
+        return (b"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;"
+                + b";".join(key.encode("ascii") + b"=" + value for key, value in fields.items()) + b"\n"
+                + b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubEntry\n"
+                + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary + b"\n"
+                + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=" + progress + b"\n")
+
+    def test_entry_roundtrip_closed_native_and_same_callback_dom_samples(self):
+        parsed = L._shell_label_pair(self.frame())
+        self.assertEqual(parsed, {"step": "GitHubEntry", "boundary": "settlement", "bootstrapProgress": "advanced",
+            "githubEntry": {"origin": "evaluation-budget", "evaluations": 128,
+                "native": {"sampleEvaluations": 128, "status": "present", "capabilityAvailable": True,
+                           "capabilityReason": "none", "sessionPresent": False},
+                "dom": {"sampleEvaluations": 128, "state": "wait", "pageSelected": True, "formPresent": True,
+                        "submitPresent": True, "submitEnabled": False, "helpPresent": None,
+                        "repositoryExpected": True, "helpContainerPresent": True}}})
+        reasons = (b"none", b"unqualified", b"runtime-unavailable", b"publisher-unconfigured", b"not-connected",
+                   b"invalid-input", b"busy", b"unauthorized", b"forbidden", b"not-found-or-inaccessible",
+                   b"target-changed", b"rate-limited", b"network-unavailable", b"tls-failed", b"response-invalid",
+                   b"response-limit", b"expired", b"stale", b"cancelled", b"cleanup-unknown")
+        for reason in reasons:
+            native = L._shell_label_pair(self.frame(reason=reason, cap=b"1" if reason == b"none" else b"0"))["githubEntry"]["native"]
+            self.assertEqual(native["capabilityReason"], reason.decode("ascii"))
+        for presence in (b"absent", b"not-observed"):
+            native = L._shell_label_pair(self.frame(ns=presence, ne=b"128" if presence == b"absent" else b"na",
+                                                    cap=b"na", reason=b"na", sess=b"na"))["githubEntry"]["native"]
+            self.assertEqual(native["status"], presence.decode("ascii"))
+            self.assertIsNone(native["capabilityAvailable"])
+            self.assertIsNone(native["sessionPresent"])
+        # Native and DOM stamps are independent global-counter samples, not a join.
+        earlier = L._shell_label_pair(self.frame(ne=b"17", de=b"93"))["githubEntry"]
+        self.assertEqual((earlier["native"]["sampleEvaluations"], earlier["dom"]["sampleEvaluations"]), (17, 93))
+        unavailable = dict(de=b"na", dom=b"not-observed", sel=b"na", form=b"na", submit=b"na",
+                           enabled=b"na", help=b"na", repo=b"na", guide=b"na")
+        for origin in (b"callback-shape", b"script-error"):
+            data = dict(unavailable, de=b"128", dom=b"error")
+            self.assertEqual(L._shell_label_pair(self.frame(o=origin, boundary=b"dom", **data))["githubEntry"]["origin"],
+                             origin.decode("ascii"))
+        refused = L._shell_label_pair(self.frame(o=b"ready-refused", boundary=b"dom", dom=b"ready",
+                                                enabled=b"1", help=b"0", repo=b"0", guide=b"0"))
+        self.assertFalse(refused["githubEntry"]["dom"]["repositoryExpected"])
+        self.assertFalse(refused["githubEntry"]["dom"]["helpPresent"])
+        deadline = L._shell_label_pair(self.frame(o=b"deadline", boundary=b"deadline", eval=b"127", ne=b"127", **unavailable))
+        self.assertEqual(deadline["githubEntry"]["evaluations"], 127)
+        generic = L._shell_label_pair(self.frame(o=b"not-recorded", eval=b"na", ne=b"na", ns=b"not-observed",
+                                                cap=b"na", reason=b"na", sess=b"na", **unavailable))["githubEntry"]
+        self.assertIsNone(generic["evaluations"])
+        self.assertEqual(generic["native"]["status"], "not-observed")
+        self.assertTrue(all(value is None for key, value in generic["dom"].items() if key != "state"))
+
+    def test_entry_rejects_every_prefix_extra_field_and_unbound_shape(self):
+        good = self.frame()
+        for end in range(len(good)):
+            for raw in (good[:end], good[:end] + b"\n"):
+                if raw != good:
+                    with self.subTest(prefix=end): self.assertIsNone(L._shell_label_pair(raw))
+        lines = good.splitlines(keepends=True)
+        for raw in (good + b"\n", good + b"x", b"".join(lines[1:]), b"".join(lines[1:] + lines[:1]),
+                    good.replace(b"\n", b"\r\n"), good.replace(b"=v1;", b"=v2;"),
+                    good.replace(b"GitHubEntry", b"GitHubToken"), good.replace(b"GitHubEntry", b"Bootstrap"),
+                    good.replace(b";eval=128", b";eval=128;eval=128"), good.replace(b";repo=1", b""),
+                    good.replace(b";guide=1\n", b";guide=1;extra=0\n"), good.replace(b";cap=1", b";cap=true"),
+                    good.replace(b";reason=none", b";reason=private-text"), good.decode("ascii")):
+            with self.subTest(malformed=repr(raw)[:100]): self.assertIsNone(L._shell_label_pair(raw))
+        for key in ("o", "eval", "ne", "ns", "cap", "reason", "sess", "de", "dom", "sel", "form", "submit",
+                    "enabled", "help", "repo", "guide"):
+            prefix = key.encode("ascii") + b"="
+            pieces = lines[0].split(b";")
+            raw = b";".join(piece for piece in pieces if not piece.startswith(prefix))
+            if not raw.endswith(b"\n"): raw += b"\n"
+            self.assertIsNone(L._shell_label_pair(raw + b"".join(lines[1:])))
+        for changes in (
+            {"eval": b"127"}, {"eval": b"129"}, {"eval": b"na"}, {"eval": b"0128"}, {"eval": b"-1"},
+            {"ne": b"129"}, {"ne": b"na"}, {"de": b"0"}, {"de": b"129"}, {"de": b"na"},
+            {"ns": b"absent"}, {"cap": b"0"}, {"reason": b"busy"}, {"sess": b"na"},
+            {"dom": b"not-observed"}, {"dom": b"error"}, {"dom": b"ready"}, {"sel": b"na"},
+            {"form": b"0"}, {"submit": b"0"}, {"enabled": b"na"}, {"enabled": b"1"},
+            {"help": b"1"}, {"guide": b"na"}, {"o": b"not-recorded"}, {"o": b"deadline"},
+            {"o": b"callback-shape"}, {"repo": b"owner/app"}, {"guide": b"false"},
+        ):
+            with self.subTest(changes=changes): self.assertIsNone(L._shell_label_pair(self.frame(**changes)))
+        for changes in ({"enabled": b"0", "help": b"0"}, {"enabled": b"1", "help": b"1"},
+                        {"enabled": b"1", "help": b"0", "de": b"127"}):
+            self.assertIsNone(L._shell_label_pair(self.frame(o=b"ready-refused", boundary=b"dom", dom=b"ready", **changes)))
+
+    def test_entry_maximum_legal_frame_fits_original_512_and_legacy_is_unchanged(self):
+        doms = (
+            dict(de=b"na", dom=b"not-observed", sel=b"na", form=b"na", submit=b"na", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"error", sel=b"na", form=b"na", submit=b"na", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"wait", sel=b"0", form=b"0", submit=b"0", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"ready", sel=b"1", form=b"1", submit=b"1", enabled=b"1", help=b"0", repo=b"na", guide=b"0"),
+        )
+        natives = (
+            dict(ne=b"na", ns=b"not-observed", cap=b"na", reason=b"na", sess=b"na"),
+            dict(ne=b"128", ns=b"absent", cap=b"na", reason=b"na", sess=b"na"),
+            dict(ne=b"128", ns=b"present", cap=b"0", reason=b"not-found-or-inaccessible", sess=b"0"),
+        )
+        # Maximal representatives: three-digit counts, longest reason, all
+        # legal nullable slots at na; 0 and 1 occupy the same one byte.
+        frames = []
+        for native in natives:
+            for dom in doms:
+                for origin, boundary in ((b"evaluation-budget", b"settlement"), (b"deadline", b"deadline"),
+                                         (b"callback-shape", b"dom"), (b"script-error", b"dom"), (b"ready-refused", b"dom")):
+                    frame = self.frame(o=origin, boundary=boundary, progress=b"app-info-returned-before-hold", **native, **dom)
+                    if L._shell_label_pair(frame) is not None: frames.append(frame)
+        self.assertEqual(max(map(len, frames)), 380)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        self.assertLessEqual(max(map(len, frames)), L.SHELL_FAILURE_LABEL_LIMIT)
+        longest = max(frames, key=len)
+        self.assertIn(b";repo=na;guide=na\n", longest)
+        for step in (b"PrepareSave", b"PathSettlement", b"Bootstrap"):
+            old = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\n"
+                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+            self.assertEqual(L._shell_label_pair(old), {"step": step.decode("ascii"), "boundary": "settlement", "bootstrapProgress": "advanced"})
+        session = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                   b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;reject=native-readiness-invariant;wait=native-reply-pending\n")
+        self.assertNotIn("githubEntry", L._shell_label_pair(session))
+        path = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=gtk-initial-folder\n"
+                b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\nMRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n"
+                b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        self.assertNotIn("githubEntry", L._shell_label_pair(path))
+        with patch.object(L, "SHELL_FAILURE_LABEL_LIMIT", len(longest) - 1):
+            self.assertIsNone(L._shell_label_pair(longest))
+
+
 class FailureLabelSinkContracts(unittest.TestCase):
     def test_path_v2_timing_callback_wait_preserves_closed_prefix_contract(self):
         good = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=8;reject=not-recorded;start=43000;now=45000;"
