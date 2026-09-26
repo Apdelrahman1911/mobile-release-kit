@@ -678,7 +678,7 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     not(feature = "macos-installed-installer")))]
 pub(super) mod observation {
     use super::*;
-    pub(crate) use native::{DialogAction, DialogKind, DialogObservation, DialogResponse};
+    pub(crate) use native::{DialogAction, DialogActionFailure, DialogActionSite, DialogKind, DialogObservation, DialogResponse};
     pub(crate) struct ObservedDialog {
         pub(crate) id: u32,
         pub(crate) native: DialogObservation,
@@ -710,9 +710,10 @@ pub(super) mod observation {
         let native = original.installed_observation()?;
         Ok(Some(ObservedDialog { id, native, action_allowed, call }))
     }
-    pub(crate) fn observe_dialog_action(id: u32, action: DialogAction<'_>) -> Result<bool, native::UiError> {
-        let Some((actual, original, call, owner)) = original()? else { return Err(native::UiError::State); };
-        if actual != id || !allowed(&call, &owner)? || owner.interrupted() { return Err(native::UiError::State); }
+    pub(crate) fn observe_dialog_action(id: u32, action: DialogAction<'_>) -> Result<bool, DialogActionFailure> {
+        let binding = |error| DialogActionFailure { site: DialogActionSite::Binding, error };
+        let Some((actual, original, call, owner)) = original().map_err(binding)? else { return Err(binding(native::UiError::State)); };
+        if actual != id || !allowed(&call, &owner).map_err(binding)? || owner.interrupted() { return Err(binding(native::UiError::State)); }
         // No DIALOG/GuiFacts borrow held across reentrant native button/folder
         // calls. The original Show/event/release path is the sole result owner.
         original.installed_action(action)

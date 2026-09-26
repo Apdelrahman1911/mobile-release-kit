@@ -13,7 +13,7 @@ use crate::{asset_commands::{AssetError, Reason}, asset_session::{DocumentBindin
 use mrk_windows_installed_native::{self as native, UiCaseFacts, UiRole};
 use native::ui_observer_diagnostic_data::{PendingKind, Refusal, Snapshot, Step};
 use super::owned_windows::observation::{observed_dialog, observe_dialog_action, session_final,
-    DialogAction, DialogKind, ObservedDialog};
+    DialogAction, DialogActionSite, DialogKind, ObservedDialog};
 
 const METHODS: [&str; 6] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"];
 const APP_ID: &str = "org.example.mrk.observed";
@@ -496,7 +496,7 @@ impl Observation {
         if std::thread::current().id() != self.main || !self.timely() { self.fail(Refusal::NativeStep); return; }
         let returned = self.native_body(step, id, kind, call);
         if returned == Ok(None) { return; } // Record contention never consumes the pending operation.
-        if returned.is_err() { self.fail(Refusal::NativeStep); }
+        if let Err(reason) = returned { self.fail(reason); }
         let Some(mut r) = self.record() else { return; };
         if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail(Refusal::NativeStep); return; }
         // Only this very synchronous body return retires its dispatch marker.
@@ -511,56 +511,68 @@ impl Observation {
         if r.actions_returned[index] { self.fail(Refusal::NativeStep); return; }
         r.actions_returned[index] = true; r.step = next;
     }
-    fn native_body(&self, step: Step, callback_id: u32, callback_kind: DialogKind, call: &Arc<GuiCall>) -> Result<Option<bool>, ()> {
+    fn native_body(&self, step: Step, callback_id: u32, callback_kind: DialogKind, call: &Arc<GuiCall>) -> Result<Option<bool>, Refusal> {
         let (id, kind) = match step {
             Step::CancelProject => (1, DialogKind::Project),
             Step::SetFolder | Step::AcceptProject => (self.case.selected_id(), DialogKind::Project),
             Step::PickerPending => (2, DialogKind::Project), Step::QuitCancel => (2, DialogKind::Quit),
-            Step::QuitConfirm => (3, DialogKind::Quit), _ => return Err(()),
+            Step::QuitConfirm => (3, DialogKind::Quit), _ => return Err(Refusal::NativePrecondition),
         };
-        if callback_id != id || callback_kind != kind { return Err(()); }
-        let Some(dialog) = observed_dialog().map_err(|_| ())? else { return Ok(Some(false)); };
+        if callback_id != id || callback_kind != kind { return Err(Refusal::NativePrecondition); }
+        let Some(dialog) = observed_dialog().map_err(|_| Refusal::NativePrecondition)? else { return Ok(Some(false)); };
         let Some(mut r) = self.try_record() else { return Ok(None); };
         if r.pending != Some(Pending::Native(step)) || r.step != step || dialog.id != id || dialog.native.kind != kind
             || !Arc::ptr_eq(call, &dialog.call)
             || dialog.native.stopped || dialog.native.close_entered
             || dialog.native.show_returned || dialog.native.settled || dialog.native.response.is_some()
-            || !self.timely() { return Err(()); }
-        let owner = dialog.call.owner().ok_or(())?;
+            || !self.timely() { return Err(Refusal::NativePrecondition); }
+        let owner = dialog.call.owner().ok_or(Refusal::NativePrecondition)?;
         if owner.interrupted() || !dialog.call.facts().is_some_and(|facts| facts.dispatched && !facts.not_created
             && !facts.response && !facts.accepted && !facts.declined && facts.refusal.is_none()
-            && !facts.close_queued && !facts.close_ack && !facts.release_queued && !facts.released) { return Err(()); }
+            && !facts.close_queued && !facts.close_ack && !facts.release_queued && !facts.released) { return Err(Refusal::NativePrecondition); }
         if let Some(witness) = r.dialogs.iter().find(|witness| witness.id == id) {
-            if !witness.same(&dialog) { return Err(()); }
+            if !witness.same(&dialog) { return Err(Refusal::NativePrecondition); }
         } else {
             if r.dialogs.len() >= 3 || id as usize != r.dialogs.len() + 1 || owner.id != id
-                || !Arc::ptr_eq(&owner.gui, &dialog.call) { return Err(()); }
+                || !Arc::ptr_eq(&owner.gui, &dialog.call) { return Err(Refusal::NativePrecondition); }
             r.dialogs.push(DialogWitness { id, kind, call: dialog.call.clone(), owner });
         }
         if !dialog.native.created || !dialog.native.showing || !dialog.native.visible || !dialog.native.presented {
-            return if r.visible[(id - 1) as usize] { Err(()) } else { Ok(Some(false)) };
+            return if r.visible[(id - 1) as usize] { Err(Refusal::NativePrecondition) } else { Ok(Some(false)) };
         }
         // The one known timer is truthfully still live. A nested/foreign live
         // callback is never an admitted observer turn or a finality fact.
-        if !dialog.native.callbacks_active || !dialog.native.observation_turn { return Err(()); }
+        if !dialog.native.callbacks_active || !dialog.native.observation_turn { return Err(Refusal::NativePrecondition); }
         r.visible[(id - 1) as usize] = true;
         if !dialog.action_allowed || !dialog.call.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.not_created
             && facts.showing && !facts.constructing && !facts.response && !facts.accepted && !facts.declined
-            && facts.selected.is_none() && facts.refusal.is_none() && !facts.destroyed && !facts.released) { return Err(()); }
+            && facts.selected.is_none() && facts.refusal.is_none() && !facts.destroyed && !facts.released) { return Err(Refusal::NativePrecondition); }
         if self.case.held() && matches!(step, Step::QuitCancel | Step::QuitConfirm | Step::PickerPending)
-            && !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { return Err(()); }
+            && !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { return Err(Refusal::NativePrecondition); }
         if step == Step::PickerPending { return Ok(Some(true)); } // Read only; no fake Cancel.
-        if step == Step::AcceptProject && !dialog.native.folder_ready { return Ok(Some(false)); }
+        // Callback DATA only schedules this attempt. It proves no target;
+        // both canonical reads still belong to the one original native Accept.
+        if step == Step::AcceptProject && !dialog.native.folder_navigation_observed { return Ok(Some(false)); }
         let (index, action) = match step {
             Step::CancelProject => (0, DialogAction::Decline), Step::SetFolder => (1, DialogAction::ChooseFolder(&self.project_path)),
             Step::AcceptProject => (2, DialogAction::Accept), Step::QuitCancel => (3, DialogAction::Decline),
-            Step::QuitConfirm => (4, DialogAction::Accept), _ => return Err(()),
+            Step::QuitConfirm => (4, DialogAction::Accept), _ => return Err(Refusal::NativePrecondition),
         };
-        if r.actions_attempted[index] || !self.timely() { return Err(()); }
+        if r.actions_attempted[index] || !self.timely() { return Err(Refusal::NativePrecondition); }
         r.actions_attempted[index] = true; drop(r);
         // The native adapter rechecks the original object/STA/current folder.
         // Any post-effect error is sticky; it can never become a retry.
-        if observe_dialog_action(id, action).map_err(|_| ())? { Ok(Some(true)) } else { Err(()) }
+        let returned = observe_dialog_action(id, action).map_err(|failure| match failure.site {
+            DialogActionSite::Binding => Refusal::NativeActionBinding,
+            DialogActionSite::FolderInput => Refusal::NativeFolderInput,
+            DialogActionSite::FolderSet => Refusal::NativeFolderSet,
+            DialogActionSite::FolderRead => Refusal::NativeFolderRead,
+            DialogActionSite::FolderCompare => Refusal::NativeFolderCompare,
+            DialogActionSite::FolderDifferent => Refusal::NativeFolderDifferent,
+            DialogActionSite::FolderInvalidated => Refusal::NativeFolderInvalidated,
+            DialogActionSite::State => Refusal::NativeActionState,
+        })?;
+        if returned { Ok(Some(true)) } else { Err(Refusal::NativeActionState) }
     }
     fn dom(&self, original: DomDispatch, raw: &str) {
         let result = self.dom_body(original, raw);

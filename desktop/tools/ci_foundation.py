@@ -1097,6 +1097,11 @@ WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
     "ordinary_owner::normal_ui::contract_tests::prerequisite_diagnostic_sink_checks_one_write_one_flush_without_outcome_change",
     "ordinary_owner::normal_ui::contract_tests::prerequisite_return_guard_keeps_unknown_and_deadline_semantics",
     "ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow",
+    "ui::folder_navigation::tests::initial_callbacks_cannot_arm_a_request_or_accept",
+    "ui::folder_navigation::tests::request_and_navigation_hint_are_separate_from_one_accept",
+    "ui::folder_navigation::tests::pre_accept_change_waits_without_spending_or_reissuing",
+    "ui::folder_navigation::tests::change_after_accept_entry_is_sticky_through_nested_completion",
+    "ui_observer_diagnostic_data::tests::native_action_sites_are_closed_first_only_and_bounded",
 )
 WINDOWS_NORMAL_UI_SCALAR_TESTS = (
     "asset_session::tests::human_quit_stop_has_one_clock_without_inventing_a_work_endpoint",
@@ -14542,7 +14547,7 @@ def windows_normal_ui_observer_row(value: object) -> dict:
     closed_object(value, {"sequence", "event", "step", "pending", "pendingStep", "dispatch", "flags",
                           "startup", "refusal", "coverageIncomplete"}, "Windows observer row fields differ")
     for key, lower, upper in (("sequence", 1, 64), ("event", 1, 6), ("step", 1, 43), ("pending", 0, 4),
-                              ("pendingStep", 0, 43), ("dispatch", 0, 200), ("flags", 0, 65535), ("refusal", 0, 25)):
+                              ("pendingStep", 0, 43), ("dispatch", 0, 200), ("flags", 0, 65535), ("refusal", 0, 34)):
         require(integer_between(value[key], lower, upper), "Windows observer row scalar differs")
     require(type(value["coverageIncomplete"]) is bool, "Windows observer coverage is not Boolean")
     pending = value["pending"]

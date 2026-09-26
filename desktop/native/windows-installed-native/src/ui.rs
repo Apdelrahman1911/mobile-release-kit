@@ -21,7 +21,107 @@ mod dialog;
 #[cfg(feature = "desktop-ui-dialogs")]
 pub use dialog::{Dialog, DialogControl, DialogEvent, DialogResult, DialogResponse};
 #[cfg(feature = "windows-installed-observation")]
-pub use dialog::{DialogAction, DialogObservation};
+pub use dialog::{DialogAction, DialogActionFailure, DialogActionSite, DialogObservation};
+
+#[cfg(any(test, feature = "windows-installed-observation"))]
+mod folder_navigation {
+    use super::{UiError, UiResult};
+    use std::cell::Cell;
+
+    #[derive(Default)]
+    pub(super) struct FolderNavigation { armed: Cell<bool>, observed: Cell<bool>, accepting: Cell<bool>, invalidated: Cell<bool> }
+    impl FolderNavigation {
+        pub(super) fn arm(&self) -> UiResult<()> {
+            if self.armed.replace(true) { return Err(UiError::State); }
+            self.observed.set(false); Ok(())
+        }
+        pub(super) fn changing(&self) {
+            self.observed.set(false);
+            if self.accepting.get() { self.invalidated.set(true); }
+        }
+        pub(super) fn changed(&self) {
+            if self.armed.get() && !self.invalidated.get() { self.observed.set(true); }
+        }
+        // A scheduling hint only. The original two canonical reads, not callbacks,
+        // must establish the exact folder during the one original Accept action.
+        pub(super) fn observed(&self) -> bool { self.armed.get() && self.observed.get() && !self.invalidated.get() }
+        pub(super) fn begin_accept(&self) -> UiResult<()> {
+            if !self.observed() || self.accepting.replace(true) { return Err(UiError::State); }
+            Ok(())
+        }
+        pub(super) fn check_accept(&self) -> UiResult<()> {
+            if self.accepting.get() && self.observed() { Ok(()) } else { Err(UiError::State) }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::{FolderNavigation, UiError};
+
+        #[test]
+        fn initial_callbacks_cannot_arm_a_request_or_accept() {
+            let navigation = FolderNavigation::default();
+            navigation.changed(); navigation.changing(); navigation.changed();
+            assert!(!navigation.observed());
+            assert_eq!(navigation.begin_accept(), Err(UiError::State));
+            assert!(!navigation.accepting.get());
+            assert_eq!(navigation.check_accept(), Err(UiError::State));
+            assert_eq!(navigation.arm(), Ok(()));
+            assert!(!navigation.observed());
+            assert_eq!(navigation.arm(), Err(UiError::State));
+            assert!(!navigation.observed());
+        }
+
+        #[test]
+        fn request_and_navigation_hint_are_separate_from_one_accept() {
+            let navigation = FolderNavigation::default();
+            assert_eq!(navigation.arm(), Ok(()));
+            assert!(!navigation.observed());
+            assert_eq!(navigation.begin_accept(), Err(UiError::State));
+            // These same DATA callbacks may arrive inside SetFolder or later.
+            // Only the controller's actual returned request advances its step.
+            navigation.changing(); navigation.changed();
+            assert!(navigation.observed());
+            assert_eq!(navigation.check_accept(), Err(UiError::State));
+            assert_eq!(navigation.begin_accept(), Ok(()));
+            assert!(navigation.accepting.get());
+            assert_eq!(navigation.check_accept(), Ok(()));
+            assert_eq!(navigation.begin_accept(), Err(UiError::State));
+            assert_eq!(navigation.arm(), Err(UiError::State));
+        }
+
+        #[test]
+        fn pre_accept_change_waits_without_spending_or_reissuing() {
+            let navigation = FolderNavigation::default();
+            assert_eq!(navigation.arm(), Ok(())); navigation.changed();
+            navigation.changing();
+            assert!(!navigation.observed());
+            assert_eq!(navigation.begin_accept(), Err(UiError::State));
+            assert!(!navigation.accepting.get());
+            navigation.changed();
+            assert_eq!(navigation.begin_accept(), Ok(()));
+            assert_eq!(navigation.arm(), Err(UiError::State));
+        }
+
+        #[test]
+        fn change_after_accept_entry_is_sticky_through_nested_completion() {
+            let navigation = FolderNavigation::default();
+            assert_eq!(navigation.arm(), Ok(())); navigation.changed();
+            assert_eq!(navigation.begin_accept(), Ok(()));
+            // Before the first COM read, between reads, or inside either read,
+            // OnFolderChanging invalidates this same already-spent attempt.
+            navigation.changing();
+            assert!(navigation.invalidated.get());
+            assert_eq!(navigation.check_accept(), Err(UiError::State));
+            for _ in 0..3 {
+                navigation.changed();
+                assert!(!navigation.observed());
+                assert_eq!(navigation.check_accept(), Err(UiError::State));
+                assert_eq!(navigation.begin_accept(), Err(UiError::State));
+                assert_eq!(navigation.arm(), Err(UiError::State));
+            }
+        }
+    }
+}
 
 // Qualification-only supporting HWND containment, not native button selection.
 // HWND 0 and shared containers are valid logical-control representations. The

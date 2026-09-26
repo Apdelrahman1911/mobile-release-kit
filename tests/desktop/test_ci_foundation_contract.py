@@ -12988,8 +12988,8 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         value, lock, source, root = self.graph_data()
         graph = helper.windows_normal_ui_native_graph(value, lock, source=source, root=root)
         self.assertEqual(len(graph["nodes"]), 24)
-        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 19)
-        self.assertEqual(len(set(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)), 19)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+        self.assertEqual(len(set(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)), 24)
         self.assertEqual(helper.windows_installed_features(self.context(), "native"), ["desktop-ui"])
         native = graph["nativeId"]
         executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"
@@ -13852,22 +13852,22 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
     def test_prerequisite_diagnostic_source_graph_and_selected_inert_results_are_closed(self):
         added = ('ordinary_owner::normal_ui::contract_tests::prerequisite_first_fault_covers_return_routes_and_expected_negatives', 'ordinary_owner::normal_ui::contract_tests::prerequisite_first_fault_survives_secondary_clock_and_status_reuse', 'ordinary_owner::normal_ui::contract_tests::prerequisite_native_statuses_require_original_completed_observations', 'ordinary_owner::normal_ui::contract_tests::prerequisite_frame_is_closed_bounded_and_binding_exact', 'ordinary_owner::normal_ui::contract_tests::prerequisite_diagnostic_sink_checks_one_write_one_flush_without_outcome_change', 'ordinary_owner::normal_ui::contract_tests::prerequisite_return_guard_keeps_unknown_and_deadline_semantics', 'ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow')
         names = helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
-        self.assertEqual(names[-7:], added); self.assertEqual(len(names), 19)
+        self.assertEqual(names[12:19], added); self.assertEqual(len(names), 24)
         artifact = {"path": r"C:\inert\mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"}
         self.assertEqual(helper.windows_normal_ui_inert_argv(artifact),
                          [artifact["path"], *names, "--exact", "--nocapture", "--test-threads=1"])
-        lines = ["running 19 tests", *("test " + name + " ... ok" for name in names),
-                 "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s"]
+        lines = ["running 24 tests", *("test " + name + " ... ok" for name in names),
+                 "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s"]
         raw = ("\n".join(lines) + "\n").encode("ascii")
         result = helper.windows_normal_ui_inert_output(raw)
-        self.assertEqual(result["tests"], list(names)); self.assertEqual(result["passed"], 19)
-        for changed in (raw.replace(b"running 19 tests", b"running 12 tests"), raw.replace(b"19 passed", b"12 passed"),
+        self.assertEqual(result["tests"], list(names)); self.assertEqual(result["passed"], 24)
+        for changed in (raw.replace(b"running 24 tests", b"running 12 tests"), raw.replace(b"24 passed", b"12 passed"),
                         raw.replace(names[-1].encode("ascii"), b"foreign::test"), raw.replace(b" ... ok", b" ... FAILED", 1),
                         raw.replace((lines[1] + "\n").encode(), b""), raw.replace((lines[1] + "\n").encode(), (lines[2] + "\n").encode()),
                         raw + b"extra\n", raw.replace(b"0 ignored", b"1 ignored")):
             with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(changed)
         native = SOURCE / helper.WINDOWS_INSTALLED_CRATE
-        for leaf, expected_hash in (('Cargo.toml', '4b15cec0864795544fcca166c9c0537baf4ef26bdeaa39a5b10c10726a18ff53'), ('src/decode.rs', '40600d98709a0550e742701b2ede3378de8498ce561d32e3234c2c5b04db3eca'), ('src/security.rs', 'd28d42680c23ca389bfcc77d2d48457752f88919f6804f5f5e88966477e9acc6'), ('src/ui.rs', '6a6cae890c813da16d0ebc0c1ebbda36baeaaebd95259ff567743729d4143ab3')):
+        for leaf, expected_hash in (('Cargo.toml', '4b15cec0864795544fcca166c9c0537baf4ef26bdeaa39a5b10c10726a18ff53'), ('src/decode.rs', '40600d98709a0550e742701b2ede3378de8498ce561d32e3234c2c5b04db3eca'), ('src/security.rs', 'd28d42680c23ca389bfcc77d2d48457752f88919f6804f5f5e88966477e9acc6'), ('src/ui.rs', 'f4b747dcea9f28f87aed8f862b9c33aca9e51dea4d18adb45042036626923316')):
             self.assertEqual(hashlib.sha256((native / leaf).read_bytes()).hexdigest(), expected_hash)
         text = (native / "src/ordinary_owner_ui.rs").read_text(encoding="utf-8")
         tests = text.split("mod contract_tests {", 1)[1]
@@ -13919,7 +13919,7 @@ class WindowsNormalUiPolicyDiagnosticTests(unittest.TestCase):
 
     def test_selection_and_summary_must_be_complete_exact_and_unambiguous(self):
         context, out, err, name, _ = self.fixture()
-        for changed in (out.replace(b"running 19", b"running 0"), out.replace(b"18 passed", b"19 passed"),
+        for changed in (out.replace(b"running 24", b"running 0"), out.replace(b"23 passed", b"24 passed"),
                         out.replace(b"1 failed", b"0 failed"), out.replace(b"0 ignored", b"1 ignored"),
                         out.replace(b"test result: FAILED", b"test result: ok"), out + b"extra\n",
                         out.replace(name.encode(), (name + "_other").encode()),
@@ -14267,6 +14267,149 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         return b"\nMRK_WINDOWS_UI_OBSERVER_DIAGNOSTIC_V1=" + json.dumps(
             cls.frame_data() if data is None else data, separators=(",", ":")).encode("ascii") + b"\n"
 
+    def test_native_folder_sites_are_closed_data_and_never_gui_credit(self):
+        names = ("NativePrecondition", "NativeActionBinding", "NativeFolderInput", "NativeFolderSet",
+                 "NativeFolderRead", "NativeFolderCompare", "NativeFolderDifferent", "NativeFolderInvalidated",
+                 "NativeActionState")
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_observer_diagnostic_data.rs").read_text()
+        block = source.split("codes!(Refusal {", 1)[1].split("});", 1)[0]
+        roster = [(name, int(code)) for name, code in __import__("re").findall(r"(\w+)=(\d+)", block)]
+        self.assertEqual(len(roster), 34)
+        self.assertEqual(roster[-9:], list(zip(names, range(26, 35))))
+        self.assertEqual([code for _, code in roster], list(range(1, 35)))
+        for code in range(26, 35):
+            frame = self.frame_data()
+            row = frame["projection"]["last"]
+            row.update(event=5, step=11 if 30 <= code <= 33 else 10, refusal=code)
+            frame["projection"]["observerRefusal"] = deepcopy(row)
+            raw = self.frame(frame)
+            self.assertLessEqual(len(raw), 4096)
+            with self.subTest(code=code):
+                self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+                parts = list(self.original_log())
+                parts[0] = parts[0].replace(self.frame()[1:-1], raw[1:-1])
+                parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+                data = self.joined(parts)
+                self.assertEqual(data["joinState"], "verified")
+                self.assertTrue(data["observerDiagnosticOnly"])
+                self.assertFalse(data["nativeQualified"])
+                self.assertFalse(data["combinedPassed"])
+                self.assertEqual(data["guiCasesExecuted"], 0)
+                self.assertEqual(data["verifiedMethods"], 0)
+        for code in (-1, True, 35, 255):
+            frame = self.frame_data(); frame["projection"]["last"]["refusal"] = code
+            with self.subTest(unknown=code), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_folder_navigation_keeps_original_request_readbacks_and_callback_order(self):
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        action = source.split("    fn installed_action_body(", 1)[1].split("\nstruct DialogReturn", 1)[0]
+        request, accept = action.split("        let accept = matches!", 1)
+        self.assertEqual(request.count(".SetFolder(item)"), 1)
+        self.assertLess(request.index("self.folder.requested.replace(true)"), request.index("SH::SHCreateItemFromParsingName"))
+        self.assertLess(request.index("self.folder.item.set(ComOriginal::new"), request.index("self.folder.navigation.arm()?"))
+        self.assertLess(request.index("self.folder.navigation.arm()?"), request.index(".SetFolder(item)"))
+        self.assertLess(request.index("hresult(returned)?"), request.index("return Ok(true)"))
+        self.assertNotIn("folder_readback", request)
+        self.assertNotIn("GetFolder", request)
+        self.assertLess(accept.index("self.folder.navigation.begin_accept()?"), accept.index("self.folder_readback(0, site)?"))
+        self.assertLess(accept.index("self.folder_readback(0, site)?"), accept.index("W::GetDlgItem"))
+        self.assertLess(accept.index("IsWindowEnabled(button)"), accept.index("self.folder_readback(1, site)?"))
+        self.assertLess(accept.index("self.folder_readback(1, site)?"), accept.rindex("self.folder.navigation.check_accept()?"))
+        self.assertLess(accept.rindex("self.folder.navigation.check_accept()?"), accept.rindex("self.observation_turn_active()"))
+        self.assertLess(accept.rindex("self.observation_turn_active()"), accept.index("W::SendMessageW(button, W::BM_CLICK"))
+        self.assertEqual(accept.count("self.folder_readback(0, site)?"), 1)
+        self.assertEqual(accept.count("self.folder_readback(1, site)?"), 1)
+        readback = source.split("    fn folder_readback(", 1)[1].split("    pub fn installed_action(", 1)[0]
+        for required in ("readbacks.get(index).filter(|slot| slot.get().is_none())", "base__.GetFolder",
+                         "slot.set(ComOriginal::new", "SICHINT_CANONICAL", "comparisons[index].get() } != 0",
+                         "DialogActionSite::FolderRead", "DialogActionSite::FolderCompare", "DialogActionSite::FolderDifferent"):
+            self.assertIn(required, readback)
+        self.assertEqual(readback.count("HRESULT_PENDING"), 2)
+        self.assertIn("readbacks: [OnceCell<ComOriginal<IShellItem>>; 2]", source)
+        callbacks = source.split("    fn OnFolderChanging(", 1)[1].split("    fn OnSelectionChange(", 1)[0]
+        self.assertEqual(callbacks.count("self.dialog.enter()"), 2)
+        self.assertEqual(callbacks.count("self.dialog.visible()"), 1)  # Existing presentation observation only.
+        self.assertIn("self.dialog.folder.navigation.changing()", callbacks)
+        self.assertIn("self.dialog.folder.navigation.changed()", callbacks)
+        for forbidden in ("folder_readback", "installed_action", "GetFolder", "SetFolder", "BM_CLICK", "ObservationTurn"):
+            self.assertNotIn(forbidden, callbacks)
+        for start, end, expected in (
+            ("    fn release_once(", "    pub fn settled(", "3628506c1e44fb34bbcd10fa2f84c7202bdf9287ffff4b64621d4bb170870d90"),
+            ('unsafe extern "system" fn control_window(', 'unsafe extern "system" fn task_callback(',
+             "232583cbb4a600aac4e17d30b47469e3304a5b0d3a7d1d1ea447c275a4804d7f")):
+            block = source[source.index(start):source.index(end, source.index(start))]
+            self.assertEqual(hashlib.sha256(block.encode()).hexdigest(), expected)
+
+    def test_navigation_contracts_bind_the_actual_small_production_state(self):
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui.rs").read_text()
+        dialog = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        module = source.split("mod folder_navigation {\n", 1)[1].split("\n}\n\n// Qualification-only supporting HWND", 1)[0]
+        state = module.split("impl FolderNavigation {", 1)[1].split("    #[cfg(test)]\n    mod tests {", 1)[0]
+        tests = module.split("    mod tests {", 1)[1]
+        self.assertIn('#[cfg(any(test, feature = "windows-installed-observation"))]\nmod folder_navigation {', source)
+        self.assertIn('#[cfg(feature = "windows-installed-observation")]\nuse super::folder_navigation::FolderNavigation;', dialog)
+        self.assertNotIn("struct FolderNavigation", dialog)
+        self.assertIn("navigation: FolderNavigation", dialog)
+        self.assertIn("pub(super) struct FolderNavigation { armed: Cell<bool>, observed: Cell<bool>, accepting: Cell<bool>, invalidated: Cell<bool> }", module)
+        self.assertEqual(state.count("pub(super) fn "), 6)
+        self.assertIn("self.armed.replace(true)", state)
+        self.assertIn("self.accepting.replace(true)", state)
+        self.assertIn("if self.accepting.get() { self.invalidated.set(true); }", state)
+        self.assertIn("if self.armed.get() && !self.invalidated.get() { self.observed.set(true); }", state)
+        for forbidden in ("invalidated.set(false)", "armed.set(false)", "accepting.set(false)"):
+            self.assertNotIn(forbidden, module)
+        for forbidden in ("unsafe", "std::thread", "Instant::", "SetTimer", "GetFolder", "SetFolder", "ComOriginal"):
+            self.assertNotIn(forbidden, state)
+        self.assertIn("use super::{FolderNavigation, UiError}", tests)
+        self.assertEqual(tests.count("let navigation = FolderNavigation::default()"), 4)
+        names = ("initial_callbacks_cannot_arm_a_request_or_accept", "request_and_navigation_hint_are_separate_from_one_accept",
+                 "pre_accept_change_waits_without_spending_or_reissuing", "change_after_accept_entry_is_sticky_through_nested_completion")
+        for name in names:
+            self.assertIn("fn " + name + "()", tests)
+        selected = tuple("ui::folder_navigation::tests::" + name for name in names) + (
+            "ui_observer_diagnostic_data::tests::native_action_sites_are_closed_first_only_and_bounded",)
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS[-5:], selected)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+        self.assertEqual(len(set(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)), 24)
+        self.assertEqual(helper.windows_normal_ui_features("native"), ["desktop-ui"])
+        # Invert only relocation indentation and sibling visibility. This pins
+        # the unchanged original state policy and all four actual-state tests.
+        body = module.split("    use std::cell::Cell;\n", 1)[1].lstrip("\n")
+        body = "".join(line[4:] if line.startswith("    ") else line for line in body.splitlines(keepends=True))
+        body = body.replace("pub(super) ", "") + "\n"
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), "95d75fca49d70d87971ba9db8dcfbe3332a274acc43beca3b390637ff09ee4ca")
+
+    def test_first_site_return_preserves_ui_error_original_owner_and_dispatch_retirement(self):
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell_windows.rs").read_text()
+        observer = (SOURCE / "desktop/src-tauri/src/installed_shell_observation_windows.rs").read_text()
+        self.assertIn("pub struct DialogActionFailure { pub site: DialogActionSite, pub error: UiError }", source)
+        self.assertIn("self.installed_action_body(action, &mut site).map_err(|error| DialogActionFailure { site, error })", source)
+        adapter = shell.split("    pub(crate) fn observe_dialog_action(", 1)[1].split("    pub(crate) fn session_final(", 1)[0]
+        for required in ("original().map_err(binding)?", "actual != id", "!allowed(&call, &owner).map_err(binding)?",
+                         "owner.interrupted()", "original.installed_action(action)"):
+            self.assertIn(required, adapter)
+        for forbidden in ("spawn", "run_on_main_thread", "thread::", "sleep", "lock()", "borrow_mut()"):
+            self.assertNotIn(forbidden, adapter)
+        body = observer.split("    fn native_body(", 1)[1].split("    fn dom(", 1)[0]
+        self.assertIn("Result<Option<bool>, Refusal>", body)
+        hint = "if step == Step::AcceptProject && !dialog.native.folder_navigation_observed { return Ok(Some(false)); }"
+        self.assertIn(hint, body)
+        self.assertLess(body.index(hint), body.index("r.actions_attempted[index] = true; drop(r)"))
+        self.assertLess(body.index("r.actions_attempted[index] = true; drop(r)"), body.index("observe_dialog_action(id, action)"))
+        for site, reason in (("Binding", "NativeActionBinding"), ("FolderInput", "NativeFolderInput"),
+                             ("FolderSet", "NativeFolderSet"), ("FolderRead", "NativeFolderRead"),
+                             ("FolderCompare", "NativeFolderCompare"), ("FolderDifferent", "NativeFolderDifferent"),
+                             ("FolderInvalidated", "NativeFolderInvalidated"), ("State", "NativeActionState")):
+            self.assertIn("DialogActionSite::" + site + " => Refusal::" + reason, body)
+        self.assertNotIn("folder_ready", observer)
+        step = observer[observer.index("    fn native_step("):observer.index("    fn native_body(")]
+        step = step.replace("if let Err(reason) = returned { self.fail(reason); }", "if returned.is_err() { self.fail(Refusal::NativeStep); }")
+        self.assertEqual(hashlib.sha256(step.encode()).hexdigest(), "31e706e4b1b82ab4292743946f6cee8713fc3fbfbaaf4ed9eda2af67c7a63790")
+        modal = observer[observer.index("    pub(super) fn modal_turn("):observer.index("    fn reload_step(")]
+        self.assertEqual(hashlib.sha256(modal.encode()).hexdigest(), "4781dcb43a93eaaab8613de50db79e115686252dc4980f4ff8863b3b0de177bb")
+
     @classmethod
     def original_log(cls, role="project-draft", coalesced=True):
         binding = {"sourceSha": "a" * 40, "sourceTree": "b" * 40, "runId": "123456", "attempt": 1, "jobId": 7654321,
@@ -14355,7 +14498,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         for where, key, value in (("frame", "diagnosticOnly", False), ("frame", "path", "private"),
                 ("projection", "records", True), ("projection", "records", 64), ("projection", "bytes", 32769),
                 ("projection", "reason", 7), ("row", "event", 7), ("row", "pending", 1), ("row", "pendingStep", 44),
-                ("row", "flags", 65536), ("row", "refusal", 26), ("row", "coverageIncomplete", 0),
+                ("row", "flags", 65536), ("row", "refusal", 35), ("row", "coverageIncomplete", 0),
                 ("row", "startup", 1), ("row", "startup", (0x51 << 56) | (1 << 52)),
                 ("row", "event", 3), ("row", "event", 4), ("row", "event", 5)):
             frame = self.frame_data(); at = frame if where == "frame" else frame["projection"] if where == "projection" else frame["projection"]["last"]
@@ -14508,7 +14651,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
             "    ObserverCaptureCheck, ObserverCaptureNative, ObserverCaptureOperation, ObserverCaptureTrace};",
             "pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal};")
         self.assertEqual(digest(qualifier), "d37c28c1d01371e3b4ea67ef2983dad80dfb20228eb07d79b0c7905ffd1e3115")
-        self.assertEqual(hashlib.sha256((root / "ui_observer_diagnostic_data.rs").read_bytes()).hexdigest(), "f2460ca96be7b2c270e5a1a650f099a03928eae2dbdf061b1ea4a33dc4922f4a")
+        self.assertEqual(hashlib.sha256((root / "ui_observer_diagnostic_data.rs").read_bytes()).hexdigest(), "ecde59e3428f28fd61f48bfe459492c0c0910a97c8e6e237afae98469e1ba287")
         journal = span(diagnostic, "impl JournalFile {", "/// Existing native owner retains")
         self.assertEqual(__import__("re").findall(r"unsafe\s*\{\s*([A-Z]+::[A-Za-z0-9_]+)\s*\(", journal),
             ["FS::CreateFileW", "F::GetLastError", "FS::GetFileInformationByHandleEx", "F::GetLastError", "FS::ReadFile", "F::GetLastError"])
@@ -14558,7 +14701,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         self.assertIn("capture.reader.first().is_some() && capture.projection != ObserverProjection::default()", ui)
         self.assertIn("if !observer_role(role) || capture.unresolved { return None; }", ui)
         self.assertIn("diagnostic, false, None)?", ui)
-        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 19)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
 
 class WindowsNormalUiGuiTests(unittest.TestCase):
     """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""
@@ -15296,7 +15439,7 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol"', callback)
         self.assertIn("native_event(&events, event, kind == native::DialogKind::Quit);", callback)
         self.assertIn("app.try_state::<Arc<super::installed_observation::Observation>>().map(|q| (q.inner().clone(), app.clone()))", shell)
-        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 19)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
         self.assertFalse(any("ui_dialog::tests" in name for name in helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS))
         for test in ("stop_before_native_construction_is_latched_without_a_foreign_window",
                      "retired_original_cannot_repost_to_a_reused_window"):

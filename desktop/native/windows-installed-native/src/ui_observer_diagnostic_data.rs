@@ -85,6 +85,9 @@ codes!(Refusal {
     ValidateRequest=13, Validation=14, PreviewRequest=15, PreviewResult=16,
     ClosePrevented=17, Tick=18, DocumentSample=19, NativeStep=20, Dom=21,
     RelayJoined=22, ActualExit=23, Finish=24, MainReturn=25,
+    NativePrecondition=26, NativeActionBinding=27, NativeFolderInput=28, NativeFolderSet=29,
+    NativeFolderRead=30, NativeFolderCompare=31, NativeFolderDifferent=32,
+    NativeFolderInvalidated=33, NativeActionState=34,
 });
 codes!(PendingKind { None=0, Dom=1, Native=2, Close=3, Reload=4 });
 
@@ -338,7 +341,7 @@ mod tests {
         assert_eq!((Projection::decode(ROW.as_bytes()).records, Projection::decode(ROW.as_bytes()).reason), (1, 0));
         for (from, to) in [("\"schema\":1", "\"schema\":true"), ("\"sequence\":1", "\"sequence\":01"),
             ("\"event\":1", "\"event\":7"), ("\"step\":1", "\"step\":44"), ("\"flags\":0", "\"flags\":65536"),
-            ("\"flags\":0", "\"flags\":-1"), ("\"pending\":0", "\"pending\":1"), ("\"refusal\":0", "\"refusal\":26"),
+            ("\"flags\":0", "\"flags\":-1"), ("\"pending\":0", "\"pending\":1"), ("\"refusal\":0", "\"refusal\":35"),
             ("\"startup\":null", "\"startup\":18446744073709551616"), ("\"startup\":null", "\"startup\":1"),
             ("\"schema\":1", "\"schema\":1,\"schema\":1"), ("}\n", ",\"path\":\"private\"}\n"),
             ("}\n", "}\r\n")] {
@@ -412,7 +415,7 @@ mod tests {
         } }
         assert!(Snapshot::decode(u64::MAX).is_none());
         assert!((0..=255).filter_map(Step::from_code).count() == 43);
-        assert!((0..=255).filter_map(Refusal::from_code).count() == 25);
+        assert!((0..=255).filter_map(Refusal::from_code).count() == 34);
         assert!(Snapshot { pending: PendingKind::Dom, ..Snapshot::default() }.encode().is_none());
     }
     #[test]
@@ -420,6 +423,28 @@ mod tests {
         let latch = Latch::default(); let snapshot = Snapshot { step: Step::SetFolder, ..Snapshot::default() };
         latch.observe(snapshot); latch.refuse(Refusal::NativeStep); latch.refuse(Refusal::Deadline);
         assert_eq!(latch.first(), Some(Refusal::NativeStep)); assert_eq!(latch.snapshot(), snapshot);
+    }
+    #[test]
+    fn native_action_sites_are_closed_first_only_and_bounded() {
+        let reasons = [Refusal::NativePrecondition, Refusal::NativeActionBinding, Refusal::NativeFolderInput,
+            Refusal::NativeFolderSet, Refusal::NativeFolderRead, Refusal::NativeFolderCompare,
+            Refusal::NativeFolderDifferent, Refusal::NativeFolderInvalidated, Refusal::NativeActionState];
+        for (index, reason) in reasons.into_iter().enumerate() {
+            assert_eq!(Refusal::from_code(26 + index as u8), Some(reason));
+            let latch = Latch::default(); let snapshot = Snapshot { step: Step::AcceptProject, ..Snapshot::default() };
+            latch.observe(snapshot); latch.refuse(reason); latch.refuse(Refusal::NativeStep); latch.refuse(Refusal::Deadline);
+            assert_eq!(latch.first(), Some(reason)); assert_eq!(latch.snapshot(), snapshot);
+            let row = Row { sequence: 1, event: Event::ObserverRefusal, snapshot, startup: None,
+                refusal: latch.first(), coverage_incomplete: false };
+            let order = JournalOrder::default(); let permit = order.begin(Event::ObserverRefusal).unwrap();
+            let mut frame = Frame::default(); permit.record(&mut frame, snapshot, None, latch.first()).unwrap();
+            assert!(frame.bytes().len() <= RECORD_LIMIT);
+            assert_eq!(Row::decode(frame.bytes()), Some(row));
+            let projection = Projection::decode(frame.bytes());
+            assert_eq!(projection.reason, 0); assert_eq!(projection.observer_refusal, Some(row));
+        }
+        assert!(Refusal::from_code(0).is_none());
+        for code in 35..=u8::MAX { assert!(Refusal::from_code(code).is_none()); }
     }
     #[test]
     fn reentry_duplicate_and_failure_cannot_replay() {
