@@ -59,7 +59,7 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertLess(workflow.index(heading), workflow.index("Prepare a fresh bounded compiler owner"))
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 2)
+                         [hashlib.sha256(lifecycle).hexdigest()] * 3)
 
     def test_workflow_fits_its_actual_original_source_record_bound(self):
         module = ast.parse(DRIVER.read_text())
@@ -108,7 +108,7 @@ class HostedWorkflowSource(unittest.TestCase):
             return found[0]
 
         compiler = step("Compile the normal shell and separate observer once without executing either")
-        upload = step("Retain original compiler evidence and shell outputs")
+        upload = step("Retain the compiler artifact or typed private-transport summary")
         route = step("Require the fixed disposable native route")
         native_owner = step("Prepare a fresh bounded native owner")
         download = step("Download this run's exact original compiled shell outputs")
@@ -120,12 +120,14 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertIn("        id: upload\n", upload)
         self.assertIn("        id: prepare_native\n", native_owner)
         gate = ("        if: (github.ref == 'refs/heads/verify/desktop-installed-shell'"
-                " || github.ref == 'refs/heads/verify/desktop-installed-github-readonly')"
-                " && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'\n")
+                " || github.ref == 'refs/heads/verify/desktop-installed-github-readonly'"
+                " || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')"
+                " && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'")
         for section in (route, native_owner, download, consumer):
             self.assertIn(gate, section)
         bindings = (
-            "MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}",
+            "MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}",
+            "MRK_INSTALLED_SHELL_SCOPE: ${{ steps.compile.outputs.shell_scope }}",
             "MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}",
             "MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}",
         )
@@ -134,7 +136,8 @@ class HostedWorkflowSource(unittest.TestCase):
                 self.assertIn(binding, section)
         self.assertIn('[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]', route)
         self.assertIn("re.fullmatch(r'[1-9][0-9]{0,19}', value)", route)
-        self.assertIn("if int(values[1]) > int(values[2]) or not re.fullmatch(r'[0-9a-f]{64}'", route)
+        self.assertIn("int(producer) > int(consumer)", route)
+        self.assertIn("if not re.fullmatch(r'[0-9a-f]{64}'", route)
         self.assertIn("          run-id: ${{ github.run_id }}\n", download)
         self.assertIn("          artifact-ids: ${{ steps.upload.outputs.artifact-id }}\n", download)
         self.assertIn("          path: ${{ steps.prepare_native.outputs.root }}/work/admitted-shell\n", download)
@@ -222,9 +225,12 @@ class JvmNamespaceWorkflowSource(unittest.TestCase):
                         and any(isinstance(target, ast.Name) and target.id == "expected" for target in node.targets))
         self.assertEqual(ast.literal_eval(expected.value),
                          {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
-                          "ImageOS": "ubuntu24", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/verify/desktop-installed-shell",
+                          "ImageOS": "ubuntu24", "GITHUB_EVENT_NAME": "push",
                           "GITHUB_JOB": "compile", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
-                          "MRK_INSTALLED_SHELL_CASE": "compile", "MRK_UBUNTU_PUBLICATION_VERIFY": "1"})
+                          "MRK_UBUNTU_PUBLICATION_VERIFY": "1"})
+        self.assertIn('("refs/heads/verify/desktop-installed-shell", "compile")', program)
+        self.assertIn('("refs/heads/verify/desktop-shell-host-metadata", "host-metadata-only")', program)
+        self.assertIn('case != "host-metadata-only" or env.get("GITHUB_RUN_ATTEMPT") == "1"', program)
         for token in ('sys.argv == ["-"]', "sys.flags.isolated", "sys.flags.no_site", "sys.dont_write_bytecode",
                       'sys.platform == "linux"', "sys.version_info[:2] == (3, 12)", 'os.uname().machine == "x86_64"',
                       'os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0', 'os.getcwd() == "/"',
@@ -413,14 +419,14 @@ class InstalledGitHubWorkflowSourceContracts(unittest.TestCase):
             "Observe only the fixed installed shell route with original finality\n")]
         self.assertEqual(len(consumers), 1); self.assertIn(ref, consumers[0])
         jdk = next(step for step in sections if step.startswith("Prepare the fixed JDK17 pair"))
-        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell'\n", jdk)
+        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'\n", jdk)
         self.assertNotIn(ref, jdk)
         for forbidden in ("workflow_dispatch:", "github-normal-negative", "ubuntu-runtime-publisher",
                           "build_conventional_runtime.py", "shell-github-observer", "continue-on-error:"):
             self.assertNotIn(forbidden, workflow)
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 2)
+                         [hashlib.sha256(lifecycle).hexdigest()] * 3)
         text = lifecycle.decode()
         self.assertIn('unit = root_path(value).name + ".service"', text)
         self.assertIn('group = "/system.slice/" + unit', text)
@@ -433,7 +439,7 @@ class InstalledGitHubNormalBoundaryWorkflowSourceContracts(unittest.TestCase):
         workflow = WORKFLOW.read_text()
         ref = "refs/heads/verify/desktop-installed-github-normal-boundaries"
         self.assertIn("verify/desktop-installed-github-normal-boundaries,", workflow)
-        self.assertIn(ref + ":compile|", workflow)
+        self.assertIn(ref + ":compile) ;;", workflow)
         sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
         for identity in ("compile", "prepare", "prepare_native"):
             steps = [step for step in sections if "\n        id: " + identity + "\n" in step]
@@ -453,7 +459,58 @@ class InstalledGitHubNormalBoundaryWorkflowSourceContracts(unittest.TestCase):
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         self.assertIn(b"SHELL_GITHUB_BOUNDARY_HOST_PROFILE = None\n", lifecycle)
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 2)
+                         [hashlib.sha256(lifecycle).hexdigest()] * 3)
+
+
+class Ordinary21WorkflowSourceContracts(unittest.TestCase):
+    def test_scope_is_explicit_before_every_acquisition_and_tools_remain_selected(self):
+        workflow = WORKFLOW.read_text()
+        heading = "Admit the fixed installed scope and source before acquisition or preparation"
+        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        gate = next(section for section in sections if section.splitlines()[0] == heading)
+        self.assertIn("        timeout-minutes: 1\n", gate)
+        self.assertIn("/usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-source-admission", gate)
+        for later in ("Select the fixed frontend compiler", "Prepare shared Ubuntu shell inputs", "Prepare the fixed JDK17 pair",
+                      "Prepare a fresh bounded compiler owner", "Download the exact accepted A runtime"):
+            self.assertLess(workflow.index(heading), workflow.index(later))
+        self.assertLess(workflow.index("Check out exact reviewed source without credentials"), workflow.index(heading))
+        job_environment = workflow.split("    env:\n", 1)[1].split("    steps:\n", 1)[0]
+        self.assertIn("MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || '' }}", job_environment)
+        self.assertIn("MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1", job_environment)
+        tools = next(section for section in sections if section.startswith("Prepare the fixed JDK17 pair"))
+        self.assertIn("if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'", tools)
+
+    def test_native_route_preparation_and_consumer_bind_the_same_original_compiler_scope_output(self):
+        workflow = WORKFLOW.read_text()
+        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        for heading in ("Require the fixed disposable native route", "Prepare a fresh bounded native owner",
+                        "Observe only the fixed installed shell route with original finality"):
+            step = next(section for section in sections if section.splitlines()[0] == heading)
+            self.assertIn("MRK_INSTALLED_SHELL_SCOPE: ${{ steps.compile.outputs.shell_scope }}", step)
+            self.assertIn("MRK_INSTALLED_SHELL_TRANSPORT: ${{ steps.compile.outputs.shell_transport }}", step)
+        gate = next(section for section in sections if section.startswith("Require the fixed disposable native route\n"))
+        self.assertIn("if scope != 'ordinary21-v1' or transport != 'actions-artifact-v1':", gate)
+        self.assertIn("elif scope:", gate)
+        self.assertIn("if local_pin or int(producer) > int(consumer)", gate)
+        driver = DRIVER.read_text()
+        compiler = driver.split("def verify_installed_shell_compile():", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('output.write("shell_scope=" + (ordinary["profile"] if ordinary is not None else "") + "\\n")', compiler)
+        self.assertEqual(compiler.count("shell_compile_argv("), 1)
+
+    def test_source_admission_contains_only_read_only_source_policy_not_an_owner_or_preparer(self):
+        source = DRIVER.read_text(); tree = ast.parse(source)
+        gate = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "installed_shell_source_admission")
+        text = ast.get_source_segment(source, gate)
+        for forbidden in ("Check(", "prepare(", "resumed_preparation(", "command(", "Popen(", "package_inputs(", "service_argv(", "run_owned(", "D.write("):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('lifecycle.check_source_pins(SOURCE, android=transport == "android-same-job-local-v1")', text)
+        self.assertIn("elif ordinary is None and not github:", text)
+        self.assertIn("lifecycle.shell_android_materials()", text)  # Historical full25 still refuses absent original materials.
+        compiler = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_installed_shell_compile")
+        text = ast.get_source_segment(source, compiler)
+        self.assertLess(text.index("ordinary = installed_shell_scope(lifecycle)"), text.index("resumed_preparation()"))
+        self.assertIn("if same_job or github or ordinary is not None:", text)
+        self.assertIn("android_materials, android_bindings, android_publication = None, {}, None", text)
 
 
 if __name__ == "__main__":

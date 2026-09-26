@@ -49,9 +49,12 @@ SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "se
 SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                            "offline-drift", "offline-cancel", "offline-settlement")
 SHELL_ANDROID_CASES = ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals")
-# Preserve all twenty-one existing cases, including iOS Firebase, raw failure and saved version.
-SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
-               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save", *SHELL_ANDROID_CASES)
+# The historical full25 profile remains exact. The separately selected ordinary
+# profile executes these established21 cases, never four missing Android rows.
+SHELL_ORDINARY_PROFILE = "ordinary21-v1"
+SHELL_ORDINARY_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
+                      *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save")
+SHELL_CASES = (*SHELL_ORDINARY_CASES, *SHELL_ANDROID_CASES)
 SHELL_PUBLIC_FILE_LIMIT = 190  # Exact25-case root roster:188, exported:190; non-shell remains128.
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
@@ -2752,12 +2755,42 @@ def shell_github(value):
     return type(value.get("shell")) is dict and "githubReadOnly" in value["shell"]
 
 
+def shell_ordinary_selection():
+    # Selection DATA, not a result or permission to skip an arbitrary case.
+    return {"profile": SHELL_ORDINARY_PROFILE, "cases": list(SHELL_ORDINARY_CASES),
+            "remainingRequiredCases": list(SHELL_ANDROID_CASES),
+            "namespacePlaceholders": sorted(SHELL_ANDROID_CASES),
+            "androidPreparation": False, "androidExecution": False}
+
+
+def shell_ordinary(value):
+    shell = value.get("shell")
+    if type(shell) is not dict or "ordinary21" not in shell:
+        return False  # Historical absence is full25, never a reduced pass.
+    need(not {"githubReadOnly", "androidPublication", "localTransport"} & set(shell)
+         and type(shell["ordinary21"]) is dict
+         and canonical(shell["ordinary21"]) == canonical(shell_ordinary_selection()),
+         "Ordinary21 selection differs or mixes another installed scope")
+    return True
+
+
+def shell_android(value):
+    ordinary = shell_ordinary(value)
+    return "shell" in value and not ordinary and not shell_github(value)
+
+
+def shell_android_cases(value):
+    return SHELL_ANDROID_CASES if shell_android(value) else ()
+
+
 def shell_normal_boundaries(value):
     return shell_github(value) and type(value["shell"]["githubReadOnly"]) is dict \
         and value["shell"]["githubReadOnly"].get("profile") == SHELL_GITHUB_BOUNDARY_PROFILE
 
 
 def shell_cases(value):
+    if shell_ordinary(value):
+        return SHELL_ORDINARY_CASES
     if shell_github(value):
         selection = value["shell"]["githubReadOnly"]
         need(type(selection) is dict, "Closed GitHub selection is not an object")
@@ -4404,12 +4437,13 @@ def shell_github_closed_result(value, outcome, raw_files, expected):
 def shell_handoff(value, original_paths):
     """The fixed connection is neither J's libtest nor a new package source."""
     shell = value["shell"]
+    ordinary = shell_ordinary(value)
     need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
          "acceptedU", "loaderPolicy"} | ({"localTransport"} if "localTransport" in shell else {"artifactId"})
-         | ({"githubReadOnly"} if "githubReadOnly" in shell else {"androidPublication"}),
+         | ({"ordinary21"} if ordinary else {"githubReadOnly"} if "githubReadOnly" in shell else {"androidPublication"}),
          "Fixed shell handoff fields differ")
-    if shell_github(value):
-        need("localTransport" not in shell, "GitHub route cannot adopt Android local transport")
+    if ordinary or shell_github(value):
+        need("localTransport" not in shell, "Non-Android scope cannot adopt Android local transport")
     else:
         materials, publication = _android_handoff_profile(value)
         need(shell["androidPublication"] == shell_android_publication_request(value["taskRoot"], materials, publication),
@@ -4422,6 +4456,9 @@ def shell_handoff(value, original_paths):
     if shell_github(value):
         need(shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub fixed case binding differs")
     binaries, compiler, accepted = shell["binaries"], shell["compiler"], shell["acceptedU"]
+    need(type(compiler) is dict and ("ordinary21" in compiler) == ordinary
+         and (not ordinary or canonical(compiler["ordinary21"]) == canonical(shell["ordinary21"])),
+         "Original compiler and root ordinary21 scopes differ")
     need(type(binaries) is dict and set(binaries) == {"normal", "observer"}, "Normal/observer shell pair missing")
     paths = list(original_paths)
     for role, row in binaries.items():
@@ -4440,11 +4477,16 @@ def shell_handoff(value, original_paths):
          and all(compiler["exportedArtifacts"][role][key] == row[key]
                  for role, row in binaries.items() for key in ("size", "sha256")),
          "Original normal/observer source, features or output bytes differ")
-    if shell_github(value):
+    if ordinary or shell_github(value):
         need(compiler.get("androidBuildMaterials") is None
-             and compiler.get("androidBuildBindings") == {}
-             and compiler.get("androidBuildPublication") is None,
-             "GitHub shell cannot adopt an Android compile profile")
+              and compiler.get("androidBuildBindings") == {}
+              and compiler.get("androidBuildPublication") is None,
+              "Non-Android shell cannot adopt an Android compile profile")
+        if ordinary:
+            need({"androidBuildMaterials", "androidBuildBindings", "androidBuildPublication"} <= set(compiler)
+                 and not {"androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild",
+                          "githubReadOnly", "githubReadOnlyProfile", "localTransport", "shellLocalTransport"} & set(compiler),
+                 "Ordinary21 compiler needs the exact null/empty/null Android contract")
     else:
         need(compiler.get("androidBuildMaterials") == materials
              and compiler.get("androidBuildBindings") == shell_android_compile_environment(materials)
@@ -4780,10 +4822,13 @@ def _capacity(value):
     if "shell" in value and not shell_github(value):
         # One write-only failure leaf per observer. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
-        required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
-        _, android_data = _android_handoff_profile(value)
-        android_totals = android_data["totals"]
-        required += android_totals["toolBytes"] + android_data["documents"]["manifest"]["size"]
+        required += (len(shell_cases(value)) + len(shell_observers(value))) * SHELL_WORK_FILE_LIMIT
+        android_publication_nodes = 0
+        if shell_android(value):
+            _, android_data = _android_handoff_profile(value)
+            android_totals = android_data["totals"]
+            required += android_totals["toolBytes"] + android_data["documents"]["manifest"]["size"]
+            android_publication_nodes = android_totals["toolFiles"] + android_totals["toolDirectories"] + 4
         required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
             + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
         required += sum(len(data) for _, mode, _, data in _shell_metadata_roster(value, True) if stat.S_ISREG(mode)) \
@@ -4794,18 +4839,21 @@ def _capacity(value):
         required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
         tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
         required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
-        android_nodes = [row for case in SHELL_ANDROID_CASES for row in _shell_android_roster(value, case, True)]
+        android_nodes = [row for case in shell_android_cases(value) for row in _shell_android_roster(value, case, True)]
         required += sum(len(row[3]) for row in android_nodes if stat.S_ISREG(row[1]))
+        # The unchanged native exact24 namespace includes four empty original
+        # root-owned placeholders in ordinary21, not Android fixture trees.
+        placeholder_nodes = len(SHELL_ANDROID_CASES) if shell_ordinary(value) else 0
         # Each added existing GUI route creates eight directories, auth and
         # bus-config files, its log, and a bus socket. The shell-only190 output
         # slots cover the188 root originals; TOTAL_LIMIT is unchanged.
         # Settled-failure and version-save are outside the three fixture groups:
         # each needs twelve GUI environment nodes in block/inode accounting.
-        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + len(SHELL_ANDROID_CASES) + 2)
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + len(shell_android_cases(value)) + 2)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (shell_public_limit(value) if "shell" in value else 128)
     if "shell" in value and not shell_github(value):
-        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + session_environment_nodes
-        inodes += android_totals["toolFiles"] + android_totals["toolDirectories"] + 4  # manifest and at most three new directories.
+        inodes += len(shell_observers(value)) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + placeholder_nodes + session_environment_nodes
+        inodes += android_publication_nodes  # Full25 manifest and at most three new directories; zero for ordinary21.
     if shell_github(value):
         count = len(shell_cases(value))
         # Two distinct complete D copies, the fixed peer/project, and the
@@ -4818,8 +4866,8 @@ def _capacity(value):
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value and not shell_github(value):
-        required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
-        required += (android_totals["toolFiles"] + android_totals["toolDirectories"] + 4) * space.f_frsize
+        required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + placeholder_nodes + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+        required += android_publication_nodes * space.f_frsize
     if shell_github(value):
         required += github_nodes * space.f_frsize
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
@@ -5555,6 +5603,8 @@ def root_phases(value):
 
 
 def result_state(value):
+    if shell_ordinary(value):
+        return "ordinary21-shell-installed-runtime-connection-observed"
     if shell_github(value):
         return "installed-github-normal-boundaries-observed" if shell_normal_boundaries(value) else "installed-github-readonly-synthetic-observed"
     if "shell" in value:
@@ -5586,10 +5636,11 @@ def public_files(value):
                         "shell-metadata-save-before.json", "shell-metadata-save-after.json",
                         "shell-version-save-before.json", "shell-version-save-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt", "shell-settled-failure-failure.labels"} \
-            | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
+            | {"shell-" + case + "-xvfb.stderr" for case in shell_cases(value)} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")} \
-            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_ANDROID_CASES for phase in ("before", "after")} \
+            | {"shell-" + case + "-" + phase + ".json" for case in shell_android_cases(value) for phase in ("before", "after")} \
+            | ({"shell-ordinary21-placeholders-" + phase + ".json" for phase in ("before", "after")} if shell_ordinary(value) else set()) \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -8402,15 +8453,97 @@ def _shell_namespace_check(value, binding):
     return namespace
 
 
+def _shell_ordinary_placeholders_prepare(value, root):
+    """Four exclusive empty directories, never Android material preparation."""
+    need(shell_ordinary(value) and _ROOT == root_path(value) and root == shell_fixture_root(value),
+         "Ordinary21 placeholder preparation route differs")
+    originals = []
+    for name in sorted(SHELL_ANDROID_CASES):
+        path = root / name
+        path.mkdir(mode=0o700)  # Never inspect/adopt/repair an occupied name.
+        original = identity(path.lstat())
+        need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0),
+             "Fresh ordinary21 placeholder protection differs")
+        _xattrs(path, True)
+        _shell_namespace_roster(path, ())
+        need(identity(path.lstat()) == original, "Fresh ordinary21 placeholder changed")
+        originals.append(list(original))
+    return originals
+
+
+def _shell_ordinary_placeholders_inventory(value, binding):
+    """Metadata/empty-child observation before GO or after all original returns."""
+    need(shell_ordinary(value) and _ROOT == root_path(value), "Ordinary21 placeholder inventory route differs")
+    namespace = _shell_namespace_check(value, binding)
+    rows, originals = [], []
+    for name in sorted(SHELL_ANDROID_CASES):
+        path = shell_fixture_root(value) / name
+        original = identity(path.lstat())
+        need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+             and 0 < original[5] <= 2 and original[6] <= 1 << 20,
+             "Ordinary21 placeholder ownership, mode or directory bound differs")
+        _xattrs(path, True)
+        _shell_namespace_roster(path, ())  # Any entry refuses; no descendant is read.
+        need(identity(path.lstat()) == original, "Ordinary21 placeholder changed during observation")
+        rows.append({"path": name, "kind": "directory", "identity": list(original), "children": []})
+        originals.append((path, original))
+    reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+    need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+         and len({tuple(row["identity"][:2]) for row in rows}) == len(SHELL_ANDROID_CASES)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Ordinary21 placeholder originals alias, cross devices or changed")
+    _shell_namespace_check(value, binding)
+    result = {"schemaVersion": 1, "fixture": "ordinary21-inert-placeholders-v1",
+              "ordinary21": shell_ordinary_selection(), "namespace": namespace, "entries": rows}
+    need(len(canonical(result)) <= 8192, "Ordinary21 placeholder inventory exceeds the existing fixture bound")
+    return result
+
+
+def shell_ordinary_placeholders(value, before_raw, after_raw):
+    """Closed DATA only; emptiness is not an Android execution/coverage claim."""
+    need(shell_ordinary(value), "Ordinary21 placeholder decoding requires the explicit scope")
+    for raw in (before_raw, after_raw):
+        document = decode(raw, 8192)
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "ordinary21", "namespace", "entries"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "ordinary21-inert-placeholders-v1"
+             and canonical(document["ordinary21"]) == canonical(shell_ordinary_selection()),
+             "Ordinary21 placeholder inventory shape or scope differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(SHELL_ANDROID_CASES), "Ordinary21 placeholder roster differs")
+        for row, name in zip(rows, sorted(SHELL_ANDROID_CASES)):
+            need(type(row) is dict and set(row) == {"path", "kind", "identity", "children"}
+                 and row["path"] == name and row["kind"] == "directory" and row["children"] == [],
+                 "Ordinary21 placeholder is not the exact empty directory")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2:5] == [stat.S_IFDIR | 0o700, 0, 0]
+                 and 0 < original[5] <= 2 and original[6] <= 1 << 20,
+                 "Ordinary21 placeholder original ownership, mode or identity differs")
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(all(row["identity"][0] == namespace["identity"][0] and tuple(row["identity"][:2]) not in reserved for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(SHELL_ANDROID_CASES),
+             "Ordinary21 placeholder originals alias or cross devices")
+    need(before_raw == after_raw, "Ordinary21 placeholder original identity, namespace or emptiness changed")
+    return {"fixture": "ordinary21-inert-placeholders-v1", "names": sorted(SHELL_ANDROID_CASES),
+            "namespaceOnly": True, "empty": True, "originalsAccounted": True, "rootRetained": True,
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
 def _shell_fixtures_prepare(value):
-    """Create the24 fixed fixture trees once, retained on every failure.
+    """Create the exact24 namespace once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
+    Ordinary21 keeps four Android-named entries empty and root-only so the
+    unchanged native namespace capture applies; they are not Android fixtures.
     """
     if shell_github(value):
         return _shell_github_fixtures_prepare(value)
-    shell_android_materials()  # Missing binding refuses before any fresh namespace.
+    if shell_android(value):
+        shell_android_materials()  # Missing full25 binding refuses before any fresh namespace.
     ancestry = _shell_fixture_ancestry(value)
     root = shell_fixture_root(value)
     root.mkdir(mode=0o700)  # Exclusive. Do not inspect/adopt an occupied name.
@@ -8489,7 +8622,11 @@ def _shell_fixtures_prepare(value):
         _xattrs(path, stat.S_ISDIR(mode))
     _shell_session_fixtures_prepare(value, root)
     _shell_tools_offline_fixtures_prepare(value, root)
-    _shell_android_fixtures_prepare(value, root)
+    placeholder_originals = None
+    if shell_android(value):
+        _shell_android_fixtures_prepare(value, root)
+    else:
+        placeholder_originals = _shell_ordinary_placeholders_prepare(value, root)
     _shell_namespace_roster(root)
     for name, kind in (("positive-project", True), ("positive-project/app", True),
                        ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
@@ -8506,6 +8643,11 @@ def _shell_fixtures_prepare(value):
          "Original shell fixture namespace publication differs")
     binding = canonical({"root": str(root), "identity": list(published), "children": list(SHELL_FIXTURE_CHILDREN), **ancestry})
     _shell_namespace_check(value, binding)
+    if placeholder_originals is not None:
+        before = _shell_ordinary_placeholders_inventory(value, binding)
+        need([row["identity"] for row in before["entries"]] == placeholder_originals,
+             "Fresh ordinary21 placeholder originals changed before capture")
+        _retain("shell-ordinary21-placeholders-before.json", canonical(before))
     return binding
 
 
@@ -9627,10 +9769,14 @@ def _shell_fixtures_final(value, namespace):
         need(canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
              == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT),
              "Later shell observations changed an earlier original Tools/Offline fixture")
-    for case in SHELL_ANDROID_CASES:
+    for case in shell_android_cases(value):
         need(canonical(_shell_android_inventory(value, namespace, case, after=True))
              == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_ANDROID_INVENTORY_LIMIT),
              "Later shell observations changed earlier Android source controls or fixed output-root metadata")
+    if shell_ordinary(value):
+        after = canonical(_shell_ordinary_placeholders_inventory(value, namespace))
+        shell_ordinary_placeholders(value, read(_ROOT / "public/shell-ordinary21-placeholders-before.json", 8192), after)
+        _retain("shell-ordinary21-placeholders-after.json", after)
 
 
 def _shell_original_child_map(raw, expected):
@@ -10433,7 +10579,7 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
     elif "shell" in value:
         shell = value["shell"]
         need(set(cases) == set(shell_cases(value)), "Original fixed shell case roster incomplete")
-        android_publication = None if shell_github(value) else _finish_android_publication(value)
+        android_publication = _finish_android_publication(value) if shell_android(value) else None
         _shell_data_check(loader)
         _installed_loader_check(loader)
         _retain("loader-final.json", canonical(loader))
@@ -10441,7 +10587,8 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
         extra = {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
                  **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
                  "packageLifecycleQualified": False, "shellPackageBuilt": False,
-                 **({"androidPublication": android_publication} if not shell_github(value) else {})}
+                 **({"androidPublication": android_publication} if shell_android(value) else {}),
+                 **({"ordinary21": shell_ordinary_selection()} if shell_ordinary(value) else {})}
     if "installed" not in value or value["installed"]["case"] == "positive":
         _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
@@ -10469,7 +10616,7 @@ def unit_start():
     _retain("unit-start.json", canonical(start))
     _retain("inputs.json", canonical(value))
     _retain("dpkg-policy.json", canonical(policy))
-    if "shell" in value and not shell_github(value):
+    if shell_android(value):
         _publish_android(value)
     loader = (_installed_loader_start(value, namespaces) if "installed" in value
               else _shell_loader_start(value, namespaces) if "shell" in value else None)
@@ -10919,6 +11066,14 @@ def shell_closed_loader(value, raw_files):
 def shell_closed_result(value, outcome, raw_files):
     """Correspondence only, after the same original-client/StopPost gate."""
     shell = value["shell"]
+    ordinary = shell_ordinary(value)
+    need(("ordinary21" in outcome) == ordinary
+         and (not ordinary or canonical(outcome["ordinary21"]) == canonical(shell["ordinary21"])),
+         "Closed original ordinary21 scope differs from the handoff")
+    if ordinary:
+        need(not {"androidPublication", "androidBuild", "githubReadOnly"} & set(outcome)
+             and set(raw_files) == public_files(value),
+             "Ordinary21 closed outputs mix another scope or omit an original file")
     for key, field in (("shellRosterSha256", "rosterSha256"), ("shellProducerAttempt", "producerAttempt"),
                        ("acceptedU", "acceptedU")):
         need(outcome.get(key) == shell[field], "Closed shell original provenance differs")
@@ -10931,11 +11086,11 @@ def shell_closed_result(value, outcome, raw_files):
     expected = shell_closed_loader(value, raw_files)
     if shell_github(value):
         return shell_github_closed_result(value, outcome, raw_files, expected)
-    android_publication = _android_closed_publication(value, outcome.get("androidPublication"))
+    android_publication = _android_closed_publication(value, outcome.get("androidPublication")) if shell_android(value) else None
     cases = decode(raw_files["shell-cases.json"])
-    need(type(cases) is dict and set(cases) == set(SHELL_CASES), "Closed original shell case roster differs")
+    need(type(cases) is dict and set(cases) == set(shell_cases(value)), "Closed original shell case roster differs")
     commands = {row["phase"]: row for row in outcome["commands"]}
-    for case in SHELL_CASES:
+    for case in shell_cases(value):
         phase = "shell-" + case
         need(commands[phase]["argv"] == shell_argv(value, case), "Closed original shell argv differs")
         streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
@@ -10962,7 +11117,7 @@ def shell_closed_result(value, outcome, raw_files):
          "Tools/Offline original native fixture observations differ from the outer inventories")
     android = {case: {"native": cases[case]["androidBuild"],
         "fixture": shell_android_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
-        for case in SHELL_ANDROID_CASES}
+        for case in shell_android_cases(value)}
     need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
              for key in _shell_android_native_fixture(case)}) for case, pair in android.items()),
          "Android original native controls differ from the outer inventories")
@@ -10972,7 +11127,12 @@ def shell_closed_result(value, outcome, raw_files):
     namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)["namespace"]
                       for case in SHELL_TOOLS_OFFLINE_CASES)
     namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_ANDROID_INVENTORY_LIMIT)["namespace"]
-                      for case in SHELL_ANDROID_CASES)
+                      for case in shell_android_cases(value))
+    placeholders = None
+    if ordinary:
+        before = raw_files["shell-ordinary21-placeholders-before.json"]
+        placeholders = shell_ordinary_placeholders(value, before, raw_files["shell-ordinary21-placeholders-after.json"])
+        namespaces.append(decode(before, 8192)["namespace"])
     need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
@@ -10996,7 +11156,9 @@ def shell_closed_result(value, outcome, raw_files):
             "sessionInputs": sessions,
             "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
             "versionSave": {"native": cases["version-save"]["versionSave"], "fixture": version},
-            "toolsOffline": tools_offline, "androidBuild": android, "androidPublication": android_publication,
+            "toolsOffline": tools_offline,
+            **({"ordinary21": shell_ordinary_selection(), "namespacePlaceholders": placeholders} if ordinary
+               else {"androidBuild": android, "androidPublication": android_publication}),
             "settledFailure": cases["settled-failure"],
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 

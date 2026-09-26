@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 10 || 50 }}
     env:
       MRK_INSTALLED_SHELL_CASE: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 'host-metadata-only' || 'compile' }}
+      MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || '' }}
+      MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1
       MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
       MRK_UBUNTU_PUBLICATION_VERIFY: '1'
     steps:
@@ -45,6 +47,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Admit the fixed installed scope and source before acquisition or preparation
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c3e70165ffc6f11403438944d6e565041033127b3e1230eaa30726320c0dc890'
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-source-admission
       - name: Select the fixed frontend compiler
         if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -608,14 +618,15 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_INSTALLED_SHELL_TRANSPORT: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'android-same-job-local-v1' || 'actions-artifact-v1' }}
+          MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1
+          MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || '' }}
           MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '1e0a64c44dbc596800570b124a0b5017f7bf714dc5d0bb0297bd51c336022ce5'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c3e70165ffc6f11403438944d6e565041033127b3e1230eaa30726320c0dc890'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
-      - name: Retain only the typed compiler summary; same-job originals stay private
+      - name: Retain the compiler artifact or typed private-transport summary
         id: upload
         if: always() && (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -633,6 +644,7 @@ jobs:
           MRK_INSTALLED_SHELL_CASE: observe
           HOSTING: ${{ runner.environment }}
           MRK_INSTALLED_SHELL_TRANSPORT: ${{ steps.compile.outputs.shell_transport }}
+          MRK_INSTALLED_SHELL_SCOPE: ${{ steps.compile.outputs.shell_scope }}
           MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256: ${{ steps.compile.outputs.shell_local_transport_sha256 }}
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}
@@ -649,7 +661,13 @@ jobs:
           producer = os.environ.get('MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT', '')
           consumer = os.environ.get('GITHUB_RUN_ATTEMPT', '')
           transport = os.environ.get('MRK_INSTALLED_SHELL_TRANSPORT', '')
+          scope = os.environ.get('MRK_INSTALLED_SHELL_SCOPE', '')
           local_pin = os.environ.get('MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256', '')
+          if os.environ.get('GITHUB_REF') == 'refs/heads/verify/desktop-installed-shell':
+              if scope != 'ordinary21-v1' or transport != 'actions-artifact-v1':
+                  raise SystemExit('Current ordinary21 route requires its original explicit artifact scope')
+          elif scope:
+              raise SystemExit('GitHub selections cannot adopt the ordinary21 scope')
           if not all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (producer, consumer)):
               raise SystemExit('Missing original compiler/consumer attempt output')
           if not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_SHELL_ROSTER_SHA256', '')):
@@ -688,6 +706,8 @@ jobs:
         env:
           MRK_INSTALLED_SHELL_CASE: observe
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_INSTALLED_SHELL_SCOPE: ${{ steps.compile.outputs.shell_scope }}
+          MRK_INSTALLED_SHELL_TRANSPORT: ${{ steps.compile.outputs.shell_transport }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       - name: Download this run's exact original compiled shell outputs
         if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success' && steps.compile.outputs.shell_transport == 'actions-artifact-v1'
@@ -721,11 +741,12 @@ jobs:
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare_native.outputs.deadline }}
           MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ steps.compile.outputs.shell_roster_sha256 }}
           MRK_INSTALLED_SHELL_TRANSPORT: ${{ steps.compile.outputs.shell_transport }}
+          MRK_INSTALLED_SHELL_SCOPE: ${{ steps.compile.outputs.shell_scope }}
           MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256: ${{ steps.compile.outputs.shell_local_transport_sha256 }}
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '1e0a64c44dbc596800570b124a0b5017f7bf714dc5d0bb0297bd51c336022ce5'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c3e70165ffc6f11403438944d6e565041033127b3e1230eaa30726320c0dc890'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
