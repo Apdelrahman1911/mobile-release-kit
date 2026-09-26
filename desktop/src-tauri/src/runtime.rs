@@ -31,10 +31,11 @@ const PYTHON_RESOURCE: &str = "python/bin/python3";
 
 // Canonical fixed inventory shared by packaging and installed-data validation.
 // Presence is not runtime, TLS, XML, or native-custody qualification.
-pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 10] = [
+pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 12] = [
     "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
     "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+    "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -1521,7 +1522,8 @@ mod tests {
         assert_eq!(REQUIRED_RUNTIME_RESOURCES, [
             "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
             "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-            "github_connection_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+            "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+            "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
         ]);
         for name in REQUIRED_RUNTIME_RESOURCES { assert!(safe_payload_path(name)); }
         assert!(safe_payload_path("python/lib/libstdc++.so.6"));
@@ -2011,6 +2013,13 @@ pub(crate) mod windows_version {
     pub(crate) const SELECTED: [&str; 3] = ["python/python.exe", "engine_bootstrap.py", "core.zip"];
     pub(crate) const BLOCK_SIZE: usize = 64 * 1024;
     pub(crate) const MANIFEST_BYTES: u64 = MANIFEST_LIMIT;
+    // This fixed supplier/publication lane retains its six-bootstrap roster.
+    // Current product payload completeness must not redefine its anchored manifest.
+    const HISTORICAL_REQUIRED_RUNTIME_RESOURCES: [&str; 9] = [
+        "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+        "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
+        "github_connection_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+    ];
 
     /// Pure selection DATA. A five-method qualification candidate is never
     /// silently promoted into the normal window's six-method capability set.
@@ -2186,7 +2195,7 @@ pub(crate) mod windows_version {
             // Derived directories, not undeclared empty folders; actual native
             // entry accounting also includes prefix and . / .. observations.
             if nodes.len() > ENTRY_COUNT { return Err(unavailable()); }
-            for required in REQUIRED_RUNTIME_RESOURCES {
+            for required in HISTORICAL_REQUIRED_RUNTIME_RESOURCES {
                 let required = if required == PYTHON_RESOURCE { SELECTED[0] } else { required };
                 if find_file(&manifest.files, required).is_none() { return Err(unavailable()); }
             }
@@ -2262,7 +2271,7 @@ pub(crate) mod windows_version {
             let mut files: Vec<PayloadFile> = SUPPLIER.iter().map(|(name, size, hash)| PayloadFile {
                 path: format!("python/{name}"), size: *size, sha256: (*hash).to_owned(),
             }).collect();
-            for required in REQUIRED_RUNTIME_RESOURCES {
+            for required in HISTORICAL_REQUIRED_RUNTIME_RESOURCES {
                 if required != PYTHON_RESOURCE {
                     files.push(PayloadFile { path: required.to_owned(), size: 1, sha256: "a".repeat(64) });
                 }
