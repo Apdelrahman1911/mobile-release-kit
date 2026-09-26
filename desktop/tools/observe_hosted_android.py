@@ -51,7 +51,11 @@ PACKAGES = ("coreutils", "sed", "findutils", "libacl1", "libasound2t64", "libgif
             "fontconfig", "fontconfig-config", "libfontconfig1")
 SOURCE_FILES = ("observe_hosted_android.py", "observe_hosted_python.py",
                 "ci_ubuntu_publication.py", "ci_foundation.py", "conventional_runtime_data.py",
-                "ubuntu_publication_lifecycle.py", "hosted_glibc_policy.py")
+                "ubuntu_publication_lifecycle.py", "hosted_glibc_policy.py",
+                "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json")
+TRUST_INPUTS = (("/etc/ssl/certs/ca-certificates.crt", 4 << 20, "pem"),
+                ("/etc/ssl/certs/java/cacerts", 8 << 20, "jks"),
+                ("/etc/ca-certificates.conf", 256 << 10, "config"))
 
 
 class Refused(ValueError):
@@ -68,7 +72,7 @@ def need(ok, reason):
 
 
 def local(name):
-    need(name in {"ci_ubuntu_publication", "observe_hosted_python"}, "module-role")
+    need(name in {"ci_ubuntu_publication", "observe_hosted_python", "stock_trust_correspondence"}, "module-role")
     spec = importlib.util.spec_from_file_location("_host_android_" + name, TOOLS / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -105,6 +109,10 @@ def diagnostic_reason(error):
         "supplier-ca-roster-changed", "receipt-format", "receipt-roster", "image-duplicate", "image-object",
         "image-field", "image-origin-url", "image-public-label", "image-known-fields-missing",
         "image-array-shape", "image-correspondence",
+        "stock-policy", "stock-policy-unavailable", "stock-pem-framing", "stock-pem-bound",
+        "stock-der", "stock-complete-set", "stock-jks-framing", "stock-jks-encoding",
+        "stock-jks-alias", "stock-jks-integrity", "stock-config", "stock-custom-inputs",
+        "stock-correspondence",
     }
     shared = {
         "Absolute native OS input required": "file-path",
@@ -455,6 +463,31 @@ def github_materials(publisher, reader):
 def collect(publisher, run, deadline):
     reader = Reader(publisher, deadline)
     observations = {}
+    trust = {}
+
+    def parse_trust(kind, raw):
+        if "policy" not in trust:
+            module = local("stock_trust_correspondence")
+            def policy_body(bound):
+                body = publisher.D.read(TOOLS / module.POLICY_FILE, bound)
+                return body, len(body)
+            # The fixed policy is source-bound by main's before/after roster and
+            # its complete digest is checked before interpretation. Charge I/O.
+            policy = reader.charged(module.POLICY_LIMIT, policy_body, overread=1)
+            trust["policy"] = module.Policy(policy)
+        return getattr(trust["policy"], kind)(raw, reader.point)
+
+    def trust_summary():
+        reader.phase = "stock-summary"
+        need("policy" in trust, "stock-policy-unavailable")
+        components = {}
+        for name, _, kind in TRUST_INPUTS:
+            row = observations[name]
+            need(row.get("status") == "observed" and "data" in row, "stock-correspondence")
+            components[kind] = row["data"]
+        data = trust["policy"].complete(components, observations["customCaInputs"])
+        return {"status": "observed", "data": data}
+
     record = {"schema": SCHEMA, "run": run, "runtimeAdmission": False, "nativeQualification": False,
               "newConsent": False, "collectionComplete": False, "producerOriginProven": False,
               "observations": observations, "stopped": None,
@@ -474,14 +507,14 @@ def collect(publisher, run, deadline):
                       lambda raw: publisher.shell_elf_record(raw, role="provider", selected=p))))
     for name in PRODUCERS:
         tasks.append((name, lambda n=name: reader.file(n, 2 << 20)))
-    for name, bound in (("/etc/ssl/certs/ca-certificates.crt", 4 << 20),
-                        ("/etc/ssl/certs/java/cacerts", 8 << 20),
-                        ("/etc/ca-certificates.conf", 256 << 10)):
-        tasks.append((name, lambda n=name, b=bound: reader.file(n, b)))
+    for name, bound, kind in TRUST_INPUTS:
+        tasks.append((name, lambda n=name, b=bound, k=kind: reader.file(n, b,
+                      lambda raw: parse_trust(k, raw))))
     tasks.extend([
         ("selectedPackages", lambda: reader.file("/var/lib/dpkg/status", 24 << 20, package_status)),
         ("supplierCaInputs", lambda: supplier_cas(reader)),
         ("customCaInputs", lambda: reader.directory(CUSTOM_CA_ROOT, custom=True)),
+        ("stockTrustCorrespondence", trust_summary),
         ("sdkLicense", lambda: reader.file(SDK_LICENSE, 4096, license_ids)),
         ("imageGeneration", lambda: reader.file(IMAGE_DATA, 64 << 10, image_identity)),
     ])
@@ -516,12 +549,14 @@ def collect(publisher, run, deadline):
         except Stopped as error:
             record["stopped"] = error.args[0]
             observations[name] = {"status": "unavailable", "reason": error.args[0]}
-            if name in {"supplierCaInputs", "sdkLicense", "imageGeneration"}:
+            if name in {"supplierCaInputs", "sdkLicense", "imageGeneration", "stockTrustCorrespondence"} \
+                    or name in {item[0] for item in TRUST_INPUTS}:
                 observations[name].update(phase=reader.phase, refusal=error.args[0])
             break
         except (OSError, ValueError, UnicodeError, KeyError, RecursionError) as error:
             observations[name] = {"status": "unavailable", "reason": reason(error)}
-            if name in {"supplierCaInputs", "sdkLicense", "imageGeneration"}:
+            if name in {"supplierCaInputs", "sdkLicense", "imageGeneration", "stockTrustCorrespondence"} \
+                    or name in {item[0] for item in TRUST_INPUTS}:
                 observations[name].update(phase=reader.phase, refusal=diagnostic_reason(error))
     record["androidChargedReadBytes"] = READ_LIMIT - reader.remaining
     return record
