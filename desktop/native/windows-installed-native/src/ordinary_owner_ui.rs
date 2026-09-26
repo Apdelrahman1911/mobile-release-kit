@@ -708,25 +708,32 @@ impl Fixture {
 // No recursive deletion or replacement/reacquisition as a finality shortcut.
 fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixture: &mut Option<Fixture>,
     role: UiRole, output: &Path, output_index: usize, result_index: Option<usize>, clock: &mut Clock,
-    trace: &mut InputTrace) -> Result<()> {
+    trace: &mut InputTrace, smoke: Option<&Smoke>) -> Result<()> {
+    // Observe each original result once; this only narrows the existing first
+    // diagnostic. No extra native operation, inventory pass or failure policy.
+    macro_rules! output_result {
+        ($check:ident, $original:expr) => {
+            smoke_result(smoke, SmokePhase::OutputPoststate, SmokeCheck::$check, $original)
+        };
+    }
     trace.prerequisite_scope(PrerequisiteCheck::O01, |trace| {
-        let (drive, parts) = decode::dos_location(output.to_str().ok_or(Error::Unsafe)?)?;
-        need(parts.len() < 16)?; clock.effect_traced(trace)?;
-        let device = native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive))?; let name = format!("{device}\\");
-        let root = native.prerequisite_observe(trace, PrerequisiteCheck::NB01, |native| native.reserve(Kind::Directory, None, &name, name.clone()))?;
-        native.prerequisite_observe(trace, PrerequisiteCheck::NB02, |native| native.call(Call::Open(root.index), null_mut(), Vec::new()))?;
-        native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.noninherited(root.index))?; native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&root))?;
-        let root_metadata = native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&root))?;
+        let (drive, parts) = output_result!(OutputDecode, decode::dos_location(output_result!(OutputLocation, output.to_str().ok_or(Error::Unsafe))?))?;
+        output_result!(OutputDepth, need(parts.len() < 16))?; output_result!(Clock, clock.effect_traced(trace))?;
+        let device = output_result!(OutputDrive, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))?; let name = format!("{device}\\");
+        let root = output_result!(OutputRootReserve, native.prerequisite_observe(trace, PrerequisiteCheck::NB01, |native| native.reserve(Kind::Directory, None, &name, name.clone())))?;
+        output_result!(OutputRootOpen, native.prerequisite_observe(trace, PrerequisiteCheck::NB02, |native| native.call(Call::Open(root.index), null_mut(), Vec::new())))?;
+        output_result!(OutputRootNoninherited, native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.noninherited(root.index)))?; output_result!(OutputFilesystem, native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&root)))?;
+        let root_metadata = output_result!(OutputRootMetadata, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&root)))?;
         let mut entries = vec![(root, root_metadata)];
         for name in parts {
-            clock.effect_traced(trace)?;
-            let original = native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(&entries.last().ok_or(Error::State)?.0, &name, FileKind::Directory))?;
-            let metadata = native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original))?; entries.push((original, metadata));
+            output_result!(Clock, clock.effect_traced(trace))?;
+            let original = output_result!(OutputAncestorOpen, native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(&output_result!(OutputParentOriginal, entries.last().ok_or(Error::State))?.0, &name, FileKind::Directory)))?;
+            let metadata = output_result!(OutputAncestorMetadata, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original)))?; entries.push((original, metadata));
         }
         let at = entries.len() - 1;
         trace.at(InputRole::Output, Some(output_index as u8));
-        let output_stamp = files[output_index].stamp_traced(trace)?;
-        need(entries[at].1.identity.volume_serial == output_stamp.volume && entries[at].1.identity.file_id == output_stamp.id)?;
+        let output_stamp = output_result!(OutputStamp, files[output_index].stamp_traced(trace))?;
+        output_result!(OutputIdentity, need(entries[at].1.identity.volume_serial == output_stamp.volume && entries[at].1.identity.file_id == output_stamp.id))?;
         let mut directories = vec![(at, at - 1)];
         let mut children: Vec<(usize, String, Stamp, FileKind)> = Vec::with_capacity(9);
         if let Some(result) = result_index {
@@ -783,28 +790,28 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                 && native.read_next(&original, LIMIT)? == if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER }
                 && native.read_next(&original, 1)?.is_empty())?;
             entries.push((original, metadata));
-        } else { need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke))?; }
+        } else { output_result!(OutputRole, need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke)))?; }
         trace.prerequisite_check(PrerequisiteCheck::O02);
         for (index, parent) in directories {
             trace.prerequisite_check(PrerequisiteCheck::O02);
             let mut seen = std::collections::BTreeSet::new();
             loop {
-                clock.effect_traced(trace)?; let Some(batch) = native.prerequisite_observe(trace, PrerequisiteCheck::NB09, |native| native.next_entries(&entries[index].0))? else { break; };
+                output_result!(Clock, clock.effect_traced(trace))?; let Some(batch) = output_result!(OutputEntryBatch, native.prerequisite_observe(trace, PrerequisiteCheck::NB09, |native| native.next_entries(&entries[index].0)))? else { break; };
                 for entry in batch {
-                    need(seen.insert(entry.name.clone()) && seen.len() <= 6)?;
-                    if entry.name == "." { need(entry.file_id == entries[index].1.identity.file_id)?; continue; }
-                    if entry.name == ".." { need(entry.file_id == entries[parent].1.identity.file_id)?; continue; }
-                    let (_, _, expected, kind) = children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)?;
-                    need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume)?;
+                    output_result!(OutputEntryAdmission, need(seen.insert(entry.name.clone()) && seen.len() <= 6))?;
+                    if entry.name == "." { output_result!(OutputDotIdentity, need(entry.file_id == entries[index].1.identity.file_id))?; continue; }
+                    if entry.name == ".." { output_result!(OutputParentIdentity, need(entry.file_id == entries[parent].1.identity.file_id))?; continue; }
+                    let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe))?;
+                    output_result!(OutputEntryBinding, need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume))?;
                 }
             }
             trace.prerequisite_check(PrerequisiteCheck::O03);
             let expected: std::collections::BTreeSet<_> = children.iter().filter(|(p, _, _, _)| *p == index)
                 .map(|(_, name, _, _)| name.clone()).chain([".".to_owned(), "..".to_owned()]).collect();
-            need(seen == expected)?;
+            output_result!(OutputRoster, need(seen == expected))?;
         }
-        for (original, before) in &entries { clock.effect_traced(trace)?; need(native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(original))? == *before)?; }
-        need(native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive))? == device)?; clock.effect_traced(trace)?;
+        for (original, before) in &entries { output_result!(Clock, clock.effect_traced(trace))?; output_result!(OutputPostMetadata, need(output_result!(OutputPostMetadataRead, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(original)))? == *before))?; }
+        output_result!(OutputMappingUnchanged, need(output_result!(OutputFinalDrive, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))? == device))?; output_result!(Clock, clock.effect_traced(trace))?;
         if let Some(fixture) = fixture.as_mut() { fixture.verified = true; }
         Ok(())
     })
@@ -897,6 +904,32 @@ smoke_labels!(SmokeCheck {
     ArtifactStamp => "artifact-original-stamp", ArtifactExpected => "artifact-expected-stamp",
     ArtifactUnchanged => "artifact-unchanged", InputStamp => "input-original-stamp",
     InputUnchanged => "input-unchanged", OutputIndex => "output-original-index", OutputInventory => "output-inventory",
+    OutputLocation => "output-location",
+    OutputDecode => "output-location-decode",
+    OutputDepth => "output-path-depth",
+    OutputDrive => "output-initial-drive",
+    OutputRootReserve => "output-root-reserve",
+    OutputRootOpen => "output-root-open",
+    OutputRootNoninherited => "output-root-noninherited",
+    OutputFilesystem => "output-root-filesystem",
+    OutputRootMetadata => "output-root-metadata",
+    OutputParentOriginal => "output-parent-original",
+    OutputAncestorOpen => "output-ancestor-open",
+    OutputAncestorMetadata => "output-ancestor-metadata",
+    OutputStamp => "output-original-stamp",
+    OutputIdentity => "output-original-identity",
+    OutputRole => "output-inventory-role",
+    OutputEntryBatch => "output-entry-batch",
+    OutputEntryAdmission => "output-entry-duplicate-bound",
+    OutputDotIdentity => "output-dot-identity",
+    OutputParentIdentity => "output-parent-identity",
+    OutputUnexpectedChild => "output-unexpected-child",
+    OutputEntryBinding => "output-entry-binding",
+    OutputRoster => "output-exact-roster",
+    OutputPostMetadataRead => "output-post-metadata-read",
+    OutputPostMetadata => "output-post-metadata",
+    OutputFinalDrive => "output-final-drive",
+    OutputMappingUnchanged => "output-mapping-unchanged",
     InventorySettlement => "inventory-settlement", InputClose => "input-original-close",
     ProfileSettlement => "profile-settlement", ProfileRetirement => "profile-retirement",
     AccountRetirement => "account-retirement",
@@ -2594,7 +2627,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
             smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputInventory,
                 output_poststate(&mut inventory, &mut files, &mut fixture, role, &output,
                     smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputIndex,
-                        output_index.ok_or(Error::State))?, result, &mut clock, trace))?;
+                        output_index.ok_or(Error::State))?, result, &mut clock, trace, smoke.as_ref()))?;
             smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect_traced(trace))
         })();
         observation = trace.prerequisite_current(observation);
@@ -4242,12 +4275,82 @@ mod contract_tests {
         assert!(observe.contains("self.query.begin(clock, &self.trace)?; self.invoke_entered = true;"));
     }
 
+    // DATA-only coverage for the precise common-path output-inventory labels.
+    // This neither runs native inventory nor substitutes for its Windows route.
+    fn output_inventory_diagnostic_contract() {
+        let source = include_str!("ordinary_owner_ui.rs");
+        let inventory = source.split_once("fn output_poststate(").unwrap().1
+            .split_once("// Qualification-only, same-thread DATA.").unwrap().0;
+        assert!(inventory.contains("trace: &mut InputTrace, smoke: Option<&Smoke>) -> Result<()> {"));
+        assert_eq!(inventory.matches("smoke_result(smoke, SmokePhase::OutputPoststate, SmokeCheck::$check, $original)").count(), 1);
+        for name in [
+            "OutputLocation",
+            "OutputDecode",
+            "OutputDepth",
+            "OutputDrive",
+            "OutputRootReserve",
+            "OutputRootOpen",
+            "OutputRootNoninherited",
+            "OutputFilesystem",
+            "OutputRootMetadata",
+            "OutputParentOriginal",
+            "OutputAncestorOpen",
+            "OutputAncestorMetadata",
+            "OutputStamp",
+            "OutputIdentity",
+            "OutputRole",
+            "OutputEntryBatch",
+            "OutputEntryAdmission",
+            "OutputDotIdentity",
+            "OutputParentIdentity",
+            "OutputUnexpectedChild",
+            "OutputEntryBinding",
+            "OutputRoster",
+            "OutputPostMetadataRead",
+            "OutputPostMetadata",
+            "OutputFinalDrive",
+            "OutputMappingUnchanged",
+        ] {
+            assert_eq!(inventory.matches(&format!("output_result!({name},")).count(), 1, "{name}");
+        }
+        assert_eq!(inventory.matches("native.next_entries(&entries[index].0)").count(), 1);
+        for predicate in [
+            "need(parts.len() < 16)",
+            "need(seen.insert(entry.name.clone()) && seen.len() <= 6)",
+            "need(entry.file_id == entries[index].1.identity.file_id)",
+            "need(entry.file_id == entries[parent].1.identity.file_id)",
+            "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)",
+            "need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume)",
+            ".map(|(_, name, _, _)| name.clone()).chain([\".\".to_owned(), \"..\".to_owned()]).collect()",
+            "need(seen == expected)",
+        ] { assert!(inventory.contains(predicate), "{predicate}"); }
+        let owner = source.split_once("fn run_prerequisite_traced(").unwrap().1
+            .split_once("    trace.prerequisite_at(PrerequisiteStage::Settlement").unwrap().0;
+        assert_eq!(owner.matches("output_poststate(").count(), 1);
+        assert!(owner.contains("output_index.ok_or(Error::State))?, result, &mut clock, trace, smoke.as_ref()))?;"));
+        for error in [Error::Unavailable, Error::Unsafe, Error::Bounds, Error::State, Error::Unknown] {
+            let smoke = Smoke::new(); // No initialize/acquire/settle or native call.
+            assert_eq!(smoke_result(Some(&smoke), SmokePhase::OutputPoststate, SmokeCheck::OutputUnexpectedChild, Ok(7u8)), Ok(7));
+            assert!(smoke.trace.first.get().is_none());
+            let original = smoke_result::<()>(Some(&smoke), SmokePhase::OutputPoststate, SmokeCheck::OutputUnexpectedChild, Err(error));
+            assert_eq!(original, Err(error));
+            let first = smoke.trace.first.get().unwrap();
+            assert_eq!((first.phase, first.check, first.error, first.status),
+                (SmokePhase::OutputPoststate, SmokeCheck::OutputUnexpectedChild, error, None));
+            assert_eq!(smoke_result(Some(&smoke), SmokePhase::OutputPoststate, SmokeCheck::OutputInventory, original), Err(error));
+            assert_eq!(smoke_result::<()>(Some(&smoke), SmokePhase::Retirement, SmokeCheck::ProfileRetirement, Err(Error::Unknown)), Err(Error::Unknown));
+            assert_eq!(smoke.trace.first.get(), Some(first));
+            assert_eq!(smoke_result::<()>(None, SmokePhase::OutputPoststate, SmokeCheck::OutputUnexpectedChild, Err(error)), Err(error));
+        }
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
         dashboard_name_observation_contract(); dashboard_stale_name_contract();
         startup_diagnostic_contract();
         quit_logical_controls_contract();
+        output_inventory_diagnostic_contract();
         // Actual finite native-containment routing; no native call is entered.
         use crate::ui::quit_native::Failure as Q;
         for (failure, check, error) in [
