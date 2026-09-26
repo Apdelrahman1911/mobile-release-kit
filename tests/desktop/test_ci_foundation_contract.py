@@ -14121,6 +14121,145 @@ class WindowsNormalUiSetupTests(unittest.TestCase):
         self.assertIn("MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME", blocks["retain"])
 
 
+class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
+    """Independent synthetic closed DATA; no journal, process or native fixture."""
+    OWNERS = {"project-draft": "ordinary_owner::hosted_normal_ui_project_original_handle_contract",
+              "quit-passive": "ordinary_owner::hosted_normal_ui_quit_original_handle_contract",
+              "document-loss": "ordinary_owner::hosted_normal_ui_document_original_handle_contract"}
+
+    @staticmethod
+    def frame_data(role="project-draft"):
+        return {"schema": 1, "source": "a" * 40, "tree": "b" * 40, "run": "123456", "attempt": 1,
+                "role": role, "request": "c" * 64, "diagnosticOnly": True,
+                "projection": {"bytes": 200, "records": 1, "reason": 0,
+                               "last": {"sequence": 1, "event": 1, "step": 1, "pending": 0, "pendingStep": 0,
+                                        "dispatch": 0, "flags": 0, "startup": None, "refusal": 0, "coverageIncomplete": False},
+                               "observerRefusal": None, "startupRefusal": None}}
+
+    @classmethod
+    def frame(cls, data=None):
+        # Stdlib fixture encoder, not a candidate serializer.
+        return b"\nMRK_WINDOWS_UI_OBSERVER_DIAGNOSTIC_V1=" + json.dumps(
+            cls.frame_data() if data is None else data, separators=(",", ":")).encode("ascii") + b"\n"
+
+    @classmethod
+    def original_log(cls, role="project-draft", coalesced=True):
+        binding = {"sourceSha": "a" * 40, "sourceTree": "b" * 40, "runId": "123456", "attempt": 1, "jobId": 7654321,
+                   "owner": cls.OWNERS[role], "ref": "refs/heads/verify/desktop-windows-normal-project-ui",
+                   "event": "workflow_dispatch", "dispatchScope": "windows-normal-project-ui", "expectedSha": "a" * 40,
+                   "workflowPath": ".github/workflows/desktop-foundation.yml", "workflowSha": "a" * 40,
+                   "role": role, "requestSha256": "c" * 64}
+        run = {"id": 123456, "run_attempt": 1, "head_sha": "a" * 40, "event": "workflow_dispatch",
+               "head_branch": "verify/desktop-windows-normal-project-ui", "path": ".github/workflows/desktop-foundation.yml",
+               "status": "completed", "conclusion": "failure"}
+        jobs = {"total_count": 2, "jobs": [{"id": 7654320, "name": "unrelated skipped job"},
+            {"id": 7654321, "name": "Windows MSVC headless reader and native facts / no runtime enablement",
+             "run_id": 123456, "run_attempt": 1, "head_sha": "a" * 40, "status": "completed", "conclusion": "failure",
+             "steps": [{"number": 17, "name": "Own one " + role + " application and settle its original ordinary-account resources",
+                        "status": "completed", "conclusion": "failure", "started_at": "2026-09-26T10:00:00Z",
+                        "completed_at": "2026-09-26T10:02:00Z"}]}]}
+        stamp = b"2026-09-26T10:01:40.0000000Z "
+        opening = b"test " + cls.OWNERS[role].encode("ascii") + b" ... "
+        if coalesced: opening += b'MRK_WINDOWS_ORDINARY_OWNER_REFUSED={"stage":"ui-profile-original-binding","unknown":false,"cleanupNotRetried":true}'
+        lines = [b"running 1 test", opening, cls.frame(cls.frame_data(role))[1:-1], b"FAILED",
+                 b"test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 173 filtered out; finished in 100.00s"]
+        raw = b"".join(stamp + line + b"\n" for line in lines)
+        closure = {"schema": "windows-normal-ui-observer-original-log-close-v1",
+                   **{key: binding[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "jobId", "role", "requestSha256")},
+                   "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                   "transferReturned": True, "streamClosed": True, "originalJobCompleted": True}
+        return raw, binding, run, jobs, closure
+
+    @staticmethod
+    def joined(parts, *, closed=True):
+        raw, binding, run, jobs, closure = parts
+        return helper.windows_normal_ui_observer_log_data(raw, binding=binding, run=run, jobs=jobs, closure=closure if closed else None)
+
+    def test_all_three_exact_owner_steps_join_only_diagnostic_scalars(self):
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text()
+        for role in self.OWNERS:
+            for coalesced in (True, False):
+                parts = self.original_log(role, coalesced)
+                with self.subTest(role=role, coalesced=coalesced), patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no I/O")), \
+                        patch.object(helper, "run", side_effect=AssertionError("no process")):
+                    data = self.joined(parts)
+                self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["frameState"], "received")
+                self.assertTrue(data["observerDiagnosticOnly"]); self.assertTrue(data["originalSelectedFailure"])
+                self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
+                self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
+                self.assertIsNone(data["rawOriginalExit"])
+                self.assertEqual(data["senderDelivery"], "unobservable")
+            expected = "Own one " + role + " application and settle its original ordinary-account resources"
+            self.assertEqual(helper.WINDOWS_NORMAL_UI_OBSERVER_STEPS[role], expected)
+            self.assertEqual(workflow.count("      - name: " + expected + "\n"), 1)
+
+    def test_original_closure_and_complete_source_metadata_cannot_be_invented(self):
+        self.assertEqual(self.joined(self.original_log(), closed=False)["joinState"], "unavailable")
+        for part, key, value in ((1, "sourceSha", "d" * 40), (1, "requestSha256", "d" * 64), (1, "jobId", 7654320),
+                                 (1, "role", "normal-smoke"), (1, "attempt", True), (2, "status", "in_progress"),
+                                 (3, "total_count", 3), (4, "streamClosed", False), (4, "bytes", 0), (4, "sha256", "0" * 64)):
+            parts = list(self.original_log()); parts[part][key] = value
+            with self.subTest(part=part, key=key): self.assertEqual(self.joined(parts)["joinState"], "mismatch")
+        for change in ("duplicate-job", "duplicate-step", "wrong-step", "unknown-end", "wrong-harness"):
+            parts = list(self.original_log()); job = parts[3]["jobs"][1]
+            if change == "duplicate-job": parts[3]["jobs"].append(deepcopy(job)); parts[3]["total_count"] += 1
+            elif change == "duplicate-step": job["steps"].append(deepcopy(job["steps"][0]))
+            elif change == "wrong-step": job["steps"][0]["name"] = "unrelated owner"
+            elif change == "unknown-end": job["steps"][0]["completed_at"] = None
+            else:
+                parts[0] = parts[0].replace(self.OWNERS["project-draft"].encode(), b"foreign::owner")
+                parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            with self.subTest(change=change): self.assertEqual(self.joined(parts)["joinState"], "mismatch")
+
+    def test_duplicate_missing_partial_foreign_and_outside_span_frames_never_verify(self):
+        for change, state in (("duplicate", "duplicate"), ("missing", "missing"), ("partial", "partial"),
+                              ("foreign", "received"), ("outside", "received"), ("overbound", "oversized")):
+            parts = list(self.original_log()); lines = parts[0].splitlines(keepends=True); frame = lines[2]
+            if change == "duplicate": lines.insert(3, frame)
+            elif change == "missing": del lines[2]
+            elif change == "partial": lines = lines[:2] + [frame[:-4]]
+            elif change == "foreign": lines[2] = frame.replace(b'"source":"' + b"a" * 40, b'"source":"' + b"d" * 40)
+            elif change == "outside": lines[2] = frame.replace(b"10:01:40", b"10:03:00")
+            else: lines[2] = frame[:-1] + b" " * 4096 + b"\n"
+            parts[0] = b"".join(lines); parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            data = self.joined(parts)
+            with self.subTest(change=change):
+                self.assertEqual(data["frameState"], state); self.assertNotEqual(data["joinState"], "verified")
+
+    def test_projection_rejects_open_shape_boolean_numbers_and_invalid_startup_or_pending(self):
+        for where, key, value in (("frame", "diagnosticOnly", False), ("frame", "path", "private"),
+                ("projection", "records", True), ("projection", "records", 64), ("projection", "bytes", 32769),
+                ("projection", "reason", 7), ("row", "event", 7), ("row", "pending", 1), ("row", "pendingStep", 44),
+                ("row", "flags", 65536), ("row", "refusal", 26), ("row", "coverageIncomplete", 0),
+                ("row", "startup", 1), ("row", "startup", (0x51 << 56) | (1 << 52)),
+                ("row", "event", 3), ("row", "event", 4), ("row", "event", 5)):
+            frame = self.frame_data(); at = frame if where == "frame" else frame["projection"] if where == "projection" else frame["projection"]["last"]
+            at[key] = value
+            with self.subTest(where=where, key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        raw = self.frame()
+        for bad in (raw[:-1], raw.replace(b'"schema":1', b'"schema":1,"schema":1'), raw + b"\n", raw.replace(b"\n", b"\r\n")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(bad)
+
+    def test_missing_partial_and_first_refusal_projection_stay_historical_data(self):
+        for reason in range(7):
+            frame = self.frame_data(); projection = frame["projection"]; projection["reason"] = reason
+            if reason in (1, 2): projection.update(bytes=0, records=0, last=None)
+            data = helper.windows_normal_ui_observer_frame(self.frame(frame))
+            self.assertEqual(data["projection"]["reason"], reason); self.assertTrue(data["diagnosticOnly"])
+        frame = self.frame_data(); projection = frame["projection"]; row = projection["last"]
+        row.update(event=4, startup=(0x51 << 56) | (22 << 26) | (1 << 44), refusal=2)
+        projection.update(observerRefusal=deepcopy(row), startupRefusal=deepcopy(row))
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["projection"], projection)
+        changed = deepcopy(frame); changed["projection"]["startupRefusal"] = None
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        changed = self.frame_data(); changed["projection"]["last"]["coverageIncomplete"] = True
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key in ("observerRefusal", "startupRefusal"):
+            changed = deepcopy(frame); changed["projection"][key]["step"] = 2
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+
+
 class WindowsNormalUiGuiTests(unittest.TestCase):
     """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""
 

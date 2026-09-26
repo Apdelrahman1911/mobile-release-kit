@@ -2130,6 +2130,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let resources = app.path().resource_dir()?;
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let observation = app.try_state::<Arc<installed_observation::Observation>>().map(|q| q.inner().clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            if let Some(q) = &observation { windows_startup.bind_observer_diagnostic(q.diagnostic()); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let bridge = Arc::new(match &observation { Some(q) => q.build_bridge(resources)?, None => DesktopBridge::new(resources) });
             #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -2147,6 +2149,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             } else { DocumentBinding::new(bridge.clone()) };
             #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             let document = DocumentBinding::new(bridge.clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            if let Some(q) = &observation { q.bind_diagnostic_document(document.clone()); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);

@@ -3,7 +3,7 @@
 //! replacement executor, document, runtime or shipping automation interface.
 //! All native actions target B's retained original STA dialog. Child result
 //! bytes report pre-exit readiness only; the native owner/finalizer proves exit.
-use std::{path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}},
+use std::{path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, OnceLock, atomic::{AtomicBool, Ordering}},
     thread::ThreadId, time::Instant};
 use serde_json::{json, Value};
 use tauri::Manager;
@@ -11,6 +11,7 @@ use crate::{asset_commands::{AssetError, Reason}, asset_session::{DocumentBindin
     bridge::AppInfo, bridge::Project, edit_owner::EditOwner, edit_protocol as edit,
     error::BridgeError, supervisor::{Supervisor, WindowsPassiveWitness}};
 use mrk_windows_installed_native::{self as native, UiCaseFacts, UiRole};
+use native::ui_observer_diagnostic_data::{PendingKind, Refusal, Snapshot, Step};
 use super::owned_windows::observation::{observed_dialog, observe_dialog_action, session_final,
     DialogAction, DialogKind, ObservedDialog};
 
@@ -24,14 +25,6 @@ enum Case { ProjectDraft, QuitPassive, DocumentLoss }
 impl Case {
     fn selected_id(self) -> u32 { if self == Self::ProjectDraft { 2 } else { 1 } }
     fn held(self) -> bool { self != Self::ProjectDraft }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Step {
-    Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, CancelProject, CancelSettled, ReadCancelled,
-    ChooseProject, SetFolder, AcceptProject, ProjectSettled, Snapshot, Settings, Suggest, Suggestion, Adopt,
-    Hydrated, EditDraft, Edited, Validate, Validated, Preview, Previewed, MutateFixture, ReturnDashboard,
-    Refresh, Refreshed, ReturnSettings, Preserved, ArmHold, HeldRefresh, Held,
-    ChoosePending, PickerPending, Reload, Lost, CloseCancel, QuitCancel, QuitCancelled, Close, QuitConfirm, Exit,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -68,16 +61,34 @@ struct Record {
     picker_pending: bool, reload_requested: bool, reload_returned: bool, reload_navigation: bool, reload_started: bool,
     loss_settled: bool, relay_joined: bool, actual_exit: bool, finality: [bool; 6],
 }
+impl Record {
+    fn diagnostic(&self) -> Snapshot {
+        let (pending, pending_step, dispatch) = match self.pending {
+            None => (PendingKind::None, None, 0),
+            Some(Pending::Dom(value)) => (PendingKind::Dom, Some(value.step), value.sequence),
+            Some(Pending::Native(step)) => (PendingKind::Native, Some(step), 0),
+            Some(Pending::Close(step)) => (PendingKind::Close, Some(step), 0),
+            Some(Pending::Reload) => (PendingKind::Reload, None, 0),
+        };
+        let flags = [self.attached, self.navigation, self.started, self.loaded, self.initial.is_some(),
+            self.methods[0], self.methods[1], self.snapshot_pending, self.project.is_some(), self.cancel_returned,
+            self.mutation_returned, self.held_seen, self.reload_requested, self.loss_settled, self.relay_joined, self.actual_exit]
+            .into_iter().enumerate().fold(0u16, |bits, (index, value)| bits | (u16::from(value) << index));
+        Snapshot { step: self.step, pending, pending_step, dispatch, flags }
+    }
+}
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value, changed: Value,
     draft: Value, failed: AtomicBool, reported: AtomicBool, record: Mutex<Record>,
+    diagnostic: Option<Arc<native::ObserverDiagnostic>>, diagnostic_document: OnceLock<DocumentBinding>,
 }
 impl Observation {
-    fn new(case: Case, end: Instant, project_path: PathBuf) -> Result<Self, ()> {
+    fn new(case: Case, end: Instant, project_path: PathBuf, diagnostic: Option<Arc<native::ObserverDiagnostic>>) -> Result<Self, ()> {
         let base = crate::protocol::strict_json(native::UI_FIXTURE_CONFIG).map_err(|_| ())?;
         let changed = crate::protocol::strict_json(native::UI_FIXTURE_CONFIG_AFTER).map_err(|_| ())?;
         let mut draft = base.clone(); draft["version"]["source"] = json!(DRAFT_SOURCE);
         Ok(Self { case, main: std::thread::current().id(), end, project_path, base, changed, draft,
+            diagnostic, diagnostic_document: OnceLock::new(),
             failed: AtomicBool::new(false), reported: AtomicBool::new(false), record: Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0,
                 attached: false, navigation: false, started: false, loaded: false,
@@ -94,15 +105,41 @@ impl Observation {
                 loss_settled: false, relay_joined: false, actual_exit: false, finality: [false; 6],
             }) })
     }
-    fn fail(&self) { self.failed.store(true, Ordering::SeqCst); }
+    fn fail(&self, reason: Refusal) {
+        self.failed.store(true, Ordering::SeqCst);
+        // Existing callers may hold Record. This is only a first-wins atomic
+        // latch: no recursive lock, formatting, native effect or app repair.
+        if let Some(diagnostic) = &self.diagnostic { diagnostic.refuse(reason); }
+    }
+    pub(super) fn diagnostic(&self) -> Option<Arc<native::ObserverDiagnostic>> { self.diagnostic.clone() }
+    pub(super) fn bind_diagnostic_document(&self, document: DocumentBinding) {
+        if self.diagnostic_document.set(document).is_err() {
+            if let Some(diagnostic) = &self.diagnostic { diagnostic.unavailable(); }
+        }
+    }
+    fn diagnostic_permitted(&self) -> bool {
+        self.diagnostic_document.get().and_then(DocumentBinding::exit_cleanup_end).is_none_or(|end| Instant::now() < end)
+    }
+    fn diagnostic_snapshot(&self) {
+        let Some(diagnostic) = &self.diagnostic else { return; };
+        // Nonwaiting copy of closed scalars; the actual guard is gone before
+        // even atomic publication, and certainly before any native operation.
+        let snapshot = match self.record.try_lock() { Ok(record) => Some(record.diagnostic()), Err(_) => None };
+        match snapshot { Some(snapshot) => diagnostic.observe(snapshot), None => diagnostic.unavailable() }
+    }
+    fn diagnostic_progress(&self) {
+        self.diagnostic_snapshot();
+        if let Some(diagnostic) = &self.diagnostic { diagnostic.progress(&|| self.diagnostic_permitted()); }
+    }
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
-        match self.record.lock() { Ok(record) => Some(record), Err(_) => { self.fail(); None } }
+        match self.record.lock() { Ok(record) => Some(record), Err(_) => { self.fail(Refusal::Record); None } }
     }
     fn timely(&self) -> bool {
-        if Instant::now() >= self.end { self.fail(); }
+        if Instant::now() >= self.end { self.fail(Refusal::Deadline); }
         !self.failed.load(Ordering::SeqCst)
     }
     fn report_failure(&self) {
+        self.diagnostic_progress();
         if self.failed.load(Ordering::SeqCst) && !self.reported.swap(true, Ordering::SeqCst) {
             // Fixed public category only. Never emit paths/native errors/DTOs.
             super::diagnostic(b"MRK_WINDOWS_NORMAL_UI=observer-refused\n");
@@ -111,32 +148,32 @@ impl Observation {
     pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
         let Some(mut r) = self.record() else { return Err(BridgeError::cleanup_unknown()); };
         if !self.timely() || std::thread::current().id() != self.main || r.attached
-            || supervisor.arm_windows_ui_observation().is_err() { self.fail(); return Err(BridgeError::invalid()); }
+            || supervisor.arm_windows_ui_observation().is_err() { self.fail(Refusal::Attach); return Err(BridgeError::invalid()); }
         r.attached = true; Ok(())
     }
     pub(super) fn navigation(&self, trusted: bool, allowed: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !trusted || !r.attached { self.fail(); return; }
+        if !self.timely() || !trusted || !r.attached { self.fail(Refusal::Navigation); return; }
         if !r.navigation && !r.loaded && allowed { r.navigation = true; return; }
         if self.case == Case::DocumentLoss && r.reload_requested && r.loaded && !allowed && !r.reload_navigation {
             r.reload_navigation = true; return;
         }
-        self.fail();
+        self.fail(Refusal::Navigation);
     }
     pub(super) fn page_load(&self, trusted: bool, finished: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !trusted || !r.attached { self.fail(); return; }
+        if !self.timely() || !trusted || !r.attached { self.fail(Refusal::PageLoad); return; }
         if r.reload_requested {
             if self.case == Case::DocumentLoss && !finished && r.loaded && !r.reload_started { r.reload_started = true; return; }
             // No second Finished can create or restore a usable document.
-            self.fail(); return;
+            self.fail(Refusal::PageLoad); return;
         }
-        if if finished { !r.started || r.loaded } else { r.started } { self.fail(); return; }
+        if if finished { !r.started || r.loaded } else { r.started } { self.fail(Refusal::PageLoad); return; }
         if finished { r.loaded = true; } else { r.started = true; }
     }
     pub(super) fn app_info(&self, info: &AppInfo) {
-        let Some(methods) = info.capabilities.as_ref().and_then(|value| value["methods"].as_array()) else { self.fail(); return; };
-        let Some(actions) = info.capabilities.as_ref().and_then(|value| value["actions"].as_array()) else { self.fail(); return; };
+        let Some(methods) = info.capabilities.as_ref().and_then(|value| value["methods"].as_array()) else { self.fail(Refusal::AppInfo); return; };
+        let Some(actions) = info.capabilities.as_ref().and_then(|value| value["actions"].as_array()) else { self.fail(Refusal::AppInfo); return; };
         let open = |row: &&Value| row["available"].as_bool() == Some(true);
         let valid = info.runtime.state == "available" && info.runtime.mode == "bundled" && info.runtime.reason.is_none()
             && info.app_name == "Mobile Release Kit" && info.app_version == env!("CARGO_PKG_VERSION")
@@ -148,7 +185,7 @@ impl Observation {
             && methods.iter().all(|row| row["available"].is_boolean())
             && actions.iter().all(|row| row["available"].as_bool() == Some(false));
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !valid || r.methods[0] || r.reload_requested || r.step != Step::Bootstrap { self.fail(); return; }
+        if !self.timely() || !valid || r.methods[0] || r.reload_requested || r.step != Step::Bootstrap { self.fail(Refusal::AppInfo); return; }
         r.methods[0] = true; r.method_rows = methods.len();
     }
     pub(super) fn catalog(&self, result: &Result<Value, BridgeError>) {
@@ -157,7 +194,7 @@ impl Observation {
                 && ["label", "requiredness", "what", "why", "where", "format", "requiredWhen", "failure"].iter()
                     .all(|key| field[*key].as_str().is_some_and(|text| !text.is_empty() && text.len() <= 16384))).count() == 1);
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !valid || !r.methods[0] || r.methods[1] || r.reload_requested || r.step != Step::Bootstrap { self.fail(); return; }
+        if !self.timely() || !valid || !r.methods[0] || r.methods[1] || r.reload_requested || r.step != Step::Bootstrap { self.fail(Refusal::Catalog); return; }
         r.methods[1] = true;
     }
     pub(super) fn project_result(&self, result: &Result<Option<Project>, AssetError>) {
@@ -165,17 +202,17 @@ impl Observation {
         if !self.timely() { return; }
         if r.reload_requested && self.case == Case::DocumentLoss {
             if r.lost_picker_returned || !r.picker_pending
-                || !matches!(result, Err(error) if error.reason == Reason::DocumentLost) { self.fail(); return; }
+                || !matches!(result, Err(error) if error.reason == Reason::DocumentLost) { self.fail(Refusal::ProjectResult); return; }
             r.lost_picker_returned = true; return;
         }
         if self.case == Case::ProjectDraft && matches!(r.step, Step::CancelProject | Step::CancelSettled) {
-            if r.cancel_returned || !matches!(result, Ok(None)) || !r.actions_attempted[0] { self.fail(); return; }
+            if r.cancel_returned || !matches!(result, Ok(None)) || !r.actions_attempted[0] { self.fail(Refusal::ProjectResult); return; }
             r.cancel_returned = true; return;
         }
-        let Ok(Some(project)) = result else { self.fail(); return; };
+        let Ok(Some(project)) = result else { self.fail(Refusal::ProjectResult); return; };
         if !matches!(r.step, Step::AcceptProject | Step::ProjectSettled) || r.project.is_some()
             || !r.actions_attempted[2] || Path::new(&project.path) != self.project_path
-            || project.name != "project" || !crate::protocol::valid_id(&project.id) { self.fail(); return; }
+            || project.name != "project" || !crate::protocol::valid_id(&project.id) { self.fail(Refusal::ProjectResult); return; }
         r.project = Some(project.clone());
     }
     pub(super) fn snapshot_request(&self, project: &str) {
@@ -183,15 +220,15 @@ impl Observation {
         let permitted = r.snapshot_requests == 0 && matches!(r.step, Step::AcceptProject | Step::ProjectSettled | Step::Snapshot)
             || r.snapshot_requests == 1 && matches!(r.step, Step::Refresh | Step::Refreshed | Step::HeldRefresh | Step::Held);
         if !self.timely() || !permitted || r.snapshot_pending || r.reload_requested
-            || !r.project.as_ref().is_some_and(|original| original.id == project) { self.fail(); return; }
+            || !r.project.as_ref().is_some_and(|original| original.id == project) { self.fail(Refusal::SnapshotRequest); return; }
         r.snapshot_requests += 1; r.snapshot_pending = true;
     }
     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !r.snapshot_pending || !r.project.as_ref().is_some_and(|original| original.id == project) { self.fail(); return; }
+        if !self.timely() || !r.snapshot_pending || !r.project.as_ref().is_some_and(|original| original.id == project) { self.fail(Refusal::Snapshot); return; }
         if self.case.held() && r.snapshot_requests == 2 {
             if !r.actions_attempted[4] || r.held_snapshot_refused || !r.held_seen
-                || !matches!(result, Err(error) if error.code == "shutting_down") { self.fail(); return; }
+                || !matches!(result, Err(error) if error.code == "shutting_down") { self.fail(Refusal::Snapshot); return; }
             r.held_snapshot_refused = true; r.snapshot_pending = false; return;
         }
         let saved = self.case != Case::ProjectDraft || r.snapshot_requests == 2;
@@ -213,7 +250,7 @@ impl Observation {
                     && observed["issues"].as_array().is_some_and(|issues| issues.len() == 1 && issues[0]["code"] == "config.missing") }
         });
         if !valid || r.snapshots + 1 != r.snapshot_requests || r.reload_requested
-            || r.snapshot_requests == 2 && !r.mutation_returned { self.fail(); return; }
+            || r.snapshot_requests == 2 && !r.mutation_returned { self.fail(Refusal::Snapshot); return; }
         r.snapshot_pending = false; r.snapshots += 1; r.methods[2] = true;
     }
     pub(super) fn suggest_request(&self, hints: &Value) {
@@ -221,67 +258,68 @@ impl Observation {
         if !self.timely() || self.case != Case::ProjectDraft || r.suggestion_requested
             || !matches!(r.step, Step::Suggest | Step::Suggestion)
             || *hints != json!({"platforms":["android"], "androidApplicationId":APP_ID,
-                "versionSource":"version.properties", "versionNameKey":"VERSION_NAME", "versionBuildKey":"BUILD_NUMBER"}) { self.fail(); return; }
+                "versionSource":"version.properties", "versionNameKey":"VERSION_NAME", "versionBuildKey":"BUILD_NUMBER"}) { self.fail(Refusal::SuggestRequest); return; }
         r.suggestion_requested = true;
     }
     pub(super) fn suggestion(&self, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
         let Some(value) = result.as_ref().ok().filter(|value| value["draft"] == self.base && value["schemaVersion"] == 1
-            && value["platformSelectionRequired"] == false && format_valid(&value["validation"]) && assurance(value, "schema-policy")) else { self.fail(); return; };
-        if !self.timely() || !r.suggestion_requested || r.suggestion.is_some() || r.reload_requested { self.fail(); return; }
-        let Some(rows) = value["provenance"].as_array().filter(|rows| !rows.is_empty() && rows.len() <= 64) else { self.fail(); return; };
+            && value["platformSelectionRequired"] == false && format_valid(&value["validation"]) && assurance(value, "schema-policy")) else { self.fail(Refusal::Suggestion); return; };
+        if !self.timely() || !r.suggestion_requested || r.suggestion.is_some() || r.reload_requested { self.fail(Refusal::Suggestion); return; }
+        let Some(rows) = value["provenance"].as_array().filter(|rows| !rows.is_empty() && rows.len() <= 64) else { self.fail(Refusal::Suggestion); return; };
         let sample: Option<Vec<Value>> = rows.iter().map(|row| {
             let path = row["path"].as_str()?; let source = row["source"].as_str()?;
             (path.len() <= 128 && matches!(source, "hint" | "default" | "example")).then(|| json!({"path":path,"source":source}))
         }).collect();
-        let Some(sample) = sample else { self.fail(); return; };
+        let Some(sample) = sample else { self.fail(Refusal::Suggestion); return; };
         r.suggestion = Some(Value::Array(sample)); r.methods[4] = true;
     }
     pub(super) fn validate_request(&self, draft: &Value) {
         let Some(mut r) = self.record() else { return; };
         if !self.timely() || !r.edited || r.validation_requested || self.case != Case::ProjectDraft
-            || !matches!(r.step, Step::Validate | Step::Validated) || draft != &self.draft { self.fail(); return; }
+            || !matches!(r.step, Step::Validate | Step::Validated) || draft != &self.draft { self.fail(Refusal::ValidateRequest); return; }
         r.validation_requested = true;
     }
     pub(super) fn validation(&self, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !r.validation_requested || r.methods[3] || !result.as_ref().is_ok_and(format_valid) { self.fail(); return; }
+        if !self.timely() || !r.validation_requested || r.methods[3] || !result.as_ref().is_ok_and(format_valid) { self.fail(Refusal::Validation); return; }
         r.methods[3] = true;
     }
     pub(super) fn preview_request(&self, base: &Value, draft: &Value) {
         let Some(mut r) = self.record() else { return; };
         if !self.timely() || !r.methods[3] || r.preview_requested || !matches!(r.step, Step::Preview | Step::Previewed)
-            || !base.is_null() || draft != &self.draft { self.fail(); return; }
+            || !base.is_null() || draft != &self.draft { self.fail(Refusal::PreviewRequest); return; }
         r.preview_requested = true;
     }
     pub(super) fn preview_result(&self, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
         let Some(value) = result.as_ref().ok().filter(|value| format_valid(&value["validation"]) && assurance(value, "schema-policy")
             && value["comparison"]["state"] == "complete" && value["comparison"]["unreviewedCount"] == 0
-            && value["comparison"]["baseProvided"] == false) else { self.fail(); return; };
-        if !self.timely() || !r.preview_requested || r.preview.is_some() { self.fail(); return; }
+            && value["comparison"]["baseProvided"] == false) else { self.fail(Refusal::PreviewResult); return; };
+        if !self.timely() || !r.preview_requested || r.preview.is_some() { self.fail(Refusal::PreviewResult); return; }
         r.preview = Some(json!({"counts":value["comparison"]["counts"], "fields":value["fields"].as_array().map(Vec::len),
             "valid":value["validation"]["state"]})); r.methods[5] = true;
     }
     pub(super) fn close_prevented(&self) {
         let Some(mut r) = self.record() else { return; };
-        let Some(Pending::Close(step)) = r.pending else { self.fail(); return; };
+        let Some(Pending::Close(step)) = r.pending else { self.fail(Refusal::ClosePrevented); return; };
         if !self.timely() || !matches!((step, r.step), (Step::CloseCancel, Step::QuitCancel) | (Step::Close, Step::QuitConfirm)) {
-            self.fail(); return;
+            self.fail(Refusal::ClosePrevented); return;
         }
         r.pending = None; r.close_count += 1;
     }
 
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
         if !self.timely() { self.report_failure(); return; }
-        if std::thread::current().id() == self.main { self.fail(); return; }
+        if std::thread::current().id() == self.main { self.fail(Refusal::Tick); return; }
+        self.diagnostic_progress();
         let state = app.state::<super::ShellState>();
         let step = {
             let Some(mut r) = self.record() else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
             if r.initial.is_none() {
                 match state.bridge.supervisor.retain_windows_initial() {
-                    Ok(Some(witness)) => r.initial = Some(witness), Ok(None) => return, Err(_) => { self.fail(); return; },
+                    Ok(Some(witness)) => r.initial = Some(witness), Ok(None) => return, Err(_) => { self.fail(Refusal::Tick); return; },
                 }
             }
             if !self.document_sample(&state, &mut r) { return; }
@@ -293,13 +331,13 @@ impl Observation {
                 Step::CancelSettled => {
                     if !r.cancel_returned { return; }
                     if !r.dialogs.first().is_some_and(|dialog| dialog.settled(false, false))
-                        || !source_idle(&state.document, 1, "user-cancelled") || state.bridge.native_generation().ok() != Some(1) { self.fail(); return; }
+                        || !source_idle(&state.document, 1, "user-cancelled") || state.bridge.native_generation().ok() != Some(1) { self.fail(Refusal::Tick); return; }
                     r.step = Step::ReadCancelled;
                 },
                 Step::ProjectSettled => {
                     if r.project.is_none() { return; }
                     if !r.dialogs.iter().find(|dialog| dialog.id == self.case.selected_id()).is_some_and(|dialog| dialog.settled(true, false) && !dialog.owner.stopped())
-                        || !source_idle(&state.document, self.case.selected_id(), "none") || state.bridge.native_generation().ok() != Some(2) { self.fail(); return; }
+                        || !source_idle(&state.document, self.case.selected_id(), "none") || state.bridge.native_generation().ok() != Some(2) { self.fail(Refusal::Tick); return; }
                     r.registry_generation = Some(2); r.step = Step::Snapshot;
                 },
                 Step::Snapshot if r.snapshots != 1 => return,
@@ -307,26 +345,26 @@ impl Observation {
                 Step::Validated if !r.methods[3] => return,
                 Step::Previewed if r.preview.is_none() => return,
                 Step::MutateFixture => {
-                    if self.case != Case::ProjectDraft || r.mutation_returned || !r.edited || !r.methods.iter().all(|done| *done) { self.fail(); return; }
+                    if self.case != Case::ProjectDraft || r.mutation_returned || !r.edited || !r.methods.iter().all(|done| *done) { self.fail(Refusal::Tick); return; }
                     // Fixed native CREATE_NEW of config_AFTER in the owner-created
                     // synthetic fixture. This is labelled test input mutation,
                     // never Save, a project hook or arbitrary supplied file write.
-                    if native::mutate_normal_ui_fixture(self.end).is_err() || !self.timely() { self.fail(); return; }
+                    if native::mutate_normal_ui_fixture(self.end).is_err() || !self.timely() { self.fail(Refusal::Tick); return; }
                     r.mutation_returned = true; r.step = Step::ReturnDashboard; return;
                 },
                 Step::Refreshed if r.snapshots != 2 => return,
                 Step::ArmHold => {
                     if !self.case.held() || r.held.is_some() || r.snapshots != 1
-                        || state.bridge.supervisor.arm_windows_refresh_hold().is_err() { self.fail(); return; }
+                        || state.bridge.supervisor.arm_windows_refresh_hold().is_err() { self.fail(Refusal::Tick); return; }
                     r.step = Step::HeldRefresh;
                 },
                 Step::Held => {
                     if r.held.is_none() {
                         match state.bridge.supervisor.retain_windows_held_refresh() {
-                            Ok(Some(witness)) => r.held = Some(witness), Ok(None) => return, Err(_) => { self.fail(); return; },
+                            Ok(Some(witness)) => r.held = Some(witness), Ok(None) => return, Err(_) => { self.fail(Refusal::Tick); return; },
                         }
                     }
-                    if !r.snapshot_pending || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(); return; }
+                    if !r.snapshot_pending || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
                     r.held_seen = true;
                     r.step = if self.case == Case::QuitPassive { Step::CloseCancel } else { Step::ChoosePending };
                 },
@@ -335,7 +373,7 @@ impl Observation {
                     // originals; not_quitting cannot bypass an unresolved quit.
                     if !state.document.assets_can_exit() || state.document.not_quitting().is_err() { return; }
                     if !r.dialogs.iter().find(|dialog| dialog.id == 2).is_some_and(|dialog| dialog.settled(false, true))
-                        || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(); return; }
+                        || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
                     r.quit_cancelled = true; r.step = Step::Close;
                 },
                 Step::Lost => {
@@ -343,7 +381,7 @@ impl Observation {
                         || !r.lost_picker_returned { return; }
                     if !source_idle(&state.document, 2, "document-lost")
                         || !r.dialogs.iter().find(|dialog| dialog.id == 2).is_some_and(|dialog| dialog.settled(false, false))
-                        || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(); return; }
+                        || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
                     r.loss_settled = true; r.step = Step::Close;
                 },
                 Step::Exit => return,
@@ -351,81 +389,82 @@ impl Observation {
             }
             r.step
         };
-        let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else { self.fail(); return; };
+        self.diagnostic_progress(); // The first-phase Record guard has ended.
+        let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else { self.fail(Refusal::Tick); return; };
         if matches!(step, Step::Close | Step::CloseCancel) {
             let Some(mut r) = self.record() else { return; };
             if !self.timely() || r.pending.is_some() || r.step != step || self.case.held()
-                && !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(); return; }
+                && !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
             r.pending = Some(Pending::Close(step));
             r.step = if step == Step::CloseCancel { Step::QuitCancel } else { Step::QuitConfirm };
             drop(r);
             // Original production CloseRequested -> actual native confirmation.
             // A dispatch return is not a response, completion or exit permit.
-            if !self.timely() || window.close().is_err() { self.fail(); } return;
+            if !self.timely() || window.close().is_err() { self.fail(Refusal::Tick); } return;
         }
         if matches!(step, Step::CancelProject | Step::SetFolder | Step::AcceptProject | Step::QuitCancel | Step::QuitConfirm | Step::PickerPending) {
             let Some(mut r) = self.record() else { return; };
-            if !self.timely() || r.pending.is_some() || r.step != step { self.fail(); return; }
+            if !self.timely() || r.pending.is_some() || r.step != step { self.fail(Refusal::Tick); return; }
             r.pending = Some(Pending::Native(step)); drop(r);
             let q = self.clone();
-            if window.run_on_main_thread(move || q.native_step(step)).is_err() { self.fail(); } return;
+            if window.run_on_main_thread(move || q.native_step(step)).is_err() { self.fail(Refusal::Tick); } return;
         }
         if step == Step::Reload {
             let Some(mut r) = self.record() else { return; };
             if !self.timely() || r.pending.is_some() || r.step != step || self.case != Case::DocumentLoss || r.reload_requested || !r.picker_pending
-                || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(); return; }
+                || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
             r.reload_requested = true; r.pending = Some(Pending::Reload); drop(r);
             let q = self.clone(); let reload = window.clone();
             if window.run_on_main_thread(move || {
-                if std::thread::current().id() != q.main || !q.timely() { q.fail(); return; }
+                if std::thread::current().id() != q.main || !q.timely() { q.fail(Refusal::Tick); return; }
                 // Real reload. Only the production navigation/Started callback
                 // can invalidate this original; no direct lost() injection.
                 let returned = reload.eval("window.location.reload()");
                 let Some(mut r) = q.record() else { return; };
-                if r.pending != Some(Pending::Reload) || returned.is_err() { q.fail(); return; }
+                if r.pending != Some(Pending::Reload) || returned.is_err() { q.fail(Refusal::Tick); return; }
                 r.pending = None; r.reload_returned = true; r.step = Step::Lost;
-            }).is_err() { self.fail(); } return;
+            }).is_err() { self.fail(Refusal::Tick); } return;
         }
-        let Some(script) = script(step) else { self.fail(); return; };
+        let Some(script) = script(step) else { self.fail(Refusal::Tick); return; };
         let original = {
             let Some(mut r) = self.record() else { return; };
-            if !self.timely() || r.evaluations == DOM_LIMIT || r.pending.is_some() || r.step != step { self.fail(); return; }
+            if !self.timely() || r.evaluations == DOM_LIMIT || r.pending.is_some() || r.step != step { self.fail(Refusal::Tick); return; }
             r.evaluations += 1; let original = DomDispatch { step, sequence: r.evaluations };
             r.pending = Some(Pending::Dom(original)); original
         };
         let q = self.clone();
         // Exactly one outstanding synchronous expression. Unknown callbacks
         // stay pending; never replay a possibly effectful click or edit.
-        if window.eval_with_callback(script, move |value| q.dom(original, &value)).is_err() { self.fail(); }
+        if window.eval_with_callback(script, move |value| q.dom(original, &value)).is_err() { self.fail(Refusal::Tick); }
     }
     fn document_sample(&self, state: &super::ShellState, r: &mut Record) -> bool {
-        let Ok(status) = state.bridge.edits.status() else { self.fail(); return false; };
+        let Ok(status) = state.bridge.edits.status() else { self.fail(Refusal::DocumentSample); return false; };
         if status.schema_version != 1 || !edit::token(&status.window_generation) || status.capability.available
             || status.active.is_some() || status.last_terminal.is_some() || state.bridge.edits.disabled()
             || state.bridge.supervisor.disabled() || state.bridge.diagnostics.disabled()
-            || state.bridge.preflight.disabled() || state.bridge.android_build.disabled() { self.fail(); return false; }
+            || state.bridge.preflight.disabled() || state.bridge.android_build.disabled() { self.fail(Refusal::DocumentSample); return false; }
         match &r.generation {
             None => r.generation = Some(status.window_generation.clone()),
             Some(original) if original != &status.window_generation => {
-                if self.case != Case::DocumentLoss || !r.reload_requested || !(r.reload_navigation || r.reload_started) { self.fail(); return false; }
+                if self.case != Case::DocumentLoss || !r.reload_requested || !(r.reload_navigation || r.reload_started) { self.fail(Refusal::DocumentSample); return false; }
                 if let Some(lost) = &r.loss_generation {
-                    if lost != &status.window_generation { self.fail(); return false; }
+                    if lost != &status.window_generation { self.fail(Refusal::DocumentSample); return false; }
                 } else { r.loss_generation = Some(status.window_generation.clone()); }
             },
-            Some(_) if r.loss_generation.is_some() => { self.fail(); return false; },
+            Some(_) if r.loss_generation.is_some() => { self.fail(Refusal::DocumentSample); return false; },
             _ => {},
         }
         if let Some(generation) = r.registry_generation {
-            if state.bridge.native_generation().ok() != Some(generation) { self.fail(); return false; }
+            if state.bridge.native_generation().ok() != Some(generation) { self.fail(Refusal::DocumentSample); return false; }
         }
         true
     }
     fn native_step(&self, step: Step) {
-        if std::thread::current().id() != self.main || !self.timely() { self.fail(); return; }
+        if std::thread::current().id() != self.main || !self.timely() { self.fail(Refusal::NativeStep); return; }
         let returned = self.native_body(step);
-        if returned.is_err() { self.fail(); }
+        if returned.is_err() { self.fail(Refusal::NativeStep); }
         let Some(mut r) = self.record() else { return; };
-        if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail(); return; }
+        if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail(Refusal::NativeStep); return; }
         // Only this very synchronous body return retires its dispatch marker.
         r.pending = None;
         if returned != Ok(true) || !self.timely() { return; }
@@ -433,9 +472,9 @@ impl Observation {
             Step::CancelProject => (0, Step::CancelSettled), Step::SetFolder => (1, Step::AcceptProject),
             Step::AcceptProject => (2, Step::ProjectSettled), Step::QuitCancel => (3, Step::QuitCancelled),
             Step::QuitConfirm => (4, Step::Exit), Step::PickerPending => { r.picker_pending = true; r.step = Step::Reload; return; },
-            _ => { self.fail(); return; },
+            _ => { self.fail(Refusal::NativeStep); return; },
         };
-        if r.actions_returned[index] { self.fail(); return; }
+        if r.actions_returned[index] { self.fail(Refusal::NativeStep); return; }
         r.actions_returned[index] = true; r.step = next;
     }
     fn native_body(&self, step: Step) -> Result<bool, ()> {
@@ -489,9 +528,9 @@ impl Observation {
     }
     fn dom(&self, original: DomDispatch, raw: &str) {
         let result = self.dom_body(original, raw);
-        if result.is_err() { self.fail(); }
+        if result.is_err() { self.fail(Refusal::Dom); }
         let Some(mut r) = self.record() else { return; };
-        if r.pending != Some(Pending::Dom(original)) || original.sequence == 0 || original.sequence > DOM_LIMIT { self.fail(); return; }
+        if r.pending != Some(Pending::Dom(original)) || original.sequence == 0 || original.sequence > DOM_LIMIT { self.fail(Refusal::Dom); return; }
         r.pending = None; // Actual callback-body return, not eval dispatch Ok.
     }
     fn dom_body(&self, original: DomDispatch, raw: &str) -> Result<(), ()> {
@@ -538,7 +577,7 @@ impl Observation {
     }
     pub(super) fn relay_joined(&self, joined: bool) {
         let Some(mut r) = self.record() else { return; };
-        if !self.timely() || !joined || r.relay_joined || !r.actions_returned[4] || r.pending.is_some() || r.step != Step::Exit { self.fail(); return; }
+        if !self.timely() || !joined || r.relay_joined || !r.actions_returned[4] || r.pending.is_some() || r.step != Step::Exit { self.fail(Refusal::RelayJoined); return; }
         r.relay_joined = true; r.finality[4] = true;
     }
     pub(super) fn actual_exit(&self, ready: bool, document: &DocumentBinding, edits: &EditOwner) {
@@ -546,19 +585,19 @@ impl Observation {
         if !self.timely() || std::thread::current().id() != self.main || !ready || r.actual_exit || !r.relay_joined
             || r.pending.is_some() || r.step != Step::Exit || r.dialogs.len() != 3 || !r.visible.iter().all(|seen| *seen)
             || !document.can_exit() || !document.assets_can_exit() || edits.disabled() || !edits.can_exit()
-            || !matches!(session_final(), Ok(true)) { self.fail(); return; }
+            || !matches!(session_final(), Ok(true)) { self.fail(Refusal::ActualExit); return; }
         // Exit can remain possible after late cleanup becomes known. This
         // qualification cannot upgrade a prior document Unknown into success.
         if !source_idle(document, if self.case == Case::DocumentLoss { 2 } else { self.case.selected_id() },
-            if self.case == Case::DocumentLoss { "document-lost" } else { "shutdown" }) { self.fail(); return; }
-        let Ok(status) = edits.status() else { self.fail(); return; };
+            if self.case == Case::DocumentLoss { "document-lost" } else { "shutdown" }) { self.fail(Refusal::ActualExit); return; }
+        let Ok(status) = edits.status() else { self.fail(Refusal::ActualExit); return; };
         // Native normal teardown intentionally invalidates the same original
         // after relay join. The loss case must retain its already-observed
         // tombstone; ordinary cases must not remain/rebind to the live one.
         if status.schema_version != 1 || status.capability.available || status.active.is_some() || status.last_terminal.is_some()
             || !edit::token(&status.window_generation)
             || if self.case == Case::DocumentLoss { r.loss_generation.as_ref() != Some(&status.window_generation) }
-                else { r.generation.as_ref() == Some(&status.window_generation) } { self.fail(); return; }
+                else { r.generation.as_ref() == Some(&status.window_generation) } { self.fail(Refusal::ActualExit); return; }
         let dialogs = r.dialogs.iter().all(|dialog| {
             let accepted = dialog.id == self.case.selected_id() || dialog.id == 3;
             let quit_cancel = self.case == Case::QuitPassive && dialog.id == 2;
@@ -568,7 +607,7 @@ impl Observation {
             let stopped = !(self.case == Case::DocumentLoss && dialog.id == 1);
             dialog.settled(accepted, quit_cancel) && dialog.owner.stopped() == stopped
         });
-        if !dialogs { self.fail(); return; }
+        if !dialogs { self.fail(Refusal::ActualExit); return; }
         r.finality[0] = true; r.finality[1] = true; r.finality[3] = true; r.finality[5] = true;
         r.actual_exit = true;
     }
@@ -738,11 +777,20 @@ pub(crate) fn main() -> std::process::ExitCode {
             UiRole::DocumentLoss => Case::DocumentLoss, _ => return None,
         };
         let project = native::normal_ui_project().ok()?;
-        Observation::new(case, end, project).ok().map(Arc::new)
+        // A known diagnostic-channel refusal is not an application refusal.
+        let diagnostic = native::ObserverDiagnostic::admit(end).ok().map(Arc::new);
+        Observation::new(case, end, project, diagnostic).ok().map(Arc::new)
     })();
     let Some(q) = admitted else { super::diagnostic(b"MRK_WINDOWS_NORMAL_UI=route-refused\n"); return std::process::ExitCode::FAILURE; };
+    q.diagnostic_snapshot();
+    if let Some(diagnostic) = &q.diagnostic { diagnostic.admitted(); }
     let returned = super::run_builder(super::builder().manage(q.clone()));
-    let facts = matches!(returned, Ok(0)).then(|| q.finish()).flatten();
+    if !matches!(returned, Ok(0)) { q.fail(Refusal::MainReturn); }
+    q.diagnostic_snapshot();
+    if let Some(diagnostic) = &q.diagnostic { diagnostic.builder_returned(&|| q.diagnostic_permitted()); }
+    let facts = matches!(returned, Ok(0)).then(|| {
+        let facts = q.finish(); if facts.is_none() { q.fail(Refusal::Finish); } facts
+    }).flatten();
     if let Some(facts) = facts {
         if q.timely() && native::write_normal_ui_result_once(&facts, q.end).is_ok() && q.timely() {
             // The ORIGINAL native launch still has to observe this process's
@@ -750,5 +798,5 @@ pub(crate) fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
     }
-    q.fail(); q.report_failure(); std::process::ExitCode::FAILURE
+    q.fail(Refusal::MainReturn); q.report_failure(); std::process::ExitCode::FAILURE
 }

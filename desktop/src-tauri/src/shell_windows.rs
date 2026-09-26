@@ -18,6 +18,8 @@ pub(super) struct Startup {
     user_data: OnceLock<PathBuf>,
     thread: std::thread::ThreadId,
     publication: native::StartupPublication,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    observer_diagnostic: OnceLock<Arc<mrk_windows_installed_native::ObserverDiagnostic>>,
 }
 #[derive(Clone, Copy)]
 enum Entered { Callback, Reply(ReplyKind), Navigation, WindowRelease }
@@ -54,10 +56,25 @@ impl Drop for OriginalCall<'_> {
             Entered::Navigation => (Event::NavigateAbandoned, 0),
             Entered::WindowRelease => (Event::WindowReleaseAbandoned, 0),
         };
-        self.startup.refuse(event, detail, true);
+        // Preserve the original loss/property behavior. Do not add append I/O
+        // to an abandoned call's Drop or use unwinding as a journal publisher.
+        self.startup.with_order(|book| book.refuse(event, detail, true));
+        self.startup.publish_property();
     } }
 }
 impl Startup {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    pub(super) fn bind_observer_diagnostic(&self, diagnostic: Option<Arc<mrk_windows_installed_native::ObserverDiagnostic>>) {
+        if let Some(diagnostic) = diagnostic {
+            if let Err(diagnostic) = self.observer_diagnostic.set(diagnostic) { diagnostic.unavailable(); }
+        }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    fn observer_word(&self, word: u64) {
+        if let Some(diagnostic) = self.observer_diagnostic.get() {
+            diagnostic.startup(word, &|| self.diagnostic_end().is_some());
+        }
+    }
     fn with_order<T>(&self, action: impl FnOnce(&mut StartupBook) -> T) -> T {
         let (value, lost) = {
             let mut book = match self.order.lock() {
@@ -81,12 +98,18 @@ impl Startup {
         Some(end)
     }
     fn publish(&self) {
-        if self.diagnostic_end().is_none() { return; }
+        let word = self.publish_property();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if let Some(word) = word { self.observer_word(word); }
+        let _ = word;
+    }
+    fn publish_property(&self) -> Option<u64> {
+        if self.diagnostic_end().is_none() { return None; }
         match self.with_order(|book| book.diagnostic().encode()) {
             // The borrowed checkpoint refreshes the ORIGINAL endpoint before
             // each property effect; it creates no endpoint, owner or retry.
-            Some(word) => self.publication.publish(word, &|| self.diagnostic_end().is_some()),
-            None => self.publication.seal(),
+            Some(word) => { self.publication.publish(word, &|| self.diagnostic_end().is_some()); Some(word) },
+            None => { self.publication.seal(); None },
         }
     }
     fn bind_publication(&self, window: &tauri::WebviewWindow) {
@@ -98,6 +121,8 @@ impl Startup {
             Ok(hwnd) => self.publication.bind(hwnd.0 as usize, word, &|| self.diagnostic_end().is_some()),
             Err(_) => self.publication.seal(),
         }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        self.observer_word(word); // Only after original registration/adoption and property binding.
     }
     fn refuse(&self, event: Event, detail: u8, unknown: bool) {
         self.with_order(|book| book.refuse(event, detail, unknown));
@@ -347,6 +372,8 @@ fn startup_refusal(error: native::UiError) {
 }
 pub(super) fn startup() -> Arc<Startup> {
     Arc::new(Startup { document: OnceLock::new(), order: Mutex::new(StartupBook::default()),
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        observer_diagnostic: OnceLock::new(),
         user_data: OnceLock::new(), thread: std::thread::current().id(), publication: native::StartupPublication::default() })
 }
 pub(super) fn before_webview(startup: &Startup) -> Result<(), native::UiError> {

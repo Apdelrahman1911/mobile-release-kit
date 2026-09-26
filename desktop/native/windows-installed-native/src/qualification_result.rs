@@ -7,6 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use windows_sys::Win32::Security::Cryptography as BC;
 
+#[cfg(all(feature = "desktop-ui", any(test, feature = "windows-installed-observation")))]
+#[path = "observer_diagnostic.rs"]
+mod observer_diagnostic;
+#[cfg(all(test, feature = "desktop-ui"))]
+pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal};
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use observer_diagnostic::ObserverDiagnostic;
+
 pub(super) const FLAGS: [&str; 4] = ["--exact", "--ignored", "--nocapture", "--test-threads=1"];
 pub(super) const LIMIT: usize = 4096;
 pub(super) const OWNER_LIMIT: usize = 65536;

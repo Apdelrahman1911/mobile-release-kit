@@ -2,6 +2,7 @@
 //! No general launcher, inherited user environment, shipping switch or fallback.
 use super::*;
 use crate::ui_startup_data::Word as StartupWord;
+use crate::ui_observer_diagnostic_data::Projection as ObserverProjection;
 use std::{cell::Cell, ffi::c_void, io::Write, marker::PhantomData, path::PathBuf};
 use windows_sys::Win32::System::{Com as CO, Ole as OLE, Registry as R};
 use windows_sys::Win32::UI::WindowsAndMessaging as W;
@@ -37,6 +38,33 @@ impl Clock {
         let remaining = self.endpoint_tick.checked_sub(unsafe { SI::GetTickCount64() }).ok_or(Error::Unsafe)?;
         need(remaining > 0 && remaining <= 90_000)?; Ok(remaining as u32)
     }
+}
+
+#[derive(Default)]
+struct ObserverCapture {
+    clock: Option<Arc<ObserverDiagnosticClock>>, claimed: bool, unresolved: bool,
+    binding: Option<(String, String, String, String)>, output: Option<(usize, Stamp)>,
+    projection: ObserverProjection,
+}
+fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }
+fn observer_child_final(launch: Option<&Launch>) -> bool {
+    launch.is_some_and(|value| {
+        let facts = &value.facts;
+        crate::ui_observer_diagnostic_data::ChildFinality {
+            returned: value.return_recorded && facts.returned, created: facts.created, signaled: facts.signaled,
+            exit_observed: facts.exit.is_some(), process_closed: facts.process == SlotState::Closed,
+            thread_closed: facts.thread == SlotState::Closed, unknown: facts.unknown,
+        }.admitted()
+    })
+}
+fn observer_capture_frame(role: UiRole, capture: &ObserverCapture, bytes: &mut [u8; 4096]) -> Option<usize> {
+    if !observer_role(role) || capture.unresolved { return None; }
+    let (source, tree, run, request) = capture.binding.as_ref()?;
+    if !is_hex(source, 40) || !is_hex(tree, 40) || !decimal(run) || !is_hex(request, 64) { return None; }
+    let mut output = std::io::Cursor::new(bytes.as_mut_slice());
+    write!(&mut output, "\nMRK_WINDOWS_UI_OBSERVER_DIAGNOSTIC_V1={{\"schema\":1,\"source\":\"{source}\",\"tree\":\"{tree}\",\"run\":\"{run}\",\"attempt\":1,\"role\":\"{}\",\"request\":\"{request}\",\"diagnosticOnly\":true,\"projection\":", role.label()).ok()?;
+    capture.projection.write_json(&mut output).ok()?; output.write_all(b"}\n").ok()?;
+    usize::try_from(output.position()).ok().filter(|length| *length <= 4096)
 }
 
 // NormalSmoke has no result children. Keep native scratch in the existing
@@ -80,6 +108,29 @@ fn normal_smoke_launch_directories(role: UiRole, app: &str, output: &Path, root:
 }
 
 impl Launch {
+    // Only the three observer roles receive the fixed original identity, after
+    // ui_traced has built its unchanged closed environment and before entry.
+    // This is DATA insertion, not a new launcher/path or a transported HANDLE.
+    fn bind_ui_diagnostic(self: Pin<&mut Self>, role: UiRole, output: &Path,
+        diagnostic: &ObserverDiagnosticOriginal) -> Result<()> {
+        let current = unsafe { self.get_unchecked_mut() };
+        need(!current.facts.claimed && !current.return_recorded && current.environment.last() == Some(&0))?;
+        let binding = diagnostic.binding(role, output)?;
+        let text = String::from_utf16(&current.environment[..current.environment.len() - 1]).map_err(|_| Error::Unsafe)?;
+        let mut pairs: Vec<(String, String)> = text.split('\0').filter(|entry| !entry.is_empty()).map(|entry| {
+            entry.split_once('=').map(|(name, value)| (name.to_owned(), value.to_owned())).ok_or(Error::Unsafe)
+        }).collect::<Result<_>>()?;
+        let key = crate::ui_observer_diagnostic_data::IDENTITY_ENV;
+        need(pairs.iter().all(|(name, _)| !name.eq_ignore_ascii_case(key))
+            && pairs.iter().filter(|(name, value)| name == "MRK_WINDOWS_NORMAL_UI_OUTPUT"
+                && Some(value.as_str()) == output.to_str()).count() == 1)?;
+        pairs.push((key.to_owned(), binding.to_owned()));
+        pairs.sort_by_key(|(name, _)| name.to_ascii_uppercase());
+        need(pairs.windows(2).all(|pair| !pair[0].0.eq_ignore_ascii_case(&pair[1].0)))?;
+        let environment: Vec<u16> = pairs.iter().flat_map(|(name, value)| wide(&format!("{name}={value}")))
+            .chain(std::iter::once(0)).collect();
+        need(environment.len() <= 8192)?; current.environment = environment; Ok(())
+    }
     fn ui(request: &UiRequest, identity: &str, raw_request: &str, output: &Path, root: &Path, profile: Option<&Profile>,
         account: &Account, parent: &[u8], endpoint: u64) -> Result<Pin<Box<Self>>> {
         Self::ui_traced(request, identity, raw_request, output, root, profile, account, parent, endpoint, &mut InputTrace::default())
@@ -756,9 +807,53 @@ impl Fixture {
 // Independent post-exit full output inventory. It reads from original pinned
 // directory cursors and joins each entry to the already-retained input full ID.
 // No recursive deletion or replacement/reacquisition as a finality shortcut.
+fn observer_journal_poststate(native: &mut NativeBook, parent: &Original,
+    diagnostic: &mut ObserverDiagnosticOriginal, failure: bool) -> Result<(Original, Metadata, Stamp, ObserverProjection)> {
+    let original = native.open_child(parent, &diagnostic.name(), FileKind::File)?;
+    let metadata = native.metadata(&original)?;
+    let (stamp, raw) = diagnostic.poststate(failure)?;
+    need(metadata.identity.volume_serial == stamp.volume && metadata.identity.file_id == stamp.id
+        && metadata.creation == stamp.creation && metadata.attributes == stamp.attributes
+        && metadata.size == stamp.size as u64 && metadata.allocation_size == stamp.allocation as u64
+        && metadata.links == stamp.links && metadata.write == stamp.write && metadata.change == stamp.change
+        && raw.len() <= crate::ui_observer_diagnostic_data::BYTE_LIMIT)?;
+    native.no_alternate_streams(&original)?;
+    need(native.metadata(&original)? == metadata)?;
+    Ok((original, metadata, stamp, ObserverProjection::decode(&raw)))
+}
+fn observer_failure_poststate(native: &mut NativeBook, files: &mut [OriginalFile],
+    diagnostic: &mut ObserverDiagnosticOriginal, output: &Path, cached: &(usize, Stamp)) -> Result<ObserverProjection> {
+    // No late stamp/read through a90s ordinary input. This is the SAME retained
+    // no-delete-share output original whose authenticated full ID was saved
+    // before child entry; new cursors supplement it, never replace it.
+    let file = files.get_mut(cached.0).ok_or(Error::State)?; need(file.directory)?;
+    let body = file.body(); need(body.state == SlotState::Owned && !body.active && valid_handle(body.handle))?;
+    let (drive, parts) = decode::dos_location(output.to_str().ok_or(Error::Unsafe)?)?;
+    need(!parts.is_empty() && parts.len() < 16)?;
+    let device = native.mapping(&drive)?; let name = format!("{device}\\");
+    let root = native.reserve(Kind::Directory, None, &name, name.clone())?;
+    native.call(Call::Open(root.index), null_mut(), Vec::new())?;
+    native.noninherited(root.index)?; native.local_ntfs(&root)?;
+    let metadata = native.metadata(&root)?; let mut entries = vec![(root, metadata)];
+    for name in parts {
+        let original = native.open_child(&entries.last().ok_or(Error::State)?.0, &name, FileKind::Directory)?;
+        let metadata = native.metadata(&original)?; entries.push((original, metadata));
+    }
+    let (parent, metadata) = entries.last().ok_or(Error::State)?;
+    need(metadata.identity.volume_serial == cached.1.volume && metadata.identity.file_id == cached.1.id
+        && metadata.creation == cached.1.creation && metadata.attributes == cached.1.attributes && metadata.links == cached.1.links)?;
+    let (original, metadata, _, projection) = observer_journal_poststate(native, parent, diagnostic, true)?;
+    entries.push((original, metadata));
+    for (original, before) in &entries { need(native.metadata(original)? == *before)?; }
+    need(native.mapping(&drive)? == device)?;
+    Ok(projection)
+}
 fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixture: &mut Option<Fixture>,
+    diagnostic: &mut Option<ObserverDiagnosticOriginal>, capture: &mut ObserverCapture,
     role: UiRole, output: &Path, output_index: usize, result_index: Option<usize>, clock: &mut Clock,
     trace: &mut InputTrace, smoke: Option<&Smoke>) -> Result<()> {
+    if observer_role(role) { need(!capture.claimed)?; capture.claimed = true; }
+    let mut projection = None;
     // Observe each original result once; this only narrows the existing first
     // diagnostic. No extra native operation, inventory pass or failure policy.
     macro_rules! output_result {
@@ -789,6 +884,17 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
         if let Some(result) = result_index {
             trace.at(InputRole::Output, Some(result as u8));
             children.push((at, role.name("result.private.json"), files[result].stamp_traced(trace)?, FileKind::File));
+        }
+        // Share-read-only excludes append cursors before this retained parent
+        // original's full EOF read. The raw tail (even partial) is PRIVATE DATA,
+        // never an additional application-readiness or success predicate.
+        need(diagnostic.is_some() == matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss))?;
+        if let Some(diagnostic) = diagnostic.as_mut() {
+            clock.effect_traced(trace)?;
+            let name = diagnostic.name();
+            let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false)?;
+            projection = Some(observed); clock.effect_traced(trace)?;
+            children.push((at, name, stamp, FileKind::File)); entries.push((original, metadata));
         }
         if let Some(fixture) = fixture.as_mut() {
             let project_path = output.join("project");
@@ -863,6 +969,9 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
         for (original, before) in &entries { output_result!(Clock, clock.effect_traced(trace))?; output_result!(OutputPostMetadata, need(output_result!(OutputPostMetadataRead, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(original)))? == *before))?; }
         output_result!(OutputMappingUnchanged, need(output_result!(OutputFinalDrive, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))? == device))?; output_result!(Clock, clock.effect_traced(trace))?;
         if let Some(fixture) = fixture.as_mut() { fixture.verified = true; }
+        // A later failure can reuse only this fully validated DATA cache. No
+        // partial/failed inventory pass licenses another root or journal read.
+        if let Some(projection) = projection { capture.projection = projection; }
         Ok(())
     })
 }
@@ -2428,7 +2537,16 @@ fn prerequisite_returned(role: UiRole, original: Result<()>, trace: &mut InputTr
 pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
     // This optional fixed DATA record exists before the original first Clock.
     let mut trace = InputTrace::prerequisite_only(role == UiRole::Prerequisite);
-    let original = run_prerequisite_traced(role, entry_tick, &mut trace);
+    let mut capture = ObserverCapture::default();
+    let original = run_prerequisite_traced(role, entry_tick, &mut trace, &mut capture);
+    if original.is_err() && observer_role(role) {
+        let mut bytes = [0; 4096];
+        if let Some(length) = observer_capture_frame(role, &capture, &mut bytes) {
+            // Same existing stdout facade: one Write, one Flush, no retry/new
+            // handle and no success/finality authority from sender delivery.
+            let _ = prerequisite_sink(&mut std::io::stdout().lock(), &bytes[..length]);
+        }
+    }
     if role != UiRole::Prerequisite || original.is_ok() { return original; }
     // Standard Write facade for the already-owned harness stdout. No new file,
     // HANDLE, alternate sink or close, and no additional owner-clock sample.
@@ -2439,8 +2557,16 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
     original
 }
 
-fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace) -> Result<()> {
+fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace, capture: &mut ObserverCapture) -> Result<()> {
     let mut clock = prerequisite_result!(trace, E01, Clock::new(entry_tick))?;
+    // Both fixed endpoints/latches exist before any account, create/open or
+    // child effect. Ordinary Clock and child90s authority remain untouched.
+    let mut inventory = NativeBook::new();
+    if observer_role(role) {
+        let diagnostic_clock = Arc::new(ObserverDiagnosticClock::new(entry_tick, clock.end)?);
+        inventory.bind_observer_inventory(Arc::clone(&diagnostic_clock))?;
+        capture.clock = Some(diagnostic_clock);
+    }
     trace.prerequisite_clock(clock.latched);
     trace.prerequisite_check(PrerequisiteCheck::E02);
     // This closed route is not any historical Fullwalk/Passive admission.
@@ -2461,12 +2587,13 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         Error::Unavailable
     })?;
     prerequisite_result!(trace, E04, role.process_args_traced(&image, true, trace))?;
-    let mut book = NativeBook::new(); let mut inventory = NativeBook::new();
+    let mut book = NativeBook::new();
     inventory.prerequisite_enable_admission(trace);
     let mut parent_attempted = false; let mut parent_settled = false;
     let mut files: Vec<OriginalFile> = Vec::with_capacity(48);
     let mut creates: Vec<Box<DirectoryCreate>> = Vec::with_capacity(4);
     let mut profile: Option<Profile> = None; let mut fixture = None;
+    let mut observer_diagnostic: Option<ObserverDiagnosticOriginal> = None;
     let mut account: Option<Account> = None; let mut launch: Option<Pin<Box<Launch>>> = None;
     let mut smoke: Option<Smoke> = None;
     let mut transitions = Vec::with_capacity(14);
@@ -2507,6 +2634,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         need(selected.role == role && selected.run == run && image.to_str() == Some(selected.owner.path.as_str()))?;
         need(files[request_index].stamp_traced(trace)? == request_before)?;
         input_stamps.push((request_index, request_before)); request_sha = digest_traced(&raw, trace)?;
+        if observer_role(role) { capture.binding = Some((selected.source.clone(), selected.tree.clone(), selected.run.clone(), request_sha.clone())); }
         trace.prerequisite_check(PrerequisiteCheck::P05);
         let mut directories = vec![(root_index.ok_or(Error::State)?, "root")];
         for (label, path) in fixed_directories(&root) {
@@ -2581,6 +2709,16 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
             stage = "ui-synthetic-project";
             fixture = Some(Fixture::create(role, &output, &mut creates, &mut files, &parent, &current.sid,
                 &mut clock, trace, &mut transitions)?);
+            stage = "ui-observer-diagnostic-original"; clock.effect_traced(trace)?;
+            // Register all native destinations and descriptor inputs before the
+            // CREATE_NEW entry; this same original survives the child lifetime.
+            need(files.len() < 48)?;
+            observer_diagnostic = Some(ObserverDiagnosticOriginal::new(role, &output, &parent, &current.sid,
+                Arc::clone(capture.clock.as_ref().ok_or(Error::State)?))?);
+            observer_diagnostic.as_mut().ok_or(Error::State)?.create(&request_sha)?;
+            clock.effect_traced(trace)?;
+            capture.output = Some((out, files[out].stamp_traced(trace)?));
+            clock.effect_traced(trace)?;
         }
         trace.prerequisite_check(PrerequisiteCheck::A03);
         stage = "ui-profile-prestate";
@@ -2594,6 +2732,9 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         stage = "ui-original-create";
         launch = Some(Launch::ui_traced(&selected, &after.wire(), std::str::from_utf8(&raw).map_err(|_| Error::Unsafe)?,
             &output, &root, profile.as_ref(), current, &parent, clock.endpoint_tick, trace)?);
+        if let Some(diagnostic) = observer_diagnostic.as_ref() {
+            launch.as_mut().ok_or(Error::State)?.as_mut().bind_ui_diagnostic(role, &output, diagnostic)?;
+        }
         request = Some(selected);
         launch.as_mut().ok_or(Error::State)?.as_mut().enter_traced(current, clock.start, &mut clock.latched, &mut clock.aggregate, trace)?;
         clock.effect_traced(trace)?; stage = "ui-profile-original-binding";
@@ -2619,7 +2760,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         trace.prerequisite_fault(PrerequisiteCheck::L04, Error::Unknown, None, None);
         diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
-            &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
+            &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture, &mut observer_diagnostic, &mut *capture)); }
     }
     trace.prerequisite_at(PrerequisiteStage::Launch, PrerequisiteCheck::L03);
     if let Some(original) = launch.as_mut() {
@@ -2637,7 +2778,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
             if !parent_settled { SmokeCheck::ParentSettlement } else { SmokeCheck::OwnerFinality }, Err(Error::Unknown));
         diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
-            &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
+            &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture, &mut observer_diagnostic, &mut *capture)); }
     }
     if observation.is_ok() {
         trace.prerequisite_at(PrerequisiteStage::ChildOutput, PrerequisiteCheck::C01);
@@ -2675,16 +2816,40 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
             trace.prerequisite_check(PrerequisiteCheck::C03);
             stage = "ui-output-poststate";
             smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputInventory,
-                output_poststate(&mut inventory, &mut files, &mut fixture, role, &output,
+                output_poststate(&mut inventory, &mut files, &mut fixture, &mut observer_diagnostic, capture, role, &output,
                     smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::OutputIndex,
                         output_index.ok_or(Error::State))?, result, &mut clock, trace, smoke.as_ref()))?;
             smoke_result(smoke.as_ref(), SmokePhase::OutputPoststate, SmokeCheck::Clock, clock.effect_traced(trace))
         })();
         observation = trace.prerequisite_current(observation);
     }
+    if observation.is_err() && observer_role(role) && !capture.claimed {
+        capture.claimed = true; // One attempt, even if admission/clock refuses.
+        let child_final = parent_settled && observer_child_final(launch.as_deref())
+            && !matches!(observation, Err(Error::Unknown)) && !inventory.is_unknown()
+            && observer_diagnostic.as_ref().is_some_and(|value| !value.unresolved());
+        if child_final && inventory.never_started() {
+            let captured = (|| -> Result<ObserverProjection> {
+                let cached = capture.output.as_ref().ok_or(Error::State)?;
+                let diagnostic = observer_diagnostic.as_mut().ok_or(Error::State)?;
+                inventory.observer_failure_inventory(child_final)?;
+                observer_failure_poststate(&mut inventory, &mut files, diagnostic, &output, cached)
+            })();
+            match captured {
+                Ok(projection) => capture.projection = projection,
+                Err(Error::Unknown) => capture.unresolved = true,
+                Err(_) => (), // Diagnostic unavailable; original failure stays.
+            }
+        }
+    }
     trace.prerequisite_at(PrerequisiteStage::Settlement, PrerequisiteCheck::S01);
-    let inventory_settled = inventory.prerequisite_settle(trace) == CloseOutcome::Settled && inventory.settled();
-    if !inventory_settled || matches!(observation, Err(Error::Unknown)) || !close_files_traced(&mut files, trace) {
+    // A diagnostic read Unknown also retains the original no-write inventory
+    // cursor on which it depended. Close the child journal before its parents.
+    let inventory_settled = !capture.unresolved && observer_diagnostic.as_ref().is_none_or(|value| !value.unresolved())
+        && inventory.prerequisite_settle(trace) == CloseOutcome::Settled && inventory.settled();
+    if !inventory_settled || matches!(observation, Err(Error::Unknown))
+        || observer_diagnostic.as_mut().is_some_and(|value| value.close().is_err())
+        || !close_files_traced(&mut files, trace) {
         trace.prerequisite_fault(PrerequisiteCheck::S01, Error::Unknown, None, None);
         let _ = smoke_result::<()>(smoke.as_ref(), SmokePhase::OutputPoststate,
             if !inventory_settled { SmokeCheck::InventorySettlement }
@@ -2692,7 +2857,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
             Err(Error::Unknown));
         diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
         loop { std::thread::park(); std::hint::black_box((&mut smoke, &mut launch, &mut profile, &mut account,
-            &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture)); }
+            &mut book, &mut inventory, &mut files, &mut creates, &request, &fixture, &mut observer_diagnostic, &mut *capture)); }
     }
     trace.prerequisite_check(PrerequisiteCheck::S02);
     if smoke_result(smoke.as_ref(), SmokePhase::OwnerFinality, SmokeCheck::Clock, clock.effect_traced(trace)).is_err() {
@@ -2702,7 +2867,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         if profile.as_mut().is_some_and(|value| smoke_result(smoke.as_ref(), SmokePhase::Retirement,
             SmokeCheck::ProfileSettlement, value.settle_traced(trace)).is_err()) {
             diagnostic_smoke("ui-profile-original-close", launch.as_deref(), true, trace.first, smoke.as_ref());
-            loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
+            loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke, &mut observer_diagnostic, &mut *capture)); }
         }
         if role != UiRole::Prerequisite { diagnostic_smoke(stage, launch.as_deref(), false, trace.first, smoke.as_ref()); }
         return observation; // Failed process/driver never permits profile/account deletion.
@@ -2716,7 +2881,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         if matches!(retirement, Err(Error::Unknown)) || profile.as_mut().is_some_and(|value| smoke_result(smoke.as_ref(),
             SmokePhase::Retirement, SmokeCheck::ProfileSettlement, value.settle_traced(trace)).is_err()) {
             diagnostic_smoke(stage, launch.as_deref(), true, trace.first, smoke.as_ref());
-            loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
+            loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke, &mut observer_diagnostic, &mut *capture)); }
         }
         return retirement;
     }
@@ -2727,7 +2892,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
     let retirement = trace.prerequisite_result(PrerequisiteCheck::R02, retirement);
     if matches!(retirement, Err(Error::Unknown)) {
         diagnostic_smoke("ui-account-retirement", launch.as_deref(), true, trace.first, smoke.as_ref());
-        loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke)); }
+        loop { std::thread::park(); std::hint::black_box((&mut profile, &mut account, &mut launch, &mut files, &mut smoke, &mut observer_diagnostic, &mut *capture)); }
     }
     retirement?; clock.effect_traced(trace)?;
     trace.prerequisite_at(PrerequisiteStage::Final, PrerequisiteCheck::Z01);
@@ -2736,6 +2901,8 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
     let original = prerequisite_result!(trace, Z01, launch.as_ref().ok_or(Error::State))?;
     let selected = prerequisite_result!(trace, Z01, request.as_ref().ok_or(Error::State))?;
     prerequisite_result!(trace, Z01, need(current.removed && original.facts.passed() && files.iter().all(OriginalFile::is_closed)
+        && observer_diagnostic.as_ref().is_none_or(ObserverDiagnosticOriginal::is_closed)
+        && files.len() + usize::from(observer_diagnostic.is_some()) <= 48
         && profile.prestate && profile.exact && profile.hives_unloaded && profile.delete_entered
         && profile.delete_return != 0 && profile.poststate && profile.settled && !profile.unknown
         && fixture.as_ref().is_none_or(|value| value.verified)))?;
