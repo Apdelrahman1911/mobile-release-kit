@@ -698,24 +698,30 @@ fn acl(files: &mut [OriginalFile], index: usize, label: &str, mask: u32, parent:
 fn create_fixture_file(files: &mut Vec<OriginalFile>, path: &Path, bytes: &'static [u8], parent: &[u8], account: &[u8],
     clock: &mut Clock, trace: &mut InputTrace, transitions: &mut Vec<String>) -> Result<FixtureFile> {
     need(files.len() < 48)?; clock.effect_traced(trace)?;
-    let writer = files.len(); files.push(OriginalFile::fixture_new(path, false, clock.end)?);
-    files[writer].open(FS::FILE_GENERIC_WRITE, true, null())?;
-    files[writer].named(path)?; files[writer].write_fixture_payload(bytes)?;
-    let created = files[writer].stamp()?;
+    let writer = files.len();
+    trace.at(InputRole::Output, Some(writer as u8));
+    files.push(OriginalFile::fixture_new_traced(path, false, clock.end, trace)?);
+    // The original pre-close stamp needs metadata-read access, not read-data access.
+    files[writer].open_traced(FS::FILE_GENERIC_WRITE | FS::FILE_READ_ATTRIBUTES, true, null(), trace)?;
+    files[writer].named_traced(path, trace)?; files[writer].write_fixture_payload(bytes)?;
+    let created = files[writer].stamp_traced(trace)?;
     // Do not retain a write-data handle while the ordinary core opens the same
     // immutable file share-read-only. Close it once and authenticate the new
     // read original against the actual CREATE_NEW identity under pinned parents.
-    files[writer].close()?; clock.effect_traced(trace)?;
+    files[writer].close_traced(trace)?; clock.effect_traced(trace)?;
+    trace.at(InputRole::Output, Some(files.len() as u8));
     let index = input(files, path, false, FS::FILE_GENERIC_READ | FS::WRITE_DAC, clock, trace)?;
-    let reopened = files[index].stamp()?;
+    let reopened = files[index].stamp_traced(trace)?;
     // Windows can publish the final write/change times only when the last
     // write-data handle closes. Identity and bytes are not allowed to change.
     need(reopened.volume == created.volume && reopened.id == created.id && reopened.creation == created.creation
         && reopened.size == bytes.len() as i64 && reopened.size == created.size && reopened.links == 1
         && reopened.attributes == created.attributes && reopened.write >= created.write && reopened.change >= created.change
-        && files[index].read(LIMIT)? == bytes)?;
+        && files[index].read_traced(LIMIT, trace)? == bytes)?;
+    trace.at(InputRole::AclOutput, Some(index as u8));
     acl(files, index, "synthetic-input", FS::FILE_GENERIC_READ, parent, account, clock, trace, transitions)?;
-    Ok(FixtureFile { index, stamp: files[index].stamp()?, bytes })
+    trace.at(InputRole::Output, Some(index as u8));
+    Ok(FixtureFile { index, stamp: files[index].stamp_traced(trace)?, bytes })
 }
 impl Fixture {
     fn create(role: UiRole, output: &Path, creates: &mut Vec<Box<DirectoryCreate>>, files: &mut Vec<OriginalFile>,
@@ -4502,6 +4508,43 @@ mod contract_tests {
         }
     }
 
+    fn fixture_writer_contract() {
+        // Inspect only the real publisher, never this test's own source literals.
+        // The hosted ProjectDraft owner supplies the actual Windows access proof.
+        let source = include_str!("ordinary_owner_ui.rs");
+        let publisher = source.split_once("fn create_fixture_file(").unwrap().1
+            .split_once("\nimpl Fixture {").unwrap().0;
+        assert_eq!(publisher.matches(".open_traced(").count(), 1);
+        assert_eq!(publisher.matches("clock.effect_traced(trace)?").count(), 2);
+        let mut remaining = publisher;
+        for operation in [
+            "need(files.len() < 48)?;",
+            "let writer = files.len();",
+            "trace.at(InputRole::Output, Some(writer as u8));",
+            "files.push(OriginalFile::fixture_new_traced(path, false, clock.end, trace)?);",
+            "files[writer].open_traced(FS::FILE_GENERIC_WRITE | FS::FILE_READ_ATTRIBUTES, true, null(), trace)?;",
+            "files[writer].named_traced(path, trace)?;",
+            "files[writer].write_fixture_payload(bytes)?;",
+            "let created = files[writer].stamp_traced(trace)?;",
+            "files[writer].close_traced(trace)?;",
+            "trace.at(InputRole::Output, Some(files.len() as u8));",
+            "let index = input(files, path, false, FS::FILE_GENERIC_READ | FS::WRITE_DAC, clock, trace)?;",
+            "let reopened = files[index].stamp_traced(trace)?;",
+            concat!("need(reopened.volume == created.volume && reopened.id == created.id && reopened.creation == created.creation\n",
+                "        && reopened.size == bytes.len() as i64 && reopened.size == created.size && reopened.links == 1\n",
+                "        && reopened.attributes == created.attributes && reopened.write >= created.write && reopened.change >= created.change\n",
+                "        && files[index].read_traced(LIMIT, trace)? == bytes)?;"),
+            "trace.at(InputRole::AclOutput, Some(index as u8));",
+            "acl(files, index, \"synthetic-input\", FS::FILE_GENERIC_READ, parent, account, clock, trace, transitions)?;",
+            "trace.at(InputRole::Output, Some(index as u8));",
+            "Ok(FixtureFile { index, stamp: files[index].stamp_traced(trace)?, bytes })",
+        ] {
+            assert_eq!(publisher.matches(operation).count(), 1, "{operation}");
+            remaining = remaining.split_once(operation)
+                .unwrap_or_else(|| panic!("publisher operation missing or out of order: {operation}")).1;
+        }
+    }
+
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
@@ -4510,6 +4553,7 @@ mod contract_tests {
         quit_logical_controls_contract();
         normal_smoke_launch_directory_contract().expect("closed normal-smoke directory routing");
         output_inventory_diagnostic_contract();
+        fixture_writer_contract();
         // Actual finite native-containment routing; no native call is entered.
         use crate::ui::quit_native::Failure as Q;
         for (failure, check, error) in [
