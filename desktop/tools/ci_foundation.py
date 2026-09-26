@@ -385,9 +385,9 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
-    "manifestSha256": "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
+    "manifestSha256": "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66",
     "preparedArtifact": {
-        "artifactId": "10839621457",
+        "artifactId": "10905226275",
         "attempt": 1,
         "files": [
             {
@@ -582,17 +582,17 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "outer.json",
-                "sha256": "0db5fec9210037429663643c09f86013e730c78548d4ab5ccc2b84183b906bba",
+                "sha256": "aefdc3d140d6668ca514a13a43de74d8f0341a825edc27d33f7145b5f5e558f8",
                 "size": 327
             },
             {
                 "path": "preparation.json",
-                "sha256": "10fac89bcc57732ef667703e2fb33b188c23352d9e5b9f214acf0f3b105876c3",
+                "sha256": "c80f014a206831662b70f570278ba3e425215e8b0e7eedec9e11cb9050b34902",
                 "size": 2539
             },
             {
                 "path": "prepared-runtime.tar",
-                "sha256": "881edca0ee48e4aec909a3fdac35ed89b6c253daf303b48294ba028226bc9933",
+                "sha256": "098727e8030da5d9e2905475e4c4dcf51348d228f054ec7c2f9c9e887cd6c5a6",
                 "size": 28815360
             },
             {
@@ -607,8 +607,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "source-bindings.json",
-                "sha256": "bd487a7103a29860fbccdabaf05ac34d8811d20da44fc1a878bbad4ce30d93d8",
-                "size": 18814
+                "sha256": "c2c151f26a9b436cdec8f3ce602ac394bdf8b6bd54354f49a927bc4bd588df2b",
+                "size": 19146
             },
             {
                 "path": "source-kit/hosted-evidence.tar",
@@ -627,10 +627,10 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             }
         ],
         "repository": "Apdelrahman1911/mobile-release-kit",
-        "runId": "36074195702",
-        "sourceSha": "0deaed83c3038433926db6110271f845b72f5369"
+        "runId": "36238334234",
+        "sourceSha": "095e776eadaf7014f5c125459585753bf54003c3"
     },
-    "protocolSha256": "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
+    "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 }
 # H's explicit trusted GitHub-hosted platform boundary, not a claimed complete
 # interpreter closure. Each image selects its own exact {path,size,sha256} body.
