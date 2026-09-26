@@ -2130,6 +2130,8 @@ def shell_source_manifest(source):
              "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/release_version_edit_commands.rs",
              "desktop/src-tauri/src/release_version_edit_protocol.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/asset_session.rs",
              "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/installed_shell_observation.rs",
+             "desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/src-tauri/src/lifecycle_evidence_protocol.rs",
+             "desktop/src-tauri/capabilities/main.json",
              "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/installed_shell_shutdown_observation.rs",
              "desktop/src-tauri/src/installed_tools_observation.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
              "desktop/src-tauri/src/environment_diagnostics_protocol.rs", "desktop/src-tauri/src/saved_command_owner.rs",
@@ -2137,6 +2139,9 @@ def shell_source_manifest(source):
              "desktop/src-tauri/src/offline_preflight_protocol.rs",
              "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
              "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
+             "desktop/src/api.ts", "desktop/src/types.ts", "desktop/src/candidateEvidence.ts", "desktop/src/lifecycleEvidence.ts",
+             "desktop/src/components/ReleaseEvidence.tsx", "desktop/src/pages/Artifacts.tsx", "desktop/src/pages/Future.tsx",
+             "desktop/tests/fixtures/lifecycle-evidence.json", "desktop/tests/lifecycle-evidence.test.mjs",
              "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
              "desktop/src/releaseVersionEditController.ts", "desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
              "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py",
@@ -3452,7 +3457,7 @@ def shell_project_draft_observation(observed, lifecycle):
            and type(files) is list and len(files) <= lifecycle.SHELL_PUBLIC_FILE_LIMIT + 2,
            "Closed project/draft receipt or exported original roster is missing")
     positive = cases["positive"]
-    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "candidateDocuments"}
+    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "lifecycleDocuments"}
            and positive["case"] == "positive" and type(positive["exitCode"]) is int and positive["exitCode"] == 0
            and positive["bootstrapReturned"] is True and positive["domAndGtkObserved"] is True and positive["maps"] == [],
            "Closed positive original result is incomplete")
@@ -3503,7 +3508,7 @@ def shell_project_draft_observation(observed, lifecycle):
                and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"]
                and matches[0]["sha256"] == pin["sha256"], "Original positive before/after export pin differs")
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Save fixture incorrectly claims an unchanged inventory")
-    _shell_candidate_documents_observation(positive, observed.get("candidateDocuments"), files, lifecycle)
+    _shell_lifecycle_documents_observation(positive, observed.get("lifecycleDocuments"), files, lifecycle)
     _shell_project_paths_observation(cases["project-paths"], observed.get("projectPaths"), files, lifecycle)
     _shell_workflow_apply_observation(cases["workflow-apply"], observed.get("workflowApply"), files, lifecycle)
     _shell_session_inputs_observation(cases, observed.get("sessionInputs"), files, lifecycle)
@@ -3521,11 +3526,11 @@ def shell_handoff_bytes(request, deadline):
     return raw
 
 
-def _shell_candidate_documents_observation(positive, combined, files, lifecycle):
-    """The companion receipt/fixture is mandatory, never standalone success."""
-    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed candidate documents observation is missing")
-    receipt = lifecycle.shell_candidate_receipt(D.canonical(positive["candidateDocuments"]))
-    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed candidate native receipt correspondence differs")
+def _shell_lifecycle_documents_observation(positive, combined, files, lifecycle):
+    """New lifecycle receipt, unchanged candidate fixture; never legacy proof."""
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed lifecycle documents observation is missing")
+    receipt = lifecycle.shell_lifecycle_receipt(D.canonical(positive["lifecycleDocuments"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed lifecycle native receipt correspondence differs")
     fixture = combined["fixture"]
     D.need(type(fixture) is dict and set(fixture) == {"fixture", "rootRetained", "documentsUnchanged", "noUnexpectedEntries",
                                                    "artifactTargetsAbsent", "entryCount", "documentBytes", "directoryMode", "fileMode",
@@ -4398,7 +4403,7 @@ def verify_installed_shell():
                "Original Tools input preparation or live Git/Python/JDK nodes changed during shell observations")
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
-            "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
+            "projectDraft": project_draft, "lifecycleDocuments": observed["lifecycleDocuments"], "projectPaths": observed["projectPaths"],
             "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
             "versionSave": observed["versionSave"],
             "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
