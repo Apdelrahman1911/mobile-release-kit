@@ -71,7 +71,7 @@ pub use checked::test_support;
 mod checked {
     use super::{DH_GENERATOR, DH_PRIME};
     use crate::Error;
-    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
+    use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
     use hkdf::Hkdf;
     use num::bigint::BigUint;
     use once_cell::sync::Lazy;
@@ -117,6 +117,17 @@ mod checked {
     /// same-operation charge/finality; the current application can only keep/drop.
     pub struct WrappingKeyCandidate {
         bytes: Zeroizing<[u8; 32]>,
+    }
+
+    impl WrappingKeyCandidate {
+        /// Consume the private candidate in one synchronous authentication
+        /// callback. The original zeroizing owner stays alive for that call;
+        /// this is not a reusable getter, async borrow or authentication result.
+        /// The application still owes header authentication, memory accounting
+        /// and the original operation's positive cleanup/finality before use.
+        pub fn consume<R>(self, authenticate: impl FnOnce(&[u8; 32]) -> R) -> R {
+            authenticate(&self.bytes)
+        }
     }
 
     impl CheckedDhExchange {
@@ -200,6 +211,32 @@ mod checked {
     }
 
     impl CheckedSessionKey {
+        /// Encrypt the one initialization proposal for this original encrypted
+        /// session. Return THIS opaque owner for the later actual GetSecret;
+        /// this does not authenticate a vault key or grant item creation.
+        pub fn encrypt_wrapping_key(
+            self, wrapping: &[u8; 32],
+        ) -> Result<(Self, [u8; 16], [u8; 48]), Error> {
+            self.encrypt_wrapping_key_with(wrapping, |iv| getrandom::fill(iv)
+                .map_err(|_| Error::Crypto("initialization IV refused")))
+        }
+
+        fn encrypt_wrapping_key_with(self, wrapping: &[u8; 32],
+            fill: impl FnOnce(&mut [u8]) -> Result<(), Error>,
+        ) -> Result<(Self, [u8; 16], [u8; 48]), Error> {
+            let mut iv = [0u8; 16];
+            fill(&mut iv)?; // One fallible fill; no retry or weak fallback.
+            let mut scratch = Zeroizing::new([0u8; 48]);
+            scratch[..32].copy_from_slice(wrapping);
+            cbc::Encryptor::<aes::Aes128>::new_from_slices(&self.aes[..], &iv)
+                .map_err(|_| Error::Crypto("initialization encryption refused"))?
+                .encrypt_padded::<Pkcs7>(&mut scratch[..], 32)
+                .map_err(|_| Error::Crypto("initialization encryption refused"))?;
+            // Only encrypted bytes leave the zeroizing scratch. Any error
+            // consumes/wipes this key as well; no borrowed key crosses await.
+            Ok((self, iv, *scratch))
+        }
+
         /// Decrypt only a checked IV16/ciphertext48 envelope. The original raw
         /// Message is immutable; all48 private scratch bytes are wiped even on
         /// invalid padding or a validly padded plaintext of the wrong length.
@@ -299,6 +336,9 @@ mod checked {
             super::tests::in_place_secret_exact_length_bad_padding_and_raw_copy();
             super::tests::actual_owned_and_library_state_sizes_fit_separate_allowance();
         }
+        pub fn assert_initialization_helpers() {
+            super::tests::initialization_encrypt_returns_original_key_and_one_fallible_iv();
+        }
     }
 
     #[cfg(any(test, feature = "mrk-retrieval-test-support"))]
@@ -315,6 +355,30 @@ mod checked {
                 output[start..].copy_from_slice(&bytes);
                 Ok(())
             })
+        }
+
+        #[cfg_attr(test, test)]
+        pub(super) fn initialization_encrypt_returns_original_key_and_one_fallible_iv() {
+            let key = CheckedSessionKey { aes: Zeroizing::new([0x39; 16]) };
+            let wrapping = [0xa5; 32];
+            let mut calls = 0;
+            let (original, iv, ciphertext) = key.encrypt_wrapping_key_with(&wrapping, |iv| {
+                calls += 1;
+                assert_eq!(iv.len(), 16);
+                iv.fill(0x27); Ok(())
+            }).unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(*original.aes, [0x39; 16]);
+            assert_eq!(iv, [0x27; 16]);
+            let actual = original.decrypt_wrapping_key(&iv, &ciphertext).unwrap();
+            actual.consume(|actual| assert_eq!(actual, &wrapping));
+            let key = CheckedSessionKey { aes: Zeroizing::new([0x39; 16]) };
+            let mut refused = 0;
+            assert!(key.encrypt_wrapping_key_with(&wrapping, |_| {
+                refused += 1; Err(Error::Crypto("synthetic IV refusal"))
+            }).is_err());
+            assert_eq!(refused, 1);
+            assert_eq!(wrapping, [0xa5; 32]);
         }
 
         #[cfg_attr(test, test)]

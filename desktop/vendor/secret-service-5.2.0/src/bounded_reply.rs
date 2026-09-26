@@ -424,6 +424,9 @@ fn wire_signature<'a>(body: &'a Body) -> Result<&'a str, Error> {
     raw_wire_signature(body)?.ok_or(Error::InvalidReply)
 }
 
+#[cfg(any(test, feature = "mrk-retrieval-test-support"))]
+pub(crate) fn test_wire_signature<'a>(body: &'a Body) -> Result<&'a str, Error> { wire_signature(body) }
+
 const BUS: &str = "org.freedesktop.DBus";
 const BUS_PATH: &str = "/org/freedesktop/DBus";
 const SERVICE: &str = "org.freedesktop.secrets";
@@ -460,6 +463,11 @@ pub(crate) fn decode_name_owner<'a>(body: &'a Body) -> Result<&'a str, Error> {
 }
 
 pub(crate) fn decode_owner_changed<'a>(body: &'a Body) -> Result<(Option<&'a str>, Option<&'a str>), Error> {
+    decode_owner_changed_for(body, SERVICE)
+}
+
+pub(crate) fn decode_owner_changed_for<'a>(body: &'a Body, subject: &str) -> Result<(Option<&'a str>, Option<&'a str>), Error> {
+    if !matches!(subject, SERVICE | "org.freedesktop.systemd1") { return Err(Error::InvalidReply); }
     let header = body.message().header();
     if header.path().map(|path| path.as_str()) != Some(BUS_PATH)
         || header.interface().map(|name| name.as_str()) != Some(BUS)
@@ -469,7 +477,7 @@ pub(crate) fn decode_owner_changed<'a>(body: &'a Body) -> Result<(Option<&'a str
     }
     let bus = UniqueName::try_from(BUS).map_err(|_| Error::InvalidReply)?;
     let (name, old, new): OwnerChangedWire<'a> = checked_typed_body(body, &bus, MessageType::Signal)?;
-    if name.0 != SERVICE { return Err(Error::InvalidReply); }
+    if name.0 != subject { return Err(Error::InvalidReply); }
     let old = if old.0.is_empty() { None } else { Some(provider_name(old.0)?) };
     let new = if new.0.is_empty() { None } else { Some(provider_name(new.0)?) };
     Ok((old, new))
@@ -498,6 +506,7 @@ fn check_empty_reply(body: &Body, sender: &UniqueName<'_>) -> Result<(), Error> 
 }
 
 type UnlockWire<'a> = (AtMostOnePath<'a>, BoundedPath<'a>);
+type Created<'a> = (BoundedPath<'a>, BoundedPath<'a>);
 type SecretWire<'a> = (
     BoundedPath<'a>,
     BorrowedBytes<'a, 16>,
@@ -508,6 +517,14 @@ type OpenSessionWire<'a> = (Variant<'a, BorrowedBytes<'a, 128>>, BoundedPath<'a>
 
 impl ReplySignature for UnlockWire<'_> {
     const WIRE_SIGNATURE: &'static str = "aoo";
+}
+
+impl ReplySignature for Created<'_> {
+    const WIRE_SIGNATURE: &'static str = "oo";
+}
+
+impl ReplySignature for u32 {
+    const WIRE_SIGNATURE: &'static str = "u";
 }
 
 impl ReplySignature for SecretWire<'_> {
@@ -552,6 +569,164 @@ pub(crate) fn decode_unlock<'a>(
 ) -> Result<UnlockReply<'a>, Error> {
     let (object_paths, prompt): UnlockWire<'a> = checked_body(body, sender)?;
     Ok(UnlockReply { object_paths, prompt })
+}
+
+/// Keep BOTH bounded results. Root sentinels and operation-specific tuple
+/// semantics belong to the original owner, after cleanup debt is retained.
+pub(crate) fn decode_created<'a>(body: &'a Body, sender: &UniqueName<'_>)
+    -> Result<(BoundedPath<'a>, BoundedPath<'a>), Error> {
+    checked_body(body, sender)
+}
+
+pub(crate) fn decode_bus_identity(body: &Body) -> Result<u32, Error> {
+    let bus = UniqueName::try_from(BUS).map_err(|_| Error::InvalidReply)?;
+    checked_body(body, &bus)
+}
+
+struct PropertyText<'a>(&'a str);
+impl Type for PropertyText<'_> { const SIGNATURE: &'static Signature = &Signature::Str; }
+impl<'de> Deserialize<'de> for PropertyText<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(BorrowedStrVisitor::<MAX_PATH_BYTES>).map(Self)
+    }
+}
+impl<'a> ReplySignature for Variant<'a, PropertyText<'a>> { const WIRE_SIGNATURE: &'static str = "v"; }
+impl ReplySignature for Variant<'_, u32> { const WIRE_SIGNATURE: &'static str = "v"; }
+
+struct EmptyStrings;
+impl Type for EmptyStrings { const SIGNATURE: &'static Signature = &Signature::static_array(&Signature::Str); }
+impl<'de> Deserialize<'de> for EmptyStrings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EmptyVisitor;
+        impl<'de> Visitor<'de> for EmptyVisitor {
+            type Value = EmptyStrings;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("an empty string array") }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let _ = seq.next_element::<RejectExtra>()?;
+                Ok(EmptyStrings)
+            }
+        }
+        deserializer.deserialize_seq(EmptyVisitor)
+    }
+}
+impl ReplySignature for Variant<'_, EmptyStrings> { const WIRE_SIGNATURE: &'static str = "v"; }
+
+struct FourArguments<'a>([PropertyText<'a>; 4]);
+impl Type for FourArguments<'_> { const SIGNATURE: &'static Signature = &Signature::static_array(&Signature::Str); }
+impl<'de> Deserialize<'de> for FourArguments<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ArgumentsVisitor;
+        impl<'de> Visitor<'de> for ArgumentsVisitor {
+            type Value = FourArguments<'de>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("exactly four bounded arguments") }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let first = seq.next_element()?.ok_or_else(|| A::Error::custom(INVALID_VALUE))?;
+                let second = seq.next_element()?.ok_or_else(|| A::Error::custom(INVALID_VALUE))?;
+                let third = seq.next_element()?.ok_or_else(|| A::Error::custom(INVALID_VALUE))?;
+                let fourth = seq.next_element()?.ok_or_else(|| A::Error::custom(INVALID_VALUE))?;
+                let _ = seq.next_element::<RejectExtra>()?;
+                Ok(FourArguments([first, second, third, fourth]))
+            }
+        }
+        deserializer.deserialize_seq(ArgumentsVisitor)
+    }
+}
+type ExecCommand<'a> = (PropertyText<'a>, FourArguments<'a>, bool, u64, u64, u64, u64, u32, i32, i32);
+struct OneExecCommand<'a>(ExecCommand<'a>);
+impl Type for OneExecCommand<'_> { const SIGNATURE: &'static Signature = &Signature::static_array(ExecCommand::SIGNATURE); }
+impl<'de> Deserialize<'de> for OneExecCommand<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ExecVisitor;
+        impl<'de> Visitor<'de> for ExecVisitor {
+            type Value = OneExecCommand<'de>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("one bounded ExecStart command") }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let command = seq.next_element()?.ok_or_else(|| A::Error::custom(INVALID_VALUE))?;
+                let _ = seq.next_element::<RejectExtra>()?;
+                Ok(OneExecCommand(command))
+            }
+        }
+        deserializer.deserialize_seq(ExecVisitor)
+    }
+}
+impl<'a> ReplySignature for Variant<'a, OneExecCommand<'a>> { const WIRE_SIGNATURE: &'static str = "v"; }
+
+pub(crate) fn decode_property_text<'a>(body: &'a Body, owner: &UniqueName<'_>) -> Result<&'a str, Error> {
+    Ok(checked_body::<Variant<'a, PropertyText<'a>>>(body, owner)?.0.0)
+}
+pub(crate) fn decode_property_u32(body: &Body, owner: &UniqueName<'_>) -> Result<u32, Error> {
+    Ok(checked_body::<Variant<'_, u32>>(body, owner)?.0)
+}
+pub(crate) fn check_empty_strings(body: &Body, owner: &UniqueName<'_>) -> Result<(), Error> {
+    checked_body::<Variant<'_, EmptyStrings>>(body, owner).map(|_| ())
+}
+pub(crate) fn check_gnome_exec_start(body: &Body, owner: &UniqueName<'_>, control_argument: &str) -> Result<(), Error> {
+    if body.len() > MAX_PROPERTY_BYTES || control_argument.len() > 128 { return Err(Error::InvalidReply); }
+    let (path, arguments, ignore_failure, _, _, _, _, _, _, _) =
+        checked_body::<Variant<'_, OneExecCommand<'_>>>(body, owner)?.0.0;
+    if path.0 != "/usr/bin/gnome-keyring-daemon" || ignore_failure
+        || arguments.0.each_ref().map(|argument| argument.0) != [
+            "/usr/bin/gnome-keyring-daemon", "--foreground", "--components=pkcs11,secrets", control_argument,
+        ]
+    { return Err(Error::InvalidReply); }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptRole { Unlock, Create }
+
+pub(crate) enum PromptCompletion<'a> {
+    Dismissed,
+    Unlocked(Option<BoundedPath<'a>>),
+    Created(BoundedPath<'a>),
+}
+
+struct EmptyText<'a>(&'a str);
+impl Type for EmptyText<'_> {
+    const SIGNATURE: &'static Signature = &Signature::Str;
+}
+impl<'de> Deserialize<'de> for EmptyText<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(BorrowedStrVisitor::<0>).map(Self)
+    }
+}
+type UnlockCompleted<'a> = (bool, Variant<'a, AtMostOnePath<'a>>);
+type CreateCompleted<'a> = (bool, Variant<'a, BoundedPath<'a>>);
+type DismissedCompleted<'a> = (bool, Variant<'a, EmptyText<'a>>);
+impl ReplySignature for UnlockCompleted<'_> { const WIRE_SIGNATURE: &'static str = "bv"; }
+impl ReplySignature for CreateCompleted<'_> { const WIRE_SIGNATURE: &'static str = "bv"; }
+impl ReplySignature for DismissedCompleted<'_> { const WIRE_SIGNATURE: &'static str = "bv"; }
+
+pub(crate) fn decode_prompt_completed<'a>(body: &'a Body, sender: &UniqueName<'_>,
+    prompt: &ObjectPath<'_>, role: PromptRole) -> Result<PromptCompletion<'a>, Error> {
+    let header = body.message().header();
+    if prompt.as_str() == "/" || prompt.as_str().len() > MAX_PATH_BYTES
+        || header.path().map(|path| path.as_str()) != Some(prompt.as_str())
+        || header.interface().map(|name| name.as_str()) != Some("org.freedesktop.Secret.Prompt")
+        || header.member().map(|name| name.as_str()) != Some("Completed")
+    { return Err(Error::InvalidReply); }
+    // Every alternative goes through the same exact bv/envelope/full-body
+    // checks. No generic variant allocation or arbitrary dismissed payload.
+    match role {
+        PromptRole::Unlock => {
+            if let Ok((dismissed, result)) = checked_typed_body::<UnlockCompleted<'a>>(body, sender, MessageType::Signal) {
+                return Ok(if dismissed { PromptCompletion::Dismissed }
+                    else { PromptCompletion::Unlocked(result.0.0) });
+            }
+        }
+        PromptRole::Create => {
+            if let Ok((dismissed, result)) = checked_typed_body::<CreateCompleted<'a>>(body, sender, MessageType::Signal) {
+                return Ok(if dismissed { PromptCompletion::Dismissed }
+                    else { PromptCompletion::Created(result.0) });
+            }
+        }
+    }
+    let (dismissed, result): DismissedCompleted<'a> = checked_typed_body(body, sender, MessageType::Signal)?;
+    if !dismissed || !result.0.0.is_empty() { return Err(Error::InvalidReply); }
+    // This closed empty-string alternative is proposed wire support, NOT
+    // evidence that an installed GNOME build uses it or that creation did not
+    // occur. Unsupported encodings refuse without fabricating completion.
+    Ok(PromptCompletion::Dismissed)
 }
 
 pub(crate) fn decode_locked<'a>(body: &'a Body, sender: &UniqueName<'_>) -> Result<bool, Error> {
@@ -618,15 +793,19 @@ pub(crate) fn assert_retrieval_empty_reply_helper() {
     tests::owner_empty_reply_is_not_a_bus_receipt_or_a_body_guess();
 }
 
+#[cfg(feature = "mrk-retrieval-test-support")]
+pub(crate) fn assert_provider_reply_helpers() {
+    tests::provider_property_shapes_and_limits_are_borrowed();
+    tests::prompt_completed_has_exact_owner_path_role_and_raw_envelope();
+    tests::created_and_manager_replies_keep_only_original_bounded_facts();
+}
+
 // Fixed native-fixture setup codecs only. Reuse the same raw-signature,
 // owner/envelope, bounded borrowed path and complete-consumption checks. These
 // helpers do not create a shipping collection/item creation API.
 #[cfg(feature = "mrk-retrieval-test-support")]
 pub(crate) mod native_fixture {
     use super::*;
-    type Created<'a> = (BoundedPath<'a>, BoundedPath<'a>);
-    impl ReplySignature for Created<'_> { const WIRE_SIGNATURE: &'static str = "oo"; }
-    impl ReplySignature for u32 { const WIRE_SIGNATURE: &'static str = "u"; }
 
     pub fn decode_session_alias<'a>(body: &'a Body, owner: &UniqueName<'_>) -> Result<&'a str, Error> {
         let path = decode_read_alias(body, owner)?;
@@ -1182,4 +1361,133 @@ mod tests {
         let huge = "x".repeat(MAX_MESSAGE_BYTES);
         invalid(decode_owner_changed(&owner_signal(&(SERVICE, "", huge.as_str())).body()));
     }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn provider_property_shapes_and_limits_are_borrowed() {
+        let sender = owner();
+        for length in [MAX_PATH_BYTES, MAX_PATH_BYTES + 1] {
+            let text = "t".repeat(length); let message = reply(&AsVariant(&text.as_str())); let body = message.body();
+            let result = decode_property_text(&body, &sender);
+            if length == MAX_PATH_BYTES { let borrowed = result.unwrap(); assert_eq!(borrowed, text); assert_borrowed(&body, borrowed.as_bytes()); }
+            else { invalid(result); }
+        }
+        assert_eq!(decode_property_u32(&reply(&AsVariant(&123u32)).body(), &sender).unwrap(), 123);
+        invalid(decode_property_u32(&reply(&AsVariant(&123i32)).body(), &sender));
+        invalid(decode_property_text(&reply(&"text").body(), &sender));
+        check_empty_strings(&reply(&AsVariant(&Vec::<&str>::new())).body(), &sender).unwrap();
+        invalid(check_empty_strings(&reply(&AsVariant(&vec![""])).body(), &sender));
+        let executable = "/usr/bin/gnome-keyring-daemon";
+        let control = "--control-directory=/run/user/1000/keyring";
+        let arguments = vec![executable, "--foreground", "--components=pkcs11,secrets", control];
+        let command = |path, arguments, ignore| (path, arguments, ignore, 0u64, 0u64, 0u64, 0u64, 123u32, 0i32, 0i32);
+        let commands = vec![command(executable, arguments.clone(), false)];
+        let message = reply(&AsVariant(&commands)); let body = message.body();
+        check_gnome_exec_start(&body, &sender, control).unwrap();
+        invalid(check_gnome_exec_start(&body, &UniqueName::try_from(":1.24").unwrap(), control));
+        invalid(check_gnome_exec_start(&body, &sender, "--control-directory=/run/user/1001/keyring"));
+        for commands in [vec![], vec![command(executable, arguments.clone(), false), command(executable, arguments.clone(), false)],
+            vec![command(executable, arguments.clone(), true)], vec![command("/other", arguments.clone(), false)],
+            vec![command(executable, arguments[..3].to_vec(), false)],
+            vec![command(executable, [arguments.clone(), vec!["--extra"]].concat(), false)]] {
+            invalid(check_gnome_exec_start(&reply(&AsVariant(&commands)).body(), &sender, control));
+        }
+        let long = "x".repeat(513);
+        let large_command = vec![command(executable, vec![executable, "--foreground", "--components=pkcs11,secrets", long.as_str()], false)];
+        invalid(check_gnome_exec_start(&reply(&AsVariant(&large_command)).body(), &sender, control));
+        // Parsed v is insufficient: nested body arguments and trailing bytes
+        // remain subject to the same raw signature/full consumption envelope.
+        invalid(decode_property_u32(&reply(&((AsVariant(&123u32),),)).body(), &sender));
+        let scalar = reply(&AsVariant(&123u32)); let scalar_body = scalar.body();
+        let mut trailing = scalar_body.data().bytes().to_vec(); trailing.push(0);
+        invalid(decode_property_u32(&raw_reply(&trailing, Signature::Variant).body(), &sender));
+    }
+
+    fn completed<T: Serialize + DynamicType>(value: &T) -> Message {
+        Message::signal("/prompt", "org.freedesktop.Secret.Prompt", "Completed").unwrap()
+            .sender(":1.23").unwrap().build(value).unwrap()
+    }
+    #[cfg_attr(test, test)]
+    pub(super) fn prompt_completed_has_exact_owner_path_role_and_raw_envelope() {
+        let sender = owner(); let prompt = path("/prompt"); let target = path("/target");
+        let paths = vec![target.clone()];
+        let unlock = completed(&(false, AsVariant(&paths))); let body = unlock.body();
+        assert_eq!(wire_signature(&body).unwrap(), "bv");
+        match decode_prompt_completed(&body, &sender, &prompt, PromptRole::Unlock).unwrap() {
+            PromptCompletion::Unlocked(Some(path)) => { assert_eq!(path.as_str(), "/target"); assert_borrowed(&body, path.as_str().as_bytes()); },
+            _ => panic!("exact unlock completion was not preserved"),
+        }
+        let create = completed(&(false, AsVariant(&target))); let body = create.body();
+        match decode_prompt_completed(&body, &sender, &prompt, PromptRole::Create).unwrap() {
+            PromptCompletion::Created(path) => { assert_eq!(path.as_str(), "/target"); assert_borrowed(&body, path.as_str().as_bytes()); },
+            _ => panic!("exact create completion was not preserved"),
+        }
+        invalid(decode_prompt_completed(&unlock.body(), &sender, &prompt, PromptRole::Create));
+        invalid(decode_prompt_completed(&create.body(), &sender, &prompt, PromptRole::Unlock));
+        invalid(decode_prompt_completed(&create.body(), &UniqueName::try_from(":1.24").unwrap(), &prompt, PromptRole::Create));
+        invalid(decode_prompt_completed(&create.body(), &sender, &path("/other"), PromptRole::Create));
+        invalid(decode_prompt_completed(&create.body(), &sender, &path("/"), PromptRole::Create));
+        let two = completed(&(false, AsVariant(&vec![path("/one"), path("/two")])));
+        invalid(decode_prompt_completed(&two.body(), &sender, &prompt, PromptRole::Unlock));
+        let long = format!("/{}", "x".repeat(MAX_PATH_BYTES));
+        let oversized = completed(&(false, AsVariant(&path(&long))));
+        invalid(decode_prompt_completed(&oversized.body(), &sender, &prompt, PromptRole::Create));
+        for role in [PromptRole::Unlock, PromptRole::Create] {
+            let denied = completed(&(true, AsVariant(&"")));
+            assert!(matches!(decode_prompt_completed(&denied.body(), &sender, &prompt, role).unwrap(), PromptCompletion::Dismissed));
+            invalid(decode_prompt_completed(&completed(&(false, AsVariant(&""))).body(), &sender, &prompt, role));
+            invalid(decode_prompt_completed(&completed(&(true, AsVariant(&1u32))).body(), &sender, &prompt, role));
+            invalid(decode_prompt_completed(&completed(&(true, AsVariant(&"not-empty"))).body(), &sender, &prompt, role));
+        }
+        assert!(matches!(decode_prompt_completed(&completed(&(true, AsVariant(&Vec::<ObjectPath<'_>>::new()))).body(),
+            &sender, &prompt, PromptRole::Unlock).unwrap(), PromptCompletion::Dismissed));
+        assert!(matches!(decode_prompt_completed(&completed(&(true, AsVariant(&path("/")))).body(),
+            &sender, &prompt, PromptRole::Create).unwrap(), PromptCompletion::Dismissed));
+        // Neither an empty method acknowledgement nor a bv MethodReturn is an
+        // original Completed signal, including an otherwise matching body.
+        invalid(decode_prompt_completed(&reply(&()).body(), &sender, &prompt, PromptRole::Create));
+        invalid(decode_prompt_completed(&reply(&(false, AsVariant(&target))).body(), &sender, &prompt, PromptRole::Create));
+        for message in [Message::signal("/prompt", "org.example.Other", "Completed").unwrap().sender(":1.23").unwrap().build(&(false, AsVariant(&target))).unwrap(),
+            Message::signal("/prompt", "org.freedesktop.Secret.Prompt", "Other").unwrap().sender(":1.23").unwrap().build(&(false, AsVariant(&target))).unwrap()] {
+            invalid(decode_prompt_completed(&message.body(), &sender, &prompt, PromptRole::Create));
+        }
+        let nested = completed(&((false, AsVariant(&target)),));
+        assert_eq!(wire_signature(&nested.body()).unwrap(), "(bv)");
+        invalid(decode_prompt_completed(&nested.body(), &sender, &prompt, PromptRole::Create));
+        let body = create.body(); let mut trailing = body.data().bytes().to_vec(); trailing.push(0);
+        // SAFETY: bounded initialized local bytes, no FD indices or attached
+        // descriptors, no bus/provider use. Only fallible decoders inspect it.
+        let trailing = unsafe { Message::signal("/prompt", "org.freedesktop.Secret.Prompt", "Completed").unwrap()
+            .sender(":1.23").unwrap().build_raw_body(&trailing, body.signature().clone(), #[cfg(unix)] Vec::new()).unwrap() };
+        invalid(decode_prompt_completed(&trailing.body(), &sender, &prompt, PromptRole::Create));
+    }
+
+    #[cfg_attr(test, test)]
+    pub(super) fn created_and_manager_replies_keep_only_original_bounded_facts() {
+        let sender = owner();
+        for (item, prompt) in [("/item", "/"), ("/", "/prompt"), ("/item", "/prompt"), ("/", "/")] {
+            let message = reply(&(path(item), path(prompt))); let body = message.body();
+            let (actual_item, actual_prompt) = decode_created(&body, &sender).unwrap();
+            assert_eq!((actual_item.as_str(), actual_prompt.as_str()), (item, prompt));
+            assert_borrowed(&body, actual_item.as_str().as_bytes()); assert_borrowed(&body, actual_prompt.as_str().as_bytes());
+        }
+        invalid(decode_created(&reply(&((path("/item"), path("/")),)).body(), &sender));
+        invalid(decode_created(&reply(&(path("/item"), path("/"))).body(), &UniqueName::try_from(":1.24").unwrap()));
+        let message = reply(&(path("/item"), path("/"))); let body = message.body(); let mut trailing = body.data().bytes().to_vec(); trailing.push(0);
+        invalid(decode_created(&raw_reply(&trailing, body.signature().clone()).body(), &sender));
+        let manager = Message::signal(BUS_PATH, BUS, "NameOwnerChanged").unwrap().sender(BUS).unwrap()
+            .build(&("org.freedesktop.systemd1", ":1.23", ":1.24")).unwrap();
+        assert_eq!(decode_owner_changed_for(&manager.body(), "org.freedesktop.systemd1").unwrap(), (Some(":1.23"), Some(":1.24")));
+        invalid(decode_owner_changed(&manager.body()));
+        invalid(decode_owner_changed_for(&manager.body(), "org.example.Other"));
+        let malformed = Message::signal(BUS_PATH, BUS, "NameOwnerChanged").unwrap().sender(BUS).unwrap()
+            .build(&("org.freedesktop.systemd1", ":1.23", "not-a-unique-name")).unwrap();
+        invalid(decode_owner_changed_for(&malformed.body(), "org.freedesktop.systemd1"));
+        let call = Message::method_call("/", "Data").unwrap().build(&()).unwrap();
+        let identity = Message::method_return(&call.header()).unwrap().sender(BUS).unwrap().build(&123u32).unwrap();
+        let body = identity.body(); assert_eq!(decode_bus_identity(&body).unwrap(), 123);
+        invalid(decode_bus_identity(&reply(&123u32).body()));
+        invalid(decode_bus_identity(&raw_empty_reply(BUS, Some("u"), 4, body.data().bytes(), 1).body()));
+        invalid(decode_bus_identity(&Message::method_return(&call.header()).unwrap().sender(BUS).unwrap().build(&123i32).unwrap().body()));
+    }
+
 }

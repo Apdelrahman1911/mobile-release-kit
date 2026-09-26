@@ -22,6 +22,30 @@ Mobile Release Kit protects the binding among reviewed source, final signed arti
 
 The final public-release decision is intentionally outside automation.
 
+### Desktop credential storage boundary
+
+The Linux encrypted-vault implementation is **disabled pending independent
+implementation review and native qualification**. Compiling its source or
+passing codec tests does not make persistent credentials available. Session
+credentials and encrypted credentials are distinct modes; the application
+never treats a missing key as permission to replace or repair an existing vault.
+
+The persistent Linux/GNOME profile assumes a trusted operating system, current
+ordinary desktop-user session, and original session bus. Its held package,
+process, and bus-owner checks are bounded profile/change-detection checkpoints,
+not atomic prevention of executable changes or cryptographic process attestation.
+It does not protect secrets from a compromised OS/session bus, malware in the
+same unlocked account, debuggers/memory access, swap/core dumps, or storage-history
+disclosure. Refused permissions or an unsupported provider fail closed; the app
+does not raise privileges or relax daemon protections to gain access.
+
+Vault lock revokes use immediately, but closure is reported only after actual
+original work and cleanup have joined. An affected encrypted operation's first
+failure/cancellation also requests relocking; durable files and uncertain state
+are preserved. Encryption does not certify that a credential is correct or that
+a Store/build operation is authorized. Saved descriptors require a separate
+stored-payload authentication, current assessment, and explicit assignment.
+
 ## Credential rules
 
 - The shared repository and fixtures contain no real credential or account/application identifier.

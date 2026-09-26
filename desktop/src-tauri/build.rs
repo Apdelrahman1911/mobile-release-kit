@@ -64,7 +64,7 @@ fn main() {
             "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
             "release_version_edit_close", "release_version_edit_status",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
-            "vault_status", "vault_open", "asset_context", "asset_choose", "credential_prepare",
+            "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];
         let attributes = tauri_build::Attributes::new()

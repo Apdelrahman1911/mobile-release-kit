@@ -22,7 +22,7 @@
     "allow-release-version-edit-open", "allow-release-version-edit-prepare", "allow-release-version-edit-apply",
     "allow-release-version-edit-close", "allow-release-version-edit-status",
     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
-    "allow-vault-status", "allow-vault-open", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
+    "allow-vault-status", "allow-vault-open", "allow-vault-prepare-initialize", "allow-vault-unlock", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
     "core:event:allow-listen", "core:event:allow-unlisten"
   ]

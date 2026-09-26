@@ -2,8 +2,8 @@
 // service, process fixture, storage, real credential or engine is accessed.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending } from '../src/assetSessionController.ts';
-import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetRequestFits, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
+import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending, assetStorageReason } from '../src/assetSessionController.ts';
+import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../src/assetSessionHelp.ts';
@@ -17,8 +17,14 @@ const D = 'd'.repeat(32);
 const context = { revision: 1, projectId: 'project-a', platform: 'android', stage: 'candidate', purpose: 'full' };
 const fields = { provider: 'inert-provider-canary', serviceAccount: 'inert-account-canary' };
 function status(revision = 0, patch = {}) {
-  return { schemaVersion: 1, statusRevision: revision, mode: 'session', capability: { available: true, reason: 'none' },
+  return { schemaVersion: 2, statusRevision: revision, persistence: null, mode: 'session', capability: { available: true, reason: 'none' },
     context: { ...context }, operation: null, records: [], assignments: [], ...patch };
+}
+function vaultStatus(revision = 0, patch = {}) {
+  return status(revision, { mode: 'encrypted', persistence: { state: 'unlocked', reason: 'none', keyAccess: 'read-write' }, ...patch });
+}
+function vaultRecord(patch = {}) {
+  return { recordId: C, revision: 1, kind: 'google-wif', availability: 'unassigned', storage: 'encrypted', label: null, payloadState: 'not-checked', ...patch };
 }
 function assessment() {
   return { schemaVersion: 1, policyVersion: 'credential-policy-v1', kind: 'google-wif',
@@ -31,9 +37,9 @@ function assessment() {
       nativeValidation: 'not-run', serviceValidation: 'not-run', releaseReadiness: 'unknown' } };
 }
 function operation(patch = {}) {
-  return { operationId: 3, operation: 'prepare', phase: 'preview', reason: 'none', source: 'not-run', settlement: 'known',
+  return { operationId: 3, operation: 'prepare', phase: 'preview', reason: 'none', source: 'not-run', settlement: 'known', storageOutcome: null,
     selectionToken: null, assessment: assessment(), preview: { token: A, action: 'save', expiresInMs: 10000,
-      subject: { kind: 'google-wif', change: 'new', recordId: null, recordRevision: null } }, ...patch };
+      subject: { type: 'record', kind: 'google-wif', change: 'new', recordId: null, recordRevision: null } }, ...patch };
 }
 function firebaseAssessment(kind = 'android-firebase') {
   const value = assessment();
@@ -59,7 +65,8 @@ function harness(initial = status()) {
   const pending = (command, args) => { const work = deferred(); calls.push({ command, args, ...work }); return work.promise; };
   const api = { mode: 'native', subscribeAssets: async (listener) => { calls.push({ command: 'listen' }); event = listener; return () => { unsubscribed = true; }; },
     assetStatus: async () => { calls.push({ command: 'status' }); return structuredClone(current); },
-    setAssetContext: (input) => pending('context', input), openAssetSession: () => pending('open', {}),
+    setAssetContext: (input) => pending('context', input), openAssetSession: (mode = 'session') => pending('open', { mode }),
+    prepareVaultInitialize: () => pending('initialize-review', {}), unlockVault: () => pending('unlock', {}),
     prepareCredential: (input) => pending('prepare', input), chooseAsset: (input) => pending('choose', input),
     prepareAssetDelete: (input) => pending('delete', input), commitAsset: (token) => pending('commit', token),
     bindAsset: (token) => pending('bind', token), discardAsset: (id) => pending('discard', id), lockAssetSession: () => pending('lock', {}),
@@ -115,7 +122,7 @@ test('status DTO detaches the provider and refuses raw material, extra authority
   ]) { const s = status(2, { operation: operation() }); change(s); assert.equal(parseAssetStatus(s), null); }
   const lost = status(3, { capability: { available: false, reason: 'document-lost' }, context: null });
   assert.ok(parseAssetStatus(lost));
-  lost.records = [{ recordId: C, revision: 0, kind: 'google-wif', availability: 'unassigned' }];
+  lost.records = [{ recordId: C, revision: 0, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' }];
   assert.equal(parseAssetStatus(lost), null);
 });
 
@@ -156,7 +163,7 @@ test('iOS Firebase is exactly the fifth session kind with a closed file-only req
   }
   assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source: { type: 'scalar', kind: 'ios-firebase', replacement: null }, fields: {} }), false);
   const value = status(2, { context: { ...context, platform: 'ios' }, operation: operation({ source: 'captured', assessment: firebaseAssessment('ios-firebase'),
-    preview: { token: A, action: 'save', expiresInMs: 10000, subject: { kind: 'ios-firebase', change: 'new', recordId: null, recordRevision: null } } }) });
+    preview: { token: A, action: 'save', expiresInMs: 10000, subject: { type: 'record', kind: 'ios-firebase', change: 'new', recordId: null, recordRevision: null } } }) });
   assert.deepEqual(parseAssetStatus(value), value);
   for (const mutate of [
     (s) => { s.operation.assessment.fields[0].requirement = 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64'; },
@@ -213,13 +220,13 @@ test('preparation refuses active or uncertain work and local replacement/private
       ['browser', { mode: 'preview' }],
       ['status observation', { observing: true }],
       ['unacknowledged original despite idle status', { originPending: true, status: status(2, { operation: idle }) }],
-      ['unconfirmed intent', { observationFailed: true, intent: { kind: 'google-wif', change: 'new', record: null } }],
+      ['unconfirmed intent', { observationFailed: true, intent: { type: 'record', kind: 'google-wif', change: 'new', record: null } }],
       ['project-path original', { status: status(2, { operation: operation({ operation: 'choose-project-path', phase: 'picking', settlement: 'pending', assessment: null, preview: null }) }) }],
       ['late-known original', { status: status(2, { operation: { ...idle, settlement: 'late-known' } }) }],
       ['selection', { status: status(2, { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) }) }],
       ['review', { status: status(2, { operation: operation() }), previewDeadline: 1000 }],
       ['cancellation', { cancelledOperationId: 3, status: status(2, { operation: operation({ phase: 'stopping', settlement: 'pending', assessment: null, preview: null }) }) }],
-      ['record change', { status: status(2, { records: [{ recordId: D, revision: 7, kind: 'android-firebase', availability: 'mutation-pending' }] }) }],
+      ['record change', { status: status(2, { records: [{ recordId: D, revision: 7, kind: 'android-firebase', availability: 'mutation-pending', storage: 'session', label: null, payloadState: 'assessed' }] }) }],
     ]) assert.notEqual(preparationSessionReason(target, { ...current, ...patch }, emptyPreparationLocal), null, label);
     for (const patch of [{ replacementId: D }, { replacementId: 'no-longer-present' }, { confirmLock: true }, { writeOnlyFormMounted: true }]) {
       const local = Object.freeze({ ...emptyPreparationLocal, ...patch });
@@ -232,7 +239,7 @@ test('preparation refuses active or uncertain work and local replacement/private
     assert.equal(preparationScopeChanged(same, current.scope), false);
     assert.equal(preparationSessionReason(same, current, form), null); // focus only; no key/scope/form change
     assert.notEqual(preparationSessionReason(preparationView('project-read-token', current.scope), current, form), null);
-    const completed = { ...current, originPending: false, intent: { kind: 'google-wif', change: 'assign', record: { recordId: C, expectedRevision: 1 } },
+    const completed = { ...current, originPending: false, intent: { type: 'record', kind: 'google-wif', change: 'assign', record: { recordId: C, expectedRevision: 1 } },
       cancelledOperationId: idle.operationId, selectionKind: 'android-firebase', status: status(2, { operation: idle }) };
     assert.equal(preparationSessionReason(same, completed, form), null); // residual completed intent/kind/cancel ID is not an original in flight
     assert.equal(h.controller.getSnapshot(), current); assert.equal(h.calls.length, count);
@@ -317,6 +324,7 @@ test('keep and assignment are separate one-use commands and do not renew the ori
   try {
     await ready(h);
     assert.equal(h.controller.prepareScalar('google-wif', { ...fields }), true);
+    assert.equal(Object.hasOwn(h.latest('prepare').args, 'label'), false, 'session requests retain their original exact shape');
     h.latest('prepare').resolve(status(2, { operation: operation() })); await settle();
     assert.equal(h.controller.getSnapshot().previewDeadline, 10100);
     assert.equal(h.controller.confirmPreview(A, 'bind'), false);
@@ -326,9 +334,9 @@ test('keep and assignment are separate one-use commands and do not renew the ori
     assert.match(assetCancellationReason(h.controller.getSnapshot()), /no cancellation has been sent/u);
     assert.equal(h.calls.filter((call) => call.command === 'discard').length, 0);
     h.time(5000);
-    const kept = { recordId: C, revision: 1, kind: 'google-wif', availability: 'unassigned' };
+    const kept = { recordId: C, revision: 1, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' };
     h.latest('commit').resolve(status(3, { records: [kept], operation: operation({ operationId: 4, operation: 'commit', preview: { token: B, action: 'bind', expiresInMs: 10000,
-      subject: { kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) })); await settle();
+      subject: { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) })); await settle();
     assert.equal(h.controller.getSnapshot().previewDeadline, 10100);
     assert.deepEqual(h.controller.getSnapshot().status.assignments, []);
     assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
@@ -477,8 +485,8 @@ test('requesting discard immediately retires a preview even before its native re
 
 test('original file replacement survives view subscriptions and Keep binds only its exact resulting revision', async () => {
   const records = [
-    { recordId: C, revision: 0, kind: 'google-wif', availability: 'unassigned' },
-    { recordId: D, revision: 7, kind: 'android-firebase', availability: 'unassigned' },
+    { recordId: C, revision: 0, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' },
+    { recordId: D, revision: 7, kind: 'android-firebase', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' },
   ];
   const h = harness();
   try {
@@ -489,20 +497,20 @@ test('original file replacement survives view subscriptions and Keep binds only 
     assert.equal(h.controller.getSnapshot().status.operation, null);
     const stopBeforeReply = h.controller.subscribe(() => {}); stopBeforeReply();
     assert.equal(assetIntentPending(h.controller.getSnapshot()), true);
-    assert.deepEqual(h.controller.getSnapshot().intent, { kind: 'android-firebase', change: 'replace', record: { recordId: D, expectedRevision: 7 } });
+    assert.deepEqual(h.controller.getSnapshot().intent, { type: 'record', kind: 'android-firebase', change: 'replace', record: { recordId: D, expectedRevision: 7 } });
     assertPreparationPreservesOriginal(h);
     const pendingRecords = records.map((record) => record.recordId === D ? { ...record, availability: 'mutation-pending' } : record);
     h.latest('choose').resolve(status(2, { records: pendingRecords, operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) })); await settle();
     const unsubscribe = h.controller.subscribe(() => {}); unsubscribe();
     const intent = h.controller.getSnapshot().intent;
-    assert.deepEqual(intent, { kind: 'android-firebase', change: 'replace', record: { recordId: D, expectedRevision: 7 } });
+    assert.deepEqual(intent, { type: 'record', kind: 'android-firebase', change: 'replace', record: { recordId: D, expectedRevision: 7 } });
     assertPreparationPreservesOriginal(h);
     assert.equal(h.controller.prepareSelection({}), true);
     assert.equal(h.controller.discard(), false); // Selected predecessor is not the new Prepare operation.
     assert.equal(h.controller.getSnapshot().originPending, true);
     assert.equal(h.calls.filter((call) => call.command === 'discard').length, 0);
     assert.deepEqual(h.latest('prepare').args.source, { type: 'selection', selectionToken: A });
-    const subject = { kind: 'android-firebase', change: 'replace', recordId: D, recordRevision: 7 };
+    const subject = { type: 'record', kind: 'android-firebase', change: 'replace', recordId: D, recordRevision: 7 };
     h.latest('prepare').resolve(status(3, { records: pendingRecords, operation: operation({ operationId: 4, source: 'captured', assessment: firebaseAssessment(),
       preview: { token: B, action: 'save', expiresInMs: 9000, subject } }) })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true);
@@ -534,14 +542,14 @@ for (const finalAction of ['assign explicitly', 'change context']) test(`iOS XML
     assert.equal(h.calls.filter((call) => call.command === 'prepare').length, 0);
     assert.equal(h.controller.prepareSelection({}), true); // Invalid companions did not spend the selection.
     assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'selection', selectionToken: A }, fields: {} });
-    const subject = { kind: 'ios-firebase', change: 'new', recordId: null, recordRevision: null };
+    const subject = { type: 'record', kind: 'ios-firebase', change: 'new', recordId: null, recordRevision: null };
     h.latest('prepare').resolve(ios(3, { operation: operation({ operationId: 4, source: 'captured', assessment: firebaseAssessment('ios-firebase'),
       preview: { token: B, action: 'save', expiresInMs: 9000, subject } }) })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true);
     assert.equal(h.controller.confirmPreview(B, 'save'), true);
-    const records = [{ recordId: D, revision: 1, kind: 'ios-firebase', availability: 'unassigned' }];
+    const records = [{ recordId: D, revision: 1, kind: 'ios-firebase', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' }];
     h.latest('commit').resolve(ios(4, { records, operation: operation({ operationId: 5, operation: 'commit', source: 'captured', assessment: firebaseAssessment('ios-firebase'),
-      preview: { token: C, action: 'bind', expiresInMs: 8000, subject: { kind: 'ios-firebase', change: 'assign', recordId: D, recordRevision: 1 } } }) })); await settle();
+      preview: { token: C, action: 'bind', expiresInMs: 8000, subject: { type: 'record', kind: 'ios-firebase', change: 'assign', recordId: D, recordRevision: 1 } } }) })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true);
     assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
     assert.deepEqual(h.controller.getSnapshot().status.assignments, []);
@@ -565,15 +573,15 @@ for (const finalAction of ['assign explicitly', 'change context']) test(`iOS XML
 
 test('removal identifies the exact record; another valid subject or unrelated newer operation cannot confirm', async () => {
   const records = [
-    { recordId: B, revision: 0, kind: 'android-keystore', availability: 'unassigned' },
-    { recordId: C, revision: 7, kind: 'google-wif', availability: 'unassigned' },
-    { recordId: D, revision: 2, kind: 'google-wif', availability: 'unassigned' },
+    { recordId: B, revision: 0, kind: 'android-keystore', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' },
+    { recordId: C, revision: 7, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' },
+    { recordId: D, revision: 2, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' },
   ];
   const h = harness();
   try {
     await ready(h, { records });
     assert.equal(h.controller.prepareDelete({ recordId: C, expectedRevision: 7 }), true);
-    const subject = { kind: 'google-wif', change: 'delete', recordId: C, recordRevision: 7 };
+    const subject = { type: 'record', kind: 'google-wif', change: 'delete', recordId: C, recordRevision: 7 };
     const deletion = operation({ operation: 'prepare-delete', assessment: null, preview: { token: A, action: 'delete', expiresInMs: 10000, subject } });
     h.latest('delete').resolve(status(2, { records, operation: deletion })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true);
@@ -625,9 +633,9 @@ test('an overtaking event cannot replace the review carried by the original comm
     h.controller.prepareScalar('google-wif', fields);
     h.latest('prepare').resolve(status(2, { operation: operation() })); await settle();
     assert.equal(h.controller.confirmPreview(A, 'save'), true);
-    const kept = { recordId: C, revision: 1, kind: 'google-wif', availability: 'unassigned' };
+    const kept = { recordId: C, revision: 1, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' };
     const original = status(3, { records: [kept], operation: operation({ operationId: 4, operation: 'commit',
-      preview: { token: B, action: 'bind', expiresInMs: 9000, subject: { kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) });
+      preview: { token: B, action: 'bind', expiresInMs: 9000, subject: { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) });
     const overtaking = structuredClone(original);
     overtaking.statusRevision = 4;
     overtaking.records[0].recordId = D;
@@ -642,4 +650,272 @@ test('an overtaking event cannot replace the review carried by the original comm
     assert.equal(h.controller.confirmPreview(A, 'bind'), false);
     assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
   } finally { h.controller.dispose(); }
+});
+
+test('v2 encrypted descriptors have their own finite bounds and cannot masquerade as session or payload authority', () => {
+  const records = Array.from({ length: 128 }, (_, index) => vaultRecord({ recordId: (index + 1).toString(16).padStart(32, '0'), label: 'x'.repeat(128) }));
+  const input = vaultStatus(1, { records });
+  assert.equal(assetJsonFits(input, 32768), false, 'the encrypted cap must not accidentally retain the smaller session cap');
+  assert.deepEqual(parseAssetStatus(input), input);
+  for (const mutate of [
+    (s) => { s.schemaVersion = 1; }, (s) => { s.persistence = null; },
+    (s) => { s.records.push(vaultRecord({ recordId: 'f'.repeat(32) })); },
+    (s) => { s.records[0].recordId = s.records[1].recordId; },
+    (s) => { s.records[0].revision = 0; }, (s) => { s.records[0].storage = 'session'; },
+    (s) => { s.records[0].label = 'x'.repeat(129); }, (s) => { s.records[0].label = 'hidden\nline'; },
+    (s) => { s.records[0].payloadState = 'verified'; }, (s) => { s.records[0].payload = 'private-canary'; },
+    (s) => { s.persistence.keyAccess = 'read-only'; },
+    (s) => { s.persistence.state = 'initializing'; }, (s) => { s.persistence.keyAccess = 'locked'; },
+  ]) { const changed = structuredClone(input); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+  const memory = status(1, { records: records.slice(0, 32).map((record) => ({ ...record, storage: 'session', label: null })) });
+  assert.ok(parseAssetStatus(memory), 'session not-checked is a truthful current-context state');
+  memory.records.push({ ...memory.records[0], recordId: 'f'.repeat(32) });
+  assert.equal(parseAssetStatus(memory), null, 'memory-only bound remains 32');
+  assert.equal(assetLabelFits('🚀'.repeat(32)), true); assert.equal(assetLabelFits('🚀'.repeat(33)), false);
+  for (const label of ['', '\u0000', '\u0085', '\ud800']) assert.equal(assetLabelFits(label), false);
+  assert.equal(assetLabelFits(null), true);
+  let readMode = false;
+  const accessor = { ...input }; Object.defineProperty(accessor, 'mode', { enumerable: true, get() { readMode = true; return 'encrypted'; } });
+  assert.equal(parseAssetStatus(accessor), null); assert.equal(readMode, false, 'choosing a response bound must not evaluate a provider getter');
+});
+
+test('locked and interrupted read-only projections cannot carry decrypted or assignment authority', () => {
+  const locked = vaultStatus(2, { context: null, persistence: { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' } });
+  assert.ok(parseAssetStatus(locked)); assert.equal(assetStorageWritable(locked), false);
+  for (const patch of [
+    { records: [vaultRecord({ label: 'not-to-be-published' })] },
+    { assignments: [{ kind: 'google-wif', recordId: C, recordRevision: 1, contextRevision: 1, availability: 'unavailable' }] },
+    { context, operation: operation() },
+    { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) },
+  ]) assert.equal(parseAssetStatus({ ...locked, ...patch }), null);
+  const interrupted = { ...locked, records: [vaultRecord({ label: 'Upload identity' })], persistence: { state: 'interrupted', reason: 'vault-interrupted', keyAccess: 'read-only' } };
+  assert.ok(parseAssetStatus(interrupted)); assert.equal(assetStorageWritable(interrupted), false);
+  for (const patch of [{ availability: 'assigned' }, { availability: 'mutation-pending' }, { payloadState: 'assessed' }])
+    assert.equal(parseAssetStatus({ ...interrupted, records: [{ ...interrupted.records[0], ...patch }] }), null);
+  const initialize = { ...locked, persistence: { state: 'uninitialized', reason: 'vault-uninitialized', keyAccess: 'locked' }, operation: operation({
+    operation: 'prepare-initialize', assessment: null, preview: { token: A, action: 'initialize', expiresInMs: 10000, subject: { type: 'vault', change: 'initialize' } },
+  }) };
+  assert.ok(parseAssetStatus(initialize));
+  for (const mutate of [
+    (s) => { s.operation.preview.subject.kind = 'google-wif'; },
+    (s) => { s.operation.preview.action = 'save'; }, (s) => { s.operation.operation = 'prepare'; },
+    (s) => { s.persistence.state = 'locked'; }, (s) => { s.operation.assessment = assessment(); s.context = context; },
+  ]) { const changed = structuredClone(initialize); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+});
+
+test('storage effect, durability and cleanup survive redacted closure but never become a successful session action', () => {
+  const receipt = status(4, { mode: 'closed', context: null, operation: operation({ operation: 'initialize', phase: 'unknown', reason: 'user-cancelled', settlement: 'unknown', assessment: null, preview: null,
+    storageOutcome: { effect: 'known-applied', durability: 'unknown', cleanup: 'unknown' } }) });
+  assert.deepEqual(parseAssetStatus(receipt), receipt);
+  for (const mutate of [
+    (s) => { s.mode = 'session'; }, (s) => { s.context = context; }, (s) => { s.records = [vaultRecord()]; },
+    (s) => { s.operation.operation = 'lock'; }, (s) => { s.operation.storageOutcome.effect = 'success'; },
+    (s) => { s.operation.storageOutcome.effect = 'known-none'; s.operation.storageOutcome.durability = 'confirmed'; },
+    (s) => { s.operation.storageOutcome.saved = true; },
+  ]) { const changed = structuredClone(receipt); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+  for (const name of ['open-vault', 'prepare-initialize', 'initialize', 'unlock'])
+    assert.equal(parseAssetStatus(status(4, { operation: operation({ operation: name, phase: 'idle', assessment: null, preview: null }) })), null);
+});
+
+test('closed v2 statuses redact material even without a storage receipt and reject invented storage modes', () => {
+  const closed = status(5, { mode: 'closed', context: null });
+  assert.deepEqual(parseAssetStatus(closed), closed);
+  const redacted = operation({ operation: 'lock', phase: 'idle', assessment: null, preview: null });
+  assert.deepEqual(parseAssetStatus({ ...closed, operation: redacted }), { ...closed, operation: redacted });
+  for (const storage of ['closed', 'session', 'encrypted']) {
+    assert.equal(parseAssetStatus({ ...closed, records: [vaultRecord({ storage, label: null })] }), null, storage);
+  }
+  for (const patch of [
+    { context },
+    { assignments: [{ kind: 'google-wif', recordId: C, recordRevision: 1, contextRevision: 1, availability: 'unavailable' }] },
+    { operation: { ...redacted, operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A } },
+    { context, operation: { ...redacted, operation: 'prepare', assessment: assessment() } },
+    { context, operation: operation() },
+  ]) assert.equal(parseAssetStatus({ ...closed, ...patch }), null);
+  for (const storage of ['closed', 'filesystem', null]) {
+    assert.equal(parseAssetStatus(status(5, { records: [vaultRecord({ storage, label: null })] })), null);
+    assert.equal(parseAssetStatus(vaultStatus(5, { records: [vaultRecord({ storage })] })), null);
+  }
+});
+
+test('native v2 routes are exact, browser-unavailable, and never acquire fields for an existing stored record', async () => {
+  const calls = [];
+  const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return vaultStatus(); });
+  await api.openAssetSession(); await api.openAssetSession('encrypted'); await api.prepareVaultInitialize(); await api.unlockVault();
+  assert.deepEqual(calls, [
+    { command: 'vault_open', args: { mode: 'session' } }, { command: 'vault_open', args: { mode: 'encrypted' } },
+    { command: 'vault_prepare_initialize', args: {} }, { command: 'vault_unlock', args: {} },
+  ]);
+  for (const [command, args] of [['vault_open', { mode: 'automatic' }], ['vault_prepare_initialize', { replaceExisting: true }], ['vault_unlock', { password: 'inert-canary' }]])
+    assert.equal(assetRequestFits(command, args), false);
+  const stored = { contextRevision: 1, source: { type: 'record', recordId: C, expectedRevision: 1 } };
+  assert.equal(assetRequestFits('credential_prepare', stored), true);
+  for (const patch of [{ fields: {} }, { label: null }, { label: 'not-an-update-route' }]) assert.equal(assetRequestFits('credential_prepare', { ...stored, ...patch }), false);
+  for (const action of [() => previewApi.openAssetSession('encrypted'), () => previewApi.prepareVaultInitialize(), () => previewApi.unlockVault()])
+    await assert.rejects(action(), (error) => error.code === 'AssetSessionUnavailable');
+});
+
+test('encrypted Save ends unassigned; only explicit preparation of the actual saved revision can lead to Bind', async () => {
+  const h = harness(vaultStatus());
+  try {
+    await ready(h, { mode: 'encrypted', persistence: vaultStatus().persistence });
+    assert.equal(h.controller.prepareScalar('google-wif', fields, null, 'Upload identity'), true);
+    assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'scalar', kind: 'google-wif', replacement: null }, fields, label: 'Upload identity' });
+    assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /inert-provider-canary|Upload identity/, 'private entry is not retained in display state');
+    h.latest('prepare').resolve(vaultStatus(2, { operation: operation() })); await settle();
+    assert.equal(h.controller.confirmPreview(A, 'save'), true);
+    const record = vaultRecord({ label: 'Upload identity' });
+    h.latest('commit').resolve(vaultStatus(3, { records: [record], operation: operation({ operationId: 4, operation: 'commit', phase: 'idle', assessment: null, preview: null,
+      storageOutcome: { effect: 'known-applied', durability: 'confirmed', cleanup: 'known' } }) })); await settle();
+    const saved = h.controller.getSnapshot();
+    assert.equal(saved.reviewReady, false); assert.equal(saved.status.operation.preview, null);
+    assert.equal(saved.status.records[0].payloadState, 'not-checked'); assert.deepEqual(saved.status.assignments, []);
+    assert.equal(h.controller.confirmPreview(A, 'bind'), false); assert.equal(h.calls.some((call) => call.command === 'bind'), false);
+    assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 2 }), false, 'no substitution of a newer revision');
+    assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), true);
+    assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'record', recordId: C, expectedRevision: 1 } });
+    const checked = { ...record, payloadState: 'assessed' };
+    h.latest('prepare').resolve(vaultStatus(4, { records: [checked], operation: operation({ operationId: 5,
+      preview: { token: B, action: 'bind', expiresInMs: 10000, subject: { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    assert.equal(h.controller.confirmPreview(B, 'bind'), true);
+    assert.equal(h.latest('bind').args, B);
+    h.latest('bind').resolve(vaultStatus(5, { records: [{ ...checked, availability: 'assigned' }],
+      assignments: [{ kind: 'google-wif', recordId: C, recordRevision: 1, contextRevision: 1, availability: 'available' }],
+      operation: operation({ operationId: 6, operation: 'bind', phase: 'idle', assessment: null, preview: null }) })); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, true);
+    assert.equal(h.controller.getSnapshot().status.assignments.length, 1);
+  } finally { h.controller.dispose(); }
+});
+
+test('encrypted save refuses an inherited source Bind review even when its record and native operation IDs are plausible', async () => {
+  const h = harness(vaultStatus());
+  try {
+    await ready(h, { mode: 'encrypted', persistence: vaultStatus().persistence });
+    h.controller.prepareScalar('google-wif', fields);
+    assert.equal(h.latest('prepare').args.label, null, 'encrypted preparation supplies the explicit optional-label slot');
+    h.latest('prepare').resolve(vaultStatus(2, { operation: operation() })); await settle();
+    assert.equal(h.controller.confirmPreview(A, 'save'), true);
+    h.latest('commit').resolve(vaultStatus(3, { records: [vaultRecord()], operation: operation({ operationId: 4, operation: 'commit',
+      preview: { token: B, action: 'bind', expiresInMs: 10000, subject: { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.getSnapshot().observationFailed, true);
+    assert.equal(h.controller.confirmPreview(B, 'bind'), false);
+    assert.equal(h.calls.some((call) => call.command === 'bind'), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('initialization uses its original vault-only review without a project and cancellation targets the actual Initialize owner', async () => {
+  const h = harness(status(0, { mode: 'closed', context: null }));
+  const absent = { state: 'uninitialized', reason: 'vault-uninitialized', keyAccess: 'locked' };
+  try {
+    h.setProject(null); await h.controller.connect(h.api);
+    assert.equal(h.controller.open('encrypted'), true);
+    assert.deepEqual(h.latest('open').args, { mode: 'encrypted' });
+    const opened = vaultStatus(1, { context: null, persistence: absent, operation: operation({ operationId: 1, operation: 'open-vault', phase: 'idle', assessment: null, preview: null }) });
+    h.emit(opened); assert.equal(h.controller.getSnapshot().originPending, true);
+    assert.equal(h.controller.prepareInitialize(), false);
+    h.latest('open').resolve(opened); await settle();
+    assert.equal(h.controller.prepareInitialize(), true);
+    const reviewed = vaultStatus(2, { context: null, persistence: absent, operation: operation({ operationId: 2, operation: 'prepare-initialize', assessment: null,
+      preview: { token: A, action: 'initialize', expiresInMs: 10000, subject: { type: 'vault', change: 'initialize' } } }) });
+    h.emit(reviewed); assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.confirmPreview(A, 'initialize'), false);
+    h.latest('initialize-review').resolve(reviewed); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    assert.deepEqual(h.controller.getSnapshot().intent, { type: 'vault', change: 'initialize' });
+    assert.equal(h.controller.confirmPreview(A, 'initialize'), true);
+    assert.equal(h.controller.discard(), false, 'the preceding PrepareInitialize cannot identify a pending Initialize');
+    const running = vaultStatus(3, { context: null, persistence: { state: 'initializing', reason: 'none', keyAccess: 'locked' },
+      operation: operation({ operationId: 3, operation: 'initialize', phase: 'mutating', settlement: 'pending', assessment: null, preview: null,
+        storageOutcome: { effect: 'not-started', durability: 'not-run', cleanup: 'pending' } }) });
+    h.latest('commit').resolve(running); await settle();
+    assert.equal(h.controller.discard(), true); assert.equal(h.latest('discard').args, 3);
+    h.latest('discard').resolve(vaultStatus(4, { context: null, persistence: { state: 'interrupted', reason: 'vault-interrupted', keyAccess: 'locked' },
+      operation: operation({ operationId: 3, operation: 'initialize', phase: 'idle', reason: 'user-cancelled', assessment: null, preview: null,
+        storageOutcome: { effect: 'known-applied', durability: 'unknown', cleanup: 'known' } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().status.operation.reason, 'user-cancelled');
+    assert.equal(h.controller.confirmPreview(A, 'initialize'), false);
+    assert.equal(h.calls.some((call) => call.command === 'context' || call.command === 'prepare' || call.command === 'bind'), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('a later vault event cannot replace the originating initialization token or extend its review', async () => {
+  const absent = { state: 'uninitialized', reason: 'vault-uninitialized', keyAccess: 'locked' };
+  const h = harness(vaultStatus(0, { context: null, persistence: absent }));
+  try {
+    h.setProject(null); await h.controller.connect(h.api);
+    assert.equal(h.controller.prepareInitialize(), true);
+    const original = vaultStatus(1, { context: null, persistence: absent, operation: operation({ operation: 'prepare-initialize', assessment: null,
+      preview: { token: A, action: 'initialize', expiresInMs: 5000, subject: { type: 'vault', change: 'initialize' } } }) });
+    h.emit({ ...original, statusRevision: 2, operation: { ...original.operation, preview: { ...original.operation.preview, token: B } } });
+    h.latest('initialize-review').resolve(original); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, false);
+    assert.equal(h.controller.confirmPreview(B, 'initialize'), false);
+    h.emit({ ...original, statusRevision: 3 });
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    h.time(5101);
+    h.emit({ ...original, statusRevision: 4, operation: { ...original.operation, preview: { ...original.operation.preview, expiresInMs: 20000 } } });
+    assert.equal(h.controller.confirmPreview(A, 'initialize'), false);
+    assert.equal(h.calls.some((call) => call.command === 'commit'), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('locked, read-only and mutating storage cannot submit context, prepare, delete or assign or fall back to memory', async () => {
+  for (const persistence of [
+    { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' },
+    { state: 'interrupted', reason: 'vault-interrupted', keyAccess: 'read-only' },
+    { state: 'mutating', reason: 'none', keyAccess: 'read-write' },
+  ]) {
+    const h = harness(vaultStatus(0, { context: null, persistence, records: persistence.keyAccess === 'locked' ? [] : [vaultRecord()] }));
+    try {
+      await h.controller.connect(h.api); const before = h.calls.length;
+      h.controller.submitContext();
+      assert.equal(h.controller.open(), false); assert.equal(h.controller.choose('android-keystore'), false);
+      assert.equal(h.controller.prepareScalar('google-wif', fields), false); assert.equal(h.controller.prepareSelection({}), false);
+      assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), false);
+      assert.equal(h.controller.prepareDelete({ recordId: C, expectedRevision: 1 }), false);
+      assert.equal(h.controller.confirmPreview(A, 'bind'), false);
+      assert.notEqual(assetStorageReason(h.controller.getSnapshot()), null);
+      await settle(); assert.equal(h.calls.length, before);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('unlock is explicit and its delayed completion only submits the already requested context, never reads or assigns a record', async () => {
+  const h = harness(vaultStatus(0, { context: null, persistence: { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' } }));
+  try {
+    await h.controller.connect(h.api); await settle();
+    assert.deepEqual(h.calls.map((call) => call.command), ['listen', 'status']);
+    assert.equal(h.controller.unlock(), true); assert.deepEqual(h.latest('unlock').args, {});
+    h.latest('unlock').resolve(vaultStatus(1, { context: null, persistence: { state: 'locked', reason: 'none', keyAccess: 'locked' },
+      operation: operation({ operation: 'unlock', phase: 'admitting', settlement: 'pending', assessment: null, preview: null }) })); await settle();
+    assert.equal(h.calls.some((call) => call.command === 'context'), false);
+    h.emit(vaultStatus(2, { context: null, records: [vaultRecord()], operation: operation({ operation: 'unlock', phase: 'idle', assessment: null, preview: null }) })); await settle();
+    assert.equal(h.calls.filter((call) => call.command === 'context').length, 1);
+    h.latest('context').resolve(vaultStatus(3, { records: [vaultRecord()], operation: operation({ operation: 'unlock', phase: 'idle', assessment: null, preview: null }) })); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, true);
+    assert.equal(h.controller.getSnapshot().status.records[0].payloadState, 'not-checked');
+    assert.equal(h.calls.some((call) => ['prepare', 'bind', 'choose', 'open'].includes(call.command)), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('encrypted live help keeps user labels nonsecret and saving distinct from actual stored-revision assessment', () => {
+  const before = structuredClone(guide);
+  for (const id of ['mode', 'initialize', 'unlock', 'label', 'save', 'assign', 'replace', 'delete', 'lock']) {
+    const help = sessionControlHelp(guide, id, 'encrypted');
+    assert.ok(help);
+    for (const field of ['label', 'requiredWhen', 'what', 'why', 'where', 'format', 'failure']) assert.ok(help[field].length, `${id}/${field}`);
+  }
+  assert.equal(sessionControlHelp(guide, 'label', 'encrypted').requiredness, 'optional');
+  assert.match(sessionControlHelp(guide, 'mode', 'encrypted').failure, /trusted operating system.*desktop account.*Secret Service.*not atomic process protection/);
+  assert.match(sessionControlHelp(guide, 'label', 'encrypted').format, /128 UTF-8 bytes/);
+  assert.match(sessionControlHelp(guide, 'save', 'encrypted').format, /Saved means not assigned.*stored payload has not yet been checked/);
+  assert.match(sessionControlHelp(guide, 'assign', 'encrypted').format, /actual stored revision/);
+  assert.match(sessionControlHelp(guide, 'lock', 'encrypted').what, /preserve encrypted records/);
+  assert.equal(sessionTargetLabel(guide, { type: 'vault', change: 'initialize' }, []), 'New encrypted private-input vault');
+  const subject = { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 };
+  assert.match(sessionTargetLabel(guide, subject, [vaultRecord({ label: '<nonsecret text>' })], 'encrypted'), /<nonsecret text> · item 1 · revision 1/);
+  assert.equal(sessionTargetLabel(guide, { ...subject, recordRevision: 2 }, [vaultRecord()], 'encrypted'), null);
+  assert.deepEqual(guide, before, 'the static catalogue and requiredness are unchanged');
 });

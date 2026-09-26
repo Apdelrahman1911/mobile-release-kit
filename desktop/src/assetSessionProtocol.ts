@@ -5,7 +5,8 @@ import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAsse
 
 export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase'] as const;
 export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token'] as const;
-export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown'] as const;
+export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown',
+  'vault-uninitialized', 'vault-key-missing', 'vault-keyring-locked', 'vault-keyring-denied', 'vault-keyring-unavailable', 'vault-provider-unsupported', 'vault-corrupt', 'vault-interrupted', 'vault-durability-unknown'] as const;
 export const ASSET_PLATFORMS = ['android', 'ios', 'project'] as const;
 export const ASSET_STAGES = ['candidate', 'external-testing', 'production'] as const;
 export const ASSET_PURPOSES = ['full', 'signing', 'store'] as const;
@@ -45,6 +46,15 @@ function scope(value: unknown): boolean {
 }
 function list(value: unknown, maximum: number, check: (value: unknown) => boolean): value is unknown[] {
   return Array.isArray(value) && value.length <= maximum && value.every(check);
+}
+export function assetLabelFits(value: unknown): value is string | null {
+  return value === null || typeof value === 'string' && value.length > 0 && value.length <= 128 &&
+    !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value) && encoder.encode(value).byteLength <= 128;
+}
+// Presentation gate only. The native original owner independently authorizes
+// every operation; an unlocked-looking DTO is not a key or mutation lease.
+export function assetStorageWritable(status: AssetStatus | null | undefined): boolean {
+  return status?.mode === 'session' || status?.mode === 'encrypted' && status.persistence?.state === 'unlocked' && status.persistence.keyAccess === 'read-write';
 }
 // Count bytes while walking, before cloning/JSON.stringify. Strings remain
 // immutable caller values; no secret copy is retained by this validator.
@@ -111,33 +121,49 @@ function assessment(value: unknown): value is CredentialAssessment {
 
 export function parseAssetStatus(value: unknown): AssetStatus | null {
   try {
-    if (!assetJsonFits(value, 32768) || !keys(value, ['schemaVersion', 'statusRevision', 'mode', 'capability', 'context', 'operation', 'records', 'assignments']) ||
-        value.schemaVersion !== 1 || !assetCounter(value.statusRevision) || !one(value.mode, ['closed', 'session']) ||
+    const mode = object(value) ? Object.getOwnPropertyDescriptor(value, 'mode') : undefined;
+    const encrypted = mode && 'value' in mode && mode.value === 'encrypted';
+    if (!assetJsonFits(value, encrypted ? 131072 : 32768) || !keys(value, ['schemaVersion', 'statusRevision', 'mode', 'persistence', 'capability', 'context', 'operation', 'records', 'assignments']) ||
+        value.schemaVersion !== 2 || !assetCounter(value.statusRevision) || !one(value.mode, ['closed', 'session', 'encrypted']) ||
         !keys(value.capability, ['available', 'reason']) || typeof value.capability.available !== 'boolean' || !one(value.capability.reason, ASSET_REASONS) ||
         (value.capability.available && value.capability.reason !== 'none')) return null;
+    if (encrypted ? !keys(value.persistence, ['state', 'reason', 'keyAccess']) ||
+        !one(value.persistence.state, ['uninitialized', 'locked', 'unlocked', 'initializing', 'mutating', 'interrupted', 'unknown']) ||
+        !one(value.persistence.reason, ASSET_REASONS) || !one(value.persistence.keyAccess, ['locked', 'read-only', 'read-write']) ||
+        value.persistence.keyAccess === 'read-only' && value.persistence.state !== 'interrupted' ||
+        value.persistence.keyAccess === 'read-write' && !one(value.persistence.state, ['unlocked', 'mutating']) ||
+        value.persistence.keyAccess === 'locked' && one(value.persistence.state, ['unlocked', 'mutating']) : value.persistence !== null) return null;
     if (value.context !== null && (!keys(value.context, ['revision', 'projectId', 'platform', 'stage', 'purpose']) || !assetCounter(value.context.revision) ||
         !projectId(value.context.projectId) || !scope({ platform: value.context.platform, stage: value.context.stage, purpose: value.context.purpose }))) return null;
-    if (!list(value.records, 32, (record) => keys(record, ['recordId', 'revision', 'kind', 'availability']) && token(record.recordId) &&
-        assetCounter(record.revision) && one(record.kind, ASSET_KINDS) && one(record.availability, ['unassigned', 'assigned', 'mutation-pending'])) ||
+    if (!list(value.records, encrypted ? 128 : 32, (record) => keys(record, ['recordId', 'revision', 'kind', 'availability', 'storage', 'label', 'payloadState']) && token(record.recordId) &&
+        assetCounter(record.revision) && one(record.kind, ASSET_KINDS) && one(record.availability, ['unassigned', 'assigned', 'mutation-pending']) &&
+        one(record.storage, ['session', 'encrypted']) && record.storage === value.mode && assetLabelFits(record.label) && one(record.payloadState, ['not-checked', 'assessed']) &&
+        (encrypted ? record.revision > 0 : record.label === null)) ||
         new Set(value.records.map((record) => (record as ObjectValue).recordId)).size !== value.records.length) return null;
     if (!list(value.assignments, 8, (assignment) => keys(assignment, ['kind', 'recordId', 'recordRevision', 'contextRevision', 'availability']) &&
         one(assignment.kind, ASSET_KINDS) && token(assignment.recordId) && assetCounter(assignment.recordRevision) && assetCounter(assignment.contextRevision) &&
         one(assignment.availability, ['available', 'unavailable'])) || new Set(value.assignments.map((assignment) => (assignment as ObjectValue).kind)).size !== value.assignments.length) return null;
     const operation = value.operation;
     if (operation !== null) {
-      if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'selectionToken', 'assessment', 'preview']) ||
-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-project', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock']) ||
+      if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview']) ||
+          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-project', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock']) ||
           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
           (operation.assessment !== null && !assessment(operation.assessment))) return null;
+      const storage = operation.storageOutcome;
+      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock']))) return null;
+      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit']) ||
+          !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
+          !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
       if (['choose-project-path', 'choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
       if (operation.preview !== null && (!keys(operation.preview, ['token', 'action', 'expiresInMs', 'subject']) || !token(operation.preview.token) ||
-          !one(operation.preview.action, ['save', 'bind', 'delete']) || !assetCounter(operation.preview.expiresInMs) || operation.preview.expiresInMs > 300000 ||
+          !one(operation.preview.action, ['save', 'bind', 'delete', 'initialize']) || !assetCounter(operation.preview.expiresInMs) || operation.preview.expiresInMs > 300000 ||
           operation.phase !== 'preview' || operation.settlement !== 'known' || operation.selectionToken !== null ||
-          !keys(operation.preview.subject, ['kind', 'change', 'recordId', 'recordRevision']) || !one(operation.preview.subject.kind, ASSET_KINDS) ||
-          !one(operation.preview.subject.change, ['new', 'replace', 'assign', 'delete']))) return null;
+          !(keys(operation.preview.subject, ['type', 'change']) && operation.preview.subject.type === 'vault' && operation.preview.subject.change === 'initialize' ||
+            keys(operation.preview.subject, ['type', 'kind', 'change', 'recordId', 'recordRevision']) && operation.preview.subject.type === 'record' &&
+            one(operation.preview.subject.kind, ASSET_KINDS) && one(operation.preview.subject.change, ['new', 'replace', 'assign', 'delete'])))) return null;
       if (operation.selectionToken !== null && (operation.phase !== 'selected' || operation.settlement !== 'known' || operation.source !== 'captured')) return null;
       if ((operation.phase === 'unknown' || operation.settlement === 'unknown' || operation.settlement === 'late-known' || operation.reason === 'document-lost') &&
           (operation.preview !== null || operation.selectionToken !== null)) return null;
@@ -146,13 +172,21 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     // select requirements, validate values, or confer native assignment authority.
     const typed = value as unknown as AssetStatus;
     const evaluated = typed.operation?.assessment;
+    // Closed mode always redacts private material and authority, with or
+    // without a durable receipt. The redacted original operation may remain
+    // observable even before all its originals settle.
+    if (typed.mode === 'closed' && (typed.context !== null || typed.records.length || typed.assignments.length ||
+        typed.operation?.selectionToken || evaluated || typed.operation?.preview)) return null;
     if (evaluated && (!typed.context || !['platform', 'stage', 'purpose'].every((key) => evaluated.context[key as keyof typeof evaluated.context] === typed.context![key as keyof typeof evaluated.context]))) return null;
     const preview = typed.operation?.preview;
-    if (preview && preview.action !== 'delete' && (!evaluated || evaluated.applicability.state !== 'required' || !['configured', 'format-valid'].includes(evaluated.state))) return null;
+    if (preview && ['save', 'bind'].includes(preview.action) && (!evaluated || evaluated.applicability.state !== 'required' || !['configured', 'format-valid'].includes(evaluated.state))) return null;
     if (preview) {
       const subject = preview.subject;
-      if (evaluated && evaluated.kind !== subject.kind) return null;
-      if (preview.action === 'save' && subject.change === 'new') {
+      if (subject.type === 'vault') {
+        if (preview.action !== 'initialize' || evaluated || typed.operation?.operation !== 'prepare-initialize' || typed.mode !== 'encrypted' ||
+            typed.persistence?.state !== 'uninitialized' || typed.persistence.keyAccess !== 'locked') return null;
+      } else if (preview.action === 'initialize' || evaluated && evaluated.kind !== subject.kind) return null;
+      else if (preview.action === 'save' && subject.change === 'new') {
         if (subject.recordId !== null || subject.recordRevision !== null) return null;
       } else {
         if (!(preview.action === 'save' && subject.change === 'replace') && !(preview.action === 'bind' && subject.change === 'assign') &&
@@ -161,8 +195,13 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
             record.recordId === subject.recordId && record.revision === subject.recordRevision && (preview.action !== 'bind' || record.availability !== 'mutation-pending'))) return null;
       }
     }
+    if (typed.mode === 'encrypted' && typed.persistence?.keyAccess !== 'read-write') {
+      if (typed.assignments.length || typed.operation?.selectionToken || evaluated || preview?.subject.type === 'record') return null;
+      if (typed.persistence?.keyAccess === 'locked' && typed.records.length ||
+          typed.persistence?.keyAccess === 'read-only' && typed.records.some((record) => record.payloadState !== 'not-checked' || record.availability !== 'unassigned')) return null;
+    }
     for (const assignment of typed.assignments) {
-      if (assignment.availability === 'available' && (typed.mode !== 'session' || !typed.context || typed.context.revision !== assignment.contextRevision ||
+      if (assignment.availability === 'available' && (!assetStorageWritable(typed) || !typed.context || typed.context.revision !== assignment.contextRevision ||
           !typed.records.some((record) => record.recordId === assignment.recordId && record.revision === assignment.recordRevision && record.kind === assignment.kind && record.availability === 'assigned') ||
           typed.operation?.phase === 'unknown' || typed.operation?.settlement === 'unknown' || typed.operation?.settlement === 'late-known')) return null;
     }
@@ -177,13 +216,13 @@ function fields(value: unknown, names: readonly string[]): boolean {
   return keys(value, names) && names.every((key) => value[key] === null || (typeof value[key] === 'string' && value[key].length <= 4096 &&
     !/[\ud800-\udfff]/u.test(value[key]) && encoder.encode(value[key]).byteLength <= 4096));
 }
-export type AssetCommand = 'vault_status' | 'vault_open' | 'asset_context' | 'asset_choose' | 'credential_prepare' | 'vault_prepare_delete' | 'vault_commit' | 'vault_bind' | 'vault_discard' | 'vault_lock';
+export type AssetCommand = 'vault_status' | 'vault_open' | 'vault_prepare_initialize' | 'vault_unlock' | 'asset_context' | 'asset_choose' | 'credential_prepare' | 'vault_prepare_delete' | 'vault_commit' | 'vault_bind' | 'vault_discard' | 'vault_lock';
 export function assetRequestFits(command: AssetCommand, value: unknown): boolean {
   const limit = command === 'asset_context' ? 1048576 : command === 'credential_prepare' ? 131072 : 1024;
   if (!assetJsonFits(value, limit)) return false;
   switch (command) {
-    case 'vault_status': return keys(value, []);
-    case 'vault_open': return keys(value, ['mode']) && value.mode === 'session';
+    case 'vault_status': case 'vault_prepare_initialize': case 'vault_unlock': return keys(value, []);
+    case 'vault_open': return keys(value, ['mode']) && one(value.mode, ['session', 'encrypted']);
     case 'vault_lock': return keys(value, ['discardSession']) && value.discardSession === true;
     case 'vault_commit': case 'vault_bind': return keys(value, ['previewToken']) && token(value.previewToken);
     case 'vault_discard': return keys(value, ['operationId']) && assetCounter(value.operationId);
@@ -196,7 +235,8 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
       if (!object(value) || !assetCounter(value.contextRevision) || !object(value.source)) return false;
       const source = value.source;
       if (source.type === 'record') return keys(value, ['contextRevision', 'source']) && keys(source, ['type', 'recordId', 'expectedRevision']) && token(source.recordId) && assetCounter(source.expectedRevision);
-      if (!keys(value, ['contextRevision', 'source', 'fields'])) return false;
+      const labelled = keys(value, ['contextRevision', 'source', 'fields', 'label']) && assetLabelFits(value.label);
+      if (!keys(value, ['contextRevision', 'source', 'fields']) && !labelled) return false;
       if (source.type === 'selection') return keys(source, ['type', 'selectionToken']) && token(source.selectionToken) &&
         (fields(value.fields, []) || fields(value.fields, SESSION_FIELDS['android-keystore']));
       return keys(source, ['type', 'kind', 'replacement']) && source.type === 'scalar' && one(source.kind, ['google-wif', 'project-read-token']) &&
@@ -231,7 +271,7 @@ export function assetError(error: unknown): ApiError {
 
 export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   none: 'The last observed step has no reported refusal. This is not release or Store verification.',
-  closed: 'Start a session to consent to keeping private inputs only in this running application.',
+  closed: 'Choose memory-only storage or an available encrypted vault before providing private inputs. No mode is selected automatically.',
   unqualified: 'Native session import has not completed its required qualification. You can read the guides, but this build cannot collect private inputs.',
   'unsupported-platform': 'This session importer currently targets qualified Linux x86_64 systems. macOS, Windows and browser previews remain guide-only.',
   'unsupported-filesystem': 'This first importer supports a qualified local ext-family filesystem, not network, overlay or FUSE locations. Your original file was not changed.',
@@ -244,7 +284,7 @@ export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   'parser-limit': 'The file exceeds the supported parser’s size or complexity limits. This does not prove the original file is malformed.',
   'project-overlap': 'The selected file entry is inside a registered project. Select the private original outside project folders; the app will not move or delete it.',
   'exclusion-unconfirmed': 'A later project selection could not confirm every retained file’s original location. Discard or reselect the affected session record explicitly before trying another project.',
-  capacity: 'This session permits at most 32 records and 64 MiB of retained material. Explicitly remove an unneeded session record; original files are never deleted.',
+  capacity: 'Memory-only storage permits 32 records / 64 MiB. The encrypted vault permits 128 descriptors / 1 GiB on disk, with bounded private memory. Explicitly review an unneeded copy for removal; original files are never deleted.',
   'context-stale': 'The project, draft or release scope changed. Submit the current context and prepare again before keeping or assigning anything.',
   'user-cancelled': 'Cancellation was requested. Old record bytes may remain, but old assignments are not automatically restored. Wait for the original cleanup status.',
   'review-expired': 'The original five-minute review expired. It cannot be extended by refreshing. Discard the review and prepare explicitly again.',
@@ -252,4 +292,13 @@ export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   'document-lost': 'The original application view was lost. Assignment authority is revoked and only redacted cleanup status remains available.',
   shutdown: 'The application is stopping its original owners. No new input or assignment can be accepted.',
   'cleanup-unknown': 'Original cleanup could not be confirmed. Do not retry, replace or assume private buffers are gone. Keep the application open while its original owners report any late settlement.',
+  'vault-uninitialized': 'No initialized encrypted vault was found. Review Initialize to create this app’s private store and one protected wrapping key; nothing is created in a project.',
+  'vault-key-missing': 'The exact wrapping key is missing from the admitted persistent OS keyring. Existing encrypted files cannot be unlocked. Do not replace the key or delete files; preserve them for recovery.',
+  'vault-keyring-locked': 'The protected OS keyring is locked. Use Unlock explicitly; the operating system may ask for approval. Status checks never open a prompt.',
+  'vault-keyring-denied': 'The OS keyring request was declined or could not complete. No unlocked key or credential use is confirmed. Check original cleanup before another explicit action.',
+  'vault-keyring-unavailable': 'The required persistent OS keyring is unavailable. No session-keyring, plaintext or password fallback is used.',
+  'vault-provider-unsupported': 'This desktop has not admitted the required persistent keyring profile. Reading this guide or passing a format check cannot enable encrypted storage.',
+  'vault-corrupt': 'The vault’s original files or authenticated data could not be validated. Keep them unchanged; the app will not repair, overwrite or silently skip them.',
+  'vault-interrupted': 'An earlier storage change is incomplete or uncertain. A valid header may be explicitly unlocked for read-only names. Saving, removing, preparing and assigning stay disabled; no automatic replay or repair is performed.',
+  'vault-durability-unknown': 'A storage change may have happened, but disk persistence was not confirmed. Preserve the current files and original operation status. Do not retry the change or assume it was rolled back.',
 };

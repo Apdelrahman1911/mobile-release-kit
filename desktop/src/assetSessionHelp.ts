@@ -13,7 +13,7 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
     failure: 'A changed, overlapping, unsupported, oversized or insufficiently private source is refused without changing the original. A recognized JKS header does not verify a password, private-key entry, digest or signing identity.',
     suffixes: ['.jks', '.keystore'],
   },
-  'android-keystore/storePassword': { format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. This session accepts the write-only value for assessment and optional in-memory retention; it does not unlock the keystore.' },
+  'android-keystore/storePassword': { format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. The private-input flow accepts the write-only value for assessment and separately confirmed storage; it does not unlock the keystore.' },
   'android-keystore/keyPassword': { format: privateValueFormat, failure: 'Missing input is not a password failure. This session does not test the password or perform signing. No value is displayed back to you.' },
   'android-firebase/file': {
     where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. Select that private original outside registered project folders. Do not use an exported service-account private key.',
@@ -59,11 +59,36 @@ const controls: Record<string, Partial<HelpContent>> = {
     format: 'The existing core selects the actual requirements for full, signing or store. Choosing a purpose does not run those operations.',
   },
   mode: {
-    requiredWhen: 'Explicit consent is required before the app keeps any private session input.',
-    what: 'Keep bounded private inputs only in this running application, without persistence.',
-    where: 'Use Start session. Only an independently qualified native profile can enable collection.',
-    format: 'Session-only memory, at most 32 retained records / 64 MiB. There is no persistent-vault, keyring or plaintext-disk fallback.',
-    failure: 'An unavailable importer does not collect input. Quitting or discarding revokes assignments and releases copies only after original work settles; perfect memory erasure is not promised.',
+    requiredWhen: 'Explicit consent is required before the app keeps any private input.',
+    what: 'Choose memory-only inputs for this launch, or an available authenticated encrypted vault for later launches.',
+    why: 'Saving, unlocking and assigning are separate decisions. Neither storage mode authorizes a build or release.',
+    where: 'Choose Start session or Open encrypted vault in this panel. Only an independently qualified native profile can enable collection.',
+    format: 'Memory-only: 32 records / 64 MiB. Encrypted: 128 descriptors / 1 GiB on disk, with bounded private memory and a qualified OS keyring. No vault-password field, plaintext disk or silent mode fallback.',
+    failure: 'Use only a trusted operating system, desktop account and original Secret Service session. Profile checks detect observed changes; they are not atomic process protection or protection from a compromised account. Unavailable or denied access fails closed, without replacing a key or weakening OS permissions. Perfect memory/disk erasure is not promised.',
+  },
+  label: {
+    label: 'Optional vault label', requiredness: 'optional', requiredWhen: 'Only when saving a new or replacement encrypted record.',
+    what: 'A short nonsecret name to help you recognize this encrypted record.',
+    why: 'A chosen label is easier to recognize, but it never proves which account, file or signing identity the record contains.',
+    where: 'Choose your own description, such as Android upload key. Leave it empty to use the input kind and item number. No filename is copied automatically.',
+    format: 'Optional nonempty text up to 128 UTF-8 bytes, without control characters. It is encrypted on disk and displayed only while its descriptor is unlocked. Unicode may use several bytes per character.',
+    failure: 'Overlong or unsupported text prevents preparation. Never put passwords, tokens or private identifiers in labels; a label does not rename or change the original file.',
+  },
+  initialize: {
+    label: 'Initialize encrypted vault', requiredness: 'conditional', requiredWhen: 'Only for a confirmed absent vault, after a separate explicit review.',
+    what: 'Create the application’s encrypted private-input vault and its new protected key.',
+    why: 'Persistence needs a new, uniquely bound vault and OS keyring entry before the app can save inputs.',
+    where: 'Use Review vault initialization, then confirm the original review. The app manages its private location outside registered projects; no folder copying is needed.',
+    format: 'Available only when the native service positively reports an uninitialized vault. This creates storage, not a credential, assignment or release.',
+    failure: 'Existing, inaccessible or conflicting state is never overwritten or adopted. A partial or uncertain result stays explicit; do not repeat initialization to repair it.',
+  },
+  unlock: {
+    label: 'Unlock encrypted vault', requiredness: 'conditional', requiredWhen: 'Before preparing, saving, removing or assigning encrypted inputs.',
+    what: 'Explicitly ask the qualified OS keyring for the existing vault key.',
+    why: 'Locked storage cannot expose labels or supply credentials. Unlock authenticates the bounded descriptor listing; it does not assess every stored payload.',
+    where: 'Use Unlock vault. If the operating system asks for access, use its normal keyring controls; never enter that password into this app’s credential fields.',
+    format: 'No automatic prompt, replacement key, import or recovery is attempted. Saved records still need an explicit Assess and assign step for the current draft.',
+    failure: 'Locked, denied, missing and unavailable access have distinct reasons. Interrupted storage may permit read-only labels only, with no mutation or assignment.',
   },
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',
@@ -112,15 +137,55 @@ const controls: Record<string, Partial<HelpContent>> = {
   lock: { requiredWhen: 'When you want this entire session to become unavailable.', what: 'Revoke all assignments and discard session copies after original pending work settles.', where: 'Use Discard session and confirm the stated data loss.', format: 'No record is saved for a later launch. No credential or signing identity is reset or revoked.', failure: 'Unknown cleanup stays explicit. Keep the original application owner available for late settlement; do not assume its buffers have been erased. Once the original work has settled and this session is closed, Close can ask for quit confirmation without reopening credential use.' },
 };
 
-export function sessionControlHelp(guide: CredentialGuide | null, id: string): HelpContent | null {
-  const original = guide?.controls.find((item) => item.id === id);
+const encryptedControls: Record<string, Partial<HelpContent>> = {
+  prepare: {
+    where: 'Use Prepare private review for new input, or Assess and assign on an existing unlocked encrypted record.',
+    format: 'Existing records are freshly read, authenticated and assessed against the submitted draft. Unlocking a label or saving a source snapshot does not perform that step.',
+  },
+  save: {
+    what: 'Save the captured input and supplied fields as one authenticated encrypted record outside your projects.',
+    where: 'Use Save encrypted copy in the original review. Then explicitly use Assess and assign on the saved revision.',
+    format: 'Saving has separate effect, durability and cleanup results. Saved means not assigned; the stored payload has not yet been checked for use in this session. No source-inherited assignment review follows.',
+  },
+  assign: {
+    where: 'Use Assess and assign on the exact unlocked saved record. Review the fresh assessment, then confirm Assign to this context.',
+    format: 'Preparation reads and authenticates the actual stored revision, then the core reassesses it for this draft. Assignment is a separate single-use confirmation; no account check, build or release starts.',
+  },
+  replace: {
+    requiredWhen: 'Only when you explicitly want to replace an existing same-kind encrypted record.',
+    what: 'Prepare a replacement for the exact selected encrypted record revision.',
+    where: 'Choose the existing kind, item number and revision under New or replacement copy. An optional nonsecret label helps recognition, not identity proof.',
+  },
+  delete: {
+    requiredWhen: 'Only when you explicitly want to remove one encrypted stored copy.',
+    what: 'Remove the exact stored record, never its original selected file or OS keyring key.',
+    where: 'Choose Review removal on the exact unlocked record and confirm the original review.',
+  },
+  discard: {
+    requiredWhen: 'When abandoning the original operation or unused review.',
+    where: 'Use Discard review or Request cancel. Use Lock vault separately to make the whole vault unavailable.',
+    format: 'Cancellation is not rollback: an effect may already have happened. Observe effect, durability and cleanup independently; no automatic retry, repair or plaintext fallback occurs.',
+  },
+  lock: {
+    requiredWhen: 'When you want all decrypted vault inputs and assignments to become unavailable.',
+    what: 'Revoke assignments and release owned decrypted copies after their original operations settle; preserve encrypted records on disk.',
+    where: 'Use Lock vault and confirm. Unlock and reassess stored revisions explicitly before assigning again.',
+    format: 'This does not remove the encrypted vault or reset, replace, revoke or export its key. Lock is not a guarantee of perfect memory or disk erasure.',
+    failure: 'A pending or unknown original owner stays visible. A storage effect is never relabeled as successful merely because Lock or Cancel was requested.',
+  },
+};
+
+export function sessionControlHelp(guide: CredentialGuide | null, id: string, storage: 'session' | 'encrypted' = 'session'): HelpContent | null {
+  const original = guide?.controls.find((item) => item.id === (id === 'initialize' || id === 'unlock' ? 'mode' : id));
   const correction = controls[id];
-  return original && correction ? { ...original, ...correction } : null;
+  return original && correction ? { ...original, ...correction, ...(storage === 'encrypted' ? encryptedControls[id] : {}) } : null;
 }
 
-export function sessionTargetLabel(guide: CredentialGuide | null, subject: AssetPreviewSubject, records: AssetStatus['records']): string | null {
-  const label = guide?.kinds.find((kind) => kind.id === subject.kind)?.label ?? 'Session input';
-  if (subject.change === 'new') return `New ${label.toLocaleLowerCase()} session record`;
+export function sessionTargetLabel(guide: CredentialGuide | null, subject: AssetPreviewSubject, records: AssetStatus['records'], storage: 'session' | 'encrypted' = 'session'): string | null {
+  if (subject.type === 'vault') return 'New encrypted private-input vault';
+  const label = guide?.kinds.find((kind) => kind.id === subject.kind)?.label ?? 'Private input';
+  if (subject.change === 'new') return `New ${label.toLocaleLowerCase()} ${storage} record`;
   const index = records.findIndex((record) => record.recordId === subject.recordId && record.kind === subject.kind);
-  return index >= 0 && subject.recordRevision !== null ? `${label} · item ${index + 1} · revision ${subject.recordRevision}` : null;
+  const record = records[index];
+  return record && record.revision === subject.recordRevision ? `${label}${record.label ? ` · ${record.label}` : ''} · item ${index + 1} · revision ${subject.recordRevision}` : null;
 }

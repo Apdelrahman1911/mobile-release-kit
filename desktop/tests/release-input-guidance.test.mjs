@@ -371,14 +371,22 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   assert.ok(session.includes('localRef.current = next; setLocal(next)'));
   for (const update of ['changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })', 'changeLocal({ replacementId: event.target.value || null })',
     'changeLocal({ confirmLock: true })']) assert.ok(session.includes(update), update);
-  assert.ok(session.includes('const selectionVisible = !!(nativeAvailable && inSession && guide && !projectPathActive)'));
+  assert.ok(session.includes('const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive)'));
+  assert.ok(session.includes('const writable = assetStorageWritable(status)'));
+  for (const action of ["controller.open('encrypted')", 'controller.prepareInitialize()', 'controller.unlock()', 'Assess and assign…']) assert.ok(session.includes(action));
   assert.ok(session.includes('const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind)'));
   assert.ok(session.includes("(idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token'))"));
   assert.ok(session.includes('{writeOnlyFormMounted && kind &&'));
   assert.ok(session.includes("<WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`}"));
   const privateForm = session.slice(session.indexOf('function WriteOnlyFields'), session.indexOf('export function CredentialSession'));
-  assert.doesNotMatch(privateForm, /preparation|localRef|onDirty|onEdit|setScope/u);
+  const privateFormParameters = privateForm.slice(0, privateForm.indexOf('const id ='));
+  assert.doesNotMatch(privateFormParameters, /\bpreparation\b/u);
+  assert.doesNotMatch(privateForm, /\b(?:ReleaseInputPreparationTarget|isPreparationCurrent|takePreparation|dismissPreparation|preparationSessionReason|preparationScopeChanged|localRef|onDirty|onEdit|setScope)\b/u);
   assert.ok(privateForm.includes('const [values, setValues] = useState<Record<string, string>>({})'));
+  assert.ok(privateForm.includes("const [label, setLabel] = useState('')"));
+  assert.ok(privateForm.includes('assetLabelFits(proposedLabel)') && privateForm.includes("setValues({}); setLabel('')"));
+  assert.doesNotMatch(privateForm, /localStorage|sessionStorage|filename|dangerouslySetInnerHTML/);
+  assert.ok(session.includes('operation.storageOutcome.effect') && session.includes('operation.storageOutcome.durability') && session.includes('operation.storageOutcome.cleanup'));
   assert.ok(session.includes('preparationCurrent && preparationKind &&')); // stale target never acquires the newly selected project label
   assert.ok(session.includes('sessionKindHelp(originalPreparationKind)'));
   assert.ok(pane.includes('controller.getSnapshot() === state') && page.includes('inputController.getSnapshot() === inputState'));

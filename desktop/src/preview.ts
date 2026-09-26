@@ -209,6 +209,8 @@ export const previewApi: DesktopApi = {
   subscribeGitHubConnection: connectionUnavailable,
   assetStatus: assetUnavailable,
   openAssetSession: assetUnavailable,
+  prepareVaultInitialize: assetUnavailable,
+  unlockVault: assetUnavailable,
   setAssetContext: assetUnavailable,
   chooseAsset: assetUnavailable,
   prepareCredential: assetUnavailable,
