@@ -3932,7 +3932,13 @@ mod contract_tests {
         assert!(released.contains("if pass.ready() { self.dashboard_ready = true; break; }"));
         assert!(released.contains("self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd)"));
         assert!(released.contains("if stale { self.trace.result(SmokeCheck::Clock, clock.effect(), None)?; }"));
-        assert!(observe.contains("let name = self.name(index, clock)?;")); // Quit dialog remains strict.
+        // Quit names remain strict in the logical-control walk and requery.
+        let quit_walk = block(source, "    fn quit_walk(", "    fn quit_native_container(");
+        assert!(quit_walk.contains("name: self.name(root, clock)?"));
+        assert!(quit_walk.contains("name: self.name(element, clock)?"));
+        let quit_control = block(source, "    fn quit_control(", "    fn quit_scan(");
+        assert!(quit_control.contains("let name = self.name(element, clock)?;"));
+        assert!(!quit_walk.contains("self.dashboard_name(") && !quit_control.contains("self.dashboard_name("));
         assert!(observe.contains("self.trace.phase.set(SmokePhase::CloseRequest);\n        self.bound(launch, clock)?;"));
         let completion = block(source, "    fn complete_dashboard_name_stale(", "    fn dashboard_name(&mut self,");
         for forbidden in ["self.main =", "self.dashboard_ready =", "self.quit_confirmed =", "self.windows.post_entered =", "self.invoke_entered ="] {
