@@ -2426,13 +2426,21 @@ def shell_github_result(stdout, stderr, case, code, expected):
          and len(stdout) + len(stderr) <= LIMIT, "GitHub original capture failed, oversized or incomplete")
     output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
     diagnostics = [line for line in stderr.splitlines(keepends=True) if line.startswith(b"MRK_")]
-    need(len(output) == 5 and output[:3] == [
+    # The one required guidance reload emits a second info/catalog pair before
+    # final contracts. It is not an optional or repeatable bootstrap allowance.
+    need(len(output) == 7, "GitHub original marker count differs")
+    need(output[:4] == [
         b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
-        b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"]
-        and output[3].startswith(SHELL_GITHUB_MARKER) and output[3].endswith(b"\n")
-        and output[4] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
-        and diagnostics == [], "GitHub original bootstrap/contract/receipt/completion order differs")
-    receipt = shell_github_receipt(output[3][len(SHELL_GITHUB_MARKER):], case, expected)
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n"],
+        "GitHub original bootstrap/reload order differs")
+    need(output[4] == b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n",
+         "GitHub original contract marker differs")
+    need(output[5].startswith(SHELL_GITHUB_MARKER) and output[5].endswith(b"\n"),
+         "GitHub original receipt marker differs")
+    need(output[6] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n",
+         "GitHub original completion marker differs")
+    need(diagnostics == [], "GitHub original stderr contains a marker")
+    receipt = shell_github_receipt(output[5][len(SHELL_GITHUB_MARKER):], case, expected)
     return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
             "maps": [], "githubReadOnly": receipt}
 
