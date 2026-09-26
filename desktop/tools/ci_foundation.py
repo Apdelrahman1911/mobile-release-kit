@@ -14424,6 +14424,98 @@ WINDOWS_NORMAL_UI_OBSERVER_STEPS = {
 }
 
 
+WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS = (
+    'eligibility', 'capture-output', 'inventory-select', 'output-original',
+    'output-location', 'drive-before', 'root-reserve', 'root-open',
+    'root-noninherited', 'root-filesystem', 'root-metadata', 'ancestor-open',
+    'ancestor-metadata', 'output-binding', 'journal-open', 'journal-cursor-metadata-before',
+    'journal-read-once', 'journal-created', 'journal-original-name', 'journal-original-metadata-before',
+    'journal-original-identity', 'journal-acl-before', 'journal-streams-before', 'journal-read',
+    'journal-acl-after', 'journal-streams-after', 'journal-original-metadata-after', 'journal-original-stability',
+    'journal-cursor-binding', 'journal-cursor-streams', 'journal-cursor-metadata-after', 'cursor-metadata-after',
+    'drive-after',
+)
+WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS = (
+    'parent-settled', 'child-original', 'child-returned', 'child-created',
+    'child-signaled', 'child-exit-observed', 'child-process-closed', 'child-thread-closed',
+    'child-known', 'observation-known', 'inventory-known', 'journal-present',
+    'journal-known', 'inventory-fresh', 'cached-output', 'cached-file',
+    'directory', 'original-owned', 'original-inactive', 'original-handle',
+    'path-text', 'dos-location', 'path-depth', 'parent-original',
+    'inventory-bound', 'inventory-once', 'inventory-clock', 'native-purpose',
+    'native-clock-before', 'native-clock-after', 'native-return', 'helper-return',
+    'volume-serial', 'file-id', 'creation-time', 'attributes',
+    'links', 'write-time', 'change-time', 'file-size',
+    'allocation-size', 'raw-limit', 'read-once', 'created',
+    'clock-permitted', 'file-ceiling', 'stamp-directory', 'stamp-delete-pending',
+    'stamp-size', 'stamp-allocation', 'stamp-links', 'stamp-attributes',
+    'stamp-kind', 'stamp-file-id', 'descriptor-size', 'descriptor-header',
+    'descriptor-control', 'descriptor-required', 'descriptor-sacl', 'descriptor-dacl-offset',
+    'descriptor-dacl-span', 'descriptor-dacl-bytes', 'descriptor-owner-offset', 'descriptor-group-offset',
+    'descriptor-sid', 'descriptor-principal-extent', 'descriptor-principal-overlap', 'descriptor-owner-trust',
+    'descriptor-account', 'streams-returned', 'streams-data', 'read-state',
+    'read-returned', 'read-count', 'stamp-stable', 'mapping-stable',
+    'input', 'admission',
+)
+WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_GATES = (
+    'parent-settled', 'child-original', 'child-returned', 'child-created',
+    'child-signaled', 'child-exit-observed', 'child-process-closed', 'child-thread-closed',
+    'child-known', 'observation-known', 'inventory-known', 'journal-present',
+    'journal-known', 'inventory-fresh',
+)
+
+
+def windows_normal_ui_observer_capture_native(value: object) -> dict:
+    """Closed failed-return scalars only; neither native invocation nor status resampling."""
+    closed_object(value, {"api", "selector", "kind", "value", "status", "code"}, "Windows observer reader native fields differ")
+    pairs = {
+        "QueryDosDeviceW": ("count", {"none"}), "GetFinalPathNameByHandleW": ("count", {"none"}),
+        "NtCreateFile": ("ntstatus", {"none"}),
+        "NtQueryVolumeInformationFile": ("ntstatus", {"file-fs-device-information"}),
+        "NtQueryInformationFile": ("ntstatus", {"file-stream-information"}),
+        "GetHandleInformation": ("bool", {"none"}), "GetVolumeInformationByHandleW": ("bool", {"none"}),
+        "GetKernelObjectSecurity": ("bool", {"none"}), "ReadFile": ("bool", {"none"}),
+        "GetFileInformationByHandleEx": ("bool", {"file-basic-info", "file-standard-info", "file-attribute-tag-info",
+                                                 "file-id-info", "file-case-sensitive-info", "file-stream-info"}),
+    }
+    require(type(value["api"]) is str and value["api"] in pairs
+            and type(value["selector"]) is str and value["selector"] in pairs[value["api"]][1]
+            and value["kind"] == pairs[value["api"]][0], "Windows observer reader API/selector differs")
+    if value["kind"] == "ntstatus":
+        require(value["status"] == "ntstatus" and integer_between(value["value"], -(2**31), 2**31 - 1)
+                and value["value"] != 0 and type(value["code"]) is int and value["code"] == value["value"],
+                "Windows observer reader NTSTATUS differs")
+    else:
+        require(type(value["value"]) is int and value["value"] == 0 and value["status"] == "win32"
+                and integer_between(value["code"], 0, 2**32 - 1), "Windows observer reader BOOL/count differs")
+    return dict(value)
+
+
+def windows_normal_ui_observer_capture_failure(value: object) -> dict:
+    closed_object(value, {"kind", "operation", "check", "index", "error", "native", "detail"},
+                  "Windows observer reader failure fields differ")
+    require(type(value["operation"]) is str and value["operation"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS
+            and type(value["check"]) is str and value["check"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS
+            and (value["index"] is None or integer_between(value["index"], 0, 16)), "Windows observer reader predicate differs")
+    if value["kind"] == "not-attempted":
+        require(value["operation"] == "eligibility" and value["check"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_GATES
+                and value["index"] is value["error"] is value["native"] is value["detail"] is None,
+                "Windows observer skipped reader carries a fabricated return")
+    else:
+        require(value["kind"] == "returned-error" and value["operation"] != "eligibility"
+                and value["error"] in ("Unsafe", "Unavailable", "State", "Bounds"), "Windows observer reader Error differs")
+        check, detail = value["check"], value["detail"]
+        if check == "native-return":
+            require(value["error"] in ("Unsafe", "Unavailable") and detail is None, "Windows observer native failure provenance differs")
+            windows_normal_ui_observer_capture_native(value["native"])
+        elif check in ("input", "admission"):
+            require(value["native"] is None and type(detail) is str and detail.startswith(check + ".")
+                    and detail in WINDOWS_NORMAL_UI_PREREQUISITE_DETAILS
+                    and (check != "admission" or value["error"] == "Unsafe"), "Windows observer reader detail differs")
+        else:
+            require(value["native"] is value["detail"] is None, "Windows observer predicate carries a foreign native return")
+    return dict(value)
+
 def windows_normal_ui_observer_startup(value: object) -> tuple[int, bool]:
     """The existing0x51 startup Word grammar; scalar DATA, no HWND/native read."""
     require(integer_between(value, 0, 2**64 - 1) and value >> 56 == 0x51 and (value >> 52) & 15 == 0,
@@ -14472,8 +14564,8 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
             and raw.endswith(b"\n") and raw.count(b"\n") == 2 and b"\r" not in raw,
             "Windows observer projection envelope differs")
     frame = bounded_json(raw[1 + len(WINDOWS_NORMAL_UI_OBSERVER_PREFIX):-1], 4096, max_nodes=128)
-    closed_object(frame, {"schema", "source", "tree", "run", "attempt", "role", "request", "diagnosticOnly", "projection"},
-                  "Windows observer projection fields differ")
+    keys = {"schema", "source", "tree", "run", "attempt", "role", "request", "diagnosticOnly", "projection"}
+    require(type(frame) is dict and set(frame) in (keys, keys | {"captureFailure"}), "Windows observer projection fields differ")
     require(type(frame["schema"]) is int and frame["schema"] == 1 and type(frame["attempt"]) is int and frame["attempt"] == 1
             and frame["diagnosticOnly"] is True and type(frame["role"]) is str and frame["role"] in WINDOWS_NORMAL_UI_OBSERVER_STEPS
             and all(type(frame[key]) is str and re.fullmatch(r"[0-9a-f]{40}", frame[key]) is not None
@@ -14510,6 +14602,10 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
         for other in rows.values():
             require(first is None or other is None or first["sequence"] != other["sequence"] or first == other,
                     "Windows observer same sequence has contradictory snapshots")
+    if frame.get("captureFailure") is not None:
+        windows_normal_ui_observer_capture_failure(frame["captureFailure"])
+        require(projection["reason"] == 1 and projection["bytes"] == projection["records"] == 0
+                and all(row is None for row in rows.values()), "Windows observer reader failure contradicts an observed projection")
     return frame
 
 
@@ -14521,7 +14617,7 @@ def windows_normal_ui_observer_log_data(raw: bytes, *, binding: dict, run: dict,
     readiness/cleanup. These roles have no prerequisite-only return frame.
     """
     summary = {"schemaVersion": 1, "observerDiagnosticOnly": True, "frameState": "missing", "joinState": "unavailable",
-               "projection": None, "independentLogClosed": False, "originalSelectedFailure": False,
+               "projection": None, "captureFailure": None, "independentLogClosed": False, "originalSelectedFailure": False,
                "rawOriginalExit": None, "senderDelivery": "unobservable",
                "combinedPassed": False, "guiCasesExecuted": 0, "verifiedMethods": 0, "nativeQualified": False}
     if type(raw) is not bytes or len(raw) > 16 << 20 or raw.count(b"\n") + int(bool(raw) and not raw.endswith(b"\n")) > 100000:
@@ -14602,7 +14698,9 @@ def windows_normal_ui_observer_log_data(raw: bytes, *, binding: dict, run: dict,
                 except (CheckFailure, ValueError, TypeError, KeyError): invalid = True
         elif len(line) >= len(b"MRK_WINDOWS_UI_") and WINDOWS_NORMAL_UI_OBSERVER_PREFIX.startswith(line): partial = True
     summary["frameState"] = "duplicate" if count > 1 else "oversized" if oversized else "invalid" if invalid else "partial" if partial else "received" if frames else "missing"
-    if frames: summary["projection"] = frames[0][2]["projection"]
+    if frames:
+        summary["projection"] = frames[0][2]["projection"]
+        summary["captureFailure"] = frames[0][2].get("captureFailure")
     bound = metadata_ok and len(frames) == count == 1 and frames[0][1] is not None and lower <= frames[0][1] <= upper and all(
         frames[0][2][field] == binding[key] for field, key in
         (("source", "sourceSha"), ("tree", "sourceTree"), ("run", "runId"), ("attempt", "attempt"), ("role", "role"), ("request", "requestSha256")))

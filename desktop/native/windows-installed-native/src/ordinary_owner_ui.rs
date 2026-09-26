@@ -44,26 +44,36 @@ impl Clock {
 struct ObserverCapture {
     clock: Option<Arc<ObserverDiagnosticClock>>, claimed: bool, unresolved: bool,
     binding: Option<(String, String, String, String)>, output: Option<(usize, Stamp)>,
-    projection: ObserverProjection,
+    projection: ObserverProjection, reader: ObserverCaptureTrace,
 }
 fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }
-fn observer_child_final(launch: Option<&Launch>) -> bool {
-    launch.is_some_and(|value| {
-        let facts = &value.facts;
-        crate::ui_observer_diagnostic_data::ChildFinality {
-            returned: value.return_recorded && facts.returned, created: facts.created, signaled: facts.signaled,
-            exit_observed: facts.exit.is_some(), process_closed: facts.process == SlotState::Closed,
-            thread_closed: facts.thread == SlotState::Closed, unknown: facts.unknown,
-        }.admitted()
-    })
+fn observer_finality(facts: crate::ui_observer_diagnostic_data::ChildFinality, trace: &ObserverCaptureTrace) -> bool {
+    use ObserverCaptureCheck as C;
+    // The same ordered ChildFinality conjunction; each executed scalar predicate
+    // is retained in place, never re-probed after a failed aggregate decision.
+    trace.gate(C::ChildReturned, facts.returned) && trace.gate(C::ChildCreated, facts.created)
+        && trace.gate(C::ChildSignaled, facts.signaled) && trace.gate(C::ChildExitObserved, facts.exit_observed)
+        && trace.gate(C::ChildProcessClosed, facts.process_closed) && trace.gate(C::ChildThreadClosed, facts.thread_closed)
+        && trace.gate(C::ChildKnown, !facts.unknown)
+}
+fn observer_child_final(launch: Option<&Launch>, trace: &ObserverCaptureTrace) -> bool {
+    let Some(value) = launch else { return trace.gate(ObserverCaptureCheck::ChildOriginal, false); };
+    let facts = &value.facts;
+    observer_finality(crate::ui_observer_diagnostic_data::ChildFinality {
+        returned: value.return_recorded && facts.returned, created: facts.created, signaled: facts.signaled,
+        exit_observed: facts.exit.is_some(), process_closed: facts.process == SlotState::Closed,
+        thread_closed: facts.thread == SlotState::Closed, unknown: facts.unknown,
+    }, trace)
 }
 fn observer_capture_frame(role: UiRole, capture: &ObserverCapture, bytes: &mut [u8; 4096]) -> Option<usize> {
     if !observer_role(role) || capture.unresolved { return None; }
     let (source, tree, run, request) = capture.binding.as_ref()?;
     if !is_hex(source, 40) || !is_hex(tree, 40) || !decimal(run) || !is_hex(request, 64) { return None; }
+    if capture.reader.first().is_some() && capture.projection != ObserverProjection::default() { return None; }
     let mut output = std::io::Cursor::new(bytes.as_mut_slice());
     write!(&mut output, "\nMRK_WINDOWS_UI_OBSERVER_DIAGNOSTIC_V1={{\"schema\":1,\"source\":\"{source}\",\"tree\":\"{tree}\",\"run\":\"{run}\",\"attempt\":1,\"role\":\"{}\",\"request\":\"{request}\",\"diagnosticOnly\":true,\"projection\":", role.label()).ok()?;
-    capture.projection.write_json(&mut output).ok()?; output.write_all(b"}\n").ok()?;
+    capture.projection.write_json(&mut output).ok()?; output.write_all(b",\"captureFailure\":").ok()?;
+    capture.reader.write_json(&mut output).ok()?; output.write_all(b"}\n").ok()?;
     usize::try_from(output.position()).ok().filter(|length| *length <= 4096)
 }
 
@@ -845,45 +855,95 @@ impl Fixture {
 // Independent post-exit full output inventory. It reads from original pinned
 // directory cursors and joins each entry to the already-retained input full ID.
 // No recursive deletion or replacement/reacquisition as a finality shortcut.
+fn observer_read_scope<T>(trace: Option<&ObserverCaptureTrace>, operation: ObserverCaptureOperation, index: Option<u8>,
+    observe: impl FnOnce() -> Result<T>) -> Result<T> {
+    match trace { Some(trace) => trace.scope(operation, index, observe), None => observe() }
+}
+fn observer_read_result<T>(trace: Option<&ObserverCaptureTrace>, check: ObserverCaptureCheck, original: Result<T>) -> Result<T> {
+    match trace { Some(trace) => trace.result(check, original), None => original }
+}
+fn observer_native<T>(native: &mut NativeBook, trace: Option<&ObserverCaptureTrace>, operation: ObserverCaptureOperation, index: Option<u8>,
+    observe: impl FnOnce(&mut NativeBook) -> Result<T>) -> Result<T> {
+    match trace { Some(trace) => trace.scope(operation, index, || native.observer_capture_observe(trace, observe)), None => observe(native) }
+}
 fn observer_journal_poststate(native: &mut NativeBook, parent: &Original,
-    diagnostic: &mut ObserverDiagnosticOriginal, failure: bool) -> Result<(Original, Metadata, Stamp, ObserverProjection)> {
-    let original = native.open_child(parent, &diagnostic.name(), FileKind::File)?;
-    let metadata = native.metadata(&original)?;
-    let (stamp, raw) = diagnostic.poststate(failure)?;
-    need(metadata.identity.volume_serial == stamp.volume && metadata.identity.file_id == stamp.id
-        && metadata.creation == stamp.creation && metadata.attributes == stamp.attributes
-        && metadata.size == stamp.size as u64 && metadata.allocation_size == stamp.allocation as u64
-        && metadata.links == stamp.links && metadata.write == stamp.write && metadata.change == stamp.change
-        && raw.len() <= crate::ui_observer_diagnostic_data::BYTE_LIMIT)?;
-    native.no_alternate_streams(&original)?;
-    need(native.metadata(&original)? == metadata)?;
+    diagnostic: &mut ObserverDiagnosticOriginal, failure: bool, trace: Option<&ObserverCaptureTrace>) -> Result<(Original, Metadata, Stamp, ObserverProjection)> {
+    use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
+    let original = observer_native(native, trace, O::JournalOpen, Some(16), |native| native.open_child(parent, &diagnostic.name(), FileKind::File))?;
+    let metadata = observer_native(native, trace, O::JournalCursorMetadataBefore, Some(16), |native| native.metadata(&original))?;
+    let (stamp, raw) = diagnostic.poststate(failure, trace)?;
+    observer_read_scope(trace, O::JournalCursorBinding, Some(16), || {
+        observer_read_result(trace, C::VolumeSerial, need(metadata.identity.volume_serial == stamp.volume))?;
+        observer_read_result(trace, C::FileId, need(metadata.identity.file_id == stamp.id))?;
+        observer_read_result(trace, C::CreationTime, need(metadata.creation == stamp.creation))?;
+        observer_read_result(trace, C::Attributes, need(metadata.attributes == stamp.attributes))?;
+        observer_read_result(trace, C::FileSize, need(metadata.size == stamp.size as u64))?;
+        observer_read_result(trace, C::AllocationSize, need(metadata.allocation_size == stamp.allocation as u64))?;
+        observer_read_result(trace, C::Links, need(metadata.links == stamp.links))?;
+        observer_read_result(trace, C::WriteTime, need(metadata.write == stamp.write))?;
+        observer_read_result(trace, C::ChangeTime, need(metadata.change == stamp.change))?;
+        observer_read_result(trace, C::RawLimit, need(raw.len() <= crate::ui_observer_diagnostic_data::BYTE_LIMIT))
+    })?;
+    observer_native(native, trace, O::JournalCursorStreams, Some(16), |native| native.no_alternate_streams(&original))?;
+    observer_read_scope(trace, O::JournalCursorMetadataAfter, Some(16), || {
+        observer_read_result(trace, C::StampStable, need(observer_native(native, trace, O::JournalCursorMetadataAfter, Some(16),
+            |native| native.metadata(&original))? == metadata))
+    })?;
     Ok((original, metadata, stamp, ObserverProjection::decode(&raw)))
 }
 fn observer_failure_poststate(native: &mut NativeBook, files: &mut [OriginalFile],
-    diagnostic: &mut ObserverDiagnosticOriginal, output: &Path, cached: &(usize, Stamp)) -> Result<ObserverProjection> {
+    diagnostic: &mut ObserverDiagnosticOriginal, output: &Path, cached: &(usize, Stamp), trace: &ObserverCaptureTrace) -> Result<ObserverProjection> {
+    use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
     // No late stamp/read through a90s ordinary input. This is the SAME retained
     // no-delete-share output original whose authenticated full ID was saved
     // before child entry; new cursors supplement it, never replace it.
-    let file = files.get_mut(cached.0).ok_or(Error::State)?; need(file.directory)?;
-    let body = file.body(); need(body.state == SlotState::Owned && !body.active && valid_handle(body.handle))?;
-    let (drive, parts) = decode::dos_location(output.to_str().ok_or(Error::Unsafe)?)?;
-    need(!parts.is_empty() && parts.len() < 16)?;
-    let device = native.mapping(&drive)?; let name = format!("{device}\\");
-    let root = native.reserve(Kind::Directory, None, &name, name.clone())?;
-    native.call(Call::Open(root.index), null_mut(), Vec::new())?;
-    native.noninherited(root.index)?; native.local_ntfs(&root)?;
-    let metadata = native.metadata(&root)?; let mut entries = vec![(root, metadata)];
-    for name in parts {
-        let original = native.open_child(&entries.last().ok_or(Error::State)?.0, &name, FileKind::Directory)?;
-        let metadata = native.metadata(&original)?; entries.push((original, metadata));
+    trace.scope(O::OutputOriginal, None, || {
+        let file = trace.result(C::CachedFile, files.get_mut(cached.0).ok_or(Error::State))?;
+        trace.result(C::Directory, need(file.directory))?;
+        let body = file.body(); trace.result(C::OriginalOwned, need(body.state == SlotState::Owned))?;
+        trace.result(C::OriginalInactive, need(!body.active))?;
+        trace.result(C::OriginalHandle, need(valid_handle(body.handle)))
+    })?;
+    let (drive, parts) = trace.scope(O::OutputLocation, None, || {
+        let text = trace.result(C::PathText, output.to_str().ok_or(Error::Unsafe))?;
+        observer_native(native, Some(trace), O::OutputLocation, None,
+            |native| decode::Observed::new(native.admission.at(AdmissionOp::Location)).dos_location(text))
+    })?;
+    trace.scope(O::OutputLocation, None, || trace.result(C::PathDepth, need(!parts.is_empty() && parts.len() < 16)))?;
+    let device = observer_native(native, Some(trace), O::DriveBefore, None, |native| native.mapping(&drive))?; let name = format!("{device}\\");
+    let root = observer_native(native, Some(trace), O::RootReserve, Some(0), |native| native.reserve(Kind::Directory, None, &name, name.clone()))?;
+    observer_native(native, Some(trace), O::RootOpen, Some(0), |native| native.call(Call::Open(root.index), null_mut(), Vec::new()))?;
+    observer_native(native, Some(trace), O::RootNoninherited, Some(0), |native| native.noninherited(root.index))?;
+    observer_native(native, Some(trace), O::RootFilesystem, Some(0), |native| native.local_ntfs(&root))?;
+    let metadata = observer_native(native, Some(trace), O::RootMetadata, Some(0), |native| native.metadata(&root))?;
+    let mut entries = vec![(root, metadata)];
+    for (position, name) in parts.into_iter().enumerate() {
+        let index = Some((position + 1) as u8); // Earlier <16 DATA bound; not a NativeBook slot.
+        let original = trace.scope(O::AncestorOpen, index, || {
+            let parent = trace.result(C::ParentOriginal, entries.last().ok_or(Error::State))?;
+            observer_native(native, Some(trace), O::AncestorOpen, index, |native| native.open_child(&parent.0, &name, FileKind::Directory))
+        })?;
+        let metadata = observer_native(native, Some(trace), O::AncestorMetadata, index, |native| native.metadata(&original))?;
+        entries.push((original, metadata));
     }
-    let (parent, metadata) = entries.last().ok_or(Error::State)?;
-    need(metadata.identity.volume_serial == cached.1.volume && metadata.identity.file_id == cached.1.id
-        && metadata.creation == cached.1.creation && metadata.attributes == cached.1.attributes && metadata.links == cached.1.links)?;
-    let (original, metadata, _, projection) = observer_journal_poststate(native, parent, diagnostic, true)?;
+    let index = Some((entries.len() - 1) as u8);
+    let (parent, metadata) = trace.scope(O::OutputBinding, index, || trace.result(C::ParentOriginal, entries.last().ok_or(Error::State)))?;
+    trace.scope(O::OutputBinding, index, || {
+        trace.result(C::VolumeSerial, need(metadata.identity.volume_serial == cached.1.volume))?;
+        trace.result(C::FileId, need(metadata.identity.file_id == cached.1.id))?;
+        trace.result(C::CreationTime, need(metadata.creation == cached.1.creation))?;
+        trace.result(C::Attributes, need(metadata.attributes == cached.1.attributes))?;
+        trace.result(C::Links, need(metadata.links == cached.1.links))
+    })?;
+    let (original, metadata, _, projection) = observer_journal_poststate(native, parent, diagnostic, true, Some(trace))?;
     entries.push((original, metadata));
-    for (original, before) in &entries { need(native.metadata(original)? == *before)?; }
-    need(native.mapping(&drive)? == device)?;
+    for (position, (original, before)) in entries.iter().enumerate() {
+        let index = Some(if position + 1 == entries.len() { 16 } else { position as u8 });
+        trace.scope(O::CursorMetadataAfter, index, || trace.result(C::StampStable,
+            need(observer_native(native, Some(trace), O::CursorMetadataAfter, index, |native| native.metadata(original))? == *before)))?;
+    }
+    trace.scope(O::DriveAfter, None, || trace.result(C::MappingStable,
+        need(observer_native(native, Some(trace), O::DriveAfter, None, |native| native.mapping(&drive))? == device)))?;
     Ok(projection)
 }
 fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixture: &mut Option<Fixture>,
@@ -930,7 +990,7 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
         if let Some(diagnostic) = diagnostic.as_mut() {
             clock.effect_traced(trace)?;
             let name = diagnostic.name();
-            let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false)?;
+            let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false, None)?;
             projection = Some(observed); clock.effect_traced(trace)?;
             children.push((at, name, stamp, FileKind::File)); entries.push((original, metadata));
         }
@@ -2892,21 +2952,27 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         observation = trace.prerequisite_current(observation);
     }
     if observation.is_err() && observer_role(role) && !capture.claimed {
+        use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
         capture.claimed = true; // One attempt, even if admission/clock refuses.
-        let child_final = parent_settled && observer_child_final(launch.as_deref())
-            && !matches!(observation, Err(Error::Unknown)) && !inventory.is_unknown()
-            && observer_diagnostic.as_ref().is_some_and(|value| !value.unresolved());
-        if child_final && inventory.never_started() {
-            let captured = (|| -> Result<ObserverProjection> {
-                let cached = capture.output.as_ref().ok_or(Error::State)?;
-                let diagnostic = observer_diagnostic.as_mut().ok_or(Error::State)?;
-                inventory.observer_failure_inventory(child_final)?;
-                observer_failure_poststate(&mut inventory, &mut files, diagnostic, &output, cached)
-            })();
+        let read_trace = &capture.reader;
+        let child_final = read_trace.gate(C::ParentSettled, parent_settled) && observer_child_final(launch.as_deref(), read_trace)
+            && read_trace.gate(C::ObservationKnown, !matches!(observation, Err(Error::Unknown)))
+            && read_trace.gate(C::InventoryKnown, !inventory.is_unknown())
+            && match observer_diagnostic.as_ref() {
+                Some(value) => read_trace.gate(C::JournalKnown, !value.unresolved()),
+                None => read_trace.gate(C::JournalPresent, false),
+            };
+        if child_final && read_trace.gate(C::InventoryFresh, inventory.never_started()) {
+            let captured = read_trace.scope(O::CaptureOutput, None, || -> Result<ObserverProjection> {
+                let cached = read_trace.result(C::CachedOutput, capture.output.as_ref().ok_or(Error::State))?;
+                let diagnostic = read_trace.result(C::JournalPresent, observer_diagnostic.as_mut().ok_or(Error::State))?;
+                read_trace.scope(O::InventorySelect, None, || inventory.observer_failure_inventory(child_final, read_trace))?;
+                observer_failure_poststate(&mut inventory, &mut files, diagnostic, &output, cached, read_trace)
+            });
             match captured {
                 Ok(projection) => capture.projection = projection,
                 Err(Error::Unknown) => capture.unresolved = true,
-                Err(_) => (), // Diagnostic unavailable; original failure stays.
+                Err(_) => (), // First reader failure DATA retained; original failure stays.
             }
         }
     }
@@ -3549,9 +3615,118 @@ mod contract_tests {
         Ok(())
     }
 
+    fn observer_capture_failure_contract() -> Result<()> {
+        use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
+        use crate::ui_observer_diagnostic_data::ChildFinality;
+        ObserverCaptureTrace::reader_contract()?;
+        // Actual shared scalar decisions, not a child, clock or native fixture.
+        for mask in 0..128u8 {
+            let facts = ChildFinality { returned: mask & 1 != 0, created: mask & 2 != 0, signaled: mask & 4 != 0,
+                exit_observed: mask & 8 != 0, process_closed: mask & 16 != 0, thread_closed: mask & 32 != 0, unknown: mask & 64 != 0 };
+            let trace = ObserverCaptureTrace::default();
+            assert_eq!(observer_finality(facts, &trace), facts.admitted());
+            let expected = [(C::ChildReturned, facts.returned), (C::ChildCreated, facts.created),
+                (C::ChildSignaled, facts.signaled), (C::ChildExitObserved, facts.exit_observed),
+                (C::ChildProcessClosed, facts.process_closed), (C::ChildThreadClosed, facts.thread_closed), (C::ChildKnown, !facts.unknown)]
+                .into_iter().find(|(_, value)| !*value).map(|(check, _)| check);
+            assert_eq!(trace.first().map(|value| value.check), expected);
+            assert!(trace.first().is_none_or(|value| value.error.is_none() && value.native.is_none()));
+        }
+        let gate = ObserverCaptureTrace::default(); assert!(!observer_child_final(None, &gate));
+        let first = gate.first().expect("false original eligibility");
+        assert_eq!((first.check, first.error, first.native), (C::ChildOriginal, None, None));
+        assert_eq!(gate.scope(O::JournalRead, Some(16), || gate.result::<()>(C::ReadCount, Err(Error::Bounds))), Err(Error::Bounds));
+        assert_eq!(gate.first(), Some(first)); // A later returning error cannot relabel a skipped reader.
+        let calls = Cell::new(0); let trace = ObserverCaptureTrace::default();
+        assert_eq!(trace.scope(O::OutputLocation, None, || { calls.set(calls.get() + 1); Ok(17) }), Ok(17));
+        assert_eq!(calls.get(), 1); assert!(trace.first().is_none());
+        assert_eq!(trace.scope(O::OutputLocation, None, || trace.result::<()>(C::PathDepth, Err(Error::Unsafe))), Err(Error::Unsafe));
+        let first = trace.first();
+        assert_eq!(trace.scope(O::JournalRead, Some(16), || trace.result::<()>(C::FileCeiling, Err(Error::Bounds))), Err(Error::Bounds));
+        assert_eq!(trace.first(), first);
+        for (call, returned) in [
+            (Call::Open(0), Returned::Nt(0xc0000043u32 as i32)),
+            (Call::Mapping, Returned::Count(0, 5)),
+            (Call::Info(FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()), Returned::Boolean(0, u32::MAX)),
+            (Call::Streams, Returned::Nt(0xc0000022u32 as i32)),
+        ] {
+            let trace = ObserverCaptureTrace::default(); let mut book = NativeBook::new();
+            // Synthetic returned DATA is staged through the same scoped wrapper;
+            // no invoke/finish, fake HANDLE adoption or OS observation is claimed.
+            let original = trace.scope(O::JournalOpen, Some(16), || book.observer_capture_observe(&trace, |book| {
+                book.prerequisite_capture(call, returned); Err::<(), _>(Error::Unavailable)
+            }));
+            assert_eq!(original, Err(Error::Unavailable)); assert!(book.never_started());
+            let first = trace.first().expect("scoped first return");
+            assert_eq!((first.check, first.error, first.native),
+                (C::NativeReturn, Some(Error::Unavailable), ObserverCaptureNative::returned(call, returned)));
+            book.prerequisite_returned.set(Some((Call::Close(0), Returned::Boolean(0, 6))));
+            assert_eq!(trace.scope(O::JournalRead, Some(16), || trace.result::<()>(C::FileCeiling, Err(Error::Unsafe))), Err(Error::Unsafe));
+            assert_eq!(trace.first(), Some(first));
+        }
+        for (call, returned) in [(Call::Open(0), Returned::Boolean(0, 5)), (Call::Open(0), Returned::Nt(0)),
+            (Call::Mapping, Returned::Count(12, 5)), (Call::Streams, Returned::Nt(0)),
+            (Call::Info(-1, 0), Returned::Boolean(0, 5)), (Call::Close(0), Returned::Boolean(0, 6))] {
+            assert!(ObserverCaptureNative::returned(call, returned).is_none());
+        }
+        let mut book = NativeBook::new(); book.first_unavailable = Some((Call::Open(0), Returned::Nt(0xc0000022u32 as i32)));
+        book.prerequisite_capture(Call::Open(0), Returned::Nt(0xc0000022u32 as i32));
+        let trace = ObserverCaptureTrace::default();
+        assert_eq!(trace.scope(O::RootReserve, Some(0), || book.observer_capture_observe(&trace, |_| Err::<(), _>(Error::State))), Err(Error::State));
+        assert!(trace.first().expect("original State").native.is_none()); assert!(book.first_unavailable.is_some());
+        let trace = ObserverCaptureTrace::default(); let mut book = NativeBook::new();
+        book.prerequisite_enable_admission(&InputTrace::prerequisite_only(true));
+        assert_eq!(trace.scope(O::RootMetadata, Some(0), || book.observer_capture_observe(&trace, |book| {
+            book.prerequisite_capture(Call::FileType, Returned::Scalar(u32::MAX));
+            book.admission.at(AdmissionOp::Metadata).need(false, AdmissionCheck::FileType)
+        })), Err(Error::Unsafe));
+        assert_eq!(trace.first().map(|value| (value.check, value.native, value.detail)),
+            Some((C::Admission, None, Some(PrerequisiteDetail::Admission(AdmissionCheck::FileType)))));
+        // Same post-gate decision as NativeBook::call: always evaluated, but a
+        // secondary expired sample may not replace a failed original return.
+        for original in [Ok(9), Err(Error::Unavailable)] {
+            let mut first = None;
+            let timely = observer_inventory_return(&mut first, C::NativeClockAfter, Err(Error::Unsafe), original.is_ok());
+            let result = original.and_then(|value| timely.map(|()| value));
+            assert_eq!(result, if original.is_ok() { Err(Error::Unsafe) } else { Err(Error::Unavailable) });
+            assert_eq!(first, original.is_ok().then_some(C::NativeClockAfter));
+        }
+        let mut first = None;
+        assert_eq!(observer_inventory_return(&mut first, C::NativeClockBefore, Err(Error::Unsafe), true), Err(Error::Unsafe));
+        assert_eq!(observer_inventory_return(&mut first, C::NativeClockAfter, Err(Error::State), true), Err(Error::State));
+        assert_eq!(first, Some(C::NativeClockBefore));
+        let mut capture = ObserverCapture::default();
+        capture.binding = Some(("a".repeat(40), "b".repeat(40), "123456".to_owned(), "c".repeat(64)));
+        let original = capture.reader.scope(O::JournalOpen, Some(16), || capture.reader.native_result::<()>(Err(Error::Unavailable),
+            ObserverCaptureNative::returned(Call::Open(0), Returned::Nt(0xc0000043u32 as i32)), None));
+        let first = capture.reader.first(); let mut bytes = [0u8; 4096];
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+            let length = observer_capture_frame(role, &capture, &mut bytes).expect("bounded diagnostic");
+            assert!(length <= 4096); let text = std::str::from_utf8(&bytes[..length]).expect("closed ASCII");
+            assert!(text.contains("\"captureFailure\":{\"kind\":\"returned-error\",\"operation\":\"journal-open\""));
+            assert!(text.contains("\"reason\":1")); assert!(text.contains("\"api\":\"NtCreateFile\""));
+            for private in ["HANDLE", "password", "accountSid", "path", "fileName", "journalBody"] { assert!(!text.contains(private)); }
+        }
+        let mut short = [0u8; 8]; assert!(capture.reader.write_json(&mut std::io::Cursor::new(&mut short[..])).is_err());
+        assert_eq!(capture.reader.first(), first); assert_eq!(original, Err(Error::Unavailable));
+        assert!(observer_capture_frame(UiRole::NormalSmoke, &capture, &mut bytes).is_none());
+        capture.unresolved = true; assert!(observer_capture_frame(UiRole::ProjectDraft, &capture, &mut bytes).is_none());
+        capture.unresolved = false; capture.projection = ObserverProjection::decode(&[]);
+        assert!(observer_capture_frame(UiRole::ProjectDraft, &capture, &mut bytes).is_none()); // Empty is not no capture.
+        capture.projection = ObserverProjection::default();
+        for (index, error) in [(Some(17), Error::Unsafe), (Some(16), Error::Unknown)] {
+            capture.reader = ObserverCaptureTrace::default();
+            let _ = capture.reader.scope(O::JournalRead, index, || capture.reader.result::<()>(C::ReadCount, Err(error)));
+            assert!(observer_capture_frame(UiRole::ProjectDraft, &capture, &mut bytes).is_none());
+        }
+        assert_eq!(ObserverCaptureOperation::ALL.len(), 33); assert_eq!(ObserverCaptureCheck::ALL.len(), 78);
+        Ok(())
+    }
+
     #[test]
     fn prerequisite_helper_decisions_preserve_native_control_flow() -> Result<()> {
         hive_unload_original_return_cases()?;
+        observer_capture_failure_contract()?;
         use PrerequisiteCheck as C; use PrerequisiteStage as G;
         let mut facts = prerequisite_created_process()?;
         let mut trace = prerequisite_trace(G::Launch, C::D04);

@@ -11,7 +11,8 @@ use windows_sys::Win32::Security::Cryptography as BC;
 #[path = "observer_diagnostic.rs"]
 mod observer_diagnostic;
 #[cfg(all(test, feature = "desktop-ui"))]
-pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal};
+pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal,
+    ObserverCaptureCheck, ObserverCaptureNative, ObserverCaptureOperation, ObserverCaptureTrace};
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub use observer_diagnostic::ObserverDiagnostic;
 

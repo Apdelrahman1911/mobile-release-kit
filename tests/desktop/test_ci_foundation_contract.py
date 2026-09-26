@@ -13784,9 +13784,9 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         ui = texts["ordinary_owner_ui.rs"]
         self.assertIn("if role != UiRole::Prerequisite { diagnostic_smoke(stage,", ui)
         owner = ui[ui.index("fn run_prerequisite_traced("):ui.index("// Inert regressions.")]
-        self.assertEqual(len(owner.encode("utf-8")), 29427)
+        self.assertEqual(len(owner.encode("utf-8")), 30041)
         self.assertEqual(hashlib.sha256(owner.encode("utf-8")).hexdigest(),
-                         "be01e58ed49e95c5aee95d4dd677b40f49c9435405241b6176cdbe551b5e083d")
+                         "3c470aa11c189c5e15de5245187b6391eeae111b13a4e5223404ed731fc07130")
         self.assertIn("return observation; // Failed process/driver never permits profile/account deletion.", owner)
         self.assertIn("loop { std::thread::park();", owner)
         for outer_only in ("prerequisite_returned(", "normal_smoke_returned(", "returned_fault(", "returned_fault_frame(", "prerequisite_sink("):
@@ -14384,6 +14384,181 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
             changed = deepcopy(frame); changed["projection"][key]["step"] = 2
             with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
 
+
+    @classmethod
+    def capture_frame_data(cls, *, gate=False):
+        frame = cls.frame_data()
+        frame["projection"] = {"bytes": 0, "records": 0, "reason": 1, "last": None, "observerRefusal": None, "startupRefusal": None}
+        frame["captureFailure"] = {"kind": "returned-error", "operation": "journal-open", "check": "native-return", "index": 16,
+            "error": "Unavailable", "native": {"api": "NtCreateFile", "selector": "none", "kind": "ntstatus",
+                "value": -1073741757, "status": "ntstatus", "code": -1073741757}, "detail": None}
+        if gate:
+            frame["captureFailure"] = {"kind": "not-attempted", "operation": "eligibility", "check": "inventory-fresh",
+                                      "index": None, "error": None, "native": None, "detail": None}
+        return frame
+
+    def test_capture_failure_accepts_only_exact_legacy_or_new_envelope(self):
+        legacy = self.frame_data()
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
+        for frame in (self.frame_data(), self.capture_frame_data(), self.capture_frame_data(gate=True)):
+            frame.setdefault("captureFailure", None)
+            raw = self.frame(frame)
+            self.assertLessEqual(len(raw), 4096)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+            for change in ("extra", "missing", "duplicate", "bool-index", "unknown-error", "new-kind", "wrong-operation", "wrong-check"):
+                changed = deepcopy(frame)
+                if change == "extra": changed["rawJournal"] = "private"
+                elif change == "missing": del changed["request"]
+                elif change == "duplicate":
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(raw.replace(b'"captureFailure":', b'"captureFailure":null,"captureFailure":'))
+                    continue
+                elif changed["captureFailure"] is None: continue
+                elif change == "bool-index": changed["captureFailure"]["index"] = True
+                elif change == "unknown-error": changed["captureFailure"]["error"] = "Unknown"
+                elif change == "new-kind": changed["captureFailure"]["kind"] = "timeout"
+                elif change == "wrong-operation": changed["captureFailure"]["operation"] = "private-path"
+                else: changed["captureFailure"]["check"] = "guessed-native"
+                with self.subTest(change=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_observer_frame(self.frame(changed))
+
+    def test_capture_failure_keeps_gate_error_and_observed_empty_distinct(self):
+        gate = self.capture_frame_data(gate=True)
+        for key, value in (("error", "State"), ("native", self.capture_frame_data()["captureFailure"]["native"]),
+                           ("index", 0), ("detail", "input.NameState"), ("operation", "journal-open"), ("check", "read-count")):
+            changed = deepcopy(gate); changed["captureFailure"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for reason in range(7):
+            changed = self.capture_frame_data(); changed["projection"]["reason"] = reason
+            if reason == 1: self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(changed))["projection"]["reason"], 1)
+            else:
+                with self.subTest(reason=reason), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        empty = self.capture_frame_data(); empty["captureFailure"] = None; empty["projection"]["reason"] = 2
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(empty))["projection"]["reason"], 2)
+        for check, detail in (("input", "input.NameExact"), ("admission", "admission.canonical-name")):
+            frame = self.capture_frame_data(); fault = frame["captureFailure"]
+            fault.update(check=check, native=None, error="Unsafe", detail=detail)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["captureFailure"], fault)
+            for bad in (None, "private", "input.NotAClosedCheck", "admission.NotAClosedCheck", "none"):
+                fault["detail"] = bad
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_capture_failure_native_pairs_are_scoped_failed_scalars_not_handles(self):
+        pairs = [("QueryDosDeviceW", "none", "count"), ("GetFinalPathNameByHandleW", "none", "count"),
+                 ("NtCreateFile", "none", "ntstatus"), ("NtQueryVolumeInformationFile", "file-fs-device-information", "ntstatus"),
+                 ("NtQueryInformationFile", "file-stream-information", "ntstatus"),
+                 *((api, "none", "bool") for api in ("GetHandleInformation", "GetVolumeInformationByHandleW", "GetKernelObjectSecurity", "ReadFile")),
+                 *(("GetFileInformationByHandleEx", selector, "bool") for selector in ("file-basic-info", "file-standard-info",
+                     "file-attribute-tag-info", "file-id-info", "file-case-sensitive-info", "file-stream-info"))]
+        for api, selector, kind in pairs:
+            frame = self.capture_frame_data(); native = frame["captureFailure"]["native"]
+            native.update(api=api, selector=selector, kind=kind, value=-(2**31) if kind == "ntstatus" else 0,
+                          status="ntstatus" if kind == "ntstatus" else "win32", code=-(2**31) if kind == "ntstatus" else 2**32 - 1)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["captureFailure"]["native"], native)
+            for key, value in (("api", "CloseHandle"), ("selector", "FileStreamInfo"), ("kind", "handle"), ("status", "ambient"),
+                               ("value", True), ("code", False), ("value", 1), ("code", 2**32), ("path", "private")):
+                changed = deepcopy(frame); changed["captureFailure"]["native"][key] = value
+                with self.subTest(api=api, key=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key, value in (("check", "native-clock-before"), ("error", "Bounds"), ("error", "State"), ("native", None),
+                           ("detail", "input.ReadReturned"), ("index", 17), ("index", -1), ("operation", "eligibility")):
+            frame = self.capture_frame_data(); frame["captureFailure"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_capture_failure_collector_never_upgrades_original_failure_or_historical_prefix(self):
+        for gate in (False, True):
+            parts = list(self.original_log()); frame = self.capture_frame_data(gate=gate)
+            parts[0] = parts[0].replace(self.frame(self.frame_data())[1:-1], self.frame(frame)[1:-1])
+            parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            with patch.object(helper, "run", side_effect=AssertionError("no subprocess/native")), \
+                    patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no I/O")):
+                data = self.joined(parts)
+            self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
+            self.assertEqual(data["projection"]["reason"], 1)
+            for key in ("nativeQualified", "combinedPassed"): self.assertFalse(data[key])
+            for key in ("guiCasesExecuted", "verifiedMethods"): self.assertEqual(data[key], 0)
+            self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
+        self.assertIsNone(self.joined(self.original_log())["captureFailure"])
+
+    def test_capture_failure_source_keeps_original_clocks_native_calls_and_return_control(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic, book, qualifier = ((root / name).read_text() for name in
+            ("ordinary_owner_ui.rs", "observer_diagnostic.rs", "lib.rs", "qualification_result.rs"))
+        def span(text, start, end):
+            at = text.index(start); return text[at:text.index(end, at)]
+        def function(text, start, indent=""):
+            at = text.index(start); return text[at:text.index("\n" + indent + "}\n", at) + len(indent) + 3]
+        def digest(text): return hashlib.sha256(text.encode()).hexdigest()
+        owner = span(ui, "fn run_prerequisite_traced(", "// Inert regressions.")
+        start = owner.index("    if observation.is_err() && observer_role(role) && !capture.claimed {")
+        end = owner.index("    trace.prerequisite_at(PrerequisiteStage::Settlement, PrerequisiteCheck::S01);", start)
+        self.assertEqual(digest(owner[:start] + owner[end:]), "a8290b34c6029a485856312846e8d8c4cc074b51edaa303e3227cb1d40adff9a")
+        self.assertEqual(digest(span(ui, "pub(super) fn run(", "fn run_prerequisite_traced(")), "00a1f1d56edd8ba2ff0dd78aed3550fabaa0dd0fccd6717743d4a42805d7390a")
+        self.assertEqual(digest(span(ui, "struct Clock {", "#[derive(Default)]\nstruct ObserverCapture")), "0864dbfc2e605338ad27a3f252f0ce8d06a25d4faa050c995bee0fbb00caf9f7")
+        self.assertEqual(digest(span(diagnostic, "#[cfg(test)]\npub(crate) struct ObserverDiagnosticClock", "// First-only parent-reader DATA.")), "b5c990c492ebd34d36209e0cd44db8b45276ada9193c88a5c796d78d8a6fb55d")
+        call = span(book, "    fn call(", "    // Inert state transition")
+        call = call.replace("self.observer_inventory_effect(call, false, true)?;", "self.observer_inventory_effect(call)?;")
+        call = call.replace("            // Still execute the original post-gate even after a definite native\n"
+                            "            // failure; that ignored secondary clock must not replace its cause.\n", "")
+        call = call.replace("self.observer_inventory_effect(call, true, original.is_ok())", "self.observer_inventory_effect(call)")
+        self.assertEqual(digest(call), "a4af373abc77b196818487a34c0e4c53389bccdcaaa08036c29a2590fb207265")
+        self.assertEqual(digest(span(book, "    fn finish(", "    fn duplicate_live(")), "95617b503463de91027c595fd5894c70391ed7ee1e5b0fa3de14443966b63b3c")
+        self.assertEqual(digest(function(book, "unsafe fn invoke(")), "af9dc9a0573e25fed8afd55daa868eb6c7c91ce362b7ca1826e9d2a52009f063")
+        self.assertEqual(digest(function(diagnostic, "    fn append_original(", "    ")), "ecb284a62d2fab6b6e2589299168b01790f721e6c02ec1c68f1b41c9d55f472f")
+        self.assertEqual(digest(function(diagnostic, "    fn open(", "    ")), "017d1a15b285dda577e6b71b896d01cb8c720997858d6a0d94ad64a9a0b8c04d")
+        qualifier = qualifier.replace("pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal,\n"
+            "    ObserverCaptureCheck, ObserverCaptureNative, ObserverCaptureOperation, ObserverCaptureTrace};",
+            "pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal};")
+        self.assertEqual(digest(qualifier), "d37c28c1d01371e3b4ea67ef2983dad80dfb20228eb07d79b0c7905ffd1e3115")
+        self.assertEqual(hashlib.sha256((root / "ui_observer_diagnostic_data.rs").read_bytes()).hexdigest(), "f2460ca96be7b2c270e5a1a650f099a03928eae2dbdf061b1ea4a33dc4922f4a")
+        journal = span(diagnostic, "impl JournalFile {", "/// Existing native owner retains")
+        self.assertEqual(__import__("re").findall(r"unsafe\s*\{\s*([A-Z]+::[A-Za-z0-9_]+)\s*\(", journal),
+            ["FS::CreateFileW", "F::GetLastError", "FS::GetFileInformationByHandleEx", "F::GetLastError", "FS::ReadFile", "F::GetLastError"])
+        failure = owner[start:end]
+        self.assertLess(failure.index("capture.claimed = true;"), failure.index("read_trace.gate(C::ParentSettled"))
+        self.assertIn("Err(Error::Unknown) => capture.unresolved = true", failure)
+        self.assertIn("if child_final && read_trace.gate(C::InventoryFresh, inventory.never_started())", failure)
+        self.assertIn("inventory.observer_failure_inventory(child_final, read_trace)", failure)
+        self.assertIn("observer_failure_poststate(&mut inventory, &mut files, diagnostic, &output, cached, read_trace)", failure)
+        for forbidden in ("GetTickCount", "Instant::", "GetLastError", "std::thread::", "capture.projection = ObserverProjection::decode"):
+            self.assertNotIn(forbidden, failure)
+
+    def test_capture_failure_finite_roster_shared_inert_cases_and_scoped_provenance_are_explicit(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic, book = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs", "lib.rs"))
+        for name, expected in (("ObserverCaptureOperation", helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS),
+                               ("ObserverCaptureCheck", helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS)):
+            block = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
+            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', block)), expected)
+            self.assertEqual(len(expected), len(set(expected)))
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS), 33)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS), 78)
+        observe = book.split("    fn observer_capture_observe<", 1)[1].split("    #[cfg(test)]", 1)[0]
+        self.assertLess(observe.index("self.prerequisite_returned.set(None)"), observe.index("let original = observe(self)"))
+        self.assertIn("admission_before.is_none()", observe)
+        self.assertIn("trace.native_result(original, native, detail)", observe)
+        self.assertNotIn("self.first_unavailable", observe)
+        for forbidden in ("GetLastError", "GetTickCount", "Instant::", "invoke(", "self.call(", "self.finish(", "self.settle"):
+            self.assertNotIn(forbidden, observe)
+        effect = book.split("    fn observer_inventory_effect(", 1)[1].split("    #[cfg(all(test, feature = \"desktop-ui\"))]", 1)[0]
+        self.assertEqual(effect.count("gate.clock.permitted(gate.order.failure())"), 1)
+        self.assertIn("C::NativeClockAfter", effect); self.assertIn("C::NativeClockBefore", effect)
+        self.assertIn("if matches!(call, Call::Close(_)) { return Ok(()); }", effect)
+        selected = ui.split("    fn prerequisite_helper_decisions_preserve_native_control_flow()", 1)[1].split("\n    #[test]", 1)[0]
+        self.assertEqual(selected.count("observer_capture_failure_contract()?"), 1)
+        self.assertEqual(ui.count("fn observer_capture_failure_contract()"), 1)
+        self.assertIn("ObserverCaptureTrace::reader_contract()?", ui)
+        input_reader = diagnostic.split("fn read_input_result<", 1)[1].split("fn read_scope<", 1)[0]
+        self.assertIn("value.check == PrerequisiteCheck::F04", input_reader)
+        self.assertIn("value.error == Error::Unsafe && value.native.is_none() && value.detail.is_none()", input_reader)
+        self.assertIn("return trace.result(ObserverCaptureCheck::FileCeiling, original)", input_reader)
+        for forbidden in ("GetTickCount", "Instant::", "GetLastError", ".timely(", ".body("):
+            self.assertNotIn(forbidden, input_reader)
+        self.assertIn("for mask in 0..128u8", ui)
+        self.assertIn("trace.first(), Some(first)", ui)
+        self.assertIn("original.is_ok().then_some(C::NativeClockAfter)", ui)
+        self.assertIn("capture.reader.first().is_some() && capture.projection != ObserverProjection::default()", ui)
+        self.assertIn("if !observer_role(role) || capture.unresolved { return None; }", ui)
+        self.assertIn("diagnostic, false, None)?", ui)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 19)
 
 class WindowsNormalUiGuiTests(unittest.TestCase):
     """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""

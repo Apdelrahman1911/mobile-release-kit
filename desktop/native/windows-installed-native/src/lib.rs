@@ -419,6 +419,13 @@ impl Complete {
 #[cfg(all(test, feature = "desktop-ui"))]
 struct ObserverInventoryGate {
     clock: Arc<qualification_result::ObserverDiagnosticClock>, order: ui_observer_diagnostic_data::InventoryOrder,
+    refusal: Option<qualification_result::ObserverCaptureCheck>,
+}
+#[cfg(all(test, feature = "desktop-ui"))]
+fn observer_inventory_return(first: &mut Option<qualification_result::ObserverCaptureCheck>,
+    check: qualification_result::ObserverCaptureCheck, original: Result<()>, retain: bool) -> Result<()> {
+    if retain && original.is_err() && first.is_none() { *first = Some(check); }
+    original // DATA only: no clock sample, native entry or Result conversion.
 }
 pub struct NativeBook {
     admission: AdmissionTrace,
@@ -462,18 +469,22 @@ impl NativeBook {
     #[cfg(all(test, feature = "desktop-ui"))]
     fn bind_observer_inventory(&mut self, clock: Arc<qualification_result::ObserverDiagnosticClock>) -> Result<()> {
         if !self.never_started() || self.observer_inventory_gate.is_some() { return Err(Error::State); }
-        self.observer_inventory_gate = Some(ObserverInventoryGate { clock, order: Default::default() }); Ok(())
+        self.observer_inventory_gate = Some(ObserverInventoryGate { clock, order: Default::default(), refusal: None }); Ok(())
     }
     #[cfg(all(test, feature = "desktop-ui"))]
-    fn observer_failure_inventory(&mut self, child_final: bool) -> Result<()> {
-        if !child_final || !self.never_started() { return Err(Error::State); }
-        let gate = self.observer_inventory_gate.as_mut().ok_or(Error::State)?;
+    fn observer_failure_inventory(&mut self, child_final: bool, trace: &qualification_result::ObserverCaptureTrace) -> Result<()> {
+        use qualification_result::ObserverCaptureCheck as C;
+        if !child_final || !self.never_started() { return trace.result(C::InventoryFresh, Err(Error::State)); }
+        let gate = trace.result(C::InventoryBound, self.observer_inventory_gate.as_mut().ok_or(Error::State))?;
         // A distinct, already-bound purpose; neither endpoint nor latch changes.
-        if !gate.order.select_failure(child_final, true) { return Err(Error::State); }
-        if gate.clock.permitted(true) { Ok(()) } else { Err(Error::Unsafe) }
+        if !gate.order.select_failure(child_final, true) { return trace.result(C::InventoryOnce, Err(Error::State)); }
+        let original = if gate.clock.permitted(true) { Ok(()) } else { Err(Error::Unsafe) };
+        if original.is_ok() { self.admission.active.set(true); } // Fresh failure-reader DATA only.
+        trace.result(C::InventoryClock, original)
     }
     #[cfg(all(test, feature = "desktop-ui"))]
-    fn observer_inventory_effect(&mut self, call: Call) -> Result<()> {
+    fn observer_inventory_effect(&mut self, call: Call, after: bool, retain: bool) -> Result<()> {
+        use qualification_result::ObserverCaptureCheck as C;
         // Settlement of already-owned originals remains permitted late.
         if matches!(call, Call::Close(_)) { return Ok(()); }
         let Some(gate) = self.observer_inventory_gate.as_mut() else { return Ok(()); };
@@ -489,8 +500,28 @@ impl NativeBook {
                 (FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()),
             ].contains(&(class, length)),
             _ => false,
-        } { return Err(Error::State); }
-        if gate.clock.permitted(gate.order.failure()) { Ok(()) } else { Err(Error::Unsafe) }
+        } { return observer_inventory_return(&mut gate.refusal, C::NativePurpose, Err(Error::State), retain); }
+        let original = if gate.clock.permitted(gate.order.failure()) { Ok(()) } else { Err(Error::Unsafe) };
+        observer_inventory_return(&mut gate.refusal, if after { C::NativeClockAfter } else { C::NativeClockBefore }, original, retain)
+    }
+    #[cfg(all(test, feature = "desktop-ui"))]
+    fn observer_capture_observe<T>(&mut self, trace: &qualification_result::ObserverCaptureTrace,
+        observe: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.prerequisite_returned.set(None);
+        if let Some(gate) = self.observer_inventory_gate.as_mut() { gate.refusal = None; }
+        let admission_before = self.admission.first.get();
+        let original = observe(self);
+        let native = if matches!(&original, Err(Error::Unavailable | Error::Unknown)) {
+            self.prerequisite_returned.get().and_then(|(call, returned)| qualification_result::ObserverCaptureNative::returned(call, returned))
+        } else { None };
+        let detail = if matches!(&original, Err(Error::Unsafe)) && admission_before.is_none() {
+            self.admission.first.get().map(|value| qualification_result::PrerequisiteDetail::Admission(value.check))
+        } else { None };
+        let gate = self.observer_inventory_gate.as_ref().and_then(|value| value.refusal);
+        if native.is_none() && detail.is_none() && matches!(&original, Err(Error::Unsafe | Error::State)) {
+            if let Some(check) = gate { return trace.result(check, original); }
+        }
+        trace.native_result(original, native, detail)
     }
     #[cfg(test)]
     fn remember_unavailable(&mut self, call: Call, returned: Returned) {
@@ -611,7 +642,7 @@ impl NativeBook {
             }
         }
         #[cfg(all(test, feature = "desktop-ui"))]
-        self.observer_inventory_effect(call)?;
+        self.observer_inventory_effect(call, false, true)?;
         self.active = Some(ManuallyDrop::new(frame));
         self.mark_entered(call)?;
         let frame = self.arena()?;
@@ -628,7 +659,9 @@ impl NativeBook {
         // retains the same active arena/slots and dominates a clock refusal.
         #[cfg(all(test, feature = "desktop-ui"))]
         if !matches!(original, Err(Error::Unknown)) {
-            let timely = self.observer_inventory_effect(call);
+            // Still execute the original post-gate even after a definite native
+            // failure; that ignored secondary clock must not replace its cause.
+            let timely = self.observer_inventory_effect(call, true, original.is_ok());
             return original.and_then(|complete| timely.map(|()| complete));
         }
         original
