@@ -29,8 +29,8 @@ import time
 ENTRY = "desktop/tools/ubuntu_publication_lifecycle.py"
 TARGET = "x86_64-unknown-linux-gnu"
 PACKAGE = "mobile-release-kit-desktop"
-M = "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66"
-F1 = "6f3005c479a8b14992f9e73135b6c3f21119a014d5212c5603cafa3b3b395757"
+M = "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2"
+F1 = "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2"
 Q = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"

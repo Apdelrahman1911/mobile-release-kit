@@ -594,8 +594,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: '36238334234'
-          artifact-ids: '10905226275'
+          run-id: '36252225056'
+          artifact-ids: '10909746838'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
@@ -613,7 +613,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'aea69e28d4cfad10c5730f1897954bb449d9c5e3379678c45e53fd075f9079bb'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '1e0a64c44dbc596800570b124a0b5017f7bf714dc5d0bb0297bd51c336022ce5'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain only the typed compiler summary; same-job originals stay private
         id: upload
@@ -705,8 +705,8 @@ jobs:
         with:
           repository: Apdelrahman1911/mobile-release-kit
           # Independently accepted U originals; full artifact membership is verified.
-          run-id: '36239971300'
-          artifact-ids: '10905825592'
+          run-id: '36254859549'
+          artifact-ids: '10911095325'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare_native.outputs.root }}/work/admitted-u
           merge-multiple: true
@@ -725,7 +725,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'aea69e28d4cfad10c5730f1897954bb449d9c5e3379678c45e53fd075f9079bb'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '1e0a64c44dbc596800570b124a0b5017f7bf714dc5d0bb0297bd51c336022ce5'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

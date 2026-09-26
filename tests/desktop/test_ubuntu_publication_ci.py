@@ -570,8 +570,8 @@ class PublisherCI(unittest.TestCase):
         pin = {"size": 1, "sha256": "b" * 64}
         # Fixed generation literals make this independent of the active expected pins.
         current_manifests = {
-            "P0": "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66",
-            "F1": "6f3005c479a8b14992f9e73135b6c3f21119a014d5212c5603cafa3b3b395757",
+            "P0": "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2",
+            "F1": "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2",
         }
         historical_manifests = {
             "P0": "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",

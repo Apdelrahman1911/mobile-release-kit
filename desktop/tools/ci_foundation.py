@@ -283,8 +283,8 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py","size":2363,"sha256":"45e1e84b7d8809963b914836d019f59553e2ba805e43a96d3c1bc9954594eae4"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py","size":509,"sha256":"acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py","size":53883,"sha256":"e71e867a8cc956227dcf5cf37962b8d4b891bd13c29867d5d36c98b015a0bf12"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":33376,"sha256":"a8053b6845677ddf6fb1ea7d3e4af90745c1b169c8f3cbcd03cbd9133459aca6"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":6190,"sha256":"f1e4248d21a56d1dd1e72d85cba206b3958d800dc0d2b36cde930cc461155b08"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":37580,"sha256":"83c3ea159bab149add7fbfa0981b305b893144fd06108a109652356f33430063"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":7238,"sha256":"f0526059bb7b76e90b075b50f6144e0e4b2e8aa7d431a8a40d51090b4e898527"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
@@ -297,7 +297,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py","size":938,"sha256":"7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py","size":1199,"sha256":"ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py","size":13301,"sha256":"094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":9835,"sha256":"b12e9b8b8432de38c53aace533faa7993b987d50f6d86be963246ed95c7e5cc0"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":10204,"sha256":"00cc5a43d7618065a6cd8020fd57cb9564cb53f6e487f75035d38f7de52b3090"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py","size":12814,"sha256":"063d8bfcc97f43862ace6adffac14c82db9146ae5927c123aae14d4749943b00"},
     {"path":"/work/inputs/core-source/src/mobile_release/_github_connection_transport.py","size":40759,"sha256":"f5e0b3e750b4ed0ff7753d2f8e9de9ba940e9db7eecbf314a1b9fe7ae8990e0a"},
     {"path":"/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py","size":18536,"sha256":"d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"},
@@ -307,9 +307,9 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_contract.py","size":9500,"sha256":"8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"},
     {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py","size":17638,"sha256":"bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872"},
     {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_files.py","size":35156,"sha256":"880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":31112,"sha256":"18ae142af1ee48f9167f05d64403f3f0bcf8f0424ab8de14bf8ca5e770289543"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":20200,"sha256":"8769dbb6796cd50346996d36750902ecc56ef1ea0538e47b043bb1c8f08da00e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":48445,"sha256":"6cd1d5530390035a16e6d0b566f5047397851a0711d20a781c0ec80cb7e8f454"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":36145,"sha256":"3b950f0362c15887cb9505ba05c2e5fbb38a052ef93fdaaa03f7ce4cfc3f7ea3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":22658,"sha256":"c920911fe65e3a969fe488af7207cff3bcd636224b4f4d7f85b67ea774031263"},
+    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":51009,"sha256":"da4b939e9deb4a0a08a28a6e7876f832eabc315b428c9b2de4e5d9751c2b9deb"},
     {"path":"/work/inputs/core-source/src/mobile_release/android_manifest.py","size":9267,"sha256":"7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7"},
     {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
     {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
@@ -349,7 +349,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/credential_requirements.py","size":9503,"sha256":"2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f"},
     {"path":"/work/inputs/core-source/src/mobile_release/credentials.py","size":103948,"sha256":"35031d83a550171faace632deb0bbe55ad87a988d62076db9be788bac22e4d56"},
     {"path":"/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem","size":4539,"sha256":"c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":12767,"sha256":"4fd76c42b2297153ca408d6f2e6dc060c60352b60d8a58cde3b7c3d82e4d8eb3"},
+    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":13147,"sha256":"81b3fc40327c1fb2d031ad94cef51cdbc1192adba21fbaafbe2ed61ffc20855e"},
     {"path":"/work/inputs/core-source/src/mobile_release/desktop_preflight.py","size":8915,"sha256":"2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581"},
     {"path":"/work/inputs/core-source/src/mobile_release/discovery.py","size":27885,"sha256":"6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd"},
     {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
@@ -387,9 +387,9 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
-    "manifestSha256": "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66",
+    "manifestSha256": "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2",
     "preparedArtifact": {
-        "artifactId": "10905226275",
+        "artifactId": "10909746838",
         "attempt": 1,
         "files": [
             {
@@ -584,18 +584,18 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "outer.json",
-                "sha256": "aefdc3d140d6668ca514a13a43de74d8f0341a825edc27d33f7145b5f5e558f8",
+                "sha256": "06f95fd1da957743ad92316aa71aea6181c7baf263057afa561aee583484381c",
                 "size": 327
             },
             {
                 "path": "preparation.json",
-                "sha256": "c80f014a206831662b70f570278ba3e425215e8b0e7eedec9e11cb9050b34902",
+                "sha256": "c32da9dd5199c35dfa4e5ae4723b810b4375715e18a57bf6861737b418c46e77",
                 "size": 2539
             },
             {
                 "path": "prepared-runtime.tar",
-                "sha256": "098727e8030da5d9e2905475e4c4dcf51348d228f054ec7c2f9c9e887cd6c5a6",
-                "size": 28815360
+                "sha256": "08052c50e9935dda7b6517643fd713009f8be3f2177c8934192f2e1186bb026e",
+                "size": 28825600
             },
             {
                 "path": "reviews/configuration-review.txt",
@@ -609,8 +609,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "source-bindings.json",
-                "sha256": "c2c151f26a9b436cdec8f3ce602ac394bdf8b6bd54354f49a927bc4bd588df2b",
-                "size": 19146
+                "sha256": "8ec1cc91434ccd757f8f130687c180b7358ef7eeb97e06b8268d652741357960",
+                "size": 19147
             },
             {
                 "path": "source-kit/hosted-evidence.tar",
@@ -629,8 +629,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             }
         ],
         "repository": "Apdelrahman1911/mobile-release-kit",
-        "runId": "36238334234",
-        "sourceSha": "095e776eadaf7014f5c125459585753bf54003c3"
+        "runId": "36252225056",
+        "sourceSha": "668af1b27be77f4e2ff3a1e303e5e47ed5358bdd"
     },
     "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 }
