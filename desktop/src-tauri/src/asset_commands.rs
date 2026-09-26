@@ -26,11 +26,12 @@ impl Kind {
         }
     }
     pub(crate) fn enabled(self) -> bool {
-        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::GoogleWif | Self::ProjectReadToken)
+        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
-        match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase), _ => None }
+        match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase),
+            Self::IosFirebase => Some(FileKind::IosFirebase), _ => None }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -248,7 +249,7 @@ fn replacement(value: &Value) -> Result<Option<RecordRef<'_>>, AssetError> {
 fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
-        Kind::AndroidFirebase => &[], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
+        Kind::AndroidFirebase | Kind::IosFirebase => &[], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
         _ => &[],
     }
 }
@@ -492,6 +493,27 @@ mod tests {
         assert!(validate_fields(Kind::GoogleWif, &json!({"provider":"x".repeat(4097),"serviceAccount":null})).is_err());
         assert!(validate_fields(Kind::GoogleWif, &json!({"provider":null})).is_err());
         assert!(validate_fields(Kind::AndroidFirebase, &json!({})).is_ok());
+    }
+    #[test]
+    fn ios_firebase_is_one_file_kind_with_no_companion_or_renderer_observation() {
+        let body = json!({"contextRevision":1,"kind":"ios-firebase","replacement":null});
+        let chosen = choose(&body).ok().expect("closed iOS file choice");
+        assert!(chosen.kind == Kind::IosFirebase && chosen.kind.enabled());
+        assert!(chosen.kind.file() == Some(crate::credential_format::FileKind::IosFirebase));
+        let fields = own_fields(chosen.kind, &json!({})).ok().expect("empty iOS companions");
+        assert_eq!(fields.into_value(), json!({}));
+        assert_eq!(fields.retained_bytes(), Some(0));
+        for extra in ["path", "filename", "bytes", "observation", "encoding", "bundleId"] {
+            let mut input = body.clone(); input[extra] = json!("private-canary");
+            assert!(choose(&input).is_err());
+            let mut companion = json!({}); companion[extra] = json!("private-canary");
+            assert!(validate_fields(chosen.kind, &companion).is_err());
+        }
+        assert!(validate_fields(chosen.kind, &json!({"storePassword":null,"keyAlias":null,"keyPassword":null})).is_err());
+        assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"ios-firebase","replacement":null},"fields":{}})).is_err());
+        for kind in [Kind::AppleP12, Kind::AppleProfile, Kind::AscP8] {
+            assert!(!kind.enabled() && kind.file().is_none());
+        }
     }
     #[test]
     fn stale_and_native_refusals_have_only_fixed_public_text() {

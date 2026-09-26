@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending } from '../src/assetSessionController.ts';
-import { assetError, assetJsonFits, assetRequestFits, parseAssetStatus } from '../src/assetSessionProtocol.ts';
+import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetRequestFits, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../src/assetSessionHelp.ts';
@@ -35,11 +35,12 @@ function operation(patch = {}) {
     selectionToken: null, assessment: assessment(), preview: { token: A, action: 'save', expiresInMs: 10000,
       subject: { kind: 'google-wif', change: 'new', recordId: null, recordRevision: null } }, ...patch };
 }
-function firebaseAssessment() {
+function firebaseAssessment(kind = 'android-firebase') {
   const value = assessment();
-  return { ...value, kind: 'android-firebase', state: 'format-valid', identity: 'match', fields: [
-    { id: 'file', requirement: 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64', presence: 'supplied', state: 'format-valid', issues: [],
-      checks: [{ scope: 'json-document', outcome: 'asserted-pass' }, { scope: 'firebase-shape', outcome: 'asserted-pass' }, { scope: 'application-identity', outcome: 'asserted-pass' }] },
+  const ios = kind === 'ios-firebase';
+  return { ...value, kind, context: { ...value.context, platform: ios ? 'ios' : 'android' }, state: 'format-valid', identity: 'match', fields: [
+    { id: 'file', requirement: ios ? 'MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64' : 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64', presence: 'supplied', state: 'format-valid', issues: [],
+      checks: [{ scope: ios ? 'plist-document' : 'json-document', outcome: 'asserted-pass' }, { scope: 'firebase-shape', outcome: 'asserted-pass' }, { scope: 'application-identity', outcome: 'asserted-pass' }] },
   ], assurance: { ...value.assurance, scalarValuesProcessed: false, fileObservationsProcessed: true } };
 }
 function deferred() {
@@ -139,6 +140,35 @@ test('requests are exact, bounded unions; paths, bytes, observations and extra f
   assert.equal(assetJsonFits(accessor, 32768), false); assert.equal(read, false);
 });
 
+test('iOS Firebase is exactly the fifth session kind with a closed file-only request and assessment layout', () => {
+  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'google-wif', 'project-read-token']);
+  assert.deepEqual(SESSION_FIELDS['ios-firebase'], []);
+  for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase']) {
+    assert.equal(isAssetFileKind(kind), true);
+    assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), true);
+  }
+  for (const kind of ['apple-p12', 'apple-profile', 'asc-p8', 'google-wif', 'project-read-token', 'IOS-Firebase']) {
+    assert.equal(isAssetFileKind(kind), false);
+    assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), false);
+  }
+  for (const extra of ['path', 'filename', 'bytes', 'observation', 'bundleId', 'encoding']) {
+    assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind: 'ios-firebase', replacement: null, [extra]: 'PRIVATE_CANARY' }), false);
+  }
+  assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source: { type: 'scalar', kind: 'ios-firebase', replacement: null }, fields: {} }), false);
+  const value = status(2, { context: { ...context, platform: 'ios' }, operation: operation({ source: 'captured', assessment: firebaseAssessment('ios-firebase'),
+    preview: { token: A, action: 'save', expiresInMs: 10000, subject: { kind: 'ios-firebase', change: 'new', recordId: null, recordRevision: null } } }) });
+  assert.deepEqual(parseAssetStatus(value), value);
+  for (const mutate of [
+    (s) => { s.operation.assessment.fields[0].requirement = 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64'; },
+    (s) => { s.operation.assessment.fields.push({ ...s.operation.assessment.fields[0], id: 'keyPassword' }); },
+    (s) => { s.operation.assessment.document = { bundleId: 'PRIVATE_CANARY' }; },
+    (s) => { s.operation.assessment.fields[0].value = 'PRIVATE_CANARY'; },
+    (s) => { s.operation.preview.subject.kind = 'apple-p12'; },
+    (s) => { s.operation.assessment.assurance.serviceValidation = 'verified'; },
+  ]) { const changed = structuredClone(value); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+  assert.doesNotMatch(JSON.stringify(parseAssetStatus(value)), /PRIVATE_CANARY|bundleId/);
+});
+
 test('bridge invokes only closed routes, copies admitted input, and removes raw error text', async () => {
   const work = deferred(); const calls = [];
   const api = createNativeApi('native', (command, args) => { calls.push({ command, args }); return work.promise; });
@@ -163,6 +193,7 @@ test('unqualified native and browser modes never collect input or fabricate a se
     assert.equal(h.controller.open(), false);
     assert.equal(h.controller.prepareScalar('google-wif', fields), false);
     assert.equal(h.controller.choose('android-keystore'), false);
+    assert.equal(h.controller.choose('ios-firebase'), false);
     assert.match(assetContextReason(h.controller.getSnapshot()), /qualification/u);
     await assert.rejects(previewApi.openAssetSession(), (error) => error.code === 'AssetSessionUnavailable');
     await assert.rejects(previewApi.prepareCredential({}), (error) => error.code === 'AssetSessionUnavailable');
@@ -489,6 +520,49 @@ test('original file replacement survives view subscriptions and Keep binds only 
   } finally { h.controller.dispose(); }
 });
 
+for (const finalAction of ['assign explicitly', 'change context']) test(`iOS XML selection has empty companions and Keep cannot ${finalAction === 'change context' ? 'survive a stale context review' : 'assign automatically'}`, async () => {
+  const iosContext = { ...context, platform: 'ios' };
+  const ios = (revision, patch = {}) => status(revision, { context: iosContext, ...patch });
+  const h = harness();
+  try {
+    h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'full' });
+    await ready(h, { context: iosContext });
+    assert.equal(h.controller.choose('ios-firebase'), true);
+    assert.deepEqual(h.latest('choose').args, { contextRevision: 1, kind: 'ios-firebase', replacement: null });
+    h.latest('choose').resolve(ios(2, { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) })); await settle();
+    assert.equal(h.controller.prepareSelection({ storePassword: null, keyAlias: null, keyPassword: null }), false);
+    assert.equal(h.calls.filter((call) => call.command === 'prepare').length, 0);
+    assert.equal(h.controller.prepareSelection({}), true); // Invalid companions did not spend the selection.
+    assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'selection', selectionToken: A }, fields: {} });
+    const subject = { kind: 'ios-firebase', change: 'new', recordId: null, recordRevision: null };
+    h.latest('prepare').resolve(ios(3, { operation: operation({ operationId: 4, source: 'captured', assessment: firebaseAssessment('ios-firebase'),
+      preview: { token: B, action: 'save', expiresInMs: 9000, subject } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    assert.equal(h.controller.confirmPreview(B, 'save'), true);
+    const records = [{ recordId: D, revision: 1, kind: 'ios-firebase', availability: 'unassigned' }];
+    h.latest('commit').resolve(ios(4, { records, operation: operation({ operationId: 5, operation: 'commit', source: 'captured', assessment: firebaseAssessment('ios-firebase'),
+      preview: { token: C, action: 'bind', expiresInMs: 8000, subject: { kind: 'ios-firebase', change: 'assign', recordId: D, recordRevision: 1 } } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
+    assert.deepEqual(h.controller.getSnapshot().status.assignments, []);
+    if (finalAction === 'assign explicitly') {
+      assert.equal(h.controller.confirmPreview(C, 'bind'), true);
+      assert.equal(h.latest('bind').args, C);
+      h.latest('bind').resolve(ios(5, { records: [{ ...records[0], availability: 'assigned' }],
+        assignments: [{ kind: 'ios-firebase', recordId: D, recordRevision: 1, contextRevision: 1, availability: 'available' }],
+        operation: operation({ operationId: 6, operation: 'bind', phase: 'idle', source: 'captured', assessment: null, preview: null }) })); await settle();
+      assert.equal(h.controller.getSnapshot().contextCurrent, true);
+      assert.equal(h.controller.getSnapshot().status.assignments[0].kind, 'ios-firebase');
+    } else {
+      h.setProject({ ...h.selected(), revision: 2, draft: { schemaVersion: 1, ios: { bundleId: 'org.changed' } } });
+      assert.equal(h.controller.getSnapshot().contextCurrent, false);
+      assert.equal(h.controller.getSnapshot().reviewReady, false);
+      assert.equal(h.controller.confirmPreview(C, 'bind'), false);
+      assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
+    }
+  } finally { h.controller.dispose(); }
+});
+
 test('removal identifies the exact record; another valid subject or unrelated newer operation cannot confirm', async () => {
   const records = [
     { recordId: B, revision: 0, kind: 'android-keystore', availability: 'unassigned' },
@@ -534,6 +608,13 @@ test('live session help explains actual collection and does not promise restored
   assert.match(sessionControlHelp(guide, 'save').failure, /never restores assignment automatically/u);
   assert.doesNotMatch(sessionControlHelp(guide, 'save').failure, /preserves prior authority|No save is available/u);
   assert.match(sessionControlHelp(guide, 'project').format, /Submission is not validation/u);
+  const ios = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'ios-firebase'));
+  assert.equal(ios.fields.length, 1); assert.equal(ios.fields[0].id, 'file');
+  assert.equal(ios.fields[0].requiredWhen, guide.kinds.find((kind) => kind.id === 'ios-firebase').fields[0].requiredWhen);
+  assert.match(ios.fields[0].where, /intended iOS app.*GoogleService-Info\.plist/u);
+  assert.match(ios.fields[0].format, /UTF-8 XML 1\.0.*4 MiB.*Binary plist is not supported.*depth to 32.*duplicate keys/u);
+  assert.match(ios.fields[0].failure, /bundle-ID match do not verify a Firebase account.*original is never changed/u);
+  assert.match(sessionControlHelp(guide, 'choose').format, /iOS Firebase XML plist.*native availability is a separate gate/u);
   assert.deepEqual(guide, original);
 });
 

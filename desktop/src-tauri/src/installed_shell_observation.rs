@@ -7993,7 +7993,8 @@ impl Observation {
     pub(super) fn session_file_created(&self, id: u32, kind: crate::credential_format::FileKind) {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
         let Some((index,SA::Choose(file,expected,_)))=self.session_action(r.step) else { self.fail(); return; };
-        let name=match kind { crate::credential_format::FileKind::AndroidKeystore=>"android-keystore", crate::credential_format::FileKind::AndroidFirebase=>"android-firebase" };
+        let name=match kind { crate::credential_format::FileKind::AndroidKeystore=>"android-keystore", crate::credential_format::FileKind::AndroidFirebase=>"android-firebase",
+            crate::credential_format::FileKind::IosFirebase=>"ios-firebase" };
         if name!=expected || id<=2 || r.session.files.len()>=9 || r.session.files.iter().any(|f| f.id==id || f.index==index) { self.fail(); return; }
         r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()},parent_navigation_reserved:false});
     }
@@ -9396,6 +9397,7 @@ fn assert_recent_files_suppression_contract() {
     // from an earlier Project picker, which could mask an EvidenceFolder omission.
     assert!(requires_recent_files_suppression(DialogChoice::File(FileKind::AndroidKeystore)));
     assert!(requires_recent_files_suppression(DialogChoice::File(FileKind::AndroidFirebase)));
+    assert!(requires_recent_files_suppression(DialogChoice::File(FileKind::IosFirebase)));
     assert!(requires_recent_files_suppression(DialogChoice::Project));
     assert!(requires_recent_files_suppression(DialogChoice::EvidenceFolder));
     for field in [crate::asset_commands::ProjectPathField::VersionSource, crate::asset_commands::ProjectPathField::IosProject,

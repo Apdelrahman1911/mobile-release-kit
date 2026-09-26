@@ -3,7 +3,7 @@ import type { ProjectSession } from '../drafts.ts';
 import type { CredentialGuide, CredentialKind, HelpContent } from '../types.ts';
 import type { AssetDisplayState, AssetKind, AssetScope, CredentialAssessment, CredentialIssue } from '../assetSessionTypes.ts';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending, assetSessionReason } from '../assetSessionController.ts';
-import { ASSET_KINDS, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS } from '../assetSessionProtocol.ts';
+import { ASSET_KINDS, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS, isAssetFileKind } from '../assetSessionProtocol.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../assetSessionHelp.ts';
 import { RELEASE_INPUT_STAGES, preparationScopeChanged, preparationSessionReason, sessionPreparationKind } from '../releaseInputGuidance.ts';
 import type { ReleaseInputPreparationLocal, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
@@ -17,7 +17,7 @@ const issueHelp: Record<CredentialIssue, string> = {
   'empty-file': 'The selected file is empty.', 'suffix-conflict': 'The file extension does not match this input kind.',
   'malformed-container': 'The supported container could not be parsed completely.', 'required-missing': 'Supply this required field before preparing again.',
   'value-nul': 'This field contains an unsupported NUL character.', 'scalar-format': 'The value does not match the required identifier format. Open its field help.',
-  'pkcs8-algorithm': 'The selected key identifiers are not supported.', 'firebase-shape': 'The Firebase document is missing a supported client structure.',
+  'pkcs8-algorithm': 'The selected key identifiers are not supported.', 'firebase-shape': 'The Firebase document lacks a supported Android client structure or iOS dictionary with a string BUNDLE_ID.',
   'identity-mismatch': 'The Firebase application identity does not match the submitted project draft.',
 };
 const stateLabel = { 'not-applicable': 'Not required here', missing: 'Missing', unknown: 'Not established', invalid: 'Needs correction', configured: 'Configured only', 'format-valid': 'Format / identity match' };
@@ -35,6 +35,7 @@ function Assessment({ value, guide, onHelp }: { value: CredentialAssessment; gui
         <p>{field.presence === 'supplied' ? 'Supplied · value not displayed' : 'Not supplied'}</p>
         {field.issues.length > 0 && <ul>{field.issues.map((issue) => <li key={issue}>{issueHelp[issue]}</li>)}</ul>}
         {field.checks.some((check) => check.scope === 'jks-header') && <p>JKS header only: no password, alias entry, whole-file digest or signing verification.</p>}
+        {value.kind === 'ios-firebase' && <p>iOS Firebase scope: XML plist format and bundle-ID match only. This is not iOS signing or Firebase account verification.</p>}
       </li>;
     })}</ul>
     <div className="session-assurance"><Badge>Native validation: not run</Badge><Badge>Service validation: not run</Badge><Badge>Release readiness: unknown</Badge></div>
@@ -135,7 +136,7 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   const reviewTarget = preview ? sessionTargetLabel(guide, preview.subject, status?.records ?? []) : null;
   const scopeChange = (name: keyof AssetScope, value: string) => controller.setScope({ ...state.scope, [name]: value } as AssetScope);
   const prepare = (fields: Record<string, string | null>): boolean => {
-    if (operation?.selectionToken) return controller.prepareSelection(state.selectionKind === 'android-firebase' ? {} : { storePassword: fields.storePassword ?? null, keyAlias: fields.keyAlias ?? null, keyPassword: fields.keyPassword ?? null });
+    if (operation?.selectionToken) return controller.prepareSelection(state.selectionKind === 'android-keystore' ? { storePassword: fields.storePassword ?? null, keyAlias: fields.keyAlias ?? null, keyPassword: fields.keyPassword ?? null } : {});
     if (replacement === undefined) return false;
     if (kindId === 'google-wif') return controller.prepareScalar('google-wif', { provider: fields.provider ?? null, serviceAccount: fields.serviceAccount ?? null }, replacement);
     if (kindId === 'project-read-token') return controller.prepareScalar('project-read-token', { token: fields.token ?? null }, replacement);
@@ -178,7 +179,7 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
           </div>)}
         </details>
         <p>Continue sets the choices in the existing session controls. If a session is open, changing its release context submits that context and makes earlier assignment displays stale. It does not choose a file, read a credential, keep an input, assign it or start a release.</p>
-        <p><strong>Next explicit step:</strong> {!nativeAvailable ? 'Read the availability reason below; this guide cannot enable collection.' : !inSession ? 'Start a session when you are ready.' : !state.contextCurrent || preparationScopeChanged(preparation, state.scope) ? 'Wait for the changed context, or use Submit current context if it is not current.' : preparation.guideId === 'android-keystore' || preparation.guideId === 'android-firebase' ? 'Use Select file, then prepare and review separately.' : 'Use the private fields, then Prepare private review.'}</p>
+        <p><strong>Next explicit step:</strong> {!nativeAvailable ? 'Read the availability reason below; this guide cannot enable collection.' : !inSession ? 'Start a session when you are ready.' : !state.contextCurrent || preparationScopeChanged(preparation, state.scope) ? 'Wait for the changed context, or use Submit current context if it is not current.' : isAssetFileKind(preparation.guideId) ? 'Use Select file, then prepare and review separately.' : 'Use the private fields, then Prepare private review.'}</p>
       </>}
       {preparationReason && <p className="review-caution" role="status">{preparationReason}</p>}
       <div className="button-row"><button type="button" className="button secondary" disabled={preparationReason !== null} onClick={continuePreparation}>Continue with this context</button><button type="button" className="button secondary" onClick={() => dismissPreparation(preparation)}>Close guidance</button></div>
@@ -206,8 +207,8 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
           <div className="field"><div className="field-label"><label htmlFor={`${id}-kind`}>What would you like to provide?</label>{controlHelp('choose')}</div><select id={`${id}-kind`} value={kindId} disabled={!!state.busy} onChange={(event) => changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })}>{ASSET_KINDS.map((kind) => <option key={kind} value={kind}>{guide.kinds.find((entry) => entry.id === kind)?.label ?? 'Supported session input'}</option>)}</select></div>
           <div className="field"><div className="field-label"><label htmlFor={`${id}-replace`}>New or replacement copy?</label>{controlHelp('replace')}</div><select id={`${id}-replace`} value={replacementId ?? ''} disabled={!!state.busy} onChange={(event) => changeLocal({ replacementId: event.target.value || null })}><option value="">Keep a new session record</option>{status?.records.map((record, index) => record.kind === kindId && <option key={record.recordId} value={record.recordId}>Replace session item {index + 1} · revision {record.revision}</option>)}</select><p>Starting a replacement makes old assignments unavailable, even if you cancel. The old record is not silently reassigned.</p></div>
         </> : <div className="session-intent" role="status"><strong>Original requested action:</strong> {state.intent?.change === 'replace' ? 'Replace' : state.intent?.change === 'assign' ? 'Assess for assignment' : state.intent?.change === 'delete' ? 'Review removal of' : 'Prepare'} {intentTarget ?? 'an unconfirmed target'}<p>Page navigation cannot change this target. Cancel the original operation before choosing a different action.</p></div>}
-        {(effectiveKindId === 'android-keystore' || effectiveKindId === 'android-firebase') && <>
-          <p>{effectiveKindId === 'android-keystore' ? 'Select a private .jks or .keystore original outside project folders. Only its JKS header is recognized; PKCS#12 is not supported here.' : 'Select the Android google-services.json downloaded from Firebase project settings. Every supported client is checked against your draft by the core.'}</p>
+        {isAssetFileKind(effectiveKindId) && <>
+          <p>{effectiveKindId === 'android-keystore' ? 'Select a private .jks or .keystore original outside project folders. Only its JKS header is recognized; PKCS#12 is not supported here.' : effectiveKindId === 'ios-firebase' ? 'Select the iOS GoogleService-Info.plist downloaded from Firebase project settings, in XML format. The core checks its BUNDLE_ID against your submitted draft; binary plist is not supported.' : 'Select the Android google-services.json downloaded from Firebase project settings. Every supported client is checked against your draft by the core.'}</p>
           {selectedKind?.fields.find((field) => field.id === 'file') && <div className="inline-heading"><span>Where to find this file and what to expect</span><HelpButton content={selectedKind.fields.find((field) => field.id === 'file')!} onHelp={onHelp} /></div>}
           <button className="button secondary" disabled={!!contextReason || !idle || replacement === undefined} onClick={() => { if (replacement !== undefined) controller.choose(effectiveKindId, replacement); }}><Icon name="folder" size={17} />Select file…</button>
           <p>No path entry, manual registration, renaming or copy into an internal folder. Native selection never sends the original filename or bytes to this view.</p>
@@ -234,6 +235,6 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
         return <article key={record.recordId}><div><h4>{guide?.kinds.find((kind) => kind.id === record.kind)?.label ?? 'Session input'} · item {index + 1}</h4><p>Revision {record.revision} · retained only in this session</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge></div><div className="button-row"><button className="button secondary small" disabled={!usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>Review assignment</button><button className="button secondary small" disabled={!!baseReason || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
       })}
     </div>}
-    <p className="session-limit-note">Not available in this increment: persistent encrypted storage, macOS/Windows import, PKCS#12, Apple profiles/P8 and iOS plist import. Their guides remain below. No native signing or online credential verification is claimed.</p>
+    <p className="session-limit-note">Not available in this increment: persistent encrypted storage, macOS/Windows import, PKCS#12, Apple profiles/P8 and binary plist. iOS Firebase supports XML plist checks only, subject to native availability. No native signing or online credential verification is claimed.</p>
   </section>;
 }

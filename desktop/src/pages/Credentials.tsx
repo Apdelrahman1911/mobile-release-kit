@@ -8,6 +8,7 @@ import type { AssetSessionController } from '../assetSessionController.ts';
 import type { ProjectSession } from '../drafts.ts';
 import { ReleaseInputGuidance } from '../components/ReleaseInputGuidance.tsx';
 import { sessionPreparationKind } from '../releaseInputGuidance.ts';
+import { isAssetFileKind } from '../assetSessionProtocol.ts';
 import type { ReleaseInputGuidanceController, ReleaseInputGuidanceState, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
 
 function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { guide: CredentialGuide | null; selected: string; onSelect: (kind: string) => void; sessionAvailable: boolean; onHelp: (help: HelpContent) => void }) {
@@ -22,7 +23,7 @@ function AssetGuide({ guide, selected, onSelect, sessionAvailable, onHelp }: { g
         <ul className="asset-guide-fields">{kind.fields.map((field) => <li key={field.id}>
           <div className="inline-heading"><h4>{field.label}</h4><HelpButton content={field} onHelp={onHelp} /></div>
           <p>{field.what}</p><dl className="asset-guide-definitions"><div><dt>Where to find it</dt><dd>{field.where}</dd></div><div><dt>Expected format</dt><dd>{field.format}</dd></div><div><dt>When you need it</dt><dd>{field.requiredWhen}</dd></div></dl>
-          {field.input === 'file' && <p className="asset-guide-file-note"><Icon name="folder" size={16} /><span>{kind.id === 'android-keystore' || kind.id === 'android-firebase' ? sessionAvailable ? 'Use the session importer above for supported JKS or Android JSON files. It preserves your original; this guide itself does not read files.' : 'The session importer is currently unavailable. Read its status and reason above; no manual copying or renaming is needed.' : 'Native selection of this file type is not available in this build. No manual copying or renaming is needed for this guide.'}</span></p>}
+          {field.input === 'file' && <p className="asset-guide-file-note"><Icon name="folder" size={16} /><span>{isAssetFileKind(kind.id) ? sessionAvailable ? 'Use the session importer above for supported JKS, Android JSON or iOS XML plist files. Binary plist is not supported. It preserves your original; this guide itself does not read files.' : 'The session importer is currently unavailable. Read its status and reason above; no manual copying or renaming is needed.' : 'Native selection of this file type is not available in this build. No manual copying or renaming is needed for this guide.'}</span></p>}
         </li>)}</ul>
         <div className="asset-guide-checks"><h4>Format-check scope — not a result for your file</h4><ul>{kind.plannedChecks.map((check, index) => <li key={index}>{check}</li>)}</ul><h4>What format checks do not verify</h4><ul>{kind.notVerified.map((check, index) => <li key={index}>{check}</li>)}</ul></div>
       </div>

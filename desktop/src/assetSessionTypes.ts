@@ -1,7 +1,7 @@
 import type { ApiError, JsonObject } from './types.ts';
 
 // Native session DTOs, not a renderer file API or a second credential policy.
-export type AssetFileKind = 'android-keystore' | 'android-firebase';
+export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase';
 export type AssetScalarKind = 'google-wif' | 'project-read-token';
 export type AssetKind = AssetFileKind | AssetScalarKind;
 export type AssetPlatform = 'android' | 'ios' | 'project';

@@ -137,7 +137,7 @@ pub(crate) struct InstalledSourceFacts {
 }
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
-    match kind { FileKind::AndroidKeystore => 32 * 1024 * 1024, FileKind::AndroidFirebase => 4 * 1024 * 1024 }
+    match kind { FileKind::AndroidKeystore => 32 * 1024 * 1024, FileKind::AndroidFirebase | FileKind::IosFirebase => 4 * 1024 * 1024 }
 }
 fn private_file(mode: u32) -> bool { mode & 0o077 == 0 }
 fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<usize, Reason> {
@@ -446,6 +446,7 @@ mod linux {
         let matches = match kind {
             FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore"),
             FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
+            FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
         };
         if !matches || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
     }
@@ -720,6 +721,10 @@ mod linux {
             assert!(suffix(FileKind::AndroidKeystore, Path::new("/fictional/STORE.JKS")).is_ok());
             assert!(suffix(FileKind::AndroidKeystore, Path::new("/fictional/store.p12")).is_err());
             assert!(suffix(FileKind::AndroidFirebase, Path::new("/fictional/google-services.JSON")).is_ok());
+            assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/GoogleService-Info.PLIST")).is_ok());
+            assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/google-services.json")).is_err());
+            assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/GoogleService-Info.plist.p12")).is_err());
+            assert_eq!(material_limit(FileKind::IosFirebase), 4 * 1024 * 1024);
         }
         #[test]
         fn unconfirmed_originals_are_not_relabelled_as_known_settlement() {

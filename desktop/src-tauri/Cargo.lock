@@ -2052,6 +2052,8 @@ dependencies = [
  "mrk-windows-installed-native",
  "nix",
  "ordered-stream",
+ "plist",
+ "quick-xml 0.42.0",
  "rfd",
  "rustix",
  "secret-service",
