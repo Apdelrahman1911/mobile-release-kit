@@ -1,4 +1,5 @@
 name: Mobile release preflight
+run-name: ${{ inputs.desktop_request != '' && format('MRK Desktop preflight [{0}]', inputs.desktop_request) || 'Mobile release preflight' }}
 
 on:
   workflow_dispatch:
@@ -12,6 +13,21 @@ on:
           - android
           - ios
           - both
+      desktop_request:
+        description: Optional Desktop request marker; use with the reviewed source and full ref.
+        required: false
+        default: ''
+        type: string
+      desktop_source_sha:
+        description: Optional Desktop-reviewed application commit (40 lowercase hexadecimal characters).
+        required: false
+        default: ''
+        type: string
+      desktop_expected_ref:
+        description: Optional Desktop-reviewed full branch ref, for example refs/heads/main.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -21,5 +37,8 @@ jobs:
     uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-preflight.yml@__MOBILE_RELEASE_KIT_SHA__
     with:
       tooling_sha: __MOBILE_RELEASE_KIT_SHA__
-      source_sha: ${{ github.sha }}
+      source_sha: ${{ inputs.desktop_source_sha || github.sha }}
       platform: ${{ inputs.platform }}
+      desktop_request: ${{ inputs.desktop_request }}
+      desktop_source_sha: ${{ inputs.desktop_source_sha }}
+      desktop_expected_ref: ${{ inputs.desktop_expected_ref }}

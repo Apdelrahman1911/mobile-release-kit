@@ -782,6 +782,55 @@ async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Req
     result
 }
 
+#[tauri::command]
+async fn github_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_status", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_preflight_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_prepare", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_preflight_dispatch(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_dispatch", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_preflight_track(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_track", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_preflight_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_reconcile", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_preflight_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_pending", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
+    state.document.github_preflight_command("github_preflight_cancel", request_body(&request)?)
+}
+
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
     if webview.label() == MAIN_WINDOW { Ok(()) } else { Err(AssetError::invalid()) }
 }
@@ -1006,6 +1055,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut metadata_revision = None;
         let mut release_version_revision = None;
         let mut diagnostics_revision = None;
+        let mut github_preflight_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
         let mut android_build_revision = None;
@@ -1054,6 +1104,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
             let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
+            let status = document.github_preflight_status();
+            if github_preflight_revision != Some(status.revision) {
+                github_preflight_revision = Some(status.revision);
+                let _ = app.emit_to(MAIN_WINDOW, crate::github_preflight_protocol::EVENT, &status);
+            }
             if let Ok(status) = document.environment_diagnostics_status() {
                 if diagnostics_revision != Some(status.status_revision) {
                     diagnostics_revision = Some(status.status_revision);
@@ -2440,6 +2495,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             release_version_edit_open, release_version_edit_prepare, release_version_edit_apply,
             release_version_edit_close, release_version_edit_status,
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+            github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+            github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
             ];

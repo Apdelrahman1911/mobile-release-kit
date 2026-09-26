@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries, finite configuration, local workflow or selected public metadata-text or saved-version value editing, saved offline-check and Android-build consent/status/cancellation, and closed session-only credential commands with native owner qualification. Offline checks disable core builds; saved Android builds remain unavailable without qualified native runtime and tool custody. Both can execute trusted saved project code. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
+  "description": "Fixed passive queries, finite local configuration/workflow/metadata/version edits, saved offline-check and Android-build consent/status/cancellation, and closed session-only credential commands with native owner qualification. Separate GitHub preflight commands permit only a qualified publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. No general remote writes, event emission, filesystem, shell, opener or HTTP API. Builds can execute trusted project code only under their existing native runtime/tool custody gates; listen/unlisten is for owner status only.",
   "windows": ["main"],
   "local": true,
   "permissions": [
@@ -22,6 +22,8 @@
     "allow-release-version-edit-open", "allow-release-version-edit-prepare", "allow-release-version-edit-apply",
     "allow-release-version-edit-close", "allow-release-version-edit-status",
     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+    "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
+    "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
     "allow-vault-status", "allow-vault-open", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
     "core:event:allow-listen", "core:event:allow-unlisten"

@@ -13,6 +13,7 @@ import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
+import { githubPreflightError } from './githubPreflightProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
@@ -75,6 +76,7 @@ const editUnavailable = async (): Promise<never> => {
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+const githubPreflightUnavailable = (): Promise<never> => Promise.reject(githubPreflightError({ code: 'github_preflight_refused_unqualified' }));
 const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
@@ -207,6 +209,14 @@ export const previewApi: DesktopApi = {
   refreshGitHubConnection: connectionUnavailable,
   disconnectGitHubConnection: connectionUnavailable,
   subscribeGitHubConnection: connectionUnavailable,
+  githubPreflightStatus: githubPreflightUnavailable,
+  prepareGitHubPreflight: githubPreflightUnavailable,
+  dispatchGitHubPreflight: githubPreflightUnavailable,
+  trackGitHubPreflight: githubPreflightUnavailable,
+  reconcileGitHubPreflight: githubPreflightUnavailable,
+  loadGitHubPreflightPending: githubPreflightUnavailable,
+  cancelGitHubPreflight: githubPreflightUnavailable,
+  subscribeGitHubPreflight: githubPreflightUnavailable,
   assetStatus: assetUnavailable,
   openAssetSession: assetUnavailable,
   setAssetContext: assetUnavailable,

@@ -122,7 +122,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
     </section>
     <section className="card" aria-label="Remote GitHub setup unavailable">
       <SectionHeading title="Remote setup — unavailable" description="Local workflow Apply does not push files or grant remote authority."><Icon name="lock" size={22} /></SectionHeading>
-      <p>No remote mutations or workflow dispatch. Template compatibility and release readiness remain unknown. The existing core requirements and protected-environment checklist remain manual/unknown and independent of login.</p>
+      <p>This read-only connection section does not write repository settings or dispatch workflows. The separate nonpublishing preflight panel has its own native qualification, exact caller review and one-use consent. Secrets, variables, environments and protections are not remotely configured here; the administrator checklist and release readiness remain unverified.</p>
     </section>
   </>;
 }

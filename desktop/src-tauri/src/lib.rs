@@ -66,6 +66,8 @@ pub mod metadata_text_edit_protocol;
 pub mod release_version_edit_protocol;
 pub mod github_connection_protocol;
 mod github_connection_session;
+mod github_preflight_protocol;
+mod github_preflight_session;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]
 pub mod shell;
