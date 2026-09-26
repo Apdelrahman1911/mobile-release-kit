@@ -444,10 +444,10 @@ IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 OWNER_PINS = {
-    "owned_process.py": "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02",
-    "_command_process.py": "803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b",
+    "owned_process.py": "d832b81894372f3c48b110f6e381fe00f6d71b75940f63a3d7eb5d61c1e2fad1",
+    "_command_process.py": "1ea5035578ae8ba0da31367f018d02b3669529077a65e2970cf92d1cc084b1c5",
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
-    "cancellation.py": "1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78",
+    "cancellation.py": "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35",
 }
 
 

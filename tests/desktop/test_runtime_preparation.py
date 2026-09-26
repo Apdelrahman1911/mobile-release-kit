@@ -150,7 +150,7 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-            "ios_archive_bootstrap.py",
+            "ios_archive_bootstrap.py", "github_release_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS),
@@ -190,13 +190,15 @@ class RuntimePreparationTests(unittest.TestCase):
             binary_dir = runtime / "python/bin"
             binary_dir.mkdir(parents=True)
             (binary_dir / "python3").write_bytes(b"inert, not executable")
-            # One Python file plus six bootstraps/core/CA requires nine payload
-            # slots, or twelve entries including python/bin and the manifest.
-            for bound, limit in (("MAX_FILES", 8), ("MAX_ENTRIES", 11)):
-                with self.subTest(bound=bound), patch.object(preparation, bound, limit):
-                    with self.assertRaises(preparation.PreparationError):
-                        preparation.prepare(source, runtime, "x86_64-unknown-linux-gnu")
-                self.assertEqual({entry.name for entry in runtime.iterdir()}, {"python"})
+            # One supplier file plus the selected bootstraps/core/CA and the
+            # manifest must fit, including the two supplier directories.
+            for prepare, names in ((preparation.prepare, preparation.BOOTSTRAPS),
+                                   (preparation.prepare_current, preparation.CURRENT_BOOTSTRAPS)):
+                for bound, limit in (("MAX_FILES", len(names) + 2), ("MAX_ENTRIES", len(names) + 5)):
+                    with self.subTest(profile=prepare.__name__, bound=bound), patch.object(preparation, bound, limit):
+                        with self.assertRaises(preparation.PreparationError):
+                            prepare(source, runtime, "x86_64-unknown-linux-gnu")
+                    self.assertEqual({entry.name for entry in runtime.iterdir()}, {"python"})
 
     def test_missing_edit_bootstrap_preserves_inputs_before_any_output_write(self):
         with tempfile.TemporaryDirectory() as temporary:

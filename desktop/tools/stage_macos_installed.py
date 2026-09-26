@@ -51,6 +51,9 @@ FIXTURE_CASES = {
     "postruntime-persistence-report": ("fixture-reported-persistence-failure", "confirmed", "not-attempted", "partial-installation-retained", True, 20),
 }
 PROTOCOL = "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
+# Current product protocol is separately source-bound; never rewrite the
+# historical supplier's protocol anchor to admit a newer core.
+CURRENT_PROTOCOL = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 ZIP_SIZE = 14726344
 ZIP_SHA = "42a6abab90f9641ba1b8c4aa9bb4202b153d676cc6d135b8227d8690e18275be"
 TAR_SIZE = 24432640
@@ -63,8 +66,11 @@ NOTICES = {
 BOOTSTRAPS = {"engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
               "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"}
 # Accepted historical supplier bytes keep their original entry roster. Newly
-# composed payloads include the additive domain without rewriting those anchors.
-CURRENT_BOOTSTRAPS = BOOTSTRAPS | {"project_recovery_bootstrap.py"}
+# composed payloads include every fixed current domain without rewriting them.
+CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
+    "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+    "ios_archive_bootstrap.py", "github_release_bootstrap.py",
+}
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
 CURRENT_CORE_BYTES = 32 * 1024 * 1024
@@ -408,13 +414,16 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
     need(actual == files, "complete-output-readback")
 
 
-def manifest_files(body, expected):
+def manifest_files(body, expected, *, current=False):
+    need(type(current) is bool, "runtime-manifest-profile")
+    protocol = CURRENT_PROTOCOL if current else PROTOCOL
+    bootstraps = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     need(sha(expected) and digest(body) == expected, "runtime-manifest-anchor")
     manifest = decode(body)
     need(type(manifest) is dict and set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
          and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
          and type(manifest["protocol"]) is int and manifest["protocol"] == 1
-         and manifest["target"] == "aarch64-apple-darwin" and manifest["protocolSha256"] == PROTOCOL,
+         and manifest["target"] == "aarch64-apple-darwin" and manifest["protocolSha256"] == protocol,
          "runtime-manifest-shape")
     rows = manifest["files"]
     need(type(rows) is list and 0 < len(rows) <= MAX_FILES and digest(canonical(rows)) == manifest["inventorySha256"], "runtime-inventory-anchor")
@@ -427,7 +436,7 @@ def manifest_files(body, expected):
         files[row["path"]] = row
         total += row["size"]
     need(list(files) == sorted(files) and total <= MAX_BYTES, "runtime-inventory-order-bound")
-    need(BOOTSTRAPS | {"core.zip", "github-ca.pem", "python/bin/python3"} <= set(files)
+    need(bootstraps | {"core.zip", "github-ca.pem", "python/bin/python3"} <= set(files)
          and manifest["coreSha256"] == files["core.zip"]["sha256"], "runtime-required-members")
     directories(files)
     return manifest, files
@@ -496,6 +505,7 @@ def current_source():
     core = tree(source / "src/mobile_release", max_bytes=CURRENT_CORE_BYTES)
     need(core and all(Path(name).suffix in {".py", ".json", ".pem"} for name in core), "current-core-inputs")
     need({"__init__.py", "_desktop_engine.py"} <= set(core), "current-core-required-inputs")
+    need(digest(core["_desktop_engine.py"][0]) == CURRENT_PROTOCOL, "current-protocol-source")
     captured = {"src/mobile_release/" + name: value for name, value in core.items()}
     fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS}
     fixed[CURRENT_CA_SOURCE] = 512 * 1024
@@ -625,7 +635,7 @@ def current_runtime_files(runtime, projection, supplier):
     for name in required - set(supplier):
         need(files[name][1] == 0o600, "current-generated-mode")
     manifest_body = files["manifest.json"][0]
-    manifest, rows = manifest_files(manifest_body, digest(manifest_body))
+    manifest, rows = manifest_files(manifest_body, digest(manifest_body), current=True)
     need(set(rows) | {"manifest.json"} == set(files), "current-runtime-manifest-roster")
     for name, row in rows.items():
         need(row["size"] == len(files[name][0]) and row["sha256"] == digest(files[name][0]),
@@ -665,7 +675,7 @@ def current_runtime_command(args):
             os.umask(old_mask)
         files, manifest = current_runtime_files(runtime, projection, supplier)
         manifest_digest = digest(files["manifest.json"][0])
-        need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": PROTOCOL,
+        need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
                           "qualification": "prepared-not-native-verified"}, "current-preparer-result")
         need(tree(source, current_root_mode=0o555) == projection and current_source() == (captured, projection, source_digest),
              "current-source-post-changed")
@@ -674,7 +684,7 @@ def current_runtime_command(args):
                   "acceptedArchiveSha256": provenance["acceptedArchiveSha256"],
                   "acceptedTarSha256": provenance["acceptedTarSha256"],
                   "originalManifestSha256": provenance["originalManifestSha256"], "supplierOnlyReuse": True,
-                  "successorManifestSha256": manifest_digest, "protocolSha256": PROTOCOL,
+                  "successorManifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
                   "inventorySha256": manifest["inventorySha256"], "coreSha256": manifest["coreSha256"],
                   "sourceInputsSha256": source_digest, "sourceInputCount": len(captured),
                   "supplierInventorySha256": digest(canonical(supplier_rows)), "supplierFileCount": len(supplier),
@@ -726,10 +736,10 @@ def app_command(args):
     return {"schemaVersion": 1, "appBinarySha256BeforeSigning": digest(body), "qualification": "app-copied-not-signed-or-launched"}
 
 
-def runtime_tree(root, expected):
+def runtime_tree(root, expected, *, current=False):
     files = tree(root)
     need("manifest.json" in files, "runtime-manifest-missing")
-    _, rows = manifest_files(files["manifest.json"][0], expected)
+    _, rows = manifest_files(files["manifest.json"][0], expected, current=current)
     need(set(files) == set(rows) | {"manifest.json"}, "runtime-complete-roster")
     for name, (body, mode) in files.items():
         need(mode == (0o555 if name == "python/bin/python3" else 0o444), "runtime-mode")
@@ -739,7 +749,7 @@ def runtime_tree(root, expected):
 
 
 def input_command(args):
-    runtime = runtime_tree(args.runtime, args.expected_manifest)
+    runtime = runtime_tree(args.runtime, args.expected_manifest, current=args.current_runtime)
     app = tree(args.app)
     need(APP_BINARY in app and "Contents/Info.plist" in app and "Contents/_CodeSignature/CodeResources" in app
          and app["Contents/Info.plist"][0] == read(DESKTOP / "macos-installed-inputs/Info.plist", 16384), "signed-app-roster")
@@ -1525,6 +1535,8 @@ def main(argv=None):
     inputs.add_argument("--app", required=True, type=Path)
     inputs.add_argument("--runtime", required=True, type=Path)
     inputs.add_argument("--expected-manifest", required=True)
+    inputs.add_argument("--current-runtime", action="store_true",
+                        help="Select the fixed current protocol and bootstrap roster; default retains the historical profile")
     inputs.add_argument("--output", required=True, type=Path)
     scripts = commands.add_parser("scripts")
     scripts.add_argument("--input", required=True, type=Path)

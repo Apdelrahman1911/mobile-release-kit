@@ -56,10 +56,14 @@ CONTEXT = {"source": "/inert-source", "root": "/inert-root", "sourceSha": "b" * 
            "repository": "inert/repository", "runId": "1", "attempt": 1, "platform": "linux"}
 BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
               "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py")
-CORE_NAMES = sorted([*("desktop/" + name for name in (*BOOTSTRAPS, "github-ca.pem")),
+CURRENT_BOOTSTRAPS = (*BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+                      "ios_archive_bootstrap.py", "github_release_bootstrap.py")
+HISTORICAL_CORE_NAMES = sorted([*("desktop/" + name for name in (*BOOTSTRAPS, "github-ca.pem")),
+                     "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"])
+CORE_NAMES = sorted([*("desktop/" + name for name in (*CURRENT_BOOTSTRAPS, "github-ca.pem")),
                      "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"])
 CURRENT_CORE = [record("/work/inputs/core-source/" + name) for name in CORE_NAMES]
-HISTORICAL_CORE = [record("/work/inputs/core-source/" + name, "b") for name in CORE_NAMES]
+HISTORICAL_CORE = [record("/work/inputs/core-source/" + name, "b") for name in HISTORICAL_CORE_NAMES]
 
 
 def prepared():
@@ -243,7 +247,7 @@ class AdmissionContracts(unittest.TestCase):
 class DataContracts(unittest.TestCase):
     def test_only_logical_ca_uses_fixed_checkout_controls_path(self):
         source, staged = Path("/inert-checkout"), Path("/inert-current-core")
-        preparer = SimpleNamespace(BOOTSTRAPS=BOOTSTRAPS, GITHUB_CA_NAME="github-ca.pem",
+        preparer = SimpleNamespace(CURRENT_BOOTSTRAPS=CURRENT_BOOTSTRAPS, GITHUB_CA_NAME="github-ca.pem",
             files=lambda root: [root / name for name in (CORE_NAMES if root == staged else ["__init__.py"])])
         inert = SimpleNamespace(decode=data.decode, records=data.records, same=data.same, bound=Mock())
         with patch.object(helper, "CONVENTIONAL_CURRENT_SOURCE_FILES", CURRENT_CORE), \
@@ -257,8 +261,8 @@ class DataContracts(unittest.TestCase):
 
     def test_current_roster_is_closed_not_historical_or_discovered_authority(self):
         admitted = data.records(helper.CONVENTIONAL_CURRENT_SOURCE_FILES, absolute=True)
-        self.assertEqual(len(admitted), 116)
-        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 108)
+        self.assertEqual(len(admitted), 139)
+        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 127)
         variants = [CURRENT_CORE[:-1], HISTORICAL_CORE, list(reversed(CURRENT_CORE)), [*CURRENT_CORE, CURRENT_CORE[-1]],
             sorted([*CURRENT_CORE, record("/work/inputs/core-source/src/mobile_release/new.py")], key=lambda row: row["path"])]
         for key, wrong in (("sha256", "f" * 64), ("size", 6), ("size", True), ("path", "/other/core.py")):
@@ -292,7 +296,7 @@ class DataContracts(unittest.TestCase):
                     if failure == "changed" and path == location / "src/mobile_release/__init__.py":
                         row["sha256"] = "f" * 64
                     return row
-                preparer = SimpleNamespace(BOOTSTRAPS=BOOTSTRAPS, GITHUB_CA_NAME="github-ca.pem", files=files)
+                preparer = SimpleNamespace(CURRENT_BOOTSTRAPS=CURRENT_BOOTSTRAPS, GITHUB_CA_NAME="github-ca.pem", files=files)
                 with self.subTest(location=location, failure=failure), patch.object(helper, "CONVENTIONAL_CURRENT_SOURCE_FILES", CURRENT_CORE), \
                         patch.object(helper, "conventional_module", return_value=preparer), patch.object(data, "file_record", side_effect=record_for) as reads, \
                         self.assertRaises((helper.CheckFailure, data.Refused)):
@@ -301,14 +305,14 @@ class DataContracts(unittest.TestCase):
 
     def test_historical_core_binds_only_original_supplier_mapping_and_retained_bytes(self):
         source, retained = Path("/inert-checkout"), Path("/inert-h/inputs/core-source")
-        preparer = SimpleNamespace(files=Mock(return_value=[retained / name for name in CORE_NAMES]))
+        preparer = SimpleNamespace(files=Mock(return_value=[retained / name for name in HISTORICAL_CORE_NAMES]))
         for rows in (HISTORICAL_CORE, CURRENT_CORE, HISTORICAL_CORE[:-1]):
             inert = SimpleNamespace(decode=data.decode, records=data.records, same=data.same,
                                     read=Mock(return_value=data.canonical(HISTORICAL_CORE)), bound=Mock())
             with self.subTest(rows=rows), patch.object(helper, "conventional_module", return_value=preparer):
                 if rows == HISTORICAL_CORE:
                     helper.conventional_historical_core(inert, source, data.canonical(rows), retained)
-                    self.assertEqual([call.args[0] for call in inert.bound.call_args_list], [retained / name for name in CORE_NAMES])
+                    self.assertEqual([call.args[0] for call in inert.bound.call_args_list], [retained / name for name in HISTORICAL_CORE_NAMES])
                 else:
                     with self.assertRaises(helper.CheckFailure):
                         helper.conventional_historical_core(inert, source, data.canonical(rows), retained)
@@ -443,7 +447,8 @@ class ProgressionContracts(unittest.TestCase):
                 if len(historical_checks) == {"historical-before": 1, "historical-after": 2}.get(failure):
                     raise helper.CheckFailure("inert changed historical supplier")
             copier = SimpleNamespace(prepare_source=Mock(return_value=copied))
-            preparer = SimpleNamespace(prepare=Mock(return_value=result), files=Mock(return_value=[
+            preparer = SimpleNamespace(prepare=Mock(side_effect=AssertionError("historical preparation is not a current producer")),
+                prepare_current=Mock(return_value=result), files=Mock(return_value=[
                 root / "runtime/core.zip", root / "runtime/manifest.json"]))
             modules = {"prepare_cpython_source_payload": SimpleNamespace(P=copier), "prepare_runtime": preparer}
             inert = SimpleNamespace(canonical=data.canonical, decode=data.decode, same=data.same,
@@ -464,12 +469,13 @@ class ProgressionContracts(unittest.TestCase):
                 else:
                     helper.conventional_prepare(CONTEXT, inert, PREPARE)
             self.assertEqual(inputs.call_args_list[1].args, (inert, kit, PREPARE["reviewFiles"]))
+            preparer.prepare.assert_not_called()
             if failure in {"before", "current-before", "current-stage", "historical-before"}:
                 copier.prepare_source.assert_not_called()
-                preparer.prepare.assert_not_called()
+                preparer.prepare_current.assert_not_called()
             else:
                 copier.prepare_source.assert_called_once()
-                preparer.prepare.assert_called_once_with(root / "current-core-source", root / "runtime", helper.TARGETS["linux"])
+                preparer.prepare_current.assert_called_once_with(root / "current-core-source", root / "runtime", helper.TARGETS["linux"])
                 self.assertEqual(copier.prepare_source.call_args.args[2:6],
                                  (root / "evidence", kit / "components.json", kit / "notices", kit / "notice-inventory.json"))
                 if failure in {"after", None}:
@@ -717,7 +723,8 @@ class ProgressionContracts(unittest.TestCase):
         self.assertIn("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", ast.unparse(functions["conventional_compile"]))
         producer = ast.unparse(functions["conventional_prepare"])
         self.assertIn("copier.prepare_source", producer)
-        self.assertIn("preparer.prepare", producer)
+        self.assertIn("preparer.prepare_current(", producer)
+        self.assertNotIn("preparer.prepare(", producer)
         self.assertNotIn("run_owned", producer)
         self.assertNotIn("github_compiled_test", producer)
         self.assertIn("desktop/cpython-source-inputs/conventional-review", producer)

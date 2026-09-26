@@ -521,9 +521,11 @@ test('passive/evidence admission uses reciprocal callback, while source integrat
   const retire = app.indexOf('offlinePreflightControllerRef.current?.beforeWorkspaceAction(action)');
   assert.ok(retire >= 0 && retire < app.indexOf('workspaceReducer(previous, action)') && retire < app.indexOf('if (next === previous) return'));
   assert.match(app, /new OfflinePreflightController/); assert.match(app, /useSyncExternalStore\(offlinePreflight.subscribe/);
-  assert.match(app, /savedCommandBusy = useCallback\(\(excludeVersion = false, excludeGitHubPreflight = false\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\) \?\? recoveryBusy\(\)/);
+  assert.match(app, /savedCommandBusy = useCallback\(\(excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\) \?\? recoveryBusy\(\)/);
   assert.match(app, /!excludeGitHubPreflight && githubPreflightControllerRef\.current \? githubPreflightOwnerReason\(/);
   assert.match(app, /savedCommandBusy\(false, true\)/);
+  assert.match(app, /!excludeGitHubRelease && githubReleaseControllerRef\.current \? githubReleaseOwnerReason\(/);
+  assert.match(app, /savedCommandBusy\(false, false, true\)/);
   assert.match(app, /!excludeVersion && versionEditControllerRef\.current \? versionOwnerReason\(/);
   assert.match(app, /otherOperationReason: \(\) => androidBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
   assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);

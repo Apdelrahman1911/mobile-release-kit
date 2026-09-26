@@ -185,7 +185,36 @@ class MacInstalledData(unittest.TestCase):
         value, rows = TOOL.manifest_files(encoded, TOOL.digest(encoded))
         self.assertEqual(set(rows), {row["path"] for row in files})
         self.assertNotIn("project_recovery_bootstrap.py", rows)  # Historical supplier roster is unchanged.
-        self.assertIn("project_recovery_bootstrap.py", TOOL.CURRENT_BOOTSTRAPS)
+        current_only = {"project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+                        "ios_archive_bootstrap.py", "github_release_bootstrap.py"}
+        self.assertEqual(TOOL.CURRENT_BOOTSTRAPS, TOOL.BOOTSTRAPS | current_only)
+        self.assertEqual(len(TOOL.BOOTSTRAPS), 6)
+        self.assertEqual(TOOL.PROTOCOL, "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e")
+        checkout = Path(__file__).absolute().parents[2]
+        self.assertEqual(TOOL.CURRENT_PROTOCOL, TOOL.digest((checkout / "src/mobile_release/_desktop_engine.py").read_bytes()))
+        self.assertIn('pub const PROTOCOL_SHA: &str = "' + TOOL.CURRENT_PROTOCOL + '";',
+                      (checkout / "desktop/src-tauri/src/macos_install_paths.rs").read_text())
+        self.assertNotEqual(TOOL.PROTOCOL, TOOL.CURRENT_PROTOCOL)
+        with self.assertRaisesRegex(TOOL.Refused, "runtime-manifest-shape"):
+            TOOL.manifest_files(encoded, TOOL.digest(encoded), current=True)
+        for invalid in (None, 0, 1, "current"):
+            with self.assertRaisesRegex(TOOL.Refused, "runtime-manifest-profile"):
+                TOOL.manifest_files(encoded, TOOL.digest(encoded), current=invalid)
+        current_files = sorted([*files, *({"path": name, "sha256": "1" * 64, "size": 1}
+                                         for name in current_only)], key=lambda row: row["path"])
+        current_manifest = {**manifest, "protocolSha256": TOOL.CURRENT_PROTOCOL,
+                            "files": current_files, "inventorySha256": TOOL.digest(TOOL.canonical(current_files))}
+        current_body = TOOL.canonical(current_manifest) + b"\n"
+        self.assertEqual(set(TOOL.manifest_files(current_body, TOOL.digest(current_body), current=True)[1]),
+                         TOOL.CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "python/bin/python3"})
+        with self.assertRaisesRegex(TOOL.Refused, "runtime-manifest-shape"):
+            TOOL.manifest_files(current_body, TOOL.digest(current_body))
+        for missing in current_only:
+            incomplete = [row for row in current_files if row["path"] != missing]
+            body = TOOL.canonical({**current_manifest, "files": incomplete,
+                                   "inventorySha256": TOOL.digest(TOOL.canonical(incomplete))})
+            with self.assertRaisesRegex(TOOL.Refused, "runtime-required-members"):
+                TOOL.manifest_files(body, TOOL.digest(body), current=True)
         with self.assertRaises(TOOL.Refused):
             TOOL.manifest_files(encoded, "0" * 64)
         manifest["files"] = list(reversed(files))
@@ -915,7 +944,7 @@ def current_data_fixture():
         provenance = {"acceptedArchiveSha256": "1" * 64, "acceptedTarSha256": "2" * 64,
                       "originalManifestSha256": "3" * 64, "addedNotices": ["synthetic notice only"]}
         with (mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"),
-              mock.patch.object(TOOL, "PROTOCOL", TOOL.digest(engine)),
+              mock.patch.object(TOOL, "CURRENT_PROTOCOL", TOOL.digest(engine)),
               mock.patch.object(TOOL, "reused_runtime", return_value=(historical, provenance))):
             yield SimpleNamespace(root=root, checkout=checkout, archive=archive, supplier=supplier, inputs=inputs)
 
@@ -960,6 +989,11 @@ class MacCurrentRuntimeData(unittest.TestCase):
     def test_source_pin_and_output_conflicts_fail_before_helper_or_writes(self):
         with current_data_fixture() as fixture, mock.patch.object(TOOL, "current_preparer") as prepare:
             args = self.args(fixture, "current-runtime", "stale")
+            with mock.patch.object(TOOL, "CURRENT_PROTOCOL", "f" * 64):
+                with self.assertRaisesRegex(TOOL.Refused, "current-protocol-source"):
+                    TOOL.current_runtime_command(args)
+            self.assertFalse(args.work.exists())
+            self.assertFalse(args.output.exists())
             with self.assertRaisesRegex(TOOL.Refused, "current-reviewed-source-mismatch"):
                 TOOL.current_runtime_command(args)
             self.assertFalse(args.work.exists())
@@ -1128,6 +1162,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
               mock.patch.object(TOOL.os, "geteuid", return_value=501),
               mock.patch.object(TOOL, "current_runtime_command", return_value={"data": True}) as current,
               mock.patch.object(TOOL, "runtime_command", return_value={"historical": True}) as historical,
+              mock.patch.object(TOOL, "input_command", return_value={"input": True}) as inputs,
               contextlib.redirect_stdout(io.StringIO())):
             TOOL.main(["current-runtime", "--archive", "/a", "--work", "/w", "--expected-source", "a" * 64,
                        "--expected-manifest", "b" * 64, "--output", "/o"])
@@ -1138,6 +1173,17 @@ class MacCurrentRuntimeData(unittest.TestCase):
             TOOL.main(["runtime", "--archive", "/a", "--expected-manifest", "c" * 64, "--output", "/o"])
             historical.assert_called_once()
             current.assert_called_once()
+            for current_profile, flags in ((False, []), (True, ["--current-runtime"])):
+                TOOL.main(["input", "--app", "/app", "--runtime", "/runtime", "--expected-manifest", "d" * 64,
+                           "--output", "/input", *flags])
+                self.assertIs(inputs.call_args.args[0].current_runtime, current_profile)
+        for current_profile in (False, True):
+            args = SimpleNamespace(runtime=Path("/inert-runtime"), expected_manifest="e" * 64,
+                                   current_runtime=current_profile)
+            with mock.patch.object(TOOL, "runtime_tree", side_effect=RuntimeError("inert tree boundary")) as tree:
+                with self.assertRaisesRegex(RuntimeError, "inert tree boundary"):
+                    TOOL.input_command(args)
+                tree.assert_called_once_with(args.runtime, args.expected_manifest, current=current_profile)
 
     def test_aqua_uses_reviewed_current_source_data_before_compilation(self):
         workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
