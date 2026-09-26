@@ -42,7 +42,7 @@ pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, 
 pub struct RuntimeConfig { bundle_root: PathBuf,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     passive_installed: PassiveInstalledSelection,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     installed_session: InstalledSessionSelection,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -142,26 +142,33 @@ enum PassiveInstalledSelection {
 // Activation of the normal constructor requires genuine installed-session
 // qualification and a separately reviewed activation change.
 pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = false;
+// Independently CLOSED Mac signing-input profile; unsigned/project evidence
+// cannot activate selected P12/profile collection or the assessment borrower.
+pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = false;
+fn session_inputs_qualified() -> bool {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) { INSTALLED_IOS_SESSION_INPUTS_QUALIFIED }
+    else { INSTALLED_SESSION_INPUTS_QUALIFIED }
+}
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 struct InstalledSessionOriginal {
     supervisor_claimed: std::sync::atomic::AtomicBool,
     document: std::sync::Mutex<Option<std::sync::Weak<()>>>,
     enabled: std::sync::atomic::AtomicBool,
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 #[derive(Clone)]
 struct InstalledSessionSelection {
     original: std::sync::Arc<InstalledSessionOriginal>,
     supervisor: bool,
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 impl InstalledSessionSelection {
     fn new() -> Self {
         use std::sync::{Arc, Mutex, atomic::AtomicBool};
         Self { original: Arc::new(InstalledSessionOriginal {
             supervisor_claimed: AtomicBool::new(false), document: Mutex::new(None),
-            enabled: AtomicBool::new(INSTALLED_SESSION_INPUTS_QUALIFIED),
+            enabled: AtomicBool::new(session_inputs_qualified()),
         }), supervisor: false }
     }
     fn claim_supervisor(&mut self) {
@@ -186,7 +193,7 @@ impl InstalledSessionSelection {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     fn admit_once(&self, identity: &std::sync::Arc<()>) -> Result<(), BridgeError> {
-        if !self.supervisor || INSTALLED_SESSION_INPUTS_QUALIFIED { return Err(unavailable()); }
+        if !self.supervisor || session_inputs_qualified() { return Err(unavailable()); }
         let document = self.original.document.lock().map_err(|_| unavailable())?;
         if !document.as_ref().and_then(std::sync::Weak::upgrade)
             .is_some_and(|original| std::sync::Arc::ptr_eq(&original, identity)) { return Err(unavailable()); }
@@ -640,7 +647,7 @@ impl RuntimeConfig {
             #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
             { PassiveInstalledSelection::Closed }
         },
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         installed_session: InstalledSessionSelection::new(),
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -651,21 +658,23 @@ impl RuntimeConfig {
         environment_fixture_core: None,
     } }
     pub(crate) fn claim_original_supervisor(&mut self) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         self.installed_session.claim_supervisor();
     }
     pub(crate) fn bind_original_session_document(&self, identity: &std::sync::Arc<()>) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         self.installed_session.bind_document(identity);
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let _ = identity;
     }
     fn installed_session_profile(&self, identity: Option<&std::sync::Arc<()>>) -> bool {
         #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-            not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { self.passive_installed_profile().is_ok() && self.installed_session.matches(identity) }
         #[cfg(not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-            not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))))]
         { let _ = identity; false }
     }
     pub(crate) fn installed_session_available(&self, identity: &std::sync::Arc<()>) -> bool {
@@ -719,7 +728,7 @@ impl RuntimeConfig {
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "macos", target_arch = "aarch64"))]
-        { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
+        { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
         { self.passive_installed_profile().is_ok_and(|profile| profile.permits(name)) }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
@@ -802,7 +811,7 @@ impl RuntimeConfig {
     pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method, originals: &mut crate::installed_runtime::PassiveRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
-        if !installed_passive_method(method.name()) { return Err(BridgeError::unavailable("This Mac installed profile supports only the eight passive project/draft/guidance methods.")); }
+        if !self.installed_method_available(method.name()) { return Err(BridgeError::unavailable("This Mac method is outside its passive profile or original document-bound signing-input assessment profile.")); }
         originals.inspect_once(profile, end, stop)
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]

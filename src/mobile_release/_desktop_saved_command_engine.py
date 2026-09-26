@@ -128,7 +128,9 @@ class _SavedCommandEngine:
         else:
             # Preserve a slot for the one terminal. The original Android DATA
             # encoder separately enforces accepted/stage/terminal sequencing.
-            self._require(1 <= self.frames < wire.MAX_FRAMES if terminal else self.frames < wire.MAX_FRAMES - 1)
+            maximum = (len(wire.stages(self.request.context)) + 2
+                       if self.domain is SavedCommandDomain.IOSArchive and self.request is not None else wire.MAX_FRAMES)
+            self._require(1 <= self.frames < maximum if terminal else self.frames < maximum - 1)
         self.terminal_claimed = terminal
         self.frames += 1
         self.output_bytes += len(raw)
@@ -137,7 +139,9 @@ class _SavedCommandEngine:
             if not terminal:
                 self.guard.check()
             endpoint = self.started + (wire.FINALITY_SECONDS if terminal else wire.WORK_SECONDS)
-            if terminal and self.input.first_failure is not None:
+            if terminal and self.domain is SavedCommandDomain.IOSArchive:
+                endpoint = self.input.hard_endpoint()
+            elif terminal and self.input.first_failure is not None:
                 endpoint = min(endpoint, self.input.first_failure + 10)
             self._require(time.monotonic() < endpoint)
             self._require(self.output.owned and not self.output.close_claimed)

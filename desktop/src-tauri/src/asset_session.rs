@@ -27,6 +27,12 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
+// A borrowed original session record is not a serialized credential or a new
+// credential owner. Only this document module can construct the signed loan.
+#[path = "asset_session_ios_signing.rs"]
+mod ios_signing;
+pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL_PREFIX, MATERIAL_SUFFIX as IOS_MATERIAL_SUFFIX};
+
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.
 #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1379,7 +1385,15 @@ fn observe_session_owner_reason(state: &mut DocumentState, reason: Option<Reason
 fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     // Private asset custody is separate from the installed project-only
     // profile. Sharing document checks must not qualify either native route.
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
+    if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64"))) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
+    Ok(())
+}
+fn session_kind_gate(kind: Kind) -> Result<(), AssetError> {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && !matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken) {
+        return Err(AssetError::new(Reason::UnsupportedFormat));
+    }
     Ok(())
 }
 fn preflight_document_gate(state: &DocumentState, profile: Option<crate::offline_preflight_protocol::Profile>)
@@ -1782,14 +1796,19 @@ impl DocumentBinding {
         // path or a diagnostics/offline fixture permit, reaches this owner.
         let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id), None);
         let (generation, root) = selected.map_err(|_| crate::ios_archive_owner::unavailable())?;
-        self.inner.bridge.ios_archive.prepare(args, generation, root, gate)
+        let material = if args.context().signed() {
+            Some(self.review_ios_material(&state, &args.context(), generation, &root)?)
+        } else { None };
+        self.inner.bridge.ios_archive.prepare_material(args, generation, root, gate, material)
     }
     pub(crate) fn start_ios_archive(&self, args: crate::ios_archive_protocol::Start) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
         let admitted_at = Instant::now(); // Original T before the document lock, lookup, executor or await.
         let mut state = self.lock();
         let project = self.inner.bridge.ios_archive.prepared_project(&args.operation_id, &args.owner_generation)?;
         let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project), None).ok();
-        let admitted = self.inner.bridge.ios_archive.start(args, admitted_at, selected, self.ios_archive_gate(&state))?;
+        let material = self.inner.bridge.ios_archive.prepared_material(&args.operation_id, &args.owner_generation)?
+            .filter(|original| selected.as_ref().is_some_and(|(generation, root)| self.recheck_ios_material(&state, original, *generation, root).is_ok()));
+        let admitted = self.inner.bridge.ios_archive.start_material(args, admitted_at, selected, self.ios_archive_gate(&state), material)?;
         // Gate/root/generation, one-use consent and the original roster claim
         // share this document mutex. GO is released only after unlocking it.
         drop(state); Ok(admitted.release())
@@ -2342,7 +2361,7 @@ impl DocumentBinding {
         let capability_reason = if state.unknown { Reason::CleanupUnknown } else if state.stopping { Reason::Shutdown }
             else if state.lost_observed { Reason::DocumentLost }
             else if let Some(reason) = state.session_owner_reason { reason }
-            else if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { Reason::UnsupportedPlatform }
+            else if ordinary_asset_platform_gate().is_err() { Reason::UnsupportedPlatform }
             else if !self.native_qualified() { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
         let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
             phase: slot.phase, reason: slot.reason, source: slot.source, settlement: slot.settlement,
@@ -2376,6 +2395,10 @@ impl DocumentBinding {
         state.session = true; self.bump(&mut state); Ok(self.snapshot(&state))
     }
     pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            && (args.platform != Platform::Ios || args.stage != Stage::Candidate || args.purpose != Purpose::Signing) {
+            return Err(AssetError::new(Reason::UnsupportedFormat));
+        }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) {
             if !context.context_input(args.project_id) || !args.draft.as_object().is_some_and(|draft| draft.is_empty())
@@ -3097,6 +3120,7 @@ impl DocumentBinding {
         self.bump(state); Ok(start)
     }
     pub(crate) fn choose(&self, app: tauri::AppHandle, args: commands::Choose<'_>) -> Result<AssetStatus, AssetError> {
+        session_kind_gate(args.kind)?;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) {
             if args.kind != Kind::AndroidKeystore || args.replacement.is_some() {
@@ -3128,6 +3152,7 @@ impl DocumentBinding {
                     && slot.selection.as_ref().is_some_and(|selection| selection.0 == token)).ok_or_else(AssetError::invalid)?;
                 if !slot.context.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, &context)) { return Err(AssetError::new(Reason::ContextStale)); }
                 let original = slot.candidate.as_ref().ok_or_else(AssetError::invalid)?;
+                session_kind_gate(original.payload.kind)?;
                 let fields = commands::own_fields(original.payload.kind, args.fields.ok_or_else(AssetError::invalid)?)?;
                 let payload = Arc::new(Payload { kind: original.payload.kind, material: original.payload.material.clone(), fields: Some(fields) });
                 let candidate = Candidate { payload: payload.clone(), record_id: original.record_id.clone(), existing: original.existing.clone() };
@@ -3136,10 +3161,12 @@ impl DocumentBinding {
             commands::Source::Record(reference) => {
                 idle(&state)?; let key = own_record(reference)?;
                 let record = state.records.iter().find(|record| record.key == key && !record.mutation_pending).ok_or_else(AssetError::invalid)?;
+                session_kind_gate(record.payload.kind)?;
                 (record.payload.clone(), None, Some(key), Some(now + REVIEW))
             }
             commands::Source::Scalar { kind, replacement } => {
                 idle(&state)?;
+                session_kind_gate(kind)?;
                 if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken) { return Err(AssetError::new(Reason::UnsupportedFormat)); }
                 let target = target(&state, replacement, kind)?;
                 let fields = commands::own_fields(kind, args.fields.ok_or_else(AssetError::invalid)?)?;

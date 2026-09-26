@@ -353,14 +353,34 @@ struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
 pub(crate) struct IOSXcodeSlots {
     original: Book, alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
-    audit: watch::Receiver<Instant>, prepared: bool,
+    signing: Option<[usize; 3]>, recovery_security: Option<usize>, audit: watch::Receiver<Instant>, prepared: bool,
 }
 impl IOSXcodeSlots {
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
         Self { original: Book::new(), alias: None, developer: None, executable: None, sdk: None,
-            developer_path: None, sdk_path: None, audit, prepared: false }
+            developer_path: None, sdk_path: None, signing: None, recovery_security: None, audit, prepared: false }
     }
     pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.inspect_selected(end, stop, false)
+    }
+    pub(crate) fn inspect_signed_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.inspect_selected(end, stop, true)
+    }
+    pub(crate) fn inspect_recovery_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if self.original.started { return Err(AdmissionFailure::AlreadyUsed); }
+        self.original.records.try_reserve_exact(8).map_err(native_error)?;
+        self.original.started = true;
+        checkpoint(end, stop)?;
+        native::real_user().map_err(native_error)?;
+        // Recovery has no Xcode/config/material prerequisite. Retain only its
+        // one fixed Security original in the same audited tool book.
+        let bin = self.original.chain(Path::new("/usr/bin"), end, stop)?;
+        self.recovery_security = Some(self.original.open(Some(bin), "security", false, end, stop)?);
+        self.original.inspected = true;
+        let _ = self.recovery_binding_data()?;
+        self.check_current(end, stop)
+    }
+    fn inspect_selected(&mut self, end: Instant, stop: &watch::Receiver<bool>, signed: bool) -> Result<()> {
         use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, sibling_target};
         if self.original.started { return Err(AdmissionFailure::AlreadyUsed); }
         self.original.records.try_reserve_exact(32).map_err(native_error)?;
@@ -399,8 +419,19 @@ impl IOSXcodeSlots {
             path.push(name);
         }
         self.sdk = Some(sdk); self.sdk_path = Some(path);
+        if signed {
+            // These fixed account/validator tools belong to the same retained
+            // book and its pre/post audits/consuming closes. No PATH search or
+            // second tools owner is introduced for the signed extension.
+            let bin = self.original.chain(Path::new("/usr/bin"), end, stop)?;
+            let security = self.original.open(Some(bin), "security", false, end, stop)?;
+            let codesign = self.original.open(Some(bin), "codesign", false, end, stop)?;
+            let openssl = self.original.open(Some(bin), "openssl", false, end, stop)?;
+            self.signing = Some([security, codesign, openssl]);
+        }
         self.original.inspected = true;
         let _ = self.binding_data()?;
+        if signed { let _ = self.signing_binding_data()?; }
         self.check_current(end, stop)?;
         Ok(())
     }
@@ -427,24 +458,43 @@ impl IOSXcodeSlots {
         checkpoint(end, stop)
     }
     pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
-        use crate::ios_archive_protocol::{RootIdentity, ToolIdentity, ToolchainBinding};
+        use crate::ios_archive_protocol::{RootIdentity, ToolchainBinding};
         if !self.original.inspected || self.original.closed || self.original.unknown { return Err(AdmissionFailure::Unknown); }
         let identity = |index: Option<usize>| -> Result<Identity> {
             self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
         };
         let root = |id: Identity| RootIdentity { device: id.dev.to_string(), inode: id.ino.to_string(),
             mode: u32::from(id.mode), uid: id.uid, gid: id.gid };
-        let developer = identity(self.developer)?; let sdk = identity(self.sdk)?; let tool = identity(self.executable)?;
+        let developer = identity(self.developer)?; let sdk = identity(self.sdk)?;
+        ToolchainBinding::new_data(self.developer_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(developer),
+            self.tool_data(self.executable)?, self.sdk_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(sdk))
+            .map_err(|_| AdmissionFailure::Inventory)
+    }
+    fn tool_data(&self, index: Option<usize>) -> Result<crate::ios_archive_protocol::ToolIdentity> {
+        use crate::ios_archive_protocol::ToolIdentity;
+        let tool = self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?)
+            .and_then(|record| record.identity).ok_or(AdmissionFailure::Identity)?;
         let nanos = |seconds: i64, remainder: i64| -> Result<String> {
             if !(0..1_000_000_000).contains(&remainder) { return Err(AdmissionFailure::Identity); }
             seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(remainder)).filter(|n| *n >= 0)
                 .map(|n| n.to_string()).ok_or(AdmissionFailure::Identity)
         };
-        let tool = ToolIdentity { device: tool.dev.to_string(), inode: tool.ino.to_string(), mode: u32::from(tool.mode),
+        Ok(ToolIdentity { device: tool.dev.to_string(), inode: tool.ino.to_string(), mode: u32::from(tool.mode),
             uid: tool.uid, gid: tool.gid, links: u32::from(tool.links), size: u64::try_from(tool.size).map_err(native_error)?,
-            mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? };
-        ToolchainBinding::new_data(self.developer_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(developer), tool,
-            self.sdk_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(sdk)).map_err(|_| AdmissionFailure::Inventory)
+            mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? })
+    }
+    pub(crate) fn signing_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
+        if !self.original.inspected || self.original.closed || self.original.unknown { return Err(AdmissionFailure::Unknown); }
+        let [security, codesign, openssl] = self.signing.ok_or(AdmissionFailure::Inventory)?;
+        crate::ios_archive_protocol::SigningToolBindings::new_data(self.tool_data(Some(security))?,
+            self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
+    }
+    pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
+        if !self.original.inspected || self.original.closed || self.original.unknown
+            || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
+            return Err(AdmissionFailure::Inventory);
+        }
+        self.tool_data(self.recovery_security)
     }
     pub(crate) fn check_after_use(&self, end: Instant) -> Result<()> {
         self.original.ios_check_after_use(end, &self.audit)?;

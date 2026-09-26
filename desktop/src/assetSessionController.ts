@@ -2,7 +2,7 @@
 // invoke or view. This controller never claims to cancel by dropping a Promise.
 import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
-import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, TokenFields, WifFields } from './assetSessionTypes.ts';
+import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, TokenFields, WifFields } from './assetSessionTypes.ts';
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
 
 function freeze<T>(value: T): T {
@@ -320,7 +320,7 @@ export class AssetSessionController {
     this.update({ selectionKind: kind });
     return this.run('choose-file', () => this.api!.chooseAsset(request), this.phase({ kind, change: replacement ? 'replace' : 'new', record: replacement }, 'choose-file', null));
   }
-  prepareSelection(fields: KeystoreFields | Record<string, never>): boolean {
+  prepareSelection(fields: KeystoreFields | P12Fields | Record<string, never>): boolean {
     const operation = this.state.status?.operation;
     const phase = this.intentPhase;
     if (!this.contextReady() || !operation?.selectionToken || operation.selectionToken === this.spentSelection || !this.state.selectionKind ||
@@ -328,7 +328,9 @@ export class AssetSessionController {
     const request: CredentialPrepareRequest = { contextRevision: this.state.status!.context!.revision, source: { type: 'selection', selectionToken: operation.selectionToken }, fields };
     // The selection token has no renderer kind field. Keep its companions tied
     // to the original choice; native ownership independently enforces this too.
-    if (!assetRequestFits('credential_prepare', request) || Object.keys(fields).length !== SESSION_FIELDS[this.state.selectionKind].length) {
+    const expected = SESSION_FIELDS[this.state.selectionKind];
+    if (!assetRequestFits('credential_prepare', request) || Object.keys(fields).length !== expected.length ||
+        !expected.every((name) => Object.hasOwn(fields, name))) {
       this.update({ error: assetError({ code: 'asset_invalid_request' }) }); return false;
     }
     this.spentSelection = operation.selectionToken;

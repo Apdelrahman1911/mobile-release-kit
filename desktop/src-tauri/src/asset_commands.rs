@@ -27,11 +27,13 @@ impl Kind {
     }
     pub(crate) fn enabled(self) -> bool {
         matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
+            || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && matches!(self, Self::AppleP12 | Self::AppleProfile))
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
         match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase),
-            Self::IosFirebase => Some(FileKind::IosFirebase), _ => None }
+            Self::IosFirebase => Some(FileKind::IosFirebase), Self::AppleP12 => Some(FileKind::AppleP12),
+            Self::AppleProfile => Some(FileKind::AppleProfile), _ => None }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -187,6 +189,12 @@ pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
 impl Fields {
     pub(crate) fn empty_firebase() -> Self { Self { kind: Kind::AndroidFirebase, values: Vec::new() } }
     pub(crate) fn byte_count(&self) -> usize { self.values.iter().flatten().map(String::capacity).sum() }
+    // The original signed consumer borrows this immutable field from its retained
+    // Payload. No clone, serializer, renderer projection or independent custody.
+    pub(crate) fn borrow_value(&self, name: &str) -> Option<&str> {
+        let index = field_names(self.kind).iter().position(|field| *field == name)?;
+        self.values.get(index)?.as_deref()
+    }
     // Lookup admission counts retained allocation capacity, including empty
     // value cells. Keep the independent committed-record charge unchanged.
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
@@ -249,7 +257,8 @@ fn replacement(value: &Value) -> Result<Option<RecordRef<'_>>, AssetError> {
 fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
-        Kind::AndroidFirebase | Kind::IosFirebase => &[], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
+        Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile => &[],
+        Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
         _ => &[],
     }
 }
@@ -511,9 +520,48 @@ mod tests {
         }
         assert!(validate_fields(chosen.kind, &json!({"storePassword":null,"keyAlias":null,"keyPassword":null})).is_err());
         assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"ios-firebase","replacement":null},"fields":{}})).is_err());
-        for kind in [Kind::AppleP12, Kind::AppleProfile, Kind::AscP8] {
-            assert!(!kind.enabled() && kind.file().is_none());
+        assert!(!Kind::AscP8.enabled() && Kind::AscP8.file().is_none());
+        for kind in [Kind::AppleP12, Kind::AppleProfile] {
+            assert_eq!(kind.enabled(), cfg!(all(target_os = "macos", target_arch = "aarch64")));
+            assert!(kind.file().is_some());
         }
+    }
+    #[test]
+    fn apple_fields_are_exact_write_only_companions_with_platform_admission_separate() {
+        assert_eq!(field_names(Kind::AppleP12), &["password"]);
+        assert!(field_names(Kind::AppleProfile).is_empty());
+        assert!(Kind::AppleP12.file() == Some(crate::credential_format::FileKind::AppleP12));
+        assert!(Kind::AppleProfile.file() == Some(crate::credential_format::FileKind::AppleProfile));
+        let values = [json!({"password":null}), json!({"password":" \0 private-canary "})];
+        for input in &values {
+            let fields = own_fields(Kind::AppleP12, input);
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                let fields = fields.ok().unwrap();
+                assert_eq!(fields.into_value(), *input);
+                assert_eq!(fields.borrow_value("password"), input["password"].as_str());
+                assert!(fields.borrow_value("storePassword").is_none());
+                assert!(fields.borrow_value("private-canary").is_none());
+            } else { assert!(fields.is_err()); }
+        }
+        assert_eq!(own_fields(Kind::AppleProfile, &json!({})).is_ok(), cfg!(all(target_os = "macos", target_arch = "aarch64")));
+        for input in [json!({}), json!({"password":false}), json!({"password":"x".repeat(4097)}),
+            json!({"password":null,"path":"private-canary"}), json!({"storePassword":null})] {
+            assert!(validate_fields(Kind::AppleP12, &input).is_err());
+        }
+        assert!(validate_fields(Kind::AppleProfile, &json!({"password":null})).is_err());
+        assert!(!Kind::AscP8.enabled());
+    }
+    #[test]
+    fn consumer_field_borrow_uses_original_backing_without_normalization_or_unknown_names() {
+        // Inert private DATA; this creates no platform/session/consumer permit.
+        let mut value = String::with_capacity(64); value.push_str(" \0 private-canary ");
+        let fields = Fields { kind: Kind::AppleP12, values: vec![Some(value)] };
+        let borrowed = fields.borrow_value("password").unwrap();
+        assert_eq!(borrowed, " \0 private-canary ");
+        assert_eq!(borrowed.as_ptr(), fields.values[0].as_ref().unwrap().as_ptr());
+        assert!(fields.borrow_value("Password").is_none() && fields.borrow_value("token").is_none());
+        let missing = Fields { kind: Kind::AppleP12, values: vec![None] };
+        assert!(missing.borrow_value("password").is_none());
     }
     #[test]
     fn stale_and_native_refusals_have_only_fixed_public_text() {

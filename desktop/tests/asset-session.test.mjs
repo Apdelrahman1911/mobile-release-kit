@@ -2,6 +2,7 @@
 // service, process fixture, storage, real credential or engine is accessed.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending } from '../src/assetSessionController.ts';
 import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetRequestFits, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
@@ -42,6 +43,15 @@ function firebaseAssessment(kind = 'android-firebase') {
     { id: 'file', requirement: ios ? 'MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64' : 'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64', presence: 'supplied', state: 'format-valid', issues: [],
       checks: [{ scope: ios ? 'plist-document' : 'json-document', outcome: 'asserted-pass' }, { scope: 'firebase-shape', outcome: 'asserted-pass' }, { scope: 'application-identity', outcome: 'asserted-pass' }] },
   ], assurance: { ...value.assurance, scalarValuesProcessed: false, fileObservationsProcessed: true } };
+}
+function appleAssessment(kind) {
+  const value = assessment(), p12 = kind === 'apple-p12';
+  return { ...value, kind, context: { platform: 'ios', stage: 'candidate', purpose: 'signing' }, state: 'configured', fields: [
+    { id: 'file', requirement: p12 ? 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64' : 'MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64',
+      presence: 'supplied', state: 'configured', issues: [], checks: [{ scope: p12 ? 'pfx-envelope' : 'cms-signed-data-envelope', outcome: 'asserted-pass' }] },
+    ...(p12 ? [{ id: 'password', requirement: 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD', presence: 'supplied', state: 'configured', issues: [],
+      checks: [{ scope: 'value-admission', outcome: 'passed' }] }] : []),
+  ], assurance: { ...value.assurance, scalarValuesProcessed: p12, fileObservationsProcessed: true } };
 }
 function deferred() {
   let resolve; let reject;
@@ -140,14 +150,14 @@ test('requests are exact, bounded unions; paths, bytes, observations and extra f
   assert.equal(assetJsonFits(accessor, 32768), false); assert.equal(read, false);
 });
 
-test('iOS Firebase is exactly the fifth session kind with a closed file-only request and assessment layout', () => {
-  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'google-wif', 'project-read-token']);
+test('iOS Firebase and separately admitted Apple files extend only the exact closed session kinds', () => {
+  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'google-wif', 'project-read-token']);
   assert.deepEqual(SESSION_FIELDS['ios-firebase'], []);
-  for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase']) {
+  for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile']) {
     assert.equal(isAssetFileKind(kind), true);
     assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), true);
   }
-  for (const kind of ['apple-p12', 'apple-profile', 'asc-p8', 'google-wif', 'project-read-token', 'IOS-Firebase']) {
+  for (const kind of ['asc-p8', 'google-wif', 'project-read-token', 'IOS-Firebase', 'Apple-P12']) {
     assert.equal(isAssetFileKind(kind), false);
     assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), false);
   }
@@ -167,6 +177,31 @@ test('iOS Firebase is exactly the fifth session kind with a closed file-only req
     (s) => { s.operation.assessment.assurance.serviceValidation = 'verified'; },
   ]) { const changed = structuredClone(value); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
   assert.doesNotMatch(JSON.stringify(parseAssetStatus(value)), /PRIVATE_CANARY|bundleId/);
+});
+
+test('Apple selection password and assessment layouts stay exact, bounded and envelope-only', () => {
+  assert.deepEqual(SESSION_FIELDS['apple-p12'], ['password']); assert.deepEqual(SESSION_FIELDS['apple-profile'], []);
+  const request = { contextRevision: 1, source: { type: 'selection', selectionToken: A }, fields: { password: ' INERT_PASSWORD_CANARY\t' } };
+  assert.equal(assetRequestFits('credential_prepare', request), true);
+  for (const password of [null, '', 'é'.repeat(2048)]) assert.equal(assetRequestFits('credential_prepare', { ...request, fields: { password } }), true);
+  for (const fields of [{ password: 1 }, { password: 'x'.repeat(4097) }, { password: 'é'.repeat(2049) }, { password: '\ud800' },
+    { password: null, profile: null }, { privateKey: 'INERT_PASSWORD_CANARY' }])
+    assert.equal(assetRequestFits('credential_prepare', { ...request, fields }), false);
+  for (const kind of ['apple-p12', 'apple-profile']) {
+    assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source: { type: 'scalar', kind, replacement: null }, fields: {} }), false);
+    const value = status(2, { context: { ...context, platform: 'ios', purpose: 'signing' }, operation: operation({ source: 'captured', assessment: appleAssessment(kind),
+      preview: { token: A, action: 'save', expiresInMs: 10000, subject: { kind, change: 'new', recordId: null, recordRevision: null } } }) });
+    assert.deepEqual(parseAssetStatus(value), value);
+    assert.equal(parseAssetStatus(value).operation.assessment.state, 'configured');
+    for (const mutate of [
+      (s) => { s.operation.assessment.fields[0].requirement = 'MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64'; },
+      (s) => { s.operation.assessment.fields[0].value = 'INERT_PASSWORD_CANARY'; },
+      (s) => { s.operation.assessment.fields.push({ ...s.operation.assessment.fields[0], id: 'keyPassword' }); },
+      (s) => { s.operation.assessment.assurance.nativeValidation = 'verified'; },
+      (s) => { s.operation.assessment.assurance.serviceValidation = 'verified'; },
+      (s) => { s.operation.assessment.signerSha256 = 'e'.repeat(64); },
+    ]) { const changed = structuredClone(value); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+  }
 });
 
 test('bridge invokes only closed routes, copies admitted input, and removes raw error text', async () => {
@@ -194,6 +229,8 @@ test('unqualified native and browser modes never collect input or fabricate a se
     assert.equal(h.controller.prepareScalar('google-wif', fields), false);
     assert.equal(h.controller.choose('android-keystore'), false);
     assert.equal(h.controller.choose('ios-firebase'), false);
+    assert.equal(h.controller.choose('apple-p12'), false);
+    assert.equal(h.controller.choose('apple-profile'), false);
     assert.match(assetContextReason(h.controller.getSnapshot()), /qualification/u);
     await assert.rejects(previewApi.openAssetSession(), (error) => error.code === 'AssetSessionUnavailable');
     await assert.rejects(previewApi.prepareCredential({}), (error) => error.code === 'AssetSessionUnavailable');
@@ -226,7 +263,7 @@ test('preparation refuses active or uncertain work and local replacement/private
       assert.notEqual(preparationSessionReason(target, current, local), null);
       assert.deepEqual(local, { ...emptyPreparationLocal, ...patch });
     }
-    assert.match(preparationSessionReason(preparationView('apple-p12'), current, emptyPreparationLocal), /reference guide only/);
+    assert.match(preparationSessionReason(preparationView('asc-p8'), current, emptyPreparationLocal), /reference guide only/);
     assert.equal(preparationSessionReason(target, current, emptyPreparationLocal, 'Other original work is pending.'), 'Other original work is pending.');
     const same = preparationView('google-wif', current.scope), form = { ...emptyPreparationLocal, kindId: 'google-wif', writeOnlyFormMounted: true };
     assert.equal(preparationScopeChanged(same, current.scope), false);
@@ -563,6 +600,49 @@ for (const finalAction of ['assign explicitly', 'change context']) test(`iOS XML
   } finally { h.controller.dispose(); }
 });
 
+for (const kind of ['apple-p12', 'apple-profile']) for (const finalAction of ['assign', 'context-change'])
+test(`${kind} original selection keeps write-only companions separate and requires explicit current ${finalAction}`, async () => {
+  const iosContext = { ...context, platform: 'ios', purpose: 'signing' };
+  const ios = (revision, patch = {}) => status(revision, { context: iosContext, ...patch });
+  const h = harness();
+  try {
+    h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'signing' }); await ready(h, { context: iosContext });
+    assert.equal(h.controller.choose(kind), true);
+    assert.deepEqual(h.latest('choose').args, { contextRevision: 1, kind, replacement: null });
+    h.latest('choose').resolve(ios(2, { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) })); await settle();
+    const fields = kind === 'apple-p12' ? { password: ' PRIVATE_P12_PASSWORD_CANARY\t' } : {};
+    for (const wrong of kind === 'apple-p12' ? [{}, { token: null }, { password: 'x'.repeat(4097) }] : [{ password: null }, { storePassword: null, keyAlias: null, keyPassword: null }])
+      assert.equal(h.controller.prepareSelection(wrong), false);
+    assert.equal(h.calls.filter((call) => call.command === 'prepare').length, 0);
+    const before = h.controller.getSnapshot().entryGeneration;
+    assert.equal(h.controller.prepareSelection(fields), true); assert.equal(h.controller.prepareSelection(fields), false);
+    assert.ok(h.controller.getSnapshot().entryGeneration > before);
+    assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'selection', selectionToken: A }, fields });
+    assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /PRIVATE_P12_PASSWORD_CANARY/);
+    const subject = { kind, change: 'new', recordId: null, recordRevision: null };
+    h.latest('prepare').resolve(ios(3, { operation: operation({ operationId: 4, source: 'captured', assessment: appleAssessment(kind),
+      preview: { token: B, action: 'save', expiresInMs: 9000, subject } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true); assert.equal(h.controller.confirmPreview(B, 'save'), true);
+    const records = [{ recordId: D, revision: 1, kind, availability: 'unassigned' }];
+    h.latest('commit').resolve(ios(4, { records, operation: operation({ operationId: 5, operation: 'commit', source: 'captured', assessment: appleAssessment(kind),
+      preview: { token: C, action: 'bind', expiresInMs: 8000, subject: { kind, change: 'assign', recordId: D, recordRevision: 1 } } }) })); await settle();
+    assert.equal(h.controller.getSnapshot().reviewReady, true); assert.deepEqual(h.controller.getSnapshot().status.assignments, []);
+    assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
+    if (finalAction === 'assign') {
+      assert.equal(h.controller.confirmPreview(C, 'bind'), true);
+      h.latest('bind').resolve(ios(5, { records: [{ ...records[0], availability: 'assigned' }],
+        assignments: [{ kind, recordId: D, recordRevision: 1, contextRevision: 1, availability: 'available' }],
+        operation: operation({ operationId: 6, operation: 'bind', phase: 'idle', source: 'captured', assessment: null, preview: null }) })); await settle();
+      assert.equal(h.controller.getSnapshot().status.assignments[0].kind, kind);
+      assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /PRIVATE_P12_PASSWORD_CANARY/);
+    } else {
+      h.setProject({ ...h.selected(), revision: 2, draft: { schemaVersion: 1, ios: { teamId: 'Z9Y8X7W6V5' } } });
+      assert.equal(h.controller.getSnapshot().contextCurrent, false); assert.equal(h.controller.getSnapshot().reviewReady, false);
+      assert.equal(h.controller.confirmPreview(C, 'bind'), false); assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
+    }
+  } finally { h.controller.dispose(); }
+});
+
 test('removal identifies the exact record; another valid subject or unrelated newer operation cannot confirm', async () => {
   const records = [
     { recordId: B, revision: 0, kind: 'android-keystore', availability: 'unassigned' },
@@ -615,7 +695,25 @@ test('live session help explains actual collection and does not promise restored
   assert.match(ios.fields[0].format, /UTF-8 XML 1\.0.*4 MiB.*Binary plist is not supported.*depth to 32.*duplicate keys/u);
   assert.match(ios.fields[0].failure, /bundle-ID match do not verify a Firebase account.*original is never changed/u);
   assert.match(sessionControlHelp(guide, 'choose').format, /iOS Firebase XML plist.*native availability is a separate gate/u);
+  const p12 = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'apple-p12'));
+  assert.deepEqual(p12.fields.map((field) => field.id), ['file', 'password']);
+  assert.match(p12.fields[0].format, /32 MiB.*4 MiB.*not password or trust checks/u);
+  assert.match(p12.fields[1].where, /authorized owner/); assert.match(p12.fields[1].format, /4,096 UTF-8 bytes.*write-only/);
+  const profile = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'apple-profile'));
+  assert.match(profile.fields[0].format, /4 MiB.*DER CMS SignedData.*No password/);
+  assert.match(profile.fields[0].failure, /not proof of Apple authenticity/);
   assert.deepEqual(guide, original);
+});
+
+test('Apple UI reuses original password-only write-only lifetime without file-path or browser-storage collection', () => {
+  const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
+  assert.match(component, /type="password".*autoComplete="new-password"/);
+  assert.ok(component.includes("state.selectionKind === 'apple-p12' ? { password: fields.password ?? null }"));
+  assert.ok(component.includes('if (onPrepare(fields)) setValues({})'));
+  assert.ok(component.includes('state.entryGeneration'));
+  assert.match(component, /P12 envelope only: the password has not been tested/);
+  assert.match(component, /CMS envelope only: this does not establish an Apple issuer/);
+  assert.doesNotMatch(component, /type="file"|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b/);
 });
 
 test('an overtaking event cannot replace the review carried by the original command reply', async () => {

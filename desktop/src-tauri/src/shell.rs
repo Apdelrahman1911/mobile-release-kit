@@ -1360,7 +1360,8 @@ mod owned_gtk {
         let object = match choice {
             DialogChoice::File(kind) => {
                 let title = match kind { FileKind::AndroidKeystore => "Choose an Android JKS keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON",
-                    FileKind::IosFirebase => "Choose iOS Firebase XML plist" };
+                    FileKind::IosFirebase => "Choose iOS Firebase XML plist",
+                    FileKind::AppleP12 | FileKind::AppleProfile => { not_created(&call, Reason::UnsupportedPlatform); return; } };
                 Object::File(gtk::FileChooserDialog::with_buttons(Some(title), Some(&parent), gtk::FileChooserAction::Open,
                     &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)]))
             }
@@ -1430,6 +1431,9 @@ mod owned_gtk {
                                 filter.set_name(Some("iOS Firebase XML plist (.plist)"));
                                 for pattern in ["*.plist", "*.PLIST"] { filter.add_pattern(pattern); }
                             }
+                            // Refused before object construction above. Keep the
+                            // closed match fail-safe if this path ever changes.
+                            FileKind::AppleP12 | FileKind::AppleProfile => { call.failed(Reason::UnsupportedPlatform); return; }
                         }
                         dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
                     }

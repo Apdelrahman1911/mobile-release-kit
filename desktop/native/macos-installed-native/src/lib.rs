@@ -104,7 +104,7 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
 }
 
 #[derive(Clone, Copy)]
-pub enum PanelKind { Project, Quit }
+pub enum PanelKind { Project, Quit, File }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelResponse { Accept, Decline, Other }
 fn panel_response(code: c_int) -> io::Result<PanelResponse> {
@@ -150,7 +150,7 @@ impl Panel {
         self.usable()?;
         // SAFETY: retained opaque original, main-thread-only type. EPERM means
         // the native function observed no available parent before construction.
-        let status = unsafe { mrk_panel_start(self.original.as_ptr(), match kind { PanelKind::Project => 1, PanelKind::Quit => 2 }) };
+        let status = unsafe { mrk_panel_start(self.original.as_ptr(), match kind { PanelKind::Project => 1, PanelKind::Quit => 2, PanelKind::File => 3 }) };
         #[cfg(feature = "installed-observation")]
         if self.observation_identity_armed {
             // This C call ACTUALLY returned. Copy saved scalars now, before the
@@ -1142,7 +1142,7 @@ mod observation {
                 &mut response, path.as_mut_ptr(), path.len()) };
             if let Err(error) = result(status) { self.unknown = true; return Err(error); }
             let parsed = (|| {
-                let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit,
+                let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit, 3 => PanelKind::File,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 if !observation_flags_valid(flags) { return Err(io::ErrorKind::InvalidData.into()); }
                 let parent_present = flags & 0x1000 != 0; let panel_present = flags & 0x2000 != 0;
@@ -1273,6 +1273,8 @@ mod tests {
         // definitions construct no NSWindow, fake callback or native permit.
         for (kind, code, expected) in [
             (1, 1, PanelResponse::Accept), (1, 0, PanelResponse::Decline),
+            (3, 1, PanelResponse::Accept), (3, 0, PanelResponse::Decline),
+            (3, -1000, PanelResponse::Other), (3, 1001, PanelResponse::Other),
             (2, 1001, PanelResponse::Accept), (2, 1000, PanelResponse::Decline),
             (1, -1000, PanelResponse::Other), (1, -1001, PanelResponse::Other),
             (1, 1000, PanelResponse::Other), (2, 0, PanelResponse::Other),

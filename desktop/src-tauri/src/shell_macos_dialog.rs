@@ -1,4 +1,4 @@
-//! Native project/Quit panel adapter for the existing OriginalWork, not rfd's
+//! Native project/signing-file/Quit panel adapter for the existing OriginalWork, not rfd's
 //! compatibility future. The actual panel and completion live on the main loop.
 use super::*;
 use std::{cell::RefCell, path::PathBuf};
@@ -544,6 +544,8 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     let call = owner.gui.clone();
     let kind = match (choice, initial_folder) {
         (DialogChoice::Project, None) => PanelKind::Project,
+        (DialogChoice::File(crate::credential_format::FileKind::AppleP12
+            | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase), None) => PanelKind::File,
         (DialogChoice::Quit, None) => PanelKind::Quit,
         _ => { call.not_created(Reason::UnsupportedPlatform); return Err(Reason::UnsupportedPlatform); }
     };

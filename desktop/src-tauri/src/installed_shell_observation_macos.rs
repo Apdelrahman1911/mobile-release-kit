@@ -71,7 +71,8 @@ fn panel_readiness(panel: &ObservedPanel, id: u32, quit: bool, ever_attached: bo
     same_action_returned: bool, preconfigured: bool) -> Result<bool, &'static str> {
     let native = &panel.native;
     if panel.id != id { return Err("native-original-id"); }
-    if matches!(native.kind, mrk_macos_installed_native::PanelKind::Quit) != quit { return Err("native-kind"); }
+    if !matches!((native.kind, quit), (mrk_macos_installed_native::PanelKind::Quit, true)
+        | (mrk_macos_installed_native::PanelKind::Project, false)) { return Err("native-kind"); }
     if !native.started { return Err("native-not-started"); }
     if !panel.action_allowed { return Err("native-ineligible"); }
     if native.action_attempted { return Err("native-action-attempted"); }
@@ -437,7 +438,7 @@ impl PanelSample {
         let native = &panel.native;
         Self { step, id: panel.id,
             kind: match native.kind { mrk_macos_installed_native::PanelKind::Project => "project",
-                mrk_macos_installed_native::PanelKind::Quit => "quit" },
+                mrk_macos_installed_native::PanelKind::Quit => "quit", mrk_macos_installed_native::PanelKind::File => "file" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
             panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible }

@@ -248,7 +248,7 @@ test('old success/failure cannot clear a newer attempt; reentrant retirement, sa
 test('preparation targets require the exact current core row, active hint and actually selected draft without submitting anything', async () => {
   const h = harness();
   try {
-    await read(h, valid([guidedRow(), guidedRow('android-keystore', 'production'), guidedRow('apple-p12')]));
+    await read(h, valid([guidedRow(), guidedRow('android-keystore', 'production'), guidedRow('asc-p8')]));
     const source = h.state, input = source.result.requirements[0], calls = h.calls.length;
     const target = h.controller.preparationTarget(source, input);
     assert.ok(target); assert.equal(target.source, source); assert.equal(target.requirement, input);
@@ -299,6 +299,20 @@ test('a current iOS Firebase requirement opens the same file-only session guide 
   } finally { h.controller.dispose(); }
 });
 
+for (const kindId of ['apple-p12', 'apple-profile']) test(`a current ${kindId} requirement opens its same core guide without collecting or assigning material`, async () => {
+  const h = harness();
+  try {
+    await read(h, valid([guidedRow(kindId)]));
+    const source = h.state, calls = h.calls.length, target = h.controller.preparationTarget(source, source.result.requirements[0]);
+    assert.ok(target); assert.equal(target.guideId, kindId); assert.equal(sessionPreparationKind(target.guideId), kindId);
+    assert.deepEqual(target.scope, { platform: 'ios', stage: 'candidate', purpose: 'full' });
+    assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === kindId).fields.map((field) => field.id), kindId === 'apple-p12' ? ['file', 'password'] : ['file']);
+    assert.equal(h.controller.preparationCurrent(target, target), true); assert.equal(h.state, source); assert.equal(h.calls.length, calls);
+    h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.teamId', value: 'Z9' });
+    assert.equal(h.controller.preparationCurrent(target, target), false);
+  } finally { h.controller.dispose(); }
+});
+
 test('retired preparation callbacks cannot revive after stage, project, draft, help, connection or save transitions', async () => {
   const changes = [
     ['stage away and back', (h) => { h.controller.setStage('production'); h.controller.setStage('candidate'); }],
@@ -346,7 +360,7 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   assert.ok(page.includes('<CredentialSession state={state} controller={controller}'));
   assert.ok(page.includes('isAssetFileKind(kind.id) ? sessionAvailable'));
   assert.ok(session.includes('isAssetFileKind(preparation.guideId)') && session.includes('isAssetFileKind(effectiveKindId)'));
-  assert.ok(session.includes("state.selectionKind === 'android-keystore' ? { storePassword:"));
+  assert.match(session, /state\.selectionKind === 'android-keystore' \?\s*\{ storePassword:/);
   assert.match(session, /iOS Firebase scope: XML plist format and bundle-ID match only/);
   assert.match(session, /Native validation: not run.*Service validation: not run.*Release readiness: unknown/);
   assert.doesNotMatch(session, /and iOS plist import/);
