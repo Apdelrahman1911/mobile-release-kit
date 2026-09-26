@@ -12,6 +12,12 @@ pub(crate) const DESCRIPTOR_LIMIT: usize = 512;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, gid: u32 }
 impl DirectoryIdentity {
+    // Only the private store's actual held Linux directory observation calls
+    // this bridge. It is not renderer input, a synthetic source or write lease.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn vault_original(dev: u64, ino: u64, mode: u32, uid: u32, gid: u32) -> Self {
+        Self { dev, ino, mode, uid, gid }
+    }
     #[cfg(test)]
     pub(crate) fn synthetic_evidence_identity() -> Self {
         // Predicate DATA only: no path is opened and no native proof is issued.
@@ -58,6 +64,14 @@ impl ProjectIdentity {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: ProjectIdentity }
+
+/// Produced only by a completed original project-directory roster probe. When
+/// the vault does not exist yet, its owner must additionally compare these
+/// roots with its held existing ancestors before creating either private edge.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct VaultAbsentExclusion { project_roots: Vec<DirectoryIdentity> }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl VaultAbsentExclusion { pub(crate) fn roots(&self) -> &[DirectoryIdentity] { &self.project_roots } }
 
 /// Test-only registration from an actually held fixture directory. This is not
 /// a ProjectProbe or a picker/asset qualification, and no synthetic identity is
@@ -517,16 +531,27 @@ mod linux {
         book.finish(result, stop)
     }
     pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>], stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
+        probe_project_excluding_vault(book, path, origins, None, stop)
+    }
+    pub(crate) fn probe_project_excluding_vault(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>], vault: Option<&RegisteredRoot>, stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
         if origins.len() > 32 || path.to_str().is_none() { return Err(Reason::SourceRefused); }
         let project_parts = parts(&path)?;
         let mut origin_parts = Vec::new(); origin_parts.try_reserve_exact(origins.len()).map_err(|_| Reason::Capacity)?;
         for origin in origins { origin_parts.push(parts(&origin.path)?); }
-        let capacity = roster_limit(std::iter::once(project_parts.len()).chain(origin_parts.iter().map(|parts| parts.len().saturating_sub(1))), 0)?;
+        let vault_parts = vault.map(|root| parts(&root.path)).transpose()?;
+        let capacity = roster_limit(std::iter::once(project_parts.len()).chain(origin_parts.iter().map(|parts| parts.len().saturating_sub(1)))
+            .chain(vault_parts.iter().map(Vec::len)), 0)?;
         book.begin(capacity, origins.len())?;
         let result = (|| {
             book.root(stop)?;
             let project_chain = book.chain(&project_parts, stop)?;
             let project = book.directory(*project_chain.last().ok_or(Reason::SourceRefused)?)?;
+            if let (Some(vault), Some(components)) = (vault, &vault_parts) {
+                let vault_chain = book.chain(components, stop)?;
+                let current = book.directory(*vault_chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+                if ProjectIdentity::Posix(current) != vault.identity { return Err(Reason::ExclusionUnconfirmed); }
+                reject_ancestry_overlap(book, &project_chain, &vault_chain)?;
+            }
             for (origin, components) in origins.iter().zip(&origin_parts) {
                 let (leaf_name, parents) = components.split_last().ok_or(Reason::SourceRefused)?;
                 let chain = book.chain(parents, stop)?;
@@ -546,6 +571,48 @@ mod linux {
                 book.probes.push(LeafProbe { parent, name: copy_bytes(leaf_name)?, identity: origin.leaf });
             }
             Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project) })
+        })();
+        book.finish(result, stop)
+    }
+
+    fn reject_ancestry_overlap(book: &SourceBook, project: &[usize], vault: &[usize]) -> Result<(), Reason> {
+        let project_root = book.directory(*project.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+        let vault_root = book.directory(*vault.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+        for index in project { if book.directory(*index)?.same_object(vault_root) { return Err(Reason::ProjectOverlap); } }
+        for index in vault { if book.directory(*index)?.same_object(project_root) { return Err(Reason::ProjectOverlap); } }
+        Ok(())
+    }
+
+    /// Fresh original directory chains, complete bounded project roster, both
+    /// ancestor directions. Called by the existing original blocking child;
+    /// neither a pathname prefix nor a prior generation is a physical proof.
+    pub(crate) fn probe_vault_exclusion(book: &mut SourceBook, vault: Option<&RegisteredRoot>, projects: &[RegisteredRoot], stop: &mut dyn FnMut() -> bool) -> Result<VaultAbsentExclusion, Reason> {
+        if projects.len() > 32 { return Err(Reason::Capacity); }
+        let vault_parts = vault.map(|root| parts(&root.path)).transpose()?;
+        let project_parts: Vec<_> = projects.iter().map(|project| parts(&project.path)).collect::<Result<_, _>>()?;
+        let capacity = roster_limit(vault_parts.iter().map(Vec::len).chain(project_parts.iter().map(Vec::len)), 0)?;
+        book.begin(capacity, 0)?;
+        let result = (|| {
+            book.root(stop)?;
+            let vault_chain = if let (Some(vault), Some(components)) = (vault, &vault_parts) {
+                let chain = book.chain(components, stop)?;
+                if ProjectIdentity::Posix(book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?) != vault.identity {
+                    return Err(Reason::ExclusionUnconfirmed);
+                }
+                Some(chain)
+            } else { None };
+            let mut project_roots = Vec::new();
+            project_roots.try_reserve_exact(projects.len()).map_err(|_| Reason::Capacity)?;
+            for (project, components) in projects.iter().zip(&project_parts) {
+                let project_chain = book.chain(components, stop)?;
+                let current = book.directory(*project_chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+                if ProjectIdentity::Posix(current) != project.identity {
+                    return Err(Reason::ExclusionUnconfirmed);
+                }
+                if let Some(vault_chain) = &vault_chain { reject_ancestry_overlap(book, &project_chain, vault_chain)?; }
+                project_roots.push(current);
+            }
+            Ok(VaultAbsentExclusion { project_roots })
         })();
         book.finish(result, stop)
     }
@@ -742,6 +809,8 @@ mod linux {
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use linux::{probe_project_excluding_vault, probe_vault_exclusion};
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::assert_project_path_source_contracts;
 

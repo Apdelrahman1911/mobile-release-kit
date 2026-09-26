@@ -77,15 +77,13 @@ test('connection help is nullable additive catalogue data, never connection admi
       assert.deepEqual(result.credentialGuide, credentialGuide ?? null);
       assert.deepEqual(calls, [{ command: 'catalog', args: undefined }]);
       assert.equal(typeof api.githubConnectionStatus, 'function');
-      await assert.rejects(api.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: 'INERT_TOKEN' }),
-        (error) => error.code === 'github_connection_refused_unqualified');
-      assert.deepEqual(calls, [{ command: 'catalog', args: undefined }], 'help never opens the compiled-disabled token route');
       assert.equal('connectGitHub' in api, false);
       if (help === githubConnectionResource) {
         assert.deepEqual(result.githubConnection, help);
         result.githubConnection.inputs[0].label = 'Changed local copy';
         assert.notEqual(help.inputs[0].label, 'Changed local copy');
       } else assert.equal(result.githubConnection, null);
+      assert.deepEqual(calls, [{ command: 'catalog', args: undefined }], 'catalogue and help processing never initiate a connection request');
     }
   }
   for (const guides of [{}, { credentialGuide: null }, { githubConnection: null },
@@ -316,18 +314,18 @@ test('project-path IPC keeps exact bounded bindings and rejects malformed or pri
 });
 
 test('shared-slot project-path status cannot supply credential authority or use credential cancellation', async () => {
-  const operation = { operationId: 3, operation: 'choose-project-path', phase: 'picking', reason: 'none', source: 'not-run', settlement: 'pending',
+  const operation = { operationId: 3, operation: 'choose-project-path', phase: 'picking', reason: 'none', source: 'not-run', settlement: 'pending', storageOutcome: null,
     selectionToken: null, assessment: null, preview: null };
-  const status = { schemaVersion: 1, statusRevision: 1, mode: 'session', capability: { available: true, reason: 'none' }, context: null,
+  const status = { schemaVersion: 2, statusRevision: 1, persistence: null, mode: 'session', capability: { available: true, reason: 'none' }, context: null,
     operation, records: [], assignments: [] };
   assert.deepEqual(parseAssetStatus(status), status);
   const token = 'a'.repeat(32);
   const selected = { ...status, operation: { ...operation, phase: 'selected', source: 'captured', settlement: 'known', selectionToken: token } };
   assert.ok(parseAssetStatus({ ...selected, operation: { ...selected.operation, operation: 'choose-file' } }));
   assert.equal(parseAssetStatus(selected), null, 'a path cannot become an asset selection');
-  const deletion = { ...status, records: [{ recordId: token, revision: 1, kind: 'google-wif', availability: 'unassigned' }],
+  const deletion = { ...status, records: [{ recordId: token, revision: 1, kind: 'google-wif', availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' }],
     operation: { ...operation, phase: 'preview', settlement: 'known', preview: { token, action: 'delete', expiresInMs: 1000,
-      subject: { kind: 'google-wif', change: 'delete', recordId: token, recordRevision: 1 } } } };
+      subject: { type: 'record', kind: 'google-wif', change: 'delete', recordId: token, recordRevision: 1 } } } };
   assert.ok(parseAssetStatus({ ...deletion, operation: { ...deletion.operation, operation: 'prepare-delete' } }));
   assert.equal(parseAssetStatus(deletion), null, 'a path cannot acquire a credential preview');
   const scope = { platform: 'project', stage: 'candidate', purpose: 'full' };

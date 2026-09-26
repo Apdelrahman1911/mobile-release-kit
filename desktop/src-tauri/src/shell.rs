@@ -845,15 +845,45 @@ async fn vault_status(webview: Webview, request: tauri::ipc::Request<'_>, state:
     result
 }
 #[tauri::command]
-async fn vault_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+async fn vault_open(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Open, observed, AssetError::new(Reason::Unqualified));
     installed_session_command!(state, Open, session_observed);
     let result = async {
-        asset_window(&webview)?; asset_commands::open(asset_body(&request)?)?; state.document.open_session()
+        asset_window(&webview)?;
+        match asset_commands::open(asset_body(&request)?)? {
+            asset_commands::OpenMode::Session => state.document.open_session(),
+            asset_commands::OpenMode::Encrypted => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                {
+                    // Native application-data resolution only. No renderer
+                    // filename/path or project location chooses the vault root.
+                    let location = app.path().app_local_data_dir().map_err(|_| AssetError::new(Reason::ExclusionUnconfirmed))?;
+                    state.document.open_encrypted(&location)
+                }
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                { let _ = &app; Err(AssetError::new(Reason::UnsupportedPlatform)) }
+            },
+        }
     }.await;
     fixture_result!(observed, asset, &result);
     installed_session_result!(session_observed, Open, &result);
     result
+}
+#[tauri::command]
+async fn vault_prepare_initialize(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { state.document.prepare_vault_initialize() }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = &state; Err(AssetError::new(Reason::UnsupportedPlatform)) }
+}
+#[tauri::command]
+async fn vault_unlock(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { state.document.unlock_vault() }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = &state; Err(AssetError::new(Reason::UnsupportedPlatform)) }
 }
 #[tauri::command]
 async fn asset_context(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
@@ -2508,7 +2538,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             release_version_edit_open, release_version_edit_prepare, release_version_edit_apply,
             release_version_edit_close, release_version_edit_status,
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
-            vault_status, vault_open, asset_context, asset_choose, credential_prepare,
+            vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
             ];
             handler(invoke)

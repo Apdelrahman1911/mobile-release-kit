@@ -349,7 +349,9 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       catch (error) { return Promise.reject(githubConnectionError(error)); }
     },
     assetStatus: () => assetCall('vault_status', {}),
-    openAssetSession: () => assetCall('vault_open', { mode: 'session' }),
+    openAssetSession: (storageMode = 'session') => assetCall('vault_open', { mode: storageMode }),
+    prepareVaultInitialize: () => assetCall('vault_prepare_initialize', {}),
+    unlockVault: () => assetCall('vault_unlock', {}),
     setAssetContext: (request) => assetCall('asset_context', { ...request }),
     chooseAsset: (request) => assetCall('asset_choose', { ...request }),
     prepareCredential: (request) => assetCall('credential_prepare', { ...request }),

@@ -62,6 +62,12 @@ mod asset_source;
 mod asset_session;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod vault_keyring_linux;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod vault_format;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod vault_crypto;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod vault_store;
 pub mod edit_protocol;
 pub mod github_workflow_edit_protocol;
 pub mod metadata_text_edit_protocol;

@@ -10,6 +10,8 @@ fn empty_state() -> DocumentState {
         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
         session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
         quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault: None,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         first_origin: None }
 }

@@ -871,6 +871,16 @@ fn file_result(field: &FieldResult, fact: FileFact, kind: Kind) -> Option<Identi
     }
 }
 impl AssessmentResult {
+    /// Actual retained DATA capacities, not a parser-arena or process-RSS claim.
+    /// Every other member is a closed scalar/enum; no credential value is kept.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>().checked_add(self.fields.capacity().checked_mul(std::mem::size_of::<FieldResult>())?)?;
+        for field in &self.fields {
+            bytes = bytes.checked_add(field.issues.capacity().checked_mul(std::mem::size_of::<IssueCode>())?)?
+                .checked_add(field.checks.capacity().checked_mul(std::mem::size_of::<Check>())?)?;
+        }
+        Some(bytes)
+    }
     /// Only the core's already-sanitized disposition. This is not another
     /// requirements selector or a native/service-validation assertion.
     pub(crate) fn permits_session_preview(&self) -> bool {

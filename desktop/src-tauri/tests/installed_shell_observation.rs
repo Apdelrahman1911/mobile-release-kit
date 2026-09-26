@@ -19,6 +19,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/offline_preflight_owner.rs"] mod offline_preflight_owner;
 #[path = "../src/android_build_protocol.rs"] mod android_build_protocol;
 #[path = "../src/android_build_owner.rs"] mod android_build_owner;
+#[path = "../src/project_recovery_protocol.rs"] mod project_recovery_protocol;
+#[path = "../src/project_recovery_owner.rs"] mod project_recovery_owner;
 #[path = "../src/android_toolchain.rs"] mod android_toolchain;
 #[path = "../src/saved_command_owner.rs"] mod saved_command_owner;
 #[path = "../src/runtime.rs"] mod runtime;
@@ -46,6 +48,12 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/asset_session.rs"] mod asset_session;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "../src/vault_keyring_linux.rs"] mod vault_keyring_linux;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "../src/vault_format.rs"] mod vault_format;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "../src/vault_crypto.rs"] mod vault_crypto;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "../src/vault_store.rs"] mod vault_store;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
 #[path = "../src/metadata_text_edit_protocol.rs"] mod metadata_text_edit_protocol;

@@ -1,4 +1,4 @@
-//! Closed, borrowed-value admission for the session-only native credential lane.
+//! Closed, borrowed-value admission for the native credential lane.
 //! Tauri has already materialized Json bodies. These are admitted-payload limits,
 //! not a pre-IPC allocation/RSS guarantee. No parser observation or path enters.
 use std::{io, sync::Arc};
@@ -52,7 +52,9 @@ pub(crate) enum Reason {
     UnsupportedFormat, InvalidRequest, Busy, SourceRefused, SourceChanged,
     MaterialLimit, ParserLimit, ProjectOverlap, ExclusionUnconfirmed, Capacity,
     ContextStale, UserCancelled, ReviewExpired, Deadline, DocumentLost, Shutdown,
-    CleanupUnknown,
+    CleanupUnknown, VaultUninitialized, VaultKeyMissing, VaultKeyringLocked,
+    VaultKeyringDenied, VaultKeyringUnavailable, VaultProviderUnsupported,
+    VaultCorrupt, VaultInterrupted, VaultDurabilityUnknown,
 }
 #[derive(Clone, Copy, Serialize)]
 pub(crate) struct AssetError {
@@ -73,6 +75,11 @@ impl AssetError {
             Reason::UserCancelled => "asset_user_cancelled", Reason::ReviewExpired => "asset_review_expired",
             Reason::Deadline => "asset_deadline", Reason::DocumentLost => "asset_document_lost",
             Reason::Shutdown => "asset_shutdown", Reason::CleanupUnknown => "asset_cleanup_unknown",
+            Reason::VaultUninitialized => "vault_uninitialized", Reason::VaultKeyMissing => "vault_key_missing",
+            Reason::VaultKeyringLocked => "vault_keyring_locked", Reason::VaultKeyringDenied => "vault_keyring_denied",
+            Reason::VaultKeyringUnavailable => "vault_keyring_unavailable", Reason::VaultProviderUnsupported => "vault_provider_unsupported",
+            Reason::VaultCorrupt => "vault_corrupt", Reason::VaultInterrupted => "vault_interrupted",
+            Reason::VaultDurabilityUnknown => "vault_durability_unknown",
         };
         Self { code, message: if reason == Reason::ContextStale { "Assessment context changed; prepare again." }
             else { "This session action was not completed. See its status reason." }, retryable: false, reason }
@@ -112,7 +119,13 @@ pub(crate) struct Choose<'a> { pub(crate) context_revision: u32, pub(crate) kind
 pub(crate) enum Source<'a> {
     Selection(&'a str), Record(RecordRef<'a>), Scalar { kind: Kind, replacement: Option<RecordRef<'a>> },
 }
-pub(crate) struct Prepare<'a> { pub(crate) context_revision: u32, pub(crate) source: Source<'a>, pub(crate) fields: Option<&'a Value> }
+pub(crate) struct Prepare<'a> {
+    pub(crate) context_revision: u32, pub(crate) source: Source<'a>, pub(crate) fields: Option<&'a Value>,
+    // Outer Option distinguishes omitted (session/record) from explicit null.
+    pub(crate) label: Option<Option<&'a str>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMode { Session, Encrypted }
 
 // A separate DATA-only purpose in the existing native owner. These four field
 // names grant neither credential capture nor arbitrary pathname authority.
@@ -165,7 +178,10 @@ pub(crate) fn project_path_result(project_id: &str, field: ProjectPathField, rel
 pub(crate) fn project_path_error(reason: Reason) -> crate::error::BridgeError {
     let (code, message) = match reason {
         Reason::None | Reason::InvalidRequest => ("project_path_invalid", "The project-path request has an unsupported shape or size."),
-        Reason::Closed | Reason::Unqualified | Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem =>
+        Reason::Closed | Reason::Unqualified | Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem
+            | Reason::VaultUninitialized | Reason::VaultKeyMissing | Reason::VaultKeyringLocked | Reason::VaultKeyringDenied
+            | Reason::VaultKeyringUnavailable | Reason::VaultProviderUnsupported | Reason::VaultCorrupt
+            | Reason::VaultInterrupted | Reason::VaultDurabilityUnknown =>
             ("project_path_unavailable", "Browsing existing project paths is unavailable in this desktop runtime profile."),
         Reason::Busy => ("project_path_busy", "Finish the original native operation before browsing a project path."),
         Reason::ContextStale | Reason::DocumentLost | Reason::Shutdown | Reason::UserCancelled =>
@@ -184,6 +200,16 @@ pub(crate) fn project_path_error(reason: Reason) -> crate::error::BridgeError {
 // No Debug/Deserialize or renderer readback. Immutable record backing is shared
 // by Arc in the owner, rather than cloning these write-only strings for leases.
 pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
+// The Linux durable lane reuses these exact scalar semantics. Wipe the strings
+// actually owned here on retirement, including copies made during bounded
+// authenticated decoding. This does not claim erasure of renderer/OS copies.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl Drop for Fields {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for value in self.values.iter_mut().flatten() { value.zeroize(); }
+    }
+}
 impl Fields {
     pub(crate) fn empty_firebase() -> Self { Self { kind: Kind::AndroidFirebase, values: Vec::new() } }
     pub(crate) fn byte_count(&self) -> usize { self.values.iter().flatten().map(String::capacity).sum() }
@@ -199,6 +225,27 @@ impl Fields {
             object.insert((*name).into(), value.as_ref().map_or(Value::Null, |value| Value::String(value.clone())));
         }
         Value::Object(object)
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn vault_kind(&self) -> Kind { self.kind }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn vault_presence(&self) -> Vec<bool> { self.values.iter().map(Option::is_some).collect() }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn write_vault_scalars(&self, writer: impl io::Write) -> Result<(), serde_json::Error> {
+        // Borrow original field strings; do not allocate another secret Value
+        // tree merely to serialize the fixed scalar map.
+        struct BorrowedFields<'a>(&'a Fields);
+        impl Serialize for BorrowedFields<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(self.0.values.len()))?;
+                for (name, value) in field_names(self.0.kind).iter().zip(&self.0.values) {
+                    map.serialize_entry(name, value)?;
+                }
+                map.end()
+            }
+        }
+        serde_json::to_writer(writer, &BorrowedFields(self))
     }
 }
 
@@ -231,7 +278,7 @@ fn token(value: &Value) -> Result<&str, AssetError> {
     if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) { return Err(AssetError::invalid()); }
     Ok(value)
 }
-fn kind(value: &Value) -> Result<Kind, AssetError> {
+pub(crate) fn kind(value: &Value) -> Result<Kind, AssetError> {
     match text(value)? {
         "android-keystore" => Ok(Kind::AndroidKeystore), "android-firebase" => Ok(Kind::AndroidFirebase),
         "apple-p12" => Ok(Kind::AppleP12), "apple-profile" => Ok(Kind::AppleProfile), "asc-p8" => Ok(Kind::AscP8),
@@ -246,7 +293,7 @@ fn record(value: &Value) -> Result<RecordRef<'_>, AssetError> {
 fn replacement(value: &Value) -> Result<Option<RecordRef<'_>>, AssetError> {
     if value.is_null() { Ok(None) } else { record(value).map(Some) }
 }
-fn field_names(kind: Kind) -> &'static [&'static str] {
+pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AndroidFirebase | Kind::IosFirebase => &[], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
@@ -298,9 +345,9 @@ pub(crate) fn draft_bytes(value: &Value) -> Result<Vec<u8>, AssetError> {
 }
 
 pub(crate) fn status(body: &Value) -> Result<(), AssetError> { bounded(body, SMALL_LIMIT)?; exact(body, &[])?; Ok(()) }
-pub(crate) fn open(body: &Value) -> Result<(), AssetError> {
+pub(crate) fn open(body: &Value) -> Result<OpenMode, AssetError> {
     bounded(body, SMALL_LIMIT)?; let object = exact(body, &["mode"])?;
-    if text(&object["mode"])? != "session" { return Err(AssetError::invalid()); } Ok(())
+    match text(&object["mode"])? { "session" => Ok(OpenMode::Session), "encrypted" => Ok(OpenMode::Encrypted), _ => Err(AssetError::invalid()) }
 }
 pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
     bounded(body, protocol::REQUEST_LIMIT)?;
@@ -322,9 +369,14 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
     let root = body.as_object().ok_or_else(AssetError::invalid)?;
     let source = root.get("source").and_then(Value::as_object).ok_or_else(AssetError::invalid)?;
     let tag = source.get("type").ok_or_else(AssetError::invalid)?;
+    let label = root.get("label").map(|value| match value {
+        Value::Null => Ok(None), Value::String(value) if !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control) => Ok(Some(value.as_str())),
+        _ => Err(AssetError::invalid()),
+    }).transpose()?;
+    let new_keys: &[&str] = if label.is_some() { &["contextRevision", "source", "fields", "label"] } else { &["contextRevision", "source", "fields"] };
     let (source, fields) = match text(tag)? {
         "selection" => {
-            exact(body, &["contextRevision", "source", "fields"])?;
+            exact(body, new_keys)?;
             let object = exact(&root["source"], &["type", "selectionToken"])?;
             (Source::Selection(token(&object["selectionToken"])?), Some(&root["fields"]))
         }
@@ -334,7 +386,7 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
             (Source::Record(RecordRef { record_id: token(&object["recordId"])?, expected_revision: number(&object["expectedRevision"])? }), None)
         }
         "scalar" => {
-            exact(body, &["contextRevision", "source", "fields"])?;
+            exact(body, new_keys)?;
             let object = exact(&root["source"], &["type", "kind", "replacement"])?;
             let kind = kind(&object["kind"])?;
             if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken) { return Err(AssetError::invalid()); }
@@ -343,7 +395,7 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
         }
         _ => return Err(AssetError::invalid()),
     };
-    Ok(Prepare { context_revision: number(root.get("contextRevision").ok_or_else(AssetError::invalid)?)?, source, fields })
+    Ok(Prepare { context_revision: number(root.get("contextRevision").ok_or_else(AssetError::invalid)?)?, source, fields, label })
 }
 pub(crate) fn delete(body: &Value) -> Result<RecordRef<'_>, AssetError> { bounded(body, SMALL_LIMIT)?; record(body) }
 pub(crate) fn preview_token(body: &Value) -> Result<&str, AssetError> {
@@ -454,6 +506,58 @@ pub(crate) fn assert_project_path_wiring_contract() {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn durable_commands_keep_modes_labels_and_stored_revision_requests_closed() {
+        assert!(matches!(open(&json!({"mode":"session"})), Ok(OpenMode::Session)));
+        assert!(matches!(open(&json!({"mode":"encrypted"})), Ok(OpenMode::Encrypted)));
+        for body in [json!({}), json!({"mode":"encrypted","path":"/inert"}), json!({"mode":" encrypted"}),
+            json!({"mode":null}), json!({"mode":"persistent"}), json!({"mode":"encrypted","key":null})] {
+            assert!(open(&body).is_err());
+        }
+        // Initialize/Unlock share the exact empty-body admission, never a path,
+        // key/provider choice, operation receipt or initialization identity.
+        for field in ["path", "key", "provider", "identity", "operationId", "reset"] {
+            assert!(status(&json!({field:null})).is_err());
+        }
+        let selection = json!({"contextRevision":1,"source":{"type":"selection","selectionToken":"a".repeat(32)},"fields":{}});
+        assert!(prepare(&selection).ok().expect("selection DATA").label.is_none());
+        let mut labeled = selection.clone(); labeled["label"] = Value::Null;
+        assert_eq!(prepare(&labeled).ok().expect("null-label DATA").label, Some(None));
+        labeled["label"] = json!("Local signing");
+        assert_eq!(prepare(&labeled).ok().expect("label DATA").label, Some(Some("Local signing")));
+        labeled["label"] = json!("é".repeat(64));
+        assert!(prepare(&labeled).is_ok()); // UTF-8 bytes, not128 characters.
+        for label in [json!(""), json!("a".repeat(129)), json!("é".repeat(65)), json!("line\nlabel"), json!("a\u{007f}b"), json!(false)] {
+            labeled["label"] = label; assert!(prepare(&labeled).is_err());
+        }
+        let scalar = json!({"contextRevision":1,"source":{"type":"scalar","kind":"google-wif","replacement":null},
+            "fields":{"provider":null,"serviceAccount":null},"label":null});
+        assert_eq!(prepare(&scalar).ok().expect("scalar DATA").label, Some(None));
+        let record = json!({"contextRevision":1,"source":{"type":"record","recordId":"a".repeat(32),"expectedRevision":1}});
+        assert!(prepare(&record).is_ok());
+        for (field, value) in [("label", Value::Null), ("fields", json!({})), ("payloadState", json!("assessed")), ("path", json!("/inert"))] {
+            let mut bad = record.clone(); bad[field] = value; assert!(prepare(&bad).is_err());
+        }
+    }
+    #[test]
+    fn vault_handlers_manifest_and_local_acl_agree_without_filesystem_grants() {
+        let manifest = include_str!("../build.rs").split_once("const COMMANDS: &[&str] = &[").unwrap().1.split_once("];").unwrap().0;
+        let handlers = include_str!("shell.rs").split_once("tauri::generate_handler![").unwrap().1.split_once("];").unwrap().0;
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        for command in ["vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "vault_prepare_delete",
+            "vault_commit", "vault_bind", "vault_discard", "vault_lock"] {
+            assert_eq!(manifest.matches(&format!("\"{command}\"")).count(), 1);
+            assert_eq!(handlers.split(',').filter(|value| value.trim() == command).count(), 1);
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            assert_eq!(permissions.iter().filter(|value| value.as_str() == Some(permission.as_str())).count(), 1);
+        }
+        assert_eq!(capability["local"], true);
+        assert_eq!(capability["windows"], json!(["main"]));
+        assert!(capability.get("remote").is_none());
+        assert!(permissions.iter().all(|value| value.as_str().is_some_and(|name|
+            name.starts_with("allow-") || ["core:event:allow-listen", "core:event:allow-unlisten"].contains(&name))));
+    }
     #[test]
     fn lookup_fields_charge_keeps_empty_cells_and_string_capacity() {
         let mut value = String::with_capacity(79); value.push_str("data"); value.truncate(1);

@@ -27,6 +27,12 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "asset_session_vault.rs"]
+mod vault;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use vault::KeyringInitializationAdmission;
+
 // Explicitly ignored component fixture only: no installed window, persistent
 // provider admission or renderer command is enabled by compiling this module.
 #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -94,11 +100,39 @@ impl ProjectPathBinding {
         self.generation == generation && self.root == *root
     }
 }
-struct Material { captured: asset_source::CapturedSource, observation: FileObservation }
+enum MaterialOrigin {
+    Selected(asset_source::CapturedSource),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    Stored(vault::StoredMaterial),
+}
+struct Material { origin: MaterialOrigin, observation: FileObservation }
+impl Material {
+    fn bytes(&self) -> &[u8] { match &self.origin {
+        MaterialOrigin::Selected(source) => &source.bytes,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        MaterialOrigin::Stored(source) => source.bytes.bytes(),
+    } }
+    fn retained_bytes(&self) -> Option<usize> { match &self.origin {
+        MaterialOrigin::Selected(source) => {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            { source.bytes.capacity().checked_add(source.origin.retained_bytes()?) }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            { Some(source.bytes.capacity()) }
+        },
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        MaterialOrigin::Stored(source) => source.bytes.retained_bytes().ok()?.checked_add(std::mem::size_of::<vault::StoredRef>()),
+    } }
+    fn selected_origin(&self) -> Option<&Arc<OriginWitness>> { match &self.origin {
+        MaterialOrigin::Selected(source) => Some(&source.origin),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        MaterialOrigin::Stored(_) => None,
+    } }
+}
 struct Payload { kind: Kind, material: Option<Arc<Material>>, fields: Option<Fields> }
 impl Payload {
     fn bytes(&self) -> usize {
-        RECORD_METADATA_BYTES + self.material.as_ref().map_or(0, |m| m.captured.bytes.capacity()) + self.fields.as_ref().map_or(0, Fields::byte_count)
+        RECORD_METADATA_BYTES.saturating_add(self.material.as_ref().map_or(0, |m| m.retained_bytes().unwrap_or(usize::MAX)))
+            .saturating_add(self.fields.as_ref().map_or(0, Fields::byte_count))
     }
     fn usable_source(&self) -> bool { self.kind.file().is_none() || self.material.as_ref().is_some_and(|m| m.observation.is_observed()) }
 }
@@ -114,7 +148,8 @@ impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview
 pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock }
+enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
+    OpenVault, PrepareInitialize, Initialize, Unlock }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
@@ -128,17 +163,24 @@ enum SourceState { NotRun, Pending, Captured, Refused, Unknown }
 enum Settlement { Pending, Known, Unknown, LateKnown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Action { Save, Bind, Delete }
+enum Action { Save, Bind, Delete, Initialize }
 struct Preview { token: Token, action: Action, bind_token: Option<Token>, record: Option<RecordKey>, subject: PreviewSubject }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum SubjectChange { New, Replace, Assign, Delete }
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PreviewSubject { kind: Kind, change: SubjectChange, record_id: Option<Token>, record_revision: Option<u32> }
+#[serde(tag = "type", rename_all = "lowercase")]
+enum PreviewSubject {
+    #[serde(rename_all = "camelCase")]
+    Record { kind: Kind, change: SubjectChange, record_id: Option<Token>, record_revision: Option<u32> },
+    Vault { change: InitializeChange },
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum InitializeChange { Initialize }
 impl PreviewSubject {
     fn new(kind: Kind, change: SubjectChange, record: Option<&RecordKey>) -> Self {
-        Self { kind, change, record_id: record.map(|record| record.id.clone()), record_revision: record.map(|record| record.revision) }
+        Self::Record { kind, change, record_id: record.map(|record| record.id.clone()), record_revision: record.map(|record| record.revision) }
     }
 }
 #[derive(Clone, Serialize)]
@@ -152,10 +194,17 @@ enum AssignmentAvailability { Available, Unavailable }
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetStatus {
     schema_version: u8, status_revision: u32, mode: &'static str, capability: Capability,
+    persistence: Option<PersistenceStatus>,
     context: Option<ContextStatus>, operation: Option<OperationStatus>, records: Vec<RecordStatus>, assignments: Vec<Assignment>,
 }
 #[derive(Serialize)]
 struct Capability { available: bool, reason: Reason }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistenceStatus { state: &'static str, reason: Reason, key_access: &'static str }
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageStatus { effect: &'static str, durability: &'static str, cleanup: &'static str }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ContextStatus { revision: u32, project_id: String, platform: Platform, stage: Stage, purpose: Purpose }
@@ -164,13 +213,15 @@ struct ContextStatus { revision: u32, project_id: String, platform: Platform, st
 struct OperationStatus {
     operation_id: u32, operation: Operation, phase: Phase, reason: Reason, source: SourceState, settlement: Settlement,
     selection_token: Option<Token>, assessment: Option<SafeAssessment>, preview: Option<PreviewStatus>,
+    storage_outcome: Option<StorageStatus>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreviewStatus { token: Token, action: Action, expires_in_ms: u32, subject: PreviewSubject }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RecordStatus { record_id: Token, revision: u32, kind: Kind, availability: &'static str }
+struct RecordStatus { record_id: Token, revision: u32, kind: Kind, availability: &'static str,
+    storage: &'static str, label: Option<String>, payload_state: &'static str }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum JoinReceipt { New, Pending, Returned, Failed }
@@ -196,10 +247,13 @@ struct Retirement {
     old_slot: Option<Box<Slot>>, candidate: Option<Candidate>, staged: Option<Staged>,
     payload: Option<Arc<Payload>>, context: Option<Arc<NativeContext>>, slot_context: Option<Arc<NativeContext>>,
     assessment: Option<SafeAssessment>, records: Vec<Record>, assignments: Vec<Assignment>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    vault: vault::Retired,
 }
 
 pub(crate) struct OriginalWork {
     pub(crate) id: u32, stop: AtomicBool, ended: AtomicBool, deadline: Mutex<Option<Instant>>,
+    cleanup_end: Mutex<Option<Instant>>,
     pub(crate) wake: Notify, coordinator: Mutex<CoordinatorBook>, child: AsyncMutex<ChildBook>,
     source: Arc<Mutex<SourceBook>>, pub(crate) gui: Arc<GuiCall>,
     retirement: Mutex<Retirement>, retired: AtomicBool,
@@ -207,6 +261,8 @@ pub(crate) struct OriginalWork {
     keyring: Mutex<crate::vault_keyring_linux::LookupBook>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     large_work_started: AtomicBool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    vault: Mutex<vault::Work>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
     #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -215,6 +271,7 @@ pub(crate) struct OriginalWork {
 impl OriginalWork {
     fn new(id: u32, gui_needed: bool, document: Weak<Inner>) -> Arc<Self> {
         Arc::new_cyclic(|owner| Self { id, stop: AtomicBool::new(false), ended: AtomicBool::new(false), deadline: Mutex::new(Some(Instant::now() + WORK)),
+            cleanup_end: Mutex::new(None),
             wake: Notify::new(), coordinator: Mutex::new(CoordinatorBook { handle: None, receipt: JoinReceipt::New }),
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
@@ -222,6 +279,8 @@ impl OriginalWork {
             keyring: Mutex::new(crate::vault_keyring_linux::LookupBook::new()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             large_work_started: AtomicBool::new(false),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: Mutex::new(vault::Work::default()),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_capture: Mutex::new(None),
             #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -265,7 +324,7 @@ impl OriginalWork {
             }
         }
     }
-    fn original_resources_settled(&self) -> bool {
+    fn control_resources_settled(&self) -> bool {
         let coordinator = self.coordinator.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let child = self.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned | JoinReceipt::Failed) && book.handle.is_none());
         let source = self.source.try_lock().is_ok_and(|book| book.not_started() || book.settled());
@@ -274,6 +333,11 @@ impl OriginalWork {
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
         let keyring = true;
         coordinator && child && source && self.gui.settled() && keyring
+    }
+    fn original_resources_settled(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if !self.vault.try_lock().is_ok_and(|work| work.settled()) { return false; }
+        self.control_resources_settled()
     }
     fn resources_settled(&self) -> bool {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -292,7 +356,7 @@ impl OriginalWork {
     fn dispose_keyring_storage(&self) -> bool {
         let Ok(retirement) = self.retirement.try_lock() else { return false; };
         if !self.retired.load(Ordering::SeqCst) || !lookup_memory::retirement_empty(&retirement)
-            || !self.original_resources_settled() { return false; }
+            || !self.control_resources_settled() { return false; }
         let Ok(mut book) = self.keyring.try_lock() else { return false; };
         book.dispose_settled_storage()
     }
@@ -480,12 +544,19 @@ struct Slot {
     staged: Option<Staged>, error: Option<CommandError>, project: Option<Project>, discard: bool,
     kind: Option<Kind>, result_record: Option<RecordKey>, retired_payload: Option<Arc<Payload>>,
     evidence: Option<EvidenceBinding>, project_path: Option<Arc<ProjectPathBinding>>, path_result: Option<commands::ProjectPathResult>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    vault: vault::SlotData,
 }
 impl Slot {
     fn stop(&mut self, reason: Reason, at: Instant) {
         self.selection = None; self.preview = None; self.path_result = None; self.discard = true;
         if self.reason == Reason::None { self.reason = reason; }
-        if self.cleanup_end.is_none() { self.cleanup_end = Some(first_cleanup_end(at, self.owner.endpoint(), self.review_end)); }
+        // A native result can report an earlier failure after a concurrent
+        // cancellation was observed. Contract to that first timestamp, never
+        // renew either the slot or retained original's cleanup interval.
+        let end = first_cleanup_end(at, self.owner.endpoint(), self.review_end);
+        self.cleanup_end = Some(self.cleanup_end.map_or(end, |old| old.min(end)));
+        if let Ok(mut original) = self.owner.cleanup_end.lock() { *original = Some(original.map_or(end, |old| old.min(end))); }
         if self.phase != Phase::Unknown { self.phase = Phase::Stopping; }
         self.owner.stop();
     }
@@ -501,6 +572,8 @@ struct DocumentState {
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
     github: ConnectionState,
     evidence: EvidenceRegistry,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    vault: Option<vault::Session>,
 }
 fn project_path_pending(state: &DocumentState) -> bool {
     state.slot.as_ref().is_some_and(|slot| slot.operation.project_path()
@@ -699,9 +772,17 @@ fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
     } else { None }
 }
 fn session_data_empty(state: &DocumentState) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if state.vault.is_some() { return false; }
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
         && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
-            && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none())
+            && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none() && slot_private_data_empty(slot))
+}
+fn slot_private_data_empty(_slot: &Slot) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { _slot.vault.loaded.is_none() }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { true }
 }
 fn assets_can_exit_locked(state: &DocumentState) -> bool {
     !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
@@ -741,14 +822,14 @@ pub(crate) struct DocumentBinding { inner: Arc<Inner> }
 fn keyring_slot_gate(state: &DocumentState, owner: &Arc<OriginalWork>, step: Option<crate::vault_keyring_linux::Step>, now: Instant)
     -> Result<Instant, crate::vault_keyring_linux::Problem> {
     use crate::vault_keyring_linux::Problem;
-    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
-        .ok_or(Problem::Interrupted)?;
     // Fixed own-session close/subscription removal may pass after STOP/loss.
     // It still belongs to this exact current OriginalWork; no public Boolean
     // can substitute for the book's expected step or real slot identity.
     if step.is_some_and(crate::vault_keyring_linux::Step::cleanup) {
         return keyring_cleanup_endpoint(state, owner, now);
     }
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && matches!(slot.operation, Operation::Prepare | Operation::Initialize | Operation::Unlock))
+        .ok_or(Problem::Interrupted)?;
     if !state.lifetime.original_bound() || state.lost_observed || state.exhausted || state.unknown || state.stopping
         || state.quit_pending || state.retiring || state.lock_pending || owner.interrupted()
         || slot.phase != Phase::Assessing || slot.cleanup_end.is_some()
@@ -760,7 +841,7 @@ fn keyring_slot_gate(state: &DocumentState, owner: &Arc<OriginalWork>, step: Opt
 fn keyring_cleanup_endpoint(state: &DocumentState, owner: &Arc<OriginalWork>, now: Instant)
     -> Result<Instant, crate::vault_keyring_linux::Problem> {
     use crate::vault_keyring_linux::Problem;
-    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && slot.operation == Operation::Prepare)
+    let slot = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner))
         .ok_or(Problem::Interrupted)?;
     // STOP/loss never grants a new lease. This same endpoint guards both remote
     // session close/removal and DISTINCT local shutdown, including first poll.
@@ -804,17 +885,23 @@ fn keyring_problem_stop(state: &mut DocumentState, owner: &Arc<OriginalWork>,
             Problem::Interrupted => Reason::UserCancelled,
             Problem::CleanupUnknown => Reason::CleanupUnknown,
             Problem::Capacity => Reason::Capacity,
+            Problem::Locked if vault::operation_attached(slot) => Reason::VaultKeyringLocked,
+            Problem::MissingKey if vault::operation_attached(slot) => Reason::VaultKeyMissing,
+            Problem::Denied if vault::operation_attached(slot) => Reason::VaultKeyringDenied,
+            Problem::UnsupportedProvider if vault::operation_attached(slot) => Reason::VaultProviderUnsupported,
+            _ if vault::operation_attached(slot) => Reason::VaultKeyringUnavailable,
             _ => Reason::SourceRefused,
         };
-        if slot.cleanup_end.is_none() { slot.stop(reason, at); return true; }
+        let before = (slot.reason, slot.cleanup_end);
+        slot.stop(reason, at);
+        return before != (slot.reason, slot.cleanup_end);
     }
     false
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn keyring_constrain_cleanup(state: &DocumentState, owner: &Arc<OriginalWork>, book: &mut crate::vault_keyring_linux::LookupBook) {
-    if let Some(end) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner)
-        && slot.operation == Operation::Prepare).and_then(|slot| slot.cleanup_end) {
+    if let Some(end) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner)).and_then(|slot| slot.cleanup_end) {
         // Slot::stop is the sole writer: first_cleanup_end always adds CLEANUP
         // to the first stop/due timestamp. Never derive this from observer-now.
         book.constrain_cleanup_endpoint(end - CLEANUP, end);
@@ -887,7 +974,7 @@ impl DocumentBinding {
                 }; // Release book BEFORE acquiring document: never inverted locks.
                 match turn {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(next @ (Next::Admit(_) | Next::AdmitShutdown | Next::Settled)) => Poll::Ready(Ok(next)),
+                    Poll::Ready(next @ (Next::Admit(_) | Next::AdmitShutdown | Next::Settled | Next::ProviderAcquire | Next::ProviderBind | Next::ProviderRecheck | Next::ProviderRelease)) => Poll::Ready(Ok(next)),
                     Poll::Ready(Next::FirstPoll) => {
                         // FINAL admission after bounded stream work. The current
                         // exact slot/Unknown/effective cutoff is read under the
@@ -929,6 +1016,10 @@ impl DocumentBinding {
             };
             self.report_keyring_problem(owner);
             match next {
+                Some(Ok(Next::ProviderAcquire)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Acquire).await?,
+                Some(Ok(Next::ProviderBind)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Bind).await?,
+                Some(Ok(Next::ProviderRecheck)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Recheck).await?,
+                Some(Ok(Next::ProviderRelease)) => self.drive_provider_child(owner, crate::vault_keyring_linux::ProviderStep::Release).await?,
                 Some(Ok(Next::Admit(step))) => {
                     // The ignored headless fixture may defer only this fixed
                     // successor. Re-enter THIS driver to keep pumping its real
@@ -981,6 +1072,53 @@ impl DocumentBinding {
             // retained originals continue until the SDK's real local finality.
         }
     }
+    async fn drive_provider_child(&self, owner: &Arc<OriginalWork>, step: crate::vault_keyring_linux::ProviderStep) -> Result<(), crate::vault_keyring_linux::Problem> {
+        use crate::vault_keyring_linux::Problem;
+        let result = child(owner, ChildJob::KeyringProvider { step }).await;
+        let actual = match result {
+            Ok(ChildEnd::KeyringProvider { step: returned, result }) if returned == step => Some(result),
+            // The blocking child joined, but its pre-entry STOP guard did not
+            // enter the native method. Do not invent a provider Returned fact.
+            Ok(ChildEnd::Refused(_)) => None,
+            Err(Reason::UserCancelled) => {
+                // Refusal before registration is not a joined child. Preserve
+                // the native book and let its existing cleanup state progress.
+                let mut book = owner.keyring.lock().map_err(|_| Problem::CleanupUnknown)?;
+                book.interrupt(); drop(book);
+                if step == crate::vault_keyring_linux::ProviderStep::Release {
+                    let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, Some(owner));
+                    return Err(Problem::CleanupUnknown);
+                }
+                return Ok(());
+            },
+            Err(_) | Ok(_) => {
+                let mut state = self.lock(); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, Some(owner));
+                return Err(Problem::CleanupUnknown);
+            },
+        };
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let child = owner.child.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if child.receipt != JoinReceipt::Returned || child.handle.is_some() { return Err(Problem::CleanupUnknown); }
+        let admission = if step == crate::vault_keyring_linux::ProviderStep::Release { keyring_cleanup_endpoint(&state, owner, Instant::now()) }
+            else { keyring_slot_gate(&state, owner, None, Instant::now()) };
+        let mut book = owner.keyring.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        if admission.is_err() || owner.interrupted() { book.interrupt(); }
+        let result = match actual {
+            Some(actual) => book.provider_child_joined(step, actual),
+            None => { book.interrupt(); Ok(()) },
+        };
+        self.record_keyring_problem(&mut state, owner, book.problem().zip(book.problem_at()), book.document_cleanup_unknown());
+        // A provider failure still owns its close path. Driver keeps pumping
+        // the original book; only unknown join/locking stops this coordinator.
+        if result == Err(Problem::CleanupUnknown) { return result; }
+        if actual.is_none() && step == crate::vault_keyring_linux::ProviderStep::Release {
+            // No close method ran. A fresh driver turn must not repeatedly
+            // offer this still-Ready step or fabricate its return/cleanup.
+            drop((book, child)); self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, Some(owner));
+            return Err(Problem::CleanupUnknown);
+        }
+        Ok(())
+    }
 }
 
 
@@ -1032,7 +1170,7 @@ mod lookup_memory {
     pub(super) fn retirement_empty(value: &Retirement) -> bool {
         value.old_slot.is_none() && value.candidate.is_none() && value.staged.is_none() && value.payload.is_none()
             && value.context.is_none() && value.slot_context.is_none() && value.assessment.is_none()
-            && value.records.capacity() == 0 && value.assignments.capacity() == 0
+            && value.records.capacity() == 0 && value.assignments.capacity() == 0 && value.vault.empty()
     }
     fn retirement_known(owner: &OriginalWork, value: &Retirement) -> Result<(), Problem> {
         // Empty + no positive drain receipt is NOT zero live bytes. The actual
@@ -1046,12 +1184,14 @@ mod lookup_memory {
 
     struct Census<'a> {
         current: &'a Arc<OriginalWork>, current_source: &'a SourceBook, current_retirement: &'a Retirement,
-        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen,
+        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen,
+        vault_stores: Seen, vault_keys: Seen,
     }
     impl<'a> Census<'a> {
         fn new(current: &'a Arc<OriginalWork>, source: &'a SourceBook, retirement: &'a Retirement) -> Self {
             Self { current, current_source: source, current_retirement: retirement, bytes: 0,
-                payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new() }
+                payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new(),
+                assessments: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() }
         }
         fn add(&mut self, bytes: usize) -> Result<(), Problem> {
             self.bytes = self.bytes.checked_add(bytes).ok_or(Problem::Capacity)?; Ok(())
@@ -1076,8 +1216,7 @@ mod lookup_memory {
             if let Some(fields) = &payload.fields { self.add(fields.retained_bytes().ok_or(Problem::Capacity)?)?; }
             if let Some(material) = &payload.material {
                 if self.materials.insert(material)? {
-                    self.arc_cells::<Material>()?; self.add(material.captured.bytes.capacity())?;
-                    self.add(material.captured.origin.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
+                    self.arc_cells::<Material>()?; self.add(material.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
                 }
             }
             Ok(())
@@ -1109,23 +1248,48 @@ mod lookup_memory {
             self.add(std::mem::size_of::<crate::credential_assessment::AssessmentError>())?;
             self.add(2 * ARC_CELLS)
         }
+        fn assessment(&mut self, value: &SafeAssessment) -> Result<(), Problem> {
+            if self.assessments.insert(&value.0)? { self.add(value.0.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?; }
+            Ok(())
+        }
+        fn vault_store(&mut self, value: &Arc<Mutex<crate::vault_store::StoreBook>>) -> Result<(), Problem> {
+            if self.vault_stores.insert(value)? {
+                let book = value.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+                if !book.not_started() && !book.operation_quiescent() && !book.settled() { return Err(Problem::CleanupUnknown); }
+                self.add(book.retained_bytes().ok_or(Problem::Capacity)?)?; self.add(ARC_CELLS)?;
+            }
+            Ok(())
+        }
+        fn vault_key(&mut self, value: &Arc<crate::vault_crypto::VaultKey>) -> Result<(), Problem> {
+            if self.vault_keys.insert(value)? { self.add(value.retained_bytes())?; self.add(ARC_CELLS)?; } Ok(())
+        }
+        fn vault_session(&mut self, value: &vault::Session) -> Result<(), Problem> {
+            self.add(value.data_bytes().ok_or(Problem::Capacity)?)?; self.vault_store(value.store())?;
+            if let Some(key) = value.key() { self.vault_key(key)?; } Ok(())
+        }
         fn staged(&mut self, staged: &Staged) -> Result<(), Problem> {
             match staged {
                 Staged::Selected { payload, tokens } => { self.payload(payload)?; self.tokens(tokens) },
                 Staged::Prepared { result: Err(_), tokens } => { self.command_error()?; self.tokens(tokens) },
+                Staged::Prepared { result: Ok(result), tokens } => { self.assessment(result)?; self.tokens(tokens) },
                 Staged::Delete(tokens) => self.tokens(tokens),
                 Staged::Committed { bind } => { if let Some(token) = bind { self.token(token)?; } Ok(()) },
                 Staged::Bound(value) => self.token(&value.record_id),
                 Staged::Refused(_) => Ok(()),
+                Staged::Vault(value) => self.add(value.retained_bytes().ok_or(Problem::Capacity)?),
                 // No invented census for opaque AssessmentResult vectors or
                 // unrelated project/evidence/path DTOs in this closed slice.
                 _ => Err(Problem::Unavailable),
             }
         }
         fn slot(&mut self, slot: &Slot) -> Result<(), Problem> {
-            if slot.assessment.is_some() || slot.project.is_some() || slot.evidence.is_some()
+            if slot.project.is_some() || slot.evidence.is_some()
                 || slot.project_path.is_some() || slot.path_result.is_some() { return Err(Problem::Unavailable); }
             self.add(std::mem::size_of::<Slot>())?;
+            if let Some(assessment) = &slot.assessment { self.assessment(assessment)?; }
+            if let Some(payload) = &slot.vault.loaded { self.payload(payload)?; }
+            if let Some(store) = &slot.vault.lease { self.vault_store(store)?; }
+            if let Some(label) = &slot.vault.label { self.add(label.capacity())?; }
             if let Some(context) = &slot.context { self.context(context)?; }
             if let Some(key) = &slot.target { self.key(key)?; }
             if let Some(candidate) = &slot.candidate { self.candidate(candidate)?; }
@@ -1134,7 +1298,7 @@ mod lookup_memory {
                 self.token(&preview.token)?;
                 if let Some(token) = &preview.bind_token { self.token(token)?; }
                 if let Some(key) = &preview.record { self.key(key)?; }
-                if let Some(token) = &preview.subject.record_id { self.token(token)?; }
+                if let PreviewSubject::Record { record_id: Some(token), .. } = &preview.subject { self.token(token)?; }
             }
             if let Some(staged) = &slot.staged { self.staged(staged)?; }
             if slot.error.is_some() { self.command_error()?; }
@@ -1143,7 +1307,11 @@ mod lookup_memory {
             self.owner(&slot.owner)
         }
         fn retirement(&mut self, retirement: &Retirement) -> Result<(), Problem> {
-            if retirement.assessment.is_some() { return Err(Problem::Unavailable); }
+            if let Some(assessment) = &retirement.assessment { self.assessment(assessment)?; }
+            self.add(retirement.vault.data_bytes().ok_or(Problem::Capacity)?)?;
+            if let Some(vault) = &retirement.vault.session { self.vault_session(vault)?; }
+            for key in retirement.vault.keys.iter().flatten() { self.vault_key(key)?; }
+            if let Some(payload) = &retirement.vault.loaded { self.payload(payload)?; }
             if let Some(candidate) = &retirement.candidate { self.candidate(candidate)?; }
             if let Some(staged) = &retirement.staged { self.staged(staged)?; }
             if let Some(payload) = &retirement.payload { self.payload(payload)?; }
@@ -1155,6 +1323,9 @@ mod lookup_memory {
         fn owner(&mut self, owner: &Arc<OriginalWork>) -> Result<(), Problem> {
             if !self.owners.insert(owner)? { return Ok(()); }
             self.arc_cells::<OriginalWork>()?; self.arc_cells::<GuiCall>()?;
+            let vault = owner.vault.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+            if let Some(store) = vault.store_ref() { self.vault_store(store)?; }
+            if let Some(key) = vault.key_ref() { self.vault_key(key)?; }
             let gui = owner.gui.facts.try_lock().map_err(|_| Problem::CleanupUnknown)?;
             if !(gui.not_created || gui.destroyed && gui.released) { return Err(Problem::CleanupUnknown); }
             if let Some(path) = &gui.selected { self.add(path.capacity())?; }
@@ -1179,6 +1350,7 @@ mod lookup_memory {
         fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
             if state.retiring { return Err(Problem::CleanupUnknown); }
             self.add(std::mem::size_of::<DocumentState>())?;
+            if let Some(vault) = &state.vault { self.vault_session(vault)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
             if let Some(slot) = &state.slot { self.slot(slot)?; }
@@ -1188,6 +1360,12 @@ mod lookup_memory {
 
     pub(super) fn live_bytes(state: &DocumentState, owner: &Arc<OriginalWork>, source: &SourceBook, retirement: &Retirement) -> Result<usize, Problem> {
         let mut census = Census::new(owner, source, retirement); census.document(state)?; Ok(census.bytes)
+    }
+    pub(super) fn pending_slot_bytes(state: &DocumentState, slot: &Slot) -> Result<usize, Problem> {
+        let source = slot.owner.source.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let retirement = slot.owner.retirement.try_lock().map_err(|_| Problem::CleanupUnknown)?;
+        let mut census = Census::new(&slot.owner, &source, &retirement);
+        census.document(state)?; census.slot(slot)?; Ok(census.bytes)
     }
     pub(super) fn enter(state: &DocumentState, owner: &Arc<OriginalWork>,
         input: crate::vault_keyring_linux::LookupInput, end: Instant) -> Result<(), Problem> {
@@ -1221,7 +1399,7 @@ mod lookup_memory {
         fn material(capacity: usize) -> Arc<Material> {
             let observation = credential_format::inspect(credential_format::FileKind::AndroidKeystore, &[], &mut || false)
                 .ok().expect("inert empty observation");
-            Arc::new(Material { captured: asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity)), observation })
+            Arc::new(Material { origin: MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(Vec::with_capacity(capacity))), observation })
         }
         fn data_context() -> Arc<NativeContext> {
             Arc::new(NativeContext { revision: 1, project_id: "data-project".into(),
@@ -1277,7 +1455,7 @@ mod lookup_memory {
             census.payload(&second).unwrap(); assert_eq!(census.bytes, once + RECORD_METADATA_BYTES);
             let distinct = material(29);
             let extra = RECORD_METADATA_BYTES + std::mem::size_of::<Material>() + ARC_CELLS
-                + distinct.captured.bytes.capacity() + distinct.captured.origin.retained_bytes().unwrap() + ARC_CELLS;
+                + distinct.retained_bytes().unwrap() + ARC_CELLS;
             let third = Arc::new(Payload { kind: Kind::AndroidKeystore, material: Some(distinct), fields: None });
             let before = census.bytes; census.payload(&third).unwrap(); assert_eq!(census.bytes, before + extra);
 
@@ -1428,6 +1606,8 @@ impl DocumentBinding {
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }) }) };
         // One memory-only binding to the Supervisor created in the ordinary
@@ -1546,6 +1726,8 @@ impl DocumentBinding {
         }
     }
     fn bump(&self, state: &mut DocumentState) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::observe_stop(state, Instant::now());
         if state.exhausted { return; }
         if state.unknown { state.github.unknown(); state.evidence.revoke(true); }
         let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
@@ -1561,6 +1743,8 @@ impl DocumentBinding {
         state.github.exhaust();
         state.evidence.revision = u64::MAX; state.evidence.revoke(true);
         state.lifetime.invalidate(); invalidate_all(state);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::revoke_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
         stop_quit(state, Instant::now());
         self.inner.bridge.edits.document_lost(MAIN);
@@ -1865,7 +2049,9 @@ impl DocumentBinding {
                     source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
                     review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
                     preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
-                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None });
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: vault::SlotData::default() });
             },
             ("existing-work", false) if state.slot.as_ref().is_some_and(|slot|
                 slot.owner.id == u32::MAX - 1 && slot.phase == Phase::Admitting) => {
@@ -1990,7 +2176,7 @@ impl DocumentBinding {
         if let Some(reason) = self.live_session_owner_reason() { return Err(AssetError::new(reason)); }
         ordinary_asset_platform_gate()?;
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
-        if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
+        if session && !session_writable(state) { return Err(AssetError::new(Reason::Closed)); } Ok(())
     }
     fn live_session_owner_reason(&self) -> Option<Reason> {
         session_owner_reason(self.inner.bridge.supervisor.disabled(), self.inner.bridge.edits.disabled(),
@@ -2334,39 +2520,51 @@ impl DocumentBinding {
                 if slot.cleanup_end.is_none() && slot.phase != Phase::Idle { slot.stop(Reason::CleanupUnknown, now); changed = true; }
             }
         }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { changed |= vault::observe_stop(state, now); }
         self.github_observe_locked(state, now);
         if changed { self.bump(state); }
     }
     fn snapshot(&self, state: &DocumentState) -> AssetStatus {
+        Self::status_data(state, self.native_qualified())
+    }
+    // A projection of retained DATA only. This Boolean is never native
+    // admission; every operation uses the original document/profile gates.
+    fn status_data(state: &DocumentState, native_qualified: bool) -> AssetStatus {
         // A saturated public sequence is one stable final redacted snapshot.
         // Internal originals may still settle for exit; no wrapped/new epoch is
         // offered to a renderer to compare against the exhausted authority.
         if state.exhausted {
-            return AssetStatus { schema_version: 1, status_revision: u32::MAX, mode: "closed", capability: Capability { available: false, reason: Reason::CleanupUnknown },
+            return AssetStatus { schema_version: 2, status_revision: u32::MAX, mode: "closed", persistence: None, capability: Capability { available: false, reason: Reason::CleanupUnknown },
                 context: None, operation: None, records: Vec::new(), assignments: Vec::new() };
         }
-        let redacted = !state.lifetime.original_bound();
+        let redacted = !state.lifetime.original_bound() || state.unknown;
+        let private_redacted = redacted || encrypted_mode(state) && !encrypted_authority_visible(state)
+            || asset_mode(state) == "closed";
         let capability_reason = if state.unknown { Reason::CleanupUnknown } else if state.stopping { Reason::Shutdown }
             else if state.lost_observed { Reason::DocumentLost }
             else if let Some(reason) = state.session_owner_reason { reason }
             else if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { Reason::UnsupportedPlatform }
-            else if !self.native_qualified() { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
+            else if !native_qualified { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
         let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
             phase: slot.phase, reason: slot.reason, source: slot.source, settlement: slot.settlement,
-            selection_token: if redacted { None } else { slot.selection.clone() },
-            assessment: if redacted || !slot.assessment_context_revision.is_some_and(|revision| state.context.as_ref().is_some_and(|context| context.revision == revision)) {
+            storage_outcome: storage_status(slot),
+            selection_token: if private_redacted { None } else { slot.selection.clone() },
+            assessment: if private_redacted || !slot.assessment_context_revision.is_some_and(|revision| state.context.as_ref().is_some_and(|context| context.revision == revision)) {
                 None
             } else { slot.assessment.clone() },
-            preview: if redacted { None } else { slot.preview.as_ref().filter(|preview| preview_subject_valid(state, slot, preview)).map(|preview| PreviewStatus {
+            preview: if redacted || asset_mode(state) == "closed" { None } else { slot.preview.as_ref().filter(|preview| (!private_redacted || preview.action == Action::Initialize)
+                && preview_subject_valid(state, slot, preview)).map(|preview| PreviewStatus {
                 token: preview.token.clone(), action: preview.action, subject: preview.subject.clone(),
                 expires_in_ms: u32::try_from(slot.review_end.map_or(Duration::ZERO, |end| end.saturating_duration_since(Instant::now())).as_millis()).unwrap_or(u32::MAX) }) } });
-        AssetStatus { schema_version: 1, status_revision: state.revision, mode: if state.session { "session" } else { "closed" },
+        AssetStatus { schema_version: 2, status_revision: state.revision, mode: asset_mode(state), persistence: persistence_status(state),
             capability: Capability { available: capability_reason == Reason::None, reason: capability_reason },
-            context: if redacted { None } else { state.context.as_ref().map(|context| ContextStatus { revision: context.revision, project_id: context.project_id.clone(),
+            context: if private_redacted { None } else { state.context.as_ref().map(|context| ContextStatus { revision: context.revision, project_id: context.project_id.clone(),
                 platform: context.platform, stage: context.stage, purpose: context.purpose }) }, operation,
-            records: if redacted { Vec::new() } else { state.records.iter().map(|record| RecordStatus { record_id: record.key.id.clone(), revision: record.key.revision,
+            records: if redacted || asset_mode(state) == "closed" { Vec::new() } else if encrypted_mode(state) { encrypted_summaries(state) } else { state.records.iter().map(|record| RecordStatus { storage: "session", label: None,
+                payload_state: if record_assessed(state, &record.key) { "assessed" } else { "not-checked" }, record_id: record.key.id.clone(), revision: record.key.revision,
                 kind: record.payload.kind, availability: if record.mutation_pending { "mutation-pending" } else if state.assignments.iter().any(|a| a.record_id == record.key.id && a.record_revision == record.key.revision && a.availability == AssignmentAvailability::Available) { "assigned" } else { "unassigned" } }).collect() },
-            assignments: if redacted { Vec::new() } else { state.assignments.clone() } }
+            assignments: if private_redacted { Vec::new() } else { state.assignments.clone() } }
     }
     pub(crate) fn status(&self) -> AssetStatus {
         self.reconcile();
@@ -2376,11 +2574,25 @@ impl DocumentBinding {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, false)?;
         idle(&state)?;
         if state.session { return Ok(self.snapshot(&state)); }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if state.vault.is_some() { return Err(AssetError::new(Reason::Busy)); }
         let remaining_records = RECORD_LIMIT.saturating_sub(state.records.len());
         let remaining_assignments = 8usize.saturating_sub(state.assignments.len());
         state.records.try_reserve_exact(remaining_records).map_err(|_| AssetError::new(Reason::Capacity))?;
         state.assignments.try_reserve_exact(remaining_assignments).map_err(|_| AssetError::new(Reason::Capacity))?;
-        state.session = true; self.bump(&mut state); Ok(self.snapshot(&state))
+        // Keep a closed encrypted operation's actual receipt until explicit
+        // new-mode admission. It is not a session operation and must not be
+        // relabelled. Only already-settled DATA is removed off this real gate.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let old = if state.slot.as_ref().is_some_and(vault::operation_attached) { state.slot.take() } else { None };
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let old: Option<Slot> = None;
+        state.session = true; state.retiring = old.is_some(); self.bump(&mut state);
+        if old.is_some() {
+            drop(state); drop(old);
+            let mut state = self.lock(); state.retiring = false;
+            self.bump(&mut state); Ok(self.snapshot(&state))
+        } else { Ok(self.snapshot(&state)) }
     }
     pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2395,16 +2607,14 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
         self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::context_gate(&state, registry_generation)?;
         let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(AssetError::new(Reason::CleanupUnknown)); };
         // Bounded, already-admitted Value serialization, not source parsing or
         // external IO. Keep only exact bytes, never another long-lived Value.
         let draft = commands::draft_bytes(args.draft)?;
         let project_id = commands::copy_text(args.project_id)?;
-        invalidate_all(&mut state);
-        if let Some(slot) = state.slot.as_mut() {
-            slot.error = Some(AssetError::new(Reason::ContextStale).into());
-            slot.stop(Reason::ContextStale, Instant::now());
-        }
+        let retired_slot_context = retire_context_authority(&mut state, Instant::now());
         state.next_context = revision;
         let old = state.context.replace(Arc::new(NativeContext { revision, project_id, project, registry_generation, draft,
             platform: args.platform, stage: args.stage, purpose: args.purpose }));
@@ -2412,7 +2622,7 @@ impl DocumentBinding {
         // admission cannot accumulate caller-local old draft buffers while an
         // earlier caller is descheduled between unlock and its off-lock drop.
         state.retiring = true;
-        self.bump(&mut state); let status = self.snapshot(&state); drop(state); drop(old);
+        self.bump(&mut state); let status = self.snapshot(&state); drop(state); drop((old, retired_slot_context));
         let mut state = self.lock(); state.retiring = false; Ok(status)
     }
     pub(crate) fn discard(&self, id: u32) -> Result<AssetStatus, AssetError> {
@@ -2420,7 +2630,11 @@ impl DocumentBinding {
         if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
         let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && !slot.operation.evidence() && !slot.operation.project_path()).ok_or_else(AssetError::invalid)?;
-        slot.operation = Operation::Discard; slot.stop(Reason::UserCancelled, Instant::now()); self.bump(&mut state);
+        if !preserve_storage_operation(slot) { slot.operation = Operation::Discard; }
+        slot.stop(Reason::UserCancelled, Instant::now());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::observe_stop(&mut state, Instant::now());
+        self.bump(&mut state);
         drop(state); Ok(self.status())
     }
     pub(crate) fn lock_session(&self) -> Result<AssetStatus, AssetError> {
@@ -2431,8 +2645,10 @@ impl DocumentBinding {
         // owner's resources settled or turn vault lock into GitHub Disconnect.
         self.inner.bridge.preflight.context_changed(); self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed();
         invalidate_all(&mut state); state.lock_pending = true;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::revoke_all(&mut state);
         if let Some(slot) = state.slot.as_mut() {
-            if !slot.operation.evidence() && !slot.operation.project_path() { slot.operation = Operation::Lock; }
+            if !slot.operation.evidence() && !slot.operation.project_path() && !preserve_storage_operation(slot) { slot.operation = Operation::Lock; }
             slot.stop(Reason::UserCancelled, Instant::now());
         }
         self.bump(&mut state); drop(state); Ok(self.status())
@@ -2442,6 +2658,86 @@ impl DocumentBinding {
 fn idle(state: &DocumentState) -> Result<(), AssetError> {
     if state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled()) { return Err(AssetError::new(Reason::Busy)); } Ok(())
 }
+fn encrypted_mode(_state: &DocumentState) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::mode(_state) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { false }
+}
+fn encrypted_authority_visible(_state: &DocumentState) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::authority_visible(_state) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { true }
+}
+fn preserve_storage_operation(_slot: &Slot) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::preserve_operation(_slot) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { false }
+}
+fn vault_retirement_data(_value: &Retirement) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { !_value.vault.empty() }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { false }
+}
+fn record_assessed(state: &DocumentState, key: &RecordKey) -> bool {
+    let Some(context) = &state.context else { return false; };
+    if record_pending(state, key) { return false; }
+    state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
+        && assignment.availability == AssignmentAvailability::Available && assignment.context_revision == context.revision)
+        || state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::None && slot.cleanup_end.is_none()
+            && slot.assessment.is_some() && slot.assessment_context_revision == Some(context.revision)
+            && slot.candidate.is_none() && (slot.target.as_ref() == Some(key) || slot.result_record.as_ref() == Some(key)))
+}
+fn session_writable(state: &DocumentState) -> bool {
+    if state.session { return true; }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::writable(state) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { false }
+}
+fn asset_mode(state: &DocumentState) -> &'static str { if encrypted_mode(state) { "encrypted" } else if state.session { "session" } else { "closed" } }
+fn persistence_status(_state: &DocumentState) -> Option<PersistenceStatus> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::projection(_state) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { None }
+}
+fn storage_status(_slot: &Slot) -> Option<StorageStatus> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::outcome(_slot) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { None }
+}
+fn encrypted_summaries(_state: &DocumentState) -> Vec<RecordStatus> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { vault::summaries(_state) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { Vec::new() }
+}
+fn has_record(state: &DocumentState, key: &RecordKey, kind: Kind) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if encrypted_mode(state) { return vault::has_record(state, key, kind); }
+    state.records.iter().any(|record| record.key == *key && record.payload.kind == kind)
+}
+fn record_pending(state: &DocumentState, key: &RecordKey) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if encrypted_mode(state) { return vault::pending(state, key); }
+    state.records.iter().any(|record| record.key == *key && record.mutation_pending)
+}
+fn record_usable(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: Kind) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if encrypted_mode(state) { return vault::usable(state, slot, key, kind); }
+    state.records.iter().any(|record| record.key == *key && record.payload.kind == kind && !record.mutation_pending && record.payload.usable_source())
+}
+fn slot_payload<'a>(state: &'a DocumentState, slot: &'a Slot) -> Option<&'a Arc<Payload>> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(payload) = &slot.vault.loaded { return Some(payload); }
+    slot.candidate.as_ref().map(|candidate| &candidate.payload).or_else(||
+        slot.target.as_ref().and_then(|target| state.records.iter().find(|record| &record.key == target).map(|record| &record.payload)))
+}
 fn project_path_idle_gate(state: &DocumentState, installed_profile: bool) -> Result<(), AssetError> {
     if !installed_profile { return Err(AssetError::new(Reason::Unqualified)); }
     idle(state)
@@ -2450,13 +2746,34 @@ fn invalidate_all(state: &mut DocumentState) {
     for assignment in &mut state.assignments { assignment.availability = AssignmentAvailability::Unavailable; }
     if let Some(slot) = state.slot.as_mut() { slot.selection = None; slot.preview = None; }
 }
+fn retire_context_authority(state: &mut DocumentState, at: Instant) -> Option<Arc<NativeContext>> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let completed_receipt = vault::completed_context_receipt(state);
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    let completed_receipt = false;
+    invalidate_all(state);
+    let slot = state.slot.as_mut()?;
+    if completed_receipt {
+        // Retain the successful operation/storage receipt and exact lease.
+        // Old-context DATA is disposed under context()'s existing retirement
+        // gate; reconcile must not later relabel it as active stale work.
+        slot.assessment_context_revision = None; slot.review_end = None;
+        return slot.context.take();
+    }
+    slot.error = Some(AssetError::new(Reason::ContextStale).into()); slot.stop(Reason::ContextStale, at);
+    None
+}
 fn revoke_record(state: &mut DocumentState, key: &RecordKey) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    vault::revoke(state, key);
     for assignment in &mut state.assignments { if assignment.record_id == key.id && assignment.record_revision == key.revision { assignment.availability = AssignmentAvailability::Unavailable; } }
     if let Some(record) = state.records.iter_mut().find(|record| record.key == *key) { record.mutation_pending = true; }
     if state.slot.as_ref().is_some_and(|slot| slot.target.as_ref() == Some(key)) { if let Some(slot) = state.slot.as_mut() { slot.preview = None; slot.selection = None; } }
 }
 fn own_record(reference: commands::RecordRef<'_>) -> Result<RecordKey, AssetError> { Ok(RecordKey { id: Token(commands::copy_text(reference.record_id)?), revision: reference.expected_revision }) }
 fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kind: Kind) -> Result<Option<RecordKey>, AssetError> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if vault::mode(state) { return vault::target(state, reference, kind); }
     let Some(reference) = reference else { if state.records.len() >= RECORD_LIMIT { return Err(AssetError::new(Reason::Capacity)); } return Ok(None); };
     let key = own_record(reference)?;
     if !state.records.iter().any(|record| record.key == key && record.payload.kind == kind && !record.mutation_pending) { return Err(AssetError::invalid()); } Ok(Some(key))
@@ -2464,37 +2781,55 @@ fn target(state: &DocumentState, reference: Option<commands::RecordRef<'_>>, kin
 
 enum ChildJob {
     Tokens, Capture { path: std::path::PathBuf, roots: Vec<asset_source::RegisteredRoot>, kind: credential_format::FileKind },
-    Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>> },
+    Probe { path: std::path::PathBuf, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { path: std::path::PathBuf, binding: Arc<ProjectPathBinding> },
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    Vault(vault::Child),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    KeyringProvider { step: crate::vault_keyring_linux::ProviderStep },
 }
-enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason) }
+enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::ProjectProbe), ProjectPath(asset_source::ProjectPathProbe), Refused(Reason),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    Vault(vault::ChildResult),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    KeyringProvider { step: crate::vault_keyring_linux::ProviderStep, result: Result<(), crate::vault_keyring_linux::Problem> },
+}
 enum Staged {
     Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
     ProjectPath { proof: asset_source::ProjectPathProbe, binding: Arc<ProjectPathBinding> },
     EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch, purpose: EvidencePurpose }, EvidenceObserved(EvidenceResult),
     Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    Vault(vault::Staged),
 }
 #[cfg(feature = "desktop-shell")]
 enum Job {
     Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
-    Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>> },
+    Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>>, vault: Option<asset_source::RegisteredRoot> },
     ProjectPath { app: tauri::AppHandle, binding: Arc<ProjectPathBinding> },
     ChooseEvidenceFolder { app: tauri::AppHandle, purpose: EvidencePurpose }, InspectEvidence { root: asset_source::RegisteredRoot, purpose: EvidencePurpose },
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    Vault(vault::Job),
 }
 
 async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4 };
+    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3, ChildJob::ProjectPath { .. } => 4, ChildJob::Vault(_) => 5, ChildJob::KeyringProvider { .. } => 6 };
     let mut book = owner.child.lock().await;
-    if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) { return Err(Reason::CleanupUnknown); }
-    if owner.interrupted() { return Err(Reason::UserCancelled); }
+    let mut failed_cleanup = false;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if book.handle.is_none() && book.receipt == JoinReceipt::Failed && matches!(&job, ChildJob::Vault(vault::Child::Release)) {
+        failed_cleanup = vault::retain_failed_child_for_release(owner);
+    }
+    if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && !failed_cleanup { return Err(Reason::CleanupUnknown); }
+    if owner.interrupted() && !cleanup_child(&job) { return Err(Reason::UserCancelled); }
     // Reciprocal to lookup_memory::enter: retain this exact child mutex while
     // checking the charge and registering the original blocking dispatch.
-    if !owner.lookup_allocations_allowed() { return Err(Reason::Busy); }
+    if !child_allocation_admitted(owner, &job) { return Err(Reason::Busy); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if !matches!(&job, ChildJob::Tokens) {
+    if !matches!(&job, ChildJob::Tokens | ChildJob::KeyringProvider { .. }) && !matches!(&job, ChildJob::Vault(job) if !job.large()) {
         // A joined Captured ChildEnd may still be a caller-local large holding.
         // This closed slice refuses later lookup in that same owner rather than
         // presume that Returned means the result was published/disposed.
@@ -2518,7 +2853,7 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
 }
 fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
     let mut stop = || owner.interrupted();
-    if stop() { return ChildEnd::Refused(Reason::UserCancelled); }
+    if stop() && !cleanup_child(&job) { return ChildEnd::Refused(Reason::UserCancelled); }
     match job {
         ChildJob::Tokens => match random_tokens(&mut stop) { Ok(tokens) => ChildEnd::Tokens(tokens), Err(reason) => ChildEnd::Refused(reason) },
         ChildJob::Capture { path, roots, kind } => {
@@ -2528,14 +2863,20 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
                     Ok(observation) => {
                         fixture_event!(owner, HeaderObserved, u32::from(kind == credential_format::FileKind::AndroidKeystore
                             && observation.is_observed() && captured.bytes == [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0]));
-                        ChildEnd::Captured(Material { captured, observation })
+                        ChildEnd::Captured(Material { origin: MaterialOrigin::Selected(captured), observation })
                     }, Err(_) => ChildEnd::Refused(Reason::UserCancelled),
                 },
                 Err(reason) => ChildEnd::Refused(reason),
             }
         }
-        ChildJob::Probe { path, origins } => match owner.source.lock() {
-            Ok(mut book) => match asset_source::probe_project(&mut book, path, &origins, &mut stop) { Ok(probe) => ChildEnd::Probed(probe), Err(reason) => ChildEnd::Refused(reason) },
+        ChildJob::Probe { path, origins, vault } => match owner.source.lock() {
+            Ok(mut book) => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                let result = asset_source::probe_project_excluding_vault(&mut book, path, &origins, vault.as_ref(), &mut stop);
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                let result = if vault.is_some() { Err(Reason::UnsupportedPlatform) } else { asset_source::probe_project(&mut book, path, &origins, &mut stop) };
+                match result { Ok(probe) => ChildEnd::Probed(probe), Err(reason) => ChildEnd::Refused(reason) }
+            },
             Err(_) => ChildEnd::Refused(Reason::CleanupUnknown),
         },
         ChildJob::ProjectPath { path, binding } => match owner.source.lock() {
@@ -2544,7 +2885,40 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
             },
             Err(_) => ChildEnd::Refused(Reason::CleanupUnknown),
         },
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        ChildJob::Vault(job) => match vault::execute(owner, job) { Ok(result) => ChildEnd::Vault(result), Err(reason) => ChildEnd::Refused(reason) },
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        ChildJob::KeyringProvider { step } => {
+            use crate::vault_keyring_linux::ProviderStep;
+            let result = match owner.keyring.lock() {
+                Ok(mut book) => match step {
+                    ProviderStep::Acquire => book.prepare_provider(&mut || owner.interrupted()),
+                    ProviderStep::Bind => book.bind_provider(&mut || owner.interrupted()),
+                    ProviderStep::Recheck => book.recheck_provider(&mut || owner.interrupted()),
+                    ProviderStep::Release => book.release_provider(&mut || vault::cleanup_expired(owner)),
+                },
+                // A poisoned custody lock prevented method entry. Do not
+                // describe this joined refusal as a native method return.
+                Err(_) => return ChildEnd::Refused(Reason::CleanupUnknown),
+            };
+            ChildEnd::KeyringProvider { step, result }
+        },
     }
+}
+fn cleanup_child(_job: &ChildJob) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { matches!(_job, ChildJob::Vault(job) if job.cleanup()) || matches!(_job, ChildJob::KeyringProvider { step: crate::vault_keyring_linux::ProviderStep::Release }) }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { false }
+}
+fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(_job, ChildJob::Vault(vault::Child::Release)) { return vault::release_child_admitted(_owner); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let ChildJob::KeyringProvider { step } = _job {
+        return _owner.keyring.try_lock().is_ok_and(|book| book.provider_step_ready(*step));
+    }
+    _owner.lookup_allocations_allowed()
 }
 fn random_tokens(stop: &mut dyn FnMut() -> bool) -> Result<TokenBatch, Reason> {
     fn one(stop: &mut dyn FnMut() -> bool) -> Result<Token, Reason> {
@@ -2597,7 +2971,9 @@ impl Slot {
         Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
             context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
             assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None,
-            evidence: None, project_path: None, path_result: None }
+            evidence: None, project_path: None, path_result: None,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: vault::SlotData::default() }
     }
 }
 
@@ -2688,7 +3064,9 @@ impl DocumentBinding {
     }
 
     /// Joins only ended originals and drains closed data outside this real
-    /// admission mutex. No task, picker, syscall or assessment is started here.
+    /// admission mutex. A revoked durable lease may register its one finite
+    /// cleanup-only continuation; GO is opened only after releasing this gate.
+    /// No native syscall, picker, assessment or new work authority runs here.
     fn reconcile(&self) { self.reconcile_scope(None); }
     fn reconcile_scope(&self, evidence_family: Option<bool>) {
         let mut release: Option<Arc<OriginalWork>> = None;
@@ -2699,6 +3077,12 @@ impl DocumentBinding {
         if evidence_family.is_some_and(|family| evidence_route_gate(&state, family).is_err()) { return; }
         self.expire(&mut state, Instant::now());
         if state.retiring { return; }
+        #[cfg(all(feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        match vault::start_cleanup(self, &mut state) {
+            Ok(Some(start)) => { drop(state); let _ = start.send(()); return; },
+            Ok(None) => {},
+            Err(_) => { self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None); return; },
+        }
 
         // Quit has its own original join receipt but shares the one GTK book.
         // No new quit coordinator is created to recheck an earlier Unknown.
@@ -2720,8 +3104,12 @@ impl DocumentBinding {
                 let records = std::mem::take(&mut state.records);
                 let assignments = std::mem::take(&mut state.assignments);
                 let context = state.context.take();
-                let changed = state.session || state.lock_pending || context.is_some() || !records.is_empty() || !assignments.is_empty();
-                state.retiring = true; drop(state); drop((records, assignments, context));
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                let vault = vault::take_empty_session(&mut state);
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                let vault: Option<()> = None;
+                let changed = state.session || state.lock_pending || context.is_some() || !records.is_empty() || !assignments.is_empty() || vault.is_some();
+                state.retiring = true; drop(state); drop((records, assignments, context, vault));
                 let mut state = self.lock(); state.retiring = false; state.session = false; state.lock_pending = false;
                 if changed { self.bump(&mut state); }
             }
@@ -2752,7 +3140,23 @@ impl DocumentBinding {
         }
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        if slot.owner.original_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
+        if let Some(ChildEnd::KeyringProvider { step, result }) = &orphan_result {
+            // This is the actual joined child of the retained original slot,
+            // not the abandoned coordinator's success. Record its exact native
+            // return/join once, but stop before any live provider successor.
+            let at = if let Ok(mut book) = slot.owner.keyring.try_lock() {
+                book.interrupt();
+                let _ = book.provider_child_joined(*step, *result);
+                book.problem_at().unwrap_or_else(Instant::now)
+            } else { Instant::now() };
+            slot.stop(Reason::CleanupUnknown, at); slot.phase = Phase::Unknown;
+            slot.settlement = Settlement::Unknown; state.unknown = true;
+            first_unknown_origin!(state, UnknownOrigin::CoordinatorJoin, Some(&slot.owner));
+            self.bump(&mut state);
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if slot.owner.control_resources_settled() && slot.owner.retired.load(Ordering::SeqCst)
             && slot.owner.keyring.try_lock().is_ok_and(|book| book.memory_held()) {
             // A settled SDK/book still owns its charged backing. Register this
             // disposal before releasing the actual document gate. In particular
@@ -2794,13 +3198,19 @@ impl DocumentBinding {
                 }
             }
         }
-        if resources && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let cleanup_data_ready = vault::retirement_ready(&state, &slot);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let cleanup_data_ready = false;
+        if (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
             let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
             let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
                 payload: slot.retired_payload.take(), slot_context: if retire_context { slot.context.take() } else { None }, ..Retirement::default() };
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            { retirement.vault = vault::take_retirement(&mut state, &mut slot); }
             // Keep the sanitized explanation for the terminal idle receipt, but
             // release all native candidate leases before known settlement.
-            if state.lock_pending || state.stopping || !state.lifetime.original_bound() {
+            if state.lock_pending || state.stopping || !state.lifetime.original_bound() || cleanup_data_ready {
                 retirement.records = std::mem::take(&mut state.records);
                 retirement.assignments = std::mem::take(&mut state.assignments);
                 retirement.context = state.context.take();
@@ -2809,8 +3219,8 @@ impl DocumentBinding {
                 if slot.target.as_ref() == Some(&record.key) || slot.result_record.as_ref() == Some(&record.key) { record.mutation_pending = false; }
             }
             let had_data = retirement.candidate.is_some() || retirement.staged.is_some() || retirement.payload.is_some() || retirement.slot_context.is_some() || !retirement.records.is_empty()
-                || !retirement.assignments.is_empty() || retirement.context.is_some();
-            if had_data || slot.phase != Phase::Idle && slot.settlement != Settlement::LateKnown {
+                || !retirement.assignments.is_empty() || retirement.context.is_some() || vault_retirement_data(&retirement);
+            if had_data || resources && slot.phase != Phase::Idle && slot.settlement != Settlement::LateKnown {
                 match slot.owner.retain_retirement(retirement) {
                     Ok(()) => {
                         // A concurrent status observer cannot call data disposal
@@ -2829,6 +3239,8 @@ impl DocumentBinding {
                         if !retirement.records.is_empty() { state.records = retirement.records; }
                         if !retirement.assignments.is_empty() { state.assignments = retirement.assignments; }
                         if retirement.context.is_some() { state.context = retirement.context; }
+                        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        vault::restore_retirement(&mut state, &mut slot, retirement.vault);
                         first_unknown_origin!(state, UnknownOrigin::RetirementRetain, Some(&slot.owner));
                         state.unknown = true; slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown;
                         self.bump(&mut state);
@@ -2836,6 +3248,8 @@ impl DocumentBinding {
                 }
             }
         }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::observe_detached_stop(&mut state, &slot, Instant::now());
         state.slot = Some(slot);
         settle_evidence_status(&mut state);
         if complete_empty_session_lock(&mut state) { self.bump(&mut state); }
@@ -2850,9 +3264,18 @@ impl DocumentBinding {
             if !disposed { self.coordinator_failed(&mut state, UnknownOrigin::RetirementDrain, Some(&owner)); return; }
             let unknown = state.unknown;
             if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) {
-                slot.owner.set_endpoint(None); slot.selection = None; slot.preview = None;
-                slot.settlement = if unknown { Settlement::LateKnown } else { Settlement::Known };
-                slot.phase = if unknown { Phase::Unknown } else { Phase::Idle };
+                slot.selection = None; slot.preview = None;
+                if slot.owner.resources_settled() {
+                    slot.owner.set_endpoint(None);
+                    slot.settlement = if unknown { Settlement::LateKnown } else { Settlement::Known };
+                    slot.phase = if unknown { Phase::Unknown } else { Phase::Idle };
+                    slot.review_end = None;
+                } else {
+                    // Draining private data does not settle the separately
+                    // retained document vault originals or SDK close failures.
+                    slot.settlement = if unknown { Settlement::Unknown } else { Settlement::Pending };
+                    slot.phase = if unknown { Phase::Unknown } else { Phase::Stopping };
+                }
             }
             // Lock/loss/quit may have arrived during a candidate-only off-lock
             // drain. Keep that request pending until a subsequent reconcile
@@ -2864,12 +3287,23 @@ impl DocumentBinding {
             settle_evidence_status(&mut state);
             self.bump(&mut state);
         }
+        #[cfg(all(feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut state = self.lock();
+            match vault::start_cleanup(self, &mut state) {
+                Ok(Some(start)) => { drop(state); let _ = start.send(()); },
+                Ok(None) => {},
+                Err(_) => self.coordinator_failed(&mut state, UnknownOrigin::NotRecorded, None),
+            }
+        }
     }
 
     fn publish(&self, state: &mut DocumentState, slot: &mut Slot, staged: Staged) {
         // This function performs bounded memory-only publication. Every source,
         // GTK, parser and original coordinator/child join has already settled.
         match staged {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Staged::Vault(result) => vault::publish(self, state, slot, result),
             Staged::ProjectPath { proof, binding } => {
                 if !slot.operation.project_path() || !slot.project_path.as_ref().is_some_and(|original| Arc::ptr_eq(original, &binding)) {
                     slot.stop(Reason::ContextStale, Instant::now()); return;
@@ -2927,8 +3361,7 @@ impl DocumentBinding {
                 }
                 match result {
                     Ok(result) => {
-                        let payload = slot.candidate.as_ref().map(|candidate| &candidate.payload).or_else(||
-                            slot.target.as_ref().and_then(|target| state.records.iter().find(|record| &record.key == target).map(|record| &record.payload)));
+                        let payload = slot_payload(state, slot);
                         let usable = payload.is_some_and(|payload| payload.usable_source());
                         let permitted = result.permits() && usable;
                         slot.assessment = Some(result);
@@ -2955,7 +3388,7 @@ impl DocumentBinding {
                 slot.settlement = Settlement::Known;
             }
             Staged::Delete(tokens) => {
-                if !tokens_distinct(&tokens) || !slot.target.as_ref().is_some_and(|key| state.records.iter().any(|record| record.key == *key && record.mutation_pending)) {
+                if !tokens_distinct(&tokens) || !slot.target.as_ref().is_some_and(|key| record_pending(state, key)) {
                     slot.stop(Reason::SourceChanged, Instant::now()); return;
                 }
                 let Some(kind) = slot.kind else { slot.stop(Reason::SourceRefused, Instant::now()); return; };
@@ -2967,6 +3400,14 @@ impl DocumentBinding {
             Staged::Project { proof, generation } => match self.inner.bridge.publish_checked_project(proof, generation) {
                 Ok(project) => {
                     invalidate_all(state);
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    match self.inner.bridge.native_generation() {
+                        Ok(actual) => vault::registered_generation(state, actual),
+                        Err(error) => {
+                            slot.error = Some(error.into()); slot.stop(Reason::CleanupUnknown, Instant::now());
+                            state.unknown = true; vault::revoke_all(state); return;
+                        },
+                    }
                     slot.project = Some(project); slot.source = SourceState::NotRun; slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
                     fixture_event!(slot.owner, ProjectPublished, 1);
                     // Registry generation is part of every old context tuple.
@@ -2997,8 +3438,7 @@ impl DocumentBinding {
                     if context.revision != assignment.context_revision { Ok(false) } else { self.context_matches(state, context) }
                 });
                 let context_ok = self.registry_result(state, context_result, Some(&slot.owner)).unwrap_or(false);
-                if !state.records.iter().any(|record| record.key.id == assignment.record_id && record.key.revision == assignment.record_revision
-                    && record.payload.kind == assignment.kind && !record.mutation_pending && record.payload.usable_source())
+                if !record_usable(state, slot, &RecordKey { id: assignment.record_id.clone(), revision: assignment.record_revision }, assignment.kind)
                     || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits)
                     || !context_ok {
                     slot.stop(Reason::ContextStale, Instant::now()); slot.error = Some(AssetError::new(Reason::ContextStale).into()); return;
@@ -3028,22 +3468,26 @@ fn tokens_distinct(tokens: &TokenBatch) -> bool {
 }
 
 fn preview_subject_valid(state: &DocumentState, slot: &Slot, preview: &Preview) -> bool {
-    let subject = &preview.subject;
-    if !subject.kind.enabled() || slot.kind != Some(subject.kind) { return false; }
-    let referenced = match (&subject.record_id, subject.record_revision) {
+    let PreviewSubject::Record { kind, change, record_id, record_revision } = &preview.subject else {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { return vault::initialize_preview_valid(state, slot, preview); }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { return false; }
+    };
+    if !kind.enabled() || slot.kind != Some(*kind) { return false; }
+    let referenced = match (record_id, record_revision) {
         (None, None) => false,
         (Some(id), Some(revision)) => {
-            if !state.records.iter().any(|record| record.key.id == *id && record.key.revision == revision && record.payload.kind == subject.kind) { return false; }
+            if !has_record(state, &RecordKey { id: id.clone(), revision: *revision }, *kind) { return false; }
             true
-        }
-        _ => return false,
+        }, _ => return false,
     };
-    let matches = |key: &RecordKey| subject.record_id.as_ref() == Some(&key.id) && subject.record_revision == Some(key.revision);
-    match (preview.action, subject.change) {
+    let matches = |key: &RecordKey| record_id.as_ref() == Some(&key.id) && *record_revision == Some(key.revision);
+    match (preview.action, change) {
         (Action::Save, SubjectChange::New) => !referenced && preview.record.is_none() && preview.bind_token.is_some() && slot.target.is_none()
-            && slot.candidate.as_ref().is_some_and(|candidate| candidate.existing.is_none() && candidate.payload.kind == subject.kind),
+            && slot.candidate.as_ref().is_some_and(|candidate| candidate.existing.is_none() && candidate.payload.kind == *kind),
         (Action::Save, SubjectChange::Replace) => referenced && preview.record.is_none() && preview.bind_token.is_some() && slot.target.as_ref().is_some_and(matches)
-            && slot.candidate.as_ref().is_some_and(|candidate| candidate.existing.as_ref().is_some_and(matches) && candidate.payload.kind == subject.kind),
+            && slot.candidate.as_ref().is_some_and(|candidate| candidate.existing.as_ref().is_some_and(matches) && candidate.payload.kind == *kind),
         (Action::Bind, SubjectChange::Assign) => referenced && preview.bind_token.is_none() && preview.record.as_ref().is_some_and(matches)
             && slot.result_record.as_ref().or(slot.target.as_ref()).is_some_and(matches),
         (Action::Delete, SubjectChange::Delete) => referenced && preview.bind_token.is_none() && preview.record.as_ref().is_some_and(matches) && slot.target.as_ref().is_some_and(matches),
@@ -3067,12 +3511,21 @@ fn restore_failed_install_retirement(state: &mut DocumentState, _owner: &Arc<Ori
 
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
-    fn install(&self, state: &mut DocumentState, slot: Slot, job: Job) -> Result<oneshot::Sender<()>, AssetError> {
+    fn install(&self, state: &mut DocumentState, mut slot: Slot, job: Job) -> Result<oneshot::Sender<()>, AssetError> {
         // Every caller also has its real reciprocal admission check. Keep the
         // path original nonreplaceable here even if a future caller omits one;
         // an absent path slot in its invoke waiter then implies known settlement.
-        if project_path_pending(state) { return Err(AssetError::new(Reason::Busy)); }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let retired_cleanup = matches!(&job, Job::Vault(vault::Job::Release)) && vault::late_cleanup_install(state, &slot);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let retired_cleanup = false;
+        // An already-late-settled unrelated path remains Unknown. Only the
+        // revoked vault lease's finite Release may retain/retire that old slot;
+        // this is never permission to replace a live path or start new work.
+        if project_path_pending(state) && !retired_cleanup { return Err(AssetError::new(Reason::Busy)); }
         lookup_allocation_gate(state)?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        vault::attach_asset_slot(state, &mut slot)?;
         settle_evidence_status(state);
         let owner = slot.owner.clone();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3114,8 +3567,10 @@ impl DocumentBinding {
         if args.kind.file().is_none() { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let context = self.current_context(&mut state, args.context_revision)?;
         let target = target(&state, args.replacement, args.kind)?;
-        let roster = self.registry_result(&mut state, self.inner.bridge.native_roster(), None)?;
+        let mut roster = self.registry_result(&mut state, self.inner.bridge.native_roster(), None)?;
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(vault) = vault::physical_root(&state) { roster.roots.push(vault); }
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         let mut slot = Slot::new(owner, Operation::ChooseFile, Some(context), target.clone(), None);
@@ -3128,6 +3583,16 @@ impl DocumentBinding {
     pub(crate) fn prepare(&self, args: commands::Prepare<'_>) -> Result<u32, AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let context = self.current_context(&mut state, args.context_revision)?;
+        let durable = encrypted_mode(&state);
+        if args.label.is_some() != (durable && !matches!(args.source, commands::Source::Record(_))) { return Err(AssetError::invalid()); }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if durable {
+            if let commands::Source::Record(reference) = &args.source {
+                let key = own_record(commands::RecordRef { record_id: reference.record_id, expected_revision: reference.expected_revision })?;
+                let (id, start) = self.prepare_stored_vault(&mut state, key, context)?;
+                drop(state); let _ = start.send(()); return Ok(id);
+            }
+        }
         let now = Instant::now();
         let (payload, candidate, target, review_end) = match args.source {
             commands::Source::Selection(token) => {
@@ -3158,6 +3623,8 @@ impl DocumentBinding {
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
         let mut slot = Slot::new(owner, Operation::Prepare, Some(context.clone()), target.clone(), review_end);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { slot.vault.label = args.label.flatten().map(commands::copy_text).transpose()?; }
         slot.kind = Some(payload.kind); slot.source = if payload.material.is_some() { SourceState::Captured } else { SourceState::NotRun };
         let is_mutation = candidate.is_some(); slot.candidate = candidate;
         // A selection token and any dependent preview are consumed at admission,
@@ -3169,6 +3636,8 @@ impl DocumentBinding {
     }
 
     pub(crate) fn prepare_delete(&self, reference: commands::RecordRef<'_>) -> Result<AssetStatus, AssetError> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if encrypted_mode(&self.lock()) { return self.prepare_vault_delete(reference); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?; idle(&state)?;
         let key = own_record(reference)?;
         let kind = state.records.iter().find(|record| record.key == key && !record.mutation_pending).map(|record| record.payload.kind).ok_or_else(AssetError::invalid)?;
@@ -3219,13 +3688,19 @@ async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) 
             _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
         }
     };
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    vault::after_job(&document, &owner, &staged).await;
     document.stage(&owner, staged);
 }
 
 #[cfg(feature = "desktop-shell")]
 async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: Job) -> Staged {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
     if owner.interrupted() { owner.gui.not_created(Reason::UserCancelled); return Staged::Refused(Reason::UserCancelled); }
     match job {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Job::Vault(job) => vault::run(document, owner, job).await,
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
         Job::ChooseEvidenceFolder { app, purpose } => {
@@ -3241,7 +3716,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
             // Ordinary directory metadata only, no project publication and no
             // credential-source capture or user-selected document paths.
-            match child(owner, ChildJob::Probe { path, origins: Vec::new() }).await {
+            match child(owner, ChildJob::Probe { path, origins: Vec::new(), vault: None }).await {
                 Ok(ChildEnd::Probed(proof)) => Staged::EvidenceFolder { proof, tokens, purpose },
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
             }
@@ -3280,7 +3755,36 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
             }
         }
-        Job::Prepare { payload, context } => {
+        Job::Prepare { payload, context } => prepare_job(document, owner, payload, context).await,
+        Job::Delete => match child(owner, ChildJob::Tokens).await {
+            Ok(ChildEnd::Tokens(tokens)) => Staged::Delete(tokens),
+            Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+        },
+        Job::Project { app, generation, origins, vault } => {
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::Project, None).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            match child(owner, ChildJob::Probe { path, origins, vault }).await {
+                Ok(ChildEnd::Probed(proof)) => Staged::Project { proof, generation },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        Job::ProjectPath { app, binding } => {
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::ProjectPath(binding.field), Some(binding.root.path.clone())).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            match child(owner, ChildJob::ProjectPath { path, binding: binding.clone() }).await {
+                Ok(ChildEnd::ProjectPath(proof)) => Staged::ProjectPath { proof, binding },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "desktop-shell")]
+async fn prepare_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, payload: Arc<Payload>, context: Arc<NativeContext>) -> Staged {
             let tokens = match child(owner, ChildJob::Tokens).await {
                 Ok(ChildEnd::Tokens(tokens)) => tokens,
                 Ok(ChildEnd::Refused(reason)) | Err(reason) => return Staged::Refused(reason), _ => return Staged::Refused(Reason::CleanupUnknown),
@@ -3307,32 +3811,6 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             }
             if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
             Staged::Prepared { result, tokens }
-        }
-        Job::Delete => match child(owner, ChildJob::Tokens).await {
-            Ok(ChildEnd::Tokens(tokens)) => Staged::Delete(tokens),
-            Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
-        },
-        Job::Project { app, generation, origins } => {
-            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::Project, None).await {
-                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
-            };
-            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
-            match child(owner, ChildJob::Probe { path, origins }).await {
-                Ok(ChildEnd::Probed(proof)) => Staged::Project { proof, generation },
-                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
-            }
-        }
-        Job::ProjectPath { app, binding } => {
-            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::ProjectPath(binding.field), Some(binding.root.path.clone())).await {
-                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
-            };
-            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
-            match child(owner, ChildJob::ProjectPath { path, binding: binding.clone() }).await {
-                Ok(ChildEnd::ProjectPath(proof)) => Staged::ProjectPath { proof, binding },
-                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
-            }
-        }
-    }
 }
 
 #[cfg(feature = "desktop-shell")]
@@ -3409,6 +3887,8 @@ impl DocumentBinding {
     }
 
     pub(crate) fn commit(&self, token: &str) -> Result<AssetStatus, AssetError> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if encrypted_mode(&self.lock()) { return self.commit_vault(token); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let preview = self.consume_preview(&mut state, token, false)?;
         // All checks after consumption either admit this exact finite effect or
@@ -3447,7 +3927,7 @@ impl DocumentBinding {
                     if !state.records.iter().any(|record| record.key == key && record.payload.kind == kind && record.mutation_pending) { return Err(AssetError::invalid()); }
                     Ok((Some(key), None, None, kind))
                 }
-                Action::Bind => Err(AssetError::invalid()),
+                Action::Bind | Action::Initialize => Err(AssetError::invalid()),
             }
         })();
         let (key, payload, bind, kind) = match decision {
@@ -3483,6 +3963,8 @@ impl DocumentBinding {
     }
 
     pub(crate) fn bind(&self, token: &str) -> Result<AssetStatus, AssetError> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if encrypted_mode(&self.lock()) { return self.bind_vault(token); }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let preview = self.consume_preview(&mut state, token, true)?;
         let decision = (|| -> Result<(RecordKey, Kind, Arc<NativeContext>), AssetError> {
@@ -3517,7 +3999,7 @@ impl DocumentBinding {
         // poison is sticky document Unknown, never merely a later picker error.
         let generation = self.registry_result(&mut state, self.inner.bridge.native_generation(), None)?;
         let mut origins = Vec::new(); origins.try_reserve_exact(state.records.len()).map_err(|_| AssetError::new(Reason::Capacity))?;
-        for record in &state.records { if let Some(material) = &record.payload.material { origins.push(material.captured.origin.clone()); } }
+        for record in &state.records { if let Some(origin) = record.payload.material.as_ref().and_then(|material| material.selected_origin()) { origins.push(origin.clone()); } }
         let id = self.next_operation(&mut state)?;
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         let slot = Slot::new(owner, Operation::ChooseProject, None, None, None);
@@ -3525,7 +4007,11 @@ impl DocumentBinding {
         // not only success, revokes old use; cancel/refusal never restores it.
         invalidate_all(&mut state);
         state.github.retire(GitHubReason::TargetChanged);
-        let start = self.install(&mut state, slot, Job::Project { app, generation, origins })?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let vault = vault::physical_root(&state);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let vault = None;
+        let start = self.install(&mut state, slot, Job::Project { app, generation, origins, vault })?;
         drop(state); let _ = start.send(()); Ok(id)
     }
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
@@ -4744,7 +5230,7 @@ mod fixture_observation {
             if !slot.context.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, context)) { return None; }
             let candidate = slot.candidate.as_ref()?; let material = candidate.payload.material.as_ref()?;
             if candidate.payload.kind != Kind::AndroidKeystore || !material.observation.is_observed()
-                || material.captured.bytes != [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0] || candidate.existing.is_some() { return None; }
+                || material.selected_origin().is_none() || material.bytes() != [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0] || candidate.existing.is_some() { return None; }
             let review = slot.review_end?; if Instant::now() >= review { return None; }
             Some(Selection { owner:slot.owner.id, payload:Arc::as_ptr(&candidate.payload) as usize,
                 context:Arc::as_ptr(context) as usize, token:slot.selection.as_ref()?.0.clone(), record:candidate.record_id.0.clone(),
@@ -4785,6 +5271,8 @@ pub(crate) fn assert_project_path_document_contracts() {
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
     }
@@ -4916,6 +5404,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
     }
@@ -5009,6 +5499,8 @@ mod tests {
             compatibility_picker_pending: false, session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             first_origin: None }
     }
@@ -5383,8 +5875,8 @@ mod tests {
         let mut preview = Preview { token: token('d'), action: Action::Bind, bind_token: None, record: Some(key.clone()),
             subject: PreviewSubject::new(Kind::GoogleWif, SubjectChange::Assign, Some(&key)) };
         assert!(preview_subject_valid(&state, &slot, &preview)); assert!(state.assignments.is_empty());
-        preview.subject.record_revision = Some(0); assert!(!preview_subject_valid(&state, &slot, &preview));
-        preview.subject.record_revision = None; assert!(!preview_subject_valid(&state, &slot, &preview));
+        if let PreviewSubject::Record { record_revision, .. } = &mut preview.subject { *record_revision = Some(0); } assert!(!preview_subject_valid(&state, &slot, &preview));
+        if let PreviewSubject::Record { record_revision, .. } = &mut preview.subject { *record_revision = None; } assert!(!preview_subject_valid(&state, &slot, &preview));
         offer_preview(&state, &mut slot, preview);
         assert!(slot.phase == Phase::Stopping && slot.preview.is_none()); assert!(state.assignments.is_empty());
     }

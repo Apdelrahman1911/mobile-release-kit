@@ -3,7 +3,7 @@ import type { ProjectSession } from '../drafts.ts';
 import type { CredentialGuide, CredentialKind, HelpContent } from '../types.ts';
 import type { AssetDisplayState, AssetKind, AssetScope, CredentialAssessment, CredentialIssue } from '../assetSessionTypes.ts';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending, assetSessionReason } from '../assetSessionController.ts';
-import { ASSET_KINDS, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS, isAssetFileKind } from '../assetSessionProtocol.ts';
+import { ASSET_KINDS, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS, assetLabelFits, assetStorageWritable, isAssetFileKind } from '../assetSessionProtocol.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../assetSessionHelp.ts';
 import { RELEASE_INPUT_STAGES, preparationScopeChanged, preparationSessionReason, sessionPreparationKind } from '../releaseInputGuidance.ts';
 import type { ReleaseInputPreparationLocal, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
@@ -42,15 +42,18 @@ function Assessment({ value, guide, onHelp }: { value: CredentialAssessment; gui
   </div>;
 }
 
-function WriteOnlyFields({ kind, disabled, prepareHelp, onPrepare, onHelp }: { kind: CredentialKind; disabled: boolean; prepareHelp: HelpContent | null; onPrepare: (fields: Record<string, string | null>) => boolean; onHelp: (help: HelpContent) => void }) {
+function WriteOnlyFields({ kind, disabled, encrypted, labelHelp, prepareHelp, onPrepare, onHelp }: { kind: CredentialKind; disabled: boolean; encrypted: boolean; labelHelp: HelpContent | null; prepareHelp: HelpContent | null; onPrepare: (fields: Record<string, string | null>, label: string | null) => boolean; onHelp: (help: HelpContent) => void }) {
   const id = useId();
   const [values, setValues] = useState<Record<string, string>>({});
+  const [label, setLabel] = useState('');
+  const proposedLabel = label === '' ? null : label;
+  const labelValid = !encrypted || assetLabelFits(proposedLabel);
   const names = SESSION_FIELDS[kind.id as AssetKind];
   return <form className="session-inputs" autoComplete="off" onSubmit={(event) => {
     event.preventDefault();
-    if (disabled) return;
+    if (disabled || !labelValid || encrypted && !labelHelp) return;
     const fields = Object.fromEntries(names.map((name) => [name, values[name] ?? null]));
-    if (onPrepare(fields)) setValues({});
+    if (onPrepare(fields, encrypted ? proposedLabel : null)) { setValues({}); setLabel(''); }
   }}>
     {names.map((name) => {
       const help = kind.fields.find((field) => field.id === name);
@@ -63,8 +66,17 @@ function WriteOnlyFields({ kind, disabled, prepareHelp, onPrepare, onHelp }: { k
         <div className="session-field-help" id={`${id}-${name}-help`}><p><strong>Find it:</strong> {help.where}</p><p><strong>Format:</strong> {help.format}</p><p><strong>Required when:</strong> {help.requiredWhen}</p></div>
       </div>;
     })}
+    {encrypted && <div className="field">
+      <div className="field-label"><label htmlFor={`${id}-label`}>Vault label (optional)</label>{labelHelp && <HelpButton content={labelHelp} onHelp={onHelp} />}</div>
+      <p className="field-description">Choose a short nonsecret name, or leave empty to use the input kind and item number. This name is encrypted on disk; it is not proof of identity.</p>
+      <input id={`${id}-label`} type="text" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={128}
+        disabled={disabled || !labelHelp} value={label} onChange={(event) => setLabel(event.target.value)} aria-describedby={`${id}-label-help`} aria-invalid={!labelValid} />
+      <p id={`${id}-label-help`}>At most 128 UTF-8 bytes, without control characters. No passwords, tokens or private identifiers. An unsupported label prevents preparation; your original file is not renamed.</p>
+      {!labelValid && <p className="review-caution" role="alert">Use a shorter nonsecret label without control characters. Some characters take several UTF-8 bytes.</p>}
+      {!labelHelp && <p role="alert">Label guidance is unavailable. No private input can be prepared.</p>}
+    </div>}
     <p className="subtle-note"><Icon name="lock" size={16} />Write-only entry. Values are cleared after handoff or cancellation; they are not put into project settings or browser storage. Complete memory erasure is not promised.</p>
-    <div className="button-row"><button className="button" type="submit" disabled={disabled || names.some((name) => !kind.fields.some((field) => field.id === name))}><Icon name="shield" size={16} />Prepare private review</button>{prepareHelp && <HelpButton content={prepareHelp} onHelp={onHelp} />}</div>
+    <div className="button-row"><button className="button" type="submit" disabled={disabled || !labelValid || encrypted && !labelHelp || names.some((name) => !kind.fields.some((field) => field.id === name))}><Icon name="shield" size={16} />Prepare private review</button>{prepareHelp && <HelpButton content={prepareHelp} onHelp={onHelp} />}</div>
   </form>;
 }
 
@@ -109,16 +121,20 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   const contextReason = nativeBusyReason ?? assetContextReason(state);
   const cancellationReason = assetCancellationReason(state);
   const inSession = status?.mode === 'session';
+  const encrypted = status?.mode === 'encrypted';
+  const storage = encrypted ? 'encrypted' : 'session';
+  const writable = assetStorageWritable(status);
+  const persistence = status?.persistence;
   const nativeAvailable = state.mode === 'native' && status?.capability.available === true && !state.blocked && !state.observationFailed;
   const idle = !operation || (operation.phase === 'idle' && operation.settlement === 'known');
   const projectPathActive = projectPathOperation && !idle;
   const intentPending = assetIntentPending(state);
-  const effectiveKindId = intentPending && state.intent ? state.intent.kind : kindId;
+  const effectiveKindId = intentPending && state.intent?.type === 'record' ? state.intent.kind : kindId;
   const originalKind = guide?.kinds.find((item) => item.id === (operation?.selectionToken ? state.selectionKind : effectiveKindId));
   const kind = originalKind ? sessionKindHelp(originalKind) : null;
   const originalSelectedKind = guide?.kinds.find((item) => item.id === effectiveKindId);
   const selectedKind = originalSelectedKind ? sessionKindHelp(originalSelectedKind) : null;
-  const selectionVisible = !!(nativeAvailable && inSession && guide && !projectPathActive);
+  const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive);
   // The complete existing outer + inner render condition protects even an
   // unsubmitted private form. Navigation never inspects or resets its values.
   const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind) ||
@@ -126,20 +142,20 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   const replacement = controller.replacement(kindId, replacementId);
   const preview = operation?.preview;
   const expired = state.previewDeadline === null || performance.now() >= state.previewDeadline;
-  const usable = state.contextCurrent && !baseReason && !state.busy && !state.updatingContext;
+  const usable = writable && state.contextCurrent && !baseReason && !state.busy && !state.updatingContext;
   const controlHelp = (name: string) => {
-    const help = sessionControlHelp(guide, name);
+    const help = sessionControlHelp(guide, name, storage);
     return help ? <HelpButton content={help} onHelp={onHelp} /> : null;
   };
-  const intentTarget = state.intent ? sessionTargetLabel(guide, { kind: state.intent.kind, change: state.intent.change,
-    recordId: state.intent.record?.recordId ?? null, recordRevision: state.intent.record?.expectedRevision ?? null }, status?.records ?? []) : null;
-  const reviewTarget = preview ? sessionTargetLabel(guide, preview.subject, status?.records ?? []) : null;
+  const intentTarget = state.intent?.type === 'record' ? sessionTargetLabel(guide, { type: 'record', kind: state.intent.kind, change: state.intent.change,
+    recordId: state.intent.record?.recordId ?? null, recordRevision: state.intent.record?.expectedRevision ?? null }, status?.records ?? [], storage) : null;
+  const reviewTarget = preview ? sessionTargetLabel(guide, preview.subject, status?.records ?? [], storage) : null;
   const scopeChange = (name: keyof AssetScope, value: string) => controller.setScope({ ...state.scope, [name]: value } as AssetScope);
-  const prepare = (fields: Record<string, string | null>): boolean => {
-    if (operation?.selectionToken) return controller.prepareSelection(state.selectionKind === 'android-keystore' ? { storePassword: fields.storePassword ?? null, keyAlias: fields.keyAlias ?? null, keyPassword: fields.keyPassword ?? null } : {});
+  const prepare = (fields: Record<string, string | null>, label: string | null): boolean => {
+    if (operation?.selectionToken) return controller.prepareSelection(state.selectionKind === 'android-keystore' ? { storePassword: fields.storePassword ?? null, keyAlias: fields.keyAlias ?? null, keyPassword: fields.keyPassword ?? null } : {}, label);
     if (replacement === undefined) return false;
-    if (kindId === 'google-wif') return controller.prepareScalar('google-wif', { provider: fields.provider ?? null, serviceAccount: fields.serviceAccount ?? null }, replacement);
-    if (kindId === 'project-read-token') return controller.prepareScalar('project-read-token', { token: fields.token ?? null }, replacement);
+    if (kindId === 'google-wif') return controller.prepareScalar('google-wif', { provider: fields.provider ?? null, serviceAccount: fields.serviceAccount ?? null }, replacement, label);
+    if (kindId === 'project-read-token') return controller.prepareScalar('project-read-token', { token: fields.token ?? null }, replacement, label);
     return false;
   };
   const preparationCurrent = preparation !== null && isPreparationCurrent(preparation);
@@ -161,9 +177,10 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
     sessionRef.current?.focus();
   };
   return <section ref={sessionRef} tabIndex={-1} className="card credential-session" aria-labelledby={`${id}-title`}>
-    <SectionHeading title="Private inputs, one guided step at a time" description="Select → assess → keep for this session → assign to this release context. Each is a separate step." />
-    <h3 id={`${id}-title`} className="inline-heading">Session-only storage {controlHelp('mode')}<Badge tone={inSession ? 'info' : 'neutral'}>{inSession ? 'Session open · no persistence' : 'Session closed'}</Badge></h3>
-    <p>Nothing is uploaded, written into your repository, or stored in a persistent vault. Native file selection preserves the original. Quitting discards session copies only after their original owners settle.</p>
+    <SectionHeading title="Private inputs, one guided step at a time" description="Choose storage → select and assess → review saving → assess and assign to this release context. These are separate decisions." />
+    <h3 id={`${id}-title`} className="inline-heading">Private-input storage {controlHelp('mode')}<Badge tone={writable ? 'info' : 'neutral'}>{inSession ? 'Memory-only session' : encrypted ? `Encrypted vault · ${persistence?.state ?? 'unknown'}` : 'Storage closed'}</Badge></h3>
+    <p>Nothing is uploaded or written into your repository. Native selection preserves the original. Memory-only copies last for this launch; explicitly saved encrypted records can remain for later launches. Neither mode automatically assigns an input or starts a release.</p>
+    {encrypted && persistence && <div className="session-context" role="status"><p><strong>Key access:</strong> {persistence.keyAccess}. {persistence.reason !== 'none' ? ASSET_REASON_HELP[persistence.reason] : writable ? 'Unlocked descriptors are not proof that their stored payloads are ready. Assess the exact revision before assigning.' : 'Wait for the original operation to settle before continuing.'}</p>{persistence.keyAccess === 'read-only' && <p>Read-only interrupted vault: authenticated labels only. Preparing, saving, removing and assigning inputs are unavailable; no automatic repair is attempted.</p>}</div>}
     {preparation && <div className="session-context" aria-label="Current requirement preparation guide">
       <div className="inline-heading"><h3>Prepare this input</h3><Badge>Guidance only · no input checked</Badge></div>
       {preparationCurrent && preparationKind && <>
@@ -178,8 +195,8 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
             <p>{field.what}</p><p><strong>Find it:</strong> {field.where}</p><p><strong>Format:</strong> {field.format}</p><p><strong>If incorrect:</strong> {field.failure}</p>
           </div>)}
         </details>
-        <p>Continue sets the choices in the existing session controls. If a session is open, changing its release context submits that context and makes earlier assignment displays stale. It does not choose a file, read a credential, keep an input, assign it or start a release.</p>
-        <p><strong>Next explicit step:</strong> {!nativeAvailable ? 'Read the availability reason below; this guide cannot enable collection.' : !inSession ? 'Start a session when you are ready.' : !state.contextCurrent || preparationScopeChanged(preparation, state.scope) ? 'Wait for the changed context, or use Submit current context if it is not current.' : isAssetFileKind(preparation.guideId) ? 'Use Select file, then prepare and review separately.' : 'Use the private fields, then Prepare private review.'}</p>
+        <p>Continue sets the choices in the existing private-input controls. When storage is writable, changing release context submits that context and makes earlier assignment displays stale. It does not unlock a vault, choose a file, read a credential, save an input, assign it or start a release.</p>
+        <p><strong>Next explicit step:</strong> {!nativeAvailable ? 'Read the availability reason below; this guide cannot enable collection.' : !writable ? encrypted ? 'Use the vault status and explicit initialization or unlock action below; locked and interrupted storage cannot collect inputs.' : 'Choose a storage mode when you are ready.' : !state.contextCurrent || preparationScopeChanged(preparation, state.scope) ? 'Wait for the changed context, or use Submit current context if it is not current.' : isAssetFileKind(preparation.guideId) ? 'Use Select file, then prepare and review separately.' : 'Use the private fields, then Prepare private review.'}</p>
       </>}
       {preparationReason && <p className="review-caution" role="status">{preparationReason}</p>}
       <div className="button-row"><button type="button" className="button secondary" disabled={preparationReason !== null} onClick={continuePreparation}>Continue with this context</button><button type="button" className="button secondary" onClick={() => dismissPreparation(preparation)}>Close guidance</button></div>
@@ -187,11 +204,13 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
     {!nativeAvailable && <div className="notice notice-warning"><Icon name="lock" size={18} /><div><strong>Private input is unavailable in this build</strong><p>{baseReason ?? 'Native qualification is required before collection.'}</p><p>Guides remain available. Do not paste credentials into project configuration to work around this gate.</p></div></div>}
     {state.error && <ErrorNotice error={state.error} title="The session action was not confirmed" />}
     <div className="button-row">
-      {!inSession && <button className="button" disabled={!!baseReason || !guide} onClick={() => controller.open()}><Icon name="key" size={16} />Start session — keep inputs in memory</button>}
-      <button className="button secondary" disabled={state.mode !== 'native' || state.observing} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={16} />{state.observing ? 'Checking original status…' : 'Check session status'}</button>
-      {inSession && <button className="button secondary" disabled={!!state.busy || projectPathActive} onClick={() => changeLocal({ confirmLock: true })}>Discard session…</button>}
+      {status?.mode === 'closed' && <><button className="button" disabled={!!baseReason || !guide || !idle} onClick={() => controller.open()}><Icon name="key" size={16} />Start session — keep inputs in memory</button><button className="button secondary" disabled={!!baseReason || !guide || !idle} onClick={() => controller.open('encrypted')}>Open encrypted vault</button></>}
+      {encrypted && persistence?.state === 'uninitialized' && <><button className="button" disabled={!!baseReason || !guide || !idle} onClick={() => controller.prepareInitialize()}>Review vault initialization…</button>{controlHelp('initialize')}</>}
+      {encrypted && persistence?.keyAccess === 'locked' && ['locked', 'interrupted'].includes(persistence.state) && <><button className="button" disabled={!!baseReason || !guide || !idle} onClick={() => controller.unlock()}>Unlock vault</button>{controlHelp('unlock')}</>}
+      <button className="button secondary" disabled={state.mode !== 'native' || state.observing} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={16} />{state.observing ? 'Checking original status…' : 'Check storage status'}</button>
+      {(inSession || encrypted) && <button className="button secondary" disabled={!!state.busy || projectPathActive} onClick={() => changeLocal({ confirmLock: true })}>{encrypted ? 'Lock vault…' : 'Discard session…'}</button>}
     </div>
-    {confirmLock && <div className="session-review" role="group" aria-label="Confirm session discard"><div className="inline-heading"><h3>Discard all session copies and assignments?</h3>{controlHelp('lock')}</div><p>Original files stay untouched. This cannot force cleanup of an unsettled operation. No record is kept for your next launch.</p><div className="button-row"><button className="button secondary" onClick={() => changeLocal({ confirmLock: false })}>Keep this session</button><button className="button danger" disabled={!!state.busy || projectPathActive} onClick={() => { if (controller.lock()) changeLocal({ confirmLock: false }); }}>Discard session copies</button></div></div>}
+    {confirmLock && <div className="session-review" role="group" aria-label="Confirm private-input lock"><div className="inline-heading"><h3>{encrypted ? 'Lock vault and revoke all current assignments?' : 'Discard all session copies and assignments?'}</h3>{controlHelp('lock')}</div><p>{encrypted ? 'Saved encrypted records stay on disk. Decrypted copies become unavailable and are released as original work settles. You must explicitly unlock and reassess records before assigning again.' : 'Original files stay untouched. No session record is kept for your next launch.'} This cannot force cleanup of an unsettled operation or guarantee memory erasure.</p><div className="button-row"><button className="button secondary" onClick={() => changeLocal({ confirmLock: false })}>Go back</button><button className="button danger" disabled={!!state.busy || projectPathActive} onClick={() => { if (controller.lock()) changeLocal({ confirmLock: false }); }}>{encrypted ? 'Lock vault' : 'Discard session copies'}</button></div></div>}
     <div className="session-context">
       <div className="inline-heading"><h3>Release context</h3>{controlHelp('project')}<Badge tone={state.contextCurrent ? 'info' : 'warning'}>{state.contextCurrent ? 'Context submitted · not yet policy-validated' : 'Context not current'}</Badge></div>
       <p><strong>Project:</strong> {project?.project.name ?? 'Choose a project first'} · {project?.draft ? 'Current in-memory draft' : 'Prepare a draft in Project settings'}</p>
@@ -199,13 +218,13 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
         ['platform', 'Platform', ASSET_PLATFORMS], ['stage', 'Release stage', ASSET_STAGES], ['purpose', 'Input purpose', ASSET_PURPOSES],
       ] as const).map(([name, label, options]) => <div className="field" key={name}><div className="field-label"><label htmlFor={`${id}-${name}`}>{label}</label>{controlHelp(name)}</div><select id={`${id}-${name}`} value={state.scope[name]} onChange={(event) => scopeChange(name, event.target.value)} disabled={state.blocked || nativeBusyReason !== null}>{options.map((option) => <option key={option} value={option}>{option === 'project' ? 'Project dependency access' : option === 'candidate' ? 'Candidate / internal testing' : option === 'production' ? 'Production preparation' : option === 'full' ? 'All selected input roles' : option === 'store' ? 'Store access only' : option === 'signing' ? 'Build / signing only' : option === 'external-testing' ? 'External testing' : option === 'ios' ? 'iOS' : 'Android'}</option>)}</select></div>)}</div>
       <p>Changing the project, draft, platform, stage or purpose makes prior assignment displays stale immediately. The core—not these selectors—decides which inputs are required.</p>
-      <button className="button secondary small" disabled={!nativeAvailable || !inSession || !project || state.updatingContext || nativeBusyReason !== null} onClick={() => controller.submitContext()}>{state.updatingContext ? 'Submitting current context…' : 'Submit current context'}</button>
+      <button className="button secondary small" disabled={!nativeAvailable || !writable || !project || state.updatingContext || nativeBusyReason !== null} onClick={() => controller.submitContext()}>{state.updatingContext ? 'Submitting current context…' : 'Submit current context'}</button>
     </div>
     {selectionVisible && guide && <>
       <div className="session-selection">
         {idle && !intentPending ? <>
           <div className="field"><div className="field-label"><label htmlFor={`${id}-kind`}>What would you like to provide?</label>{controlHelp('choose')}</div><select id={`${id}-kind`} value={kindId} disabled={!!state.busy} onChange={(event) => changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })}>{ASSET_KINDS.map((kind) => <option key={kind} value={kind}>{guide.kinds.find((entry) => entry.id === kind)?.label ?? 'Supported session input'}</option>)}</select></div>
-          <div className="field"><div className="field-label"><label htmlFor={`${id}-replace`}>New or replacement copy?</label>{controlHelp('replace')}</div><select id={`${id}-replace`} value={replacementId ?? ''} disabled={!!state.busy} onChange={(event) => changeLocal({ replacementId: event.target.value || null })}><option value="">Keep a new session record</option>{status?.records.map((record, index) => record.kind === kindId && <option key={record.recordId} value={record.recordId}>Replace session item {index + 1} · revision {record.revision}</option>)}</select><p>Starting a replacement makes old assignments unavailable, even if you cancel. The old record is not silently reassigned.</p></div>
+          <div className="field"><div className="field-label"><label htmlFor={`${id}-replace`}>New or replacement copy?</label>{controlHelp('replace')}</div><select id={`${id}-replace`} value={replacementId ?? ''} disabled={!!state.busy} onChange={(event) => changeLocal({ replacementId: event.target.value || null })}><option value="">{encrypted ? 'Save a new encrypted record' : 'Keep a new session record'}</option>{status?.records.map((record, index) => record.kind === kindId && <option key={record.recordId} value={record.recordId}>Replace item {index + 1}{record.label ? ` · ${record.label}` : ''} · revision {record.revision}</option>)}</select><p>Starting a replacement makes old assignments unavailable, even if you cancel. The old record is not silently reassigned.</p></div>
         </> : <div className="session-intent" role="status"><strong>Original requested action:</strong> {state.intent?.change === 'replace' ? 'Replace' : state.intent?.change === 'assign' ? 'Assess for assignment' : state.intent?.change === 'delete' ? 'Review removal of' : 'Prepare'} {intentTarget ?? 'an unconfirmed target'}<p>Page navigation cannot change this target. Cancel the original operation before choosing a different action.</p></div>}
         {isAssetFileKind(effectiveKindId) && <>
           <p>{effectiveKindId === 'android-keystore' ? 'Select a private .jks or .keystore original outside project folders. Only its JKS header is recognized; PKCS#12 is not supported here.' : effectiveKindId === 'ios-firebase' ? 'Select the iOS GoogleService-Info.plist downloaded from Firebase project settings, in XML format. The core checks its BUNDLE_ID against your submitted draft; binary plist is not supported.' : 'Select the Android google-services.json downloaded from Firebase project settings. Every supported client is checked against your draft by the core.'}</p>
@@ -215,26 +234,28 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
         </>}
         {contextReason && <p className="review-caution">{contextReason}</p>}
         {writeOnlyFormMounted && kind &&
-          <WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`} kind={kind} disabled={!!contextReason || (idle && replacement === undefined)} prepareHelp={sessionControlHelp(guide, 'prepare')} onPrepare={prepare} onHelp={onHelp} />}
+          <WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`} kind={kind} encrypted={encrypted} labelHelp={sessionControlHelp(guide, 'label', storage)} disabled={!!contextReason || (idle && replacement === undefined)} prepareHelp={sessionControlHelp(guide, 'prepare', storage)} onPrepare={prepare} onHelp={onHelp} />}
       </div>
     </>}
     {cancellationReason && <p className="review-caution" role="status">{cancellationReason}</p>}
     {operation && (projectPathOperation ? <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original project-path picker status</h3><Badge>{operation.phase}</Badge></div><p><strong>Settlement:</strong> {operation.settlement} · <strong>Reason:</strong> {operation.reason}</p><p>This selects a project-relative draft path, not a credential or asset. Only the original picker offers Cancel; a pending or unknown result does not confirm selection or cleanup.</p></div>
-      : <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original operation status</h3><Badge tone={operation.settlement === 'unknown' || operation.settlement === 'late-known' ? 'warning' : 'neutral'}>{operation.phase}</Badge></div><p><strong>Source custody:</strong> {operation.source} · <strong>Settlement:</strong> {operation.settlement}</p><p>{ASSET_REASON_HELP[operation.reason]}</p>{operation.phase !== 'idle' && <button className="button secondary small" disabled={!!cancellationReason} onClick={() => controller.discard()}>Request cancel / discard this operation</button>}<p>A pending result is not a successful import. Cancellation does not erase an unknown owner or restore an old assignment.</p></div>)}
+      : <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original operation status</h3><Badge tone={operation.settlement === 'unknown' || operation.settlement === 'late-known' ? 'warning' : 'neutral'}>{operation.phase}</Badge></div><p><strong>Action:</strong> {operation.operation} · <strong>Source custody:</strong> {operation.source} · <strong>Settlement:</strong> {operation.settlement}</p><p>{ASSET_REASON_HELP[operation.reason]}</p>
+        {operation.storageOutcome && <div><p><strong>Storage effect:</strong> {operation.storageOutcome.effect} · <strong>Durability:</strong> {operation.storageOutcome.durability} · <strong>Cleanup:</strong> {operation.storageOutcome.cleanup}</p><p>These are separate facts. An applied change is not a successful operation if cancellation, failure, uncertain durability or unconfirmed cleanup remains. Locking does not erase this receipt. No rollback or retry is inferred.</p></div>}
+        {operation.phase !== 'idle' && <button className="button secondary small" disabled={!!cancellationReason} onClick={() => controller.discard()}>Request cancel / discard this operation</button>}<p>A pending result is not a successful import. Cancellation does not erase an unknown owner or restore an old assignment.</p></div>)}
     {operation?.assessment && guide && <Assessment value={operation.assessment} guide={guide} onHelp={onHelp} />}
-    {preview && <div className="session-review" aria-label="Explicit session review"><div className="inline-heading"><h3>{preview.action === 'save' ? 'Keep this input for this session?' : preview.action === 'bind' ? 'Assign this record to the submitted context?' : 'Remove this session copy?'}</h3>{controlHelp(preview.action === 'bind' ? 'assign' : preview.action)}</div>
+    {preview && <div className="session-review" aria-label="Explicit private-input review"><div className="inline-heading"><h3>{preview.action === 'initialize' ? 'Create a new encrypted vault?' : preview.action === 'save' ? encrypted ? 'Save this encrypted input?' : 'Keep this input for this session?' : preview.action === 'bind' ? 'Assign this record to the submitted context?' : encrypted ? 'Remove this encrypted copy?' : 'Remove this session copy?'}</h3>{controlHelp(preview.action === 'bind' ? 'assign' : preview.action)}</div>
       <p><strong>Exact target:</strong> {reviewTarget ?? 'Not established — confirmation is unavailable'}{preview.subject.change === 'replace' ? ' · Replace this revision' : ''}</p>
       {!state.reviewReady && <p className="review-caution">The original action and this review have not been positively matched. Check status, or discard and prepare explicitly again. No confirmation will be sent.</p>}
-      <p>{preview.action === 'save' ? 'Only the native-captured snapshot and supplied fields are retained in memory. Keeping is not assigning; review the separate assignment step next.' : preview.action === 'bind' ? 'This assigns the exact retained revision to the submitted project draft and release scope. It does not start a build, verify an account or authorize a release.' : 'Only this session record is removed. The original file is never deleted, and old assignments will not be restored if you cancel.'}</p>
+      <p>{preview.action === 'initialize' ? 'Create application-managed encrypted storage outside your projects and its new protected OS keyring entry. Existing, conflicting or inaccessible state is not overwritten, adopted or repaired. No credential or assignment is created.' : preview.action === 'save' ? encrypted ? 'Save the captured snapshot and supplied fields as an encrypted copy. Saved means not assigned: the stored payload has not yet been checked for use. Next, explicitly choose Assess and assign on the actual saved revision.' : 'Only the native-captured snapshot and supplied fields are retained in memory. Keeping is not assigning; review the separate assignment step next.' : preview.action === 'bind' ? 'This assigns the exact freshly assessed revision to the submitted project draft and release scope. It does not start a build, verify an account or authorize a release.' : 'Only this stored copy is removed. The original file is never deleted, and old assignments will not be restored if you cancel.'}</p>
       <p>{expired ? 'This review has expired or is no longer current. No confirmation will be submitted.' : 'The original review lasts at most five minutes. Refreshing or moving from Keep to Assign does not extend it.'}</p>
-      <div className="button-row"><button className="button secondary" disabled={!!cancellationReason} onClick={() => controller.discard()}>Discard review</button>{controlHelp('discard')}<button className={`button${preview.action === 'delete' ? ' danger' : ''}`} disabled={!!baseReason || expired || !state.reviewReady || !reviewTarget || (preview.action !== 'delete' && !usable)} onClick={() => controller.confirmPreview(preview.token, preview.action)}>{preview.action === 'save' ? 'Keep for this session' : preview.action === 'bind' ? 'Assign to this context' : 'Remove session copy'}</button></div>
+      <div className="button-row"><button className="button secondary" disabled={!!cancellationReason} onClick={() => controller.discard()}>Discard review</button>{controlHelp('discard')}<button className={`button${preview.action === 'delete' ? ' danger' : ''}`} disabled={!!baseReason || expired || !state.reviewReady || !reviewTarget || (preview.action === 'save' || preview.action === 'bind') && !usable || preview.action === 'delete' && !writable} onClick={() => controller.confirmPreview(preview.token, preview.action)}>{preview.action === 'initialize' ? 'Create encrypted vault' : preview.action === 'save' ? encrypted ? 'Save encrypted copy' : 'Keep for this session' : preview.action === 'bind' ? 'Assign to this context' : encrypted ? 'Remove encrypted copy' : 'Remove session copy'}</button></div>
     </div>}
-    {!!status?.records.length && <div className="session-records"><div className="inline-heading"><h3>Kept session records</h3>{controlHelp('assign')}</div><p>Fixed labels only; no secret value or original filename is displayed. At most 32 records / 64 MiB; secure persistence is not enabled.</p>
+    {!!status?.records.length && <div className="session-records"><div className="inline-heading"><h3>{encrypted ? 'Encrypted stored records' : 'Kept session records'}</h3>{controlHelp('assign')}</div><p>{encrypted ? 'Authenticated descriptors only; a listed label is not payload assessment or assignment. At most 128 records / 1 GiB on disk. Labels are optional user text, never filled from original filenames.' : 'Fixed labels only; no secret value or original filename is displayed. At most 32 records / 64 MiB; retained only for this launch.'}</p>
       {status.records.map((record, index) => {
         const assigned = usable && status.assignments.some((assignment) => assignment.recordId === record.recordId && assignment.recordRevision === record.revision && assignment.kind === record.kind && assignment.contextRevision === status.context?.revision && assignment.availability === 'available');
-        return <article key={record.recordId}><div><h4>{guide?.kinds.find((kind) => kind.id === record.kind)?.label ?? 'Session input'} · item {index + 1}</h4><p>Revision {record.revision} · retained only in this session</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge></div><div className="button-row"><button className="button secondary small" disabled={!usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>Review assignment</button><button className="button secondary small" disabled={!!baseReason || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
+        return <article key={record.recordId}><div><h4>{guide?.kinds.find((kind) => kind.id === record.kind)?.label ?? 'Private input'} · item {index + 1}{record.label ? ` · ${record.label}` : ''}</h4><p>Revision {record.revision} · {encrypted ? 'encrypted stored copy' : 'retained only in this session'}</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge><p>{record.payloadState === 'not-checked' ? 'Payload not checked for the current session and draft. Assess this exact revision before assigning.' : 'Payload assessed for its submitted context; a changed draft needs preparation again. Native signing, account access and release readiness remain unverified.'}</p></div><div className="button-row"><button className="button secondary small" disabled={!usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>{encrypted ? 'Assess and assign…' : 'Review assignment'}</button><button className="button secondary small" disabled={!!baseReason || !writable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
       })}
     </div>}
-    <p className="session-limit-note">Not available in this increment: persistent encrypted storage, macOS/Windows import, PKCS#12, Apple profiles/P8 and binary plist. iOS Firebase supports XML plist checks only, subject to native availability. No native signing or online credential verification is claimed.</p>
+    <p className="session-limit-note">Encrypted storage and input collection require their qualified native profile; UI controls never enable that gate. macOS/Windows import, PKCS#12, Apple profiles/P8 and binary plist are unavailable here. iOS Firebase supports XML plist checks only. No native signing, online credential verification, automatic repair or release is performed.</p>
   </section>;
 }

@@ -71,7 +71,7 @@ tauri = { version = "=2.11.5", optional = true, default-features = false, featur
 rfd = { version = "=0.15.4", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "=0.30.1", default-features = false, features = ["fs"] }
+nix = { version = "=0.30.1", default-features = false, features = ["fs", "poll"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 # Read Darwin's actual per-descriptor mount flags; no mount operation is used.
@@ -102,6 +102,11 @@ mrk-linux-mount-observation = { path = "../native/linux-mount-observation" }
 secret-service = { version = "=5.2.0", path = "../vendor/secret-service-5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 ordered-stream = "=0.2.0"
+# Private durable-vault primitive only; no RNG defaults or provider activation.
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+# chacha20poly1305/zeroize does not forward this internal-state Drop feature.
+poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 
 # One maintained zbus identity for both the application and secret-service.
 # Its additive owned client does not enable native qualification/persistence.
