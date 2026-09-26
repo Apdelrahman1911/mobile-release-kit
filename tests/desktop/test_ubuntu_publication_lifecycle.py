@@ -6919,6 +6919,7 @@ def github_receipt_data(case, expected=None):
 
 def github_capture_data(case, receipt):
     return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
             b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
             + b"MRK_INSTALLED_SHELL_GITHUB_READONLY=" + L.canonical(receipt)
             + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n")
@@ -7226,9 +7227,16 @@ class InstalledGitHubReadOnlyDataContracts(unittest.TestCase):
         case, maps = "github-connect-refresh", github_map_data()
         raw = github_capture_data(case, github_receipt_data(case, maps))
         lines = raw.splitlines(keepends=True)
-        bad_outputs = (b"".join(lines[:3] + lines[4:]), raw + lines[3],
-                       b"".join([lines[1], lines[0], *lines[2:]]), raw.rstrip(b"\n"),
-                       raw + b"MRK_INSTALLED_NATIVE_CHILD=[]\n")
+        self.assertEqual(len(lines), 7)
+        bad_outputs = (b"".join(lines[:5] + lines[6:]), raw + lines[5],
+                       b"".join([lines[1], lines[0], *lines[2:]]),
+                       b"".join([*lines[:2], lines[3], lines[2], *lines[4:]]),
+                       b"".join(lines[:2] + lines[4:]),  # stale pre-reload shape
+                       b"".join(lines[:4] + lines[2:]),  # second reload forbidden
+                       b"".join([*lines[:4], lines[5], lines[4], lines[6]]),
+                       b"".join(lines[:6] + [lines[6].replace(b"verified", b"failed")]),
+                       raw.rstrip(b"\n"), raw + b"MRK_INSTALLED_NATIVE_CHILD=[]\n",
+                       *(b"".join(lines[:index] + lines[index + 1:]) for index in range(4)))
         for stdout, stderr, code in [(value, b"", 0) for value in bad_outputs] + [
                 (raw, b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", 0), (raw, b"", False), (raw, b"", 1)]:
             with self.subTest(code=code, length=len(stdout)), self.assertRaises(L.Refused):
