@@ -3088,6 +3088,13 @@ class _Outer:
             _require(scope._source._lease.cancellation is guard)
             scope._consume(self, binding)
         guard.lifetime_ledger._bind_command(self.slot)
+        # One fixed read-only original-slot binding. This must not poll STOP or
+        # introduce native work before the normal CleanupScope is registered.
+        ios_source = guard._ios_archive_source
+        if ios_source is not None:
+            from ._desktop_ios_archive_control import IOSArchiveInput
+            _require(type(ios_source) is IOSArchiveInput)
+            ios_source.require_operation().bind_command_slot(self, self.slot)
         self.create_route, self.run_route = _Route(Tag.CREATE_W), _Route(Tag.RUN_TOOL)
         self.ctx.routes.extend((self.create_route, self.run_route))
         self.io: native.Acquisition | None = None

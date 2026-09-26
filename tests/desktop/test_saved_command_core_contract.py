@@ -90,7 +90,8 @@ def inert_operation(source):
 class SavedCommandBindingTests(unittest.TestCase):
     def test_finite_domains_share_methods_but_not_offline_type_or_budget(self):
         self.assertEqual(set(control.SavedCommandDomain), {
-            control.SavedCommandDomain.OfflinePreflight, control.SavedCommandDomain.AndroidBuild, control.SavedCommandDomain.ProjectRecovery})
+            control.SavedCommandDomain.OfflinePreflight, control.SavedCommandDomain.AndroidBuild,
+            control.SavedCommandDomain.ProjectRecovery, control.SavedCommandDomain.IOSArchive})
         self.assertIs(PreflightInput.poll, AndroidBuildInput.poll)
         self.assertIs(PreflightInput.close, AndroidBuildInput.close)
         self.assertIs(PreflightEngine.run, AndroidEngine.run)

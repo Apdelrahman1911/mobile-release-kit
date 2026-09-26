@@ -18,6 +18,9 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/project_recovery_protocol.rs"] mod project_recovery_protocol;
 #[path = "../src/project_recovery_owner.rs"] mod project_recovery_owner;
 #[path = "../src/android_toolchain.rs"] mod android_toolchain;
+#[path = "../src/ios_archive_protocol.rs"] mod ios_archive_protocol;
+#[path = "../src/ios_archive_owner.rs"] mod ios_archive_owner;
+#[path = "../src/ios_toolchain.rs"] mod ios_toolchain;
 #[path = "../src/saved_command_owner.rs"] mod saved_command_owner;
 #[path = "../src/runtime.rs"] mod runtime;
 #[path = "../src/installed_runtime.rs"] mod installed_runtime;

@@ -1,7 +1,8 @@
 """Inert DATA/control-flow regressions, not Mac/native/process evidence.
 
-No core owner is imported, no command/native fixture is run, and no candidate
-process or filesystem readback is substituted for required hosted Aqua cases.
+No core owner is imported and no command/native fixture is run. The unsigned-
+iOS output-reader tests use disposable regular-file fixtures only; their DATA
+does not substitute for required installed hosted Aqua/core/native evidence.
 """
 from contextlib import contextmanager
 from copy import deepcopy
@@ -15,6 +16,7 @@ import stat
 from subprocess import CompletedProcess
 import sys
 from types import FunctionType, ModuleType, SimpleNamespace
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +58,9 @@ def final_snapshot(case, original):
             previous = result[name].identity
             identity = (previous[0], 202 if case == "first-save" else previous[1], *previous[2:6], len(body), 101, 101)
             result[name] = M.Node(identity, M.digest(body), None)
+        elif name == "version.properties" and case == "ios-version-stale":
+            previous = result[name].identity
+            result[name] = M.Node((*previous[:7], 101, 101), M.digest(body), None)
     return result
 
 
@@ -77,6 +82,10 @@ class InertFixtures:
             raise AssertionError("readback lacks positive original return")
         self.reads.append(case)
         return {"inertTestOnly": True}
+
+    def readback_ios(self, case, report):
+        M._ios_report(report, case)
+        return self.readback(case)
 
 
 def context_data():
@@ -1651,7 +1660,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("flags == 0 && matches!(code, 1 | 2)", decoder)
         self.assertIn('result: "invalid-return", state: None', decoder)
         self.assertIn("original_window_data_check()", native_rust.split("pub fn installed_observation_flags_data_check()", 1)[1])
-        checks = observer.split("fn original_window_witness_data_check()", 1)[1].split("fn observer_data_checks()", 1)[0]
+        checks = observer.split("fn original_window_witness_data_check()", 1)[1].split("\nfn completion_ownership_data_check()", 1)[0]
         self.assertIn("publish_original_window(&mut slot, negative, true, true, false)", checks)
         self.assertIn("publish_original_window(&mut slot, positive, true, true, false)", checks)
         self.assertIn("(true, false, false)", checks)
@@ -2164,9 +2173,11 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("!completion_ownership_data_check()", observer)
         for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_CONTROL_NODES = 17", "MRK_CONTROL_DEPTH = 8"):
             self.assertIn(bound, native)
-        self.assertIn("let end = Instant::now() + Duration::from_secs(45);", observer)
+        self.assertIn("let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(_)) { 315 } else { 45 });", observer)
         self.assertIn("let end = self.end.min(Instant::now() + Duration::from_secs(2));", observer)
-        self.assertIn("timeout=60, capture=True, text=False, output_limit=OUTPUT_LIMIT", qualification)
+        self.assertIn("timeout=case_timeout(case), capture=True, text=False, output_limit=OUTPUT_LIMIT", qualification)
+        self.assertEqual([M.case_timeout(case) for case in M.CASES], [60] * 4)
+        self.assertEqual([M.case_timeout(case) for case in M.IOS_CASES], [325] * 5)
         self.assertIn('len(data.encode("ascii")) <= 24 * 1024', qualification)
 
     def test_semantic_timeout_uses_independent_relay_and_retains_original_receiver(self):
@@ -2362,10 +2373,19 @@ class AquaDataTests(unittest.TestCase):
         body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
         for forbidden in ("self.record()", "r.pending", "catch_unwind", "failed.store", "self.end ="):
             self.assertNotIn(forbidden, body)
-        self.assertEqual(body.count("if !self.timely() { return; }"), 2)
+        self.assertEqual(body.count("if !self.timely() { return; }"), 4)
         for label in ("dom-callback-size", "dom-callback-json", "dom-callback-object", "dom-callback-state"):
             self.assertIn(f'self.fail_with("{label}")', body)
-        before_transition = body.split("r.step = match step", 1)[0]
+        # Legacy and iOS branches both retain the original DOM wrapper/cutoff.
+        # iOS validates a comparison-DATA candidate; only a timely commit may
+        # publish ready flags, and it never clones owner/native custody.
+        ios = body.split("if let Step::Ios(step) = step {", 1)[1].split("let review_round =", 1)[0]
+        self.assertIn("let mut observed = record.clone();", ios)
+        self.assertEqual(ios.count("r.ios_record = Some(observed)"), 2)
+        next_commit, final_commit = ios.split("Ok(None) =>", 1)
+        for commit in (next_commit, final_commit):
+            self.assertLess(commit.index("if !self.timely() { return; }"), commit.index("r.ios_record = Some(observed)"))
+        before_transition = body.split("let review_round =", 1)[1].split("r.step = match step", 1)[0]
         self.assertTrue(before_transition.rstrip().endswith("if !self.timely() { return; }"))
         self.assertNotRegex(before_transition, r"r\.[a-z_]+\s*(?:\+=|=(?!=))")
         shutdown = observer.split("fn failure_shutdown(", 1)[1].split("    fn dom(", 1)[0]
@@ -2636,7 +2656,7 @@ class AquaDataTests(unittest.TestCase):
                         M.validate_snapshot(original, item, case, True, UID, GID)
         original = initial_snapshot("noop-stale")
         final = final_snapshot("noop-stale", original)
-        self.assertEqual(final[".gitignore"].identity[6], 274)
+        self.assertEqual(final[".gitignore"].identity[6], 365)
         identity = list(final[".gitignore"].identity); identity[1] += 1000
         final[".gitignore"] = replace(final[".gitignore"], identity=tuple(identity))
         with self.assertRaises(M.Refused):
@@ -2814,6 +2834,343 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(report["innerOutput"], "unavailable")
         output = io.StringIO(); M.emit_record(report, output)
         self.assertNotIn("PRIVATE MESSAGE", output.getvalue())
+
+
+@contextmanager
+def inert_ios_archive():
+    """Private, disposable DATA only: no Mach-O, native tool or app invocation."""
+    import plistlib
+    with tempfile.TemporaryDirectory(prefix="mrk-ios-reader-data-") as directory:
+        parent = Path(directory)
+        archive = parent / "archive.xcarchive"
+        files = {
+            "Info.plist": plistlib.dumps({"ApplicationProperties": {"ApplicationPath": "Applications/MRKObserved.app"}}),
+            "Products/Applications/MRKObserved.app/Info.plist": plistlib.dumps({"CFBundleIdentifier": "org.example.mrk.observed",
+                "CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "7"}),
+            "Products/Applications/MRKObserved.app/MRKObserved": b"inert-app-not-executable",
+            "dSYMs/MRKObserved.app.dSYM/Contents/Resources/DWARF/MRKObserved": b"inert-symbol-data",
+        }
+        for name, body in files.items():
+            path = archive / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_bytes(body)
+            path.chmod(0o600)
+        for path in archive.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o700)
+        archive.chmod(0o700)
+        fixture = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), "ios-unsigned-archive")
+        fd = fixture._open(parent, directory=True)
+        result = {"entries": len(list(archive.rglob("*"))), "bytes": sum(map(len, files.values()))}
+        try:
+            yield SimpleNamespace(parent=parent, archive=archive, fixtures=fixture, fd=fd, result=result, files=files)
+        finally:
+            fixture.close()
+
+
+class IOSAquaDataTests(unittest.TestCase):
+    def test_literal_fixture_matches_native_and_has_no_packages_or_scripts(self):
+        import plistlib
+        import xml.etree.ElementTree as ET
+        native = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos_ios.rs").read_text()
+        expected = {
+            "CONFIG": (901, "8d0e73dbbe82672e52a61fd39e8cb363fdaa35052a3267f48bf8f4c299b868cd"),
+            "CONFIG_PREREQUISITE": (955, "2dac0a87eb465ae714f8281a2b37c05fbef2f63cbb427a17dc9b9603c87d0a34"),
+            "CONFIG_CANCEL": (963, "6253b3df5076f134f9bc7cddfcd49ab98ead1aa5639172b253bee4e4ef923ccc"),
+            "PROJECT": (3903, "4c79547c12407d02971ee1ad618b8ea416aef0db97b4b7b5a8aac2516c80e642"),
+            "SCHEME": (679, "1d1e0b95797e6a1aae0b22cd96cbd771f2bce63324f49e0142406d3a0c457c83"),
+            "MAIN": (736, "503a7dbe4e11346b822d0358828dd932d22d459bbe7301913c01eb70beb131ea"),
+            "PLIST": (883, "e95c5837a07db7141f196061f9ed5c35f33b40f0f2ddc26abe5590323226ccdc"),
+            "WORKSPACE": (104, "14e75b34da352a734fd05df443ef597fe5c547284cfb8ecfccacfd21cb5c7f93"),
+        }
+        for name, identity in expected.items():
+            with self.subTest(name=name):
+                body = getattr(M, "IOS_" + name)
+                literal = M.re.search(r"const " + name + r': &\[u8\] = br#"(.*?)"#;', native, M.re.S)
+                self.assertIsNotNone(literal)
+                self.assertEqual(literal.group(1).encode("ascii"), body)
+                self.assertEqual((len(body), M.digest(body)), identity)
+        for case in M.IOS_CASES:
+            config = json.loads(M.ios_config(case))
+            self.assertIs(config["android"]["enabled"], False)
+            self.assertEqual(config["ios"]["symbols"], {"policy": "required", "uploadCommand": ["/usr/bin/false"]})
+            preparation = config["ios"].get("prepareCommand")
+            self.assertEqual(preparation, ["/usr/bin/false"] if case == M.IOS_CASES[0] else ["/bin/sleep", "30"] if case == "ios-cancel" else None)
+            files, directories = M.ios_fixture_data(case, False)
+            self.assertEqual((len(files), len(directories)), (9, 8))
+            self.assertTrue(all(len(body) <= 4096 for body in files.values()))
+        self.assertNotIn(b"PBXShellScriptBuildPhase", M.IOS_PROJECT)
+        self.assertNotIn(b"packageReferences", M.IOS_PROJECT)
+        for line in (b"CODE_SIGNING_ALLOWED = NO", b"CODE_SIGNING_REQUIRED = NO", b'DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"'):
+            self.assertIn(line, M.IOS_PROJECT)
+        self.assertEqual(plistlib.loads(M.IOS_PLIST)["CFBundleShortVersionString"], "$(MARKETING_VERSION)")
+        self.assertEqual(ET.fromstring(M.IOS_WORKSPACE).find("FileRef").get("location"), "self:")
+        self.assertEqual(ET.fromstring(M.IOS_SCHEME).find("ArchiveAction").get("buildConfiguration"), "Release")
+
+    def test_scope_fixed_roster_native_endpoint_and_no_extra_arguments(self):
+        self.assertEqual(M.IOS_CASES, ("ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality"))
+        self.assertIsNone(M.argument_scope([]))
+        self.assertEqual(M.selected_cases(), M.CASES)
+        self.assertEqual(M.argument_scope(["--scope", "ios-unsigned-archive"]), "ios-unsigned-archive")
+        self.assertEqual(M.selected_cases("ios-unsigned-archive"), M.IOS_CASES)
+        for argv in (["ios-unsigned-archive"], ["--scope", "ios-cancel"], ["--scope", "ios-unsigned-archive", "--timeout", "999"],
+                     ["--scope", "ios-unsigned-archive", "--scope", "ios-unsigned-archive"], ("--scope", "ios-unsigned-archive"), None):
+            with self.subTest(argv=argv), self.assertRaises(M.Refused):
+                M.argument_scope(argv)
+        for case in ("ios-finality-other", "IOS-FINALITY", "", None):
+            with self.assertRaises(M.Refused):
+                M.case_timeout(case)
+        source = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        self.assertIn("Duration::from_secs(if matches!(case, Case::Ios(_)) { 315 } else { 45 })", source)
+        self.assertIn("!ios::data_checks()", source)
+        child = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos_ios.rs").read_text()
+        data_check = child.split("pub(super) fn data_checks()", 1)[1].split("pub(super) fn snapshot_failure", 1)[0]
+        for forbidden in ("Observation::new", "thread::spawn", "tokio::spawn", "std::process::Command", "file_fact("):
+            self.assertNotIn(forbidden, data_check)
+        self.assertIn("self.admitted.load(Ordering::SeqCst)", child)
+        permits = child.split("pub(crate) fn permits(&self)", 1)[1].split("pub(crate) fn claim", 1)[0]
+        self.assertNotIn(".record()", permits)
+        self.assertNotIn(".lock()", permits)
+        self.assertIn("self.claimed.compare_exchange(false, true", child)
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        self.assertIn("macos_aqua_qualification.py --scope ios-unsigned-archive", workflow)
+        self.assertIn('"caseNames": ' + json.dumps(list(M.IOS_CASES)), workflow)
+
+    def test_five_reports_and_dynamic_original_ids_are_closed_and_bounded(self):
+        for case in M.IOS_CASES:
+            with self.subTest(case=case):
+                report = M.expected_result(BINDING, case)
+                self.assertEqual(M.parse_result(captured(report), b"", BINDING, case), report)
+                self.assertLessEqual(len(captured(report)), M.JSON_LIMIT)
+                value = report["iosArchive"]
+                self.assertEqual(value["prerequisiteOnly"], case == M.IOS_CASES[0])
+                if value["prerequisiteOnly"]:
+                    self.assertEqual(value["original"]["terminal"]["outcome"], "failed")
+                    self.assertIsNone(value["original"]["terminal"]["result"])
+                value["context"].update(projectId="project-a", draftRevision=23, baselineGeneration=7)
+                operation, generation = "7" * 32, "8" * 32
+                snapshots = [value["original"]] + ([value["hold"]["original"]] if value["hold"] else [])
+                for snapshot in snapshots:
+                    snapshot["facts"].update(operationId=operation, ownerGeneration=generation)
+                    terminal = snapshot["terminal"]
+                    if terminal["disposition"]["relativeDirectory"] is not None:
+                        terminal["disposition"]["relativeDirectory"] = f".mobile-release/desktop-ios-archive/{operation}"
+                    if terminal["result"]:
+                        terminal["result"].update(archive=f".mobile-release/desktop-ios-archive/{operation}/archive.xcarchive", entries=63, bytes=19317)
+                self.assertEqual(M.parse_result(captured(report), b"", BINDING, case), report)
+
+    def test_reports_refuse_missing_joins_unknown_resources_wrong_context_and_false_success(self):
+        cases = ("ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality")
+        for case in cases:
+            good = M.expected_result(BINDING, case)
+            value = good["iosArchive"]
+            mutations = [("original", "facts", key) for key, actual in value["original"]["facts"].items() if type(actual) is bool]
+            mutations += [("original", "terminal", "lifetime", key) for key in ("complete", "fatal", "contained", "inputClosed", "handlersRestored", "invocationClosed", "snapshotClosed", "filesClosed", "namespaceClosed")]
+            for path in mutations:
+                bad = deepcopy(good)
+                cursor = bad["iosArchive"]
+                for part in path[:-1]:
+                    cursor = cursor[part]
+                cursor[path[-1]] = not cursor[path[-1]]
+                with self.subTest(case=case, field=path), self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+            for mutation in (
+                lambda v: v["context"]["savedVersion"].update(build=8),
+                lambda v: v["savedVersionObservation"]["savedConfig"].update(sha256="0" * 64),
+                lambda v: v["original"]["facts"].update(workMs=300001),
+                lambda v: v["original"]["facts"].update(hardMs=310001),
+                lambda v: v["original"]["facts"].update(operationId="../foreign"),
+                lambda v: v.update(statusCallsReturned=65),
+                lambda v: v.update(statusCallsReturned=True),
+                lambda v: v["original"]["terminal"].update(outcome="unknown", reason="cleanup-unknown"),
+                lambda v: v["original"]["terminal"]["activity"]["commands"]["xcode-version"].update(outcome="unknown", exitCode=None),
+                lambda v: v["original"]["terminal"]["disposition"].update(work="retained-work"),
+            ):
+                bad = deepcopy(good); mutation(bad["iosArchive"])
+                with self.subTest(case=case), self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+        bad = M.expected_result(BINDING, "ios-toolchain-prerequisite")
+        bad["iosArchive"]["original"]["terminal"]["activity"]["commands"]["prepare"]["exitCode"] = 0
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(bad), b"", BINDING, "ios-toolchain-prerequisite")
+
+    def test_cancel_distinguishes_predispatch_and_unavailable_exit_from_unknown_custody(self):
+        for outcome, code, counts in (("not-dispatched", None, (2, 3)), ("exited", 0, (3,)), ("unknown", None, (3,))):
+            for count in counts:
+                value = M._expected_ios_report("ios-cancel")
+                command = {"outcome": outcome, "exitCode": code}
+                value["original"]["terminal"]["activity"]["commands"]["prepare"] = command
+                value["original"]["terminal"]["lifetime"]["commands"] = count
+                value["cancel"]["prepareOutcome"] = command
+                self.assertIs(M._ios_report(value, "ios-cancel"), value)
+                for mutate in (lambda v: v["cancel"].update(activeCommandKillClaimed=True),
+                               lambda v: v["original"]["facts"].update(resourceUnknown=True),
+                               lambda v: v["original"]["terminal"]["lifetime"].update(complete=False),
+                               lambda v: v["original"]["terminal"]["activity"]["commands"]["archive"].update(outcome="exited", exitCode=0)):
+                    bad = deepcopy(value); mutate(bad)
+                    with self.assertRaises(M.Refused):
+                        M._ios_report(bad, "ios-cancel")
+        for outcome, code, count in (("unknown", None, 2), ("exited", -15, 3), ("exited", True, 3), ("not-dispatched", 0, 2), ("not-configured", None, 3)):
+            value = M._expected_ios_report("ios-cancel")
+            command = {"outcome": outcome, "exitCode": code}
+            value["original"]["terminal"]["activity"]["commands"]["prepare"] = command
+            value["original"]["terminal"]["lifetime"]["commands"] = count
+            value["cancel"]["prepareOutcome"] = command
+            with self.assertRaises(M.Refused):
+                M._ios_report(value, "ios-cancel")
+
+    def test_finality_hold_requires_same_original_core_terminal_and_later_real_joins(self):
+        good = M._expected_ios_report("ios-finality")
+        for mutate in (
+            lambda v: v.update(hold=None),
+            lambda v: v["hold"].update(originalReleasedOnce=False),
+            lambda v: v["hold"].update(publicSuccessHidden=False),
+            lambda v: v["hold"].update(conflictingUiBlocked=False),
+            lambda v: v["hold"].update(environmentDiagnosticsBlocked=False),
+            lambda v: v["hold"]["original"]["facts"].update(ownerGeneration="c" * 32),
+            lambda v: v["hold"]["original"]["facts"].update(observerJoined=True),
+            lambda v: v["hold"]["original"]["facts"].update(watchdogJoined=True),
+            lambda v: v["hold"]["original"]["facts"].update(retiredBeforeCutoff=True),
+            lambda v: v["hold"]["original"]["facts"].update(activeRetained=False),
+            lambda v: v["original"]["facts"].update(observerJoined=False),
+        ):
+            bad = deepcopy(good); mutate(bad)
+            with self.assertRaises(M.Refused):
+                M._ios_report(bad, "ios-finality")
+        bad = deepcopy(good)
+        # Break shared inert DATA references to model independently supplied JSON.
+        bad["hold"]["original"]["terminal"] = deepcopy(bad["hold"]["original"]["terminal"])
+        bad["hold"]["original"]["terminal"]["result"]["entries"] += 1
+        with self.assertRaises(M.Refused):
+            M._ios_report(bad, "ios-finality")
+
+    def test_ios_invocations_use_only_fixed_argv_clean_environment_and_original_325_seconds(self):
+        fixtures, calls, emitted = InertFixtures(), [], []
+        fixtures.cases = M.IOS_CASES
+        def runner(argv, **options):
+            calls.append((argv, options))
+            return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, argv[1])), b"")
+        with patch.dict(M.os.environ, {"GITHUB_TOKEN": "inert-not-secret", "DEVELOPER_DIR": "/not-used", "DYLD_INSERT_LIBRARIES": "/not-used"}):
+            M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append, "ios-unsigned-archive")
+        self.assertEqual(fixtures.before, list(M.IOS_CASES))
+        self.assertEqual(fixtures.reads, list(M.IOS_CASES))
+        self.assertEqual(len(emitted), 5)
+        for (argv, options), case in zip(calls, M.IOS_CASES):
+            self.assertEqual(argv, [M.EXECUTABLE, case])
+            self.assertEqual(options["timeout"], 325)
+            self.assertEqual(options["cwd"], BINDING.root() / "state" / case)
+            self.assertEqual(options["environ"], M.app_environment(options["cwd"], UID, "runner"))
+            self.assertEqual(set(options), {"timeout", "cwd", "environ", "capture", "text", "output_limit"})
+            self.assertEqual((options["capture"], options["text"], options["output_limit"]), (True, False, M.OUTPUT_LIMIT))
+        fixtures.cases = M.CASES
+        with self.assertRaisesRegex(M.Refused, "^fixture-scope$"):
+            M.run_cases(BINDING, fixtures, self.fail, UID, "runner", self.fail, "ios-unsigned-archive")
+
+    def test_failed_prerequisite_invalid_return_or_original_exception_stops_all_later_cases(self):
+        first = M.IOS_CASES[0]
+        bad_success = M.expected_result(BINDING, first)
+        bad_success["iosArchive"]["original"]["facts"]["nativeIntegrity"] = False
+        for result, inflight in ((CompletedProcess([M.EXECUTABLE, first], 1, b"", b""), False),
+                                 (CompletedProcess([M.EXECUTABLE, first], 0, captured(bad_success), b""), False),
+                                 (CompletedProcess([M.EXECUTABLE, first], True, b"", b""), True),
+                                 (SimpleNamespace(returncode=0), True)):
+            fixtures, calls = InertFixtures(), []
+            fixtures.cases = M.IOS_CASES
+            def runner(argv, **_):
+                calls.append(argv)
+                return result
+            with self.assertRaises(M.Refused):
+                M.run_cases(BINDING, fixtures, runner, UID, "runner", self.fail, "ios-unsigned-archive")
+            self.assertEqual((fixtures.before, fixtures.reads, len(calls)), ([first], [], 1))
+            self.assertIs(fixtures.inflight, inflight)
+            self.assertIs(fixtures.last_returned, not inflight)
+        fixtures = InertFixtures(); fixtures.cases = M.IOS_CASES
+        failure = KeyboardInterrupt()
+        def interrupt(*_, **__):
+            raise failure
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            M.run_cases(BINDING, fixtures, interrupt, UID, "runner", self.fail, "ios-unsigned-archive")
+        self.assertIs(raised.exception, failure)
+        self.assertEqual((fixtures.before, fixtures.reads), ([first], []))
+        self.assertTrue(fixtures.inflight)
+        real = M.Fixtures(BINDING, UID, GID, "ios-unsigned-archive"); real.inflight = True
+        with patch.object(M.os, "close", side_effect=AssertionError("unknown invocation must not close")), self.assertRaises(M.Refused):
+            real.close()
+
+    def test_original_source_readback_requires_same_stale_version_object_and_exact_roster(self):
+        for case in M.IOS_CASES:
+            original = initial_snapshot(case)
+            final = final_snapshot(case, original)
+            self.assertEqual(M.validate_snapshot(original, final, case, True, UID, GID)["files"], 9)
+            for name in ("version.properties", "ios/MRKObserved.xcodeproj/project.pbxproj", "release/mobile-release.json"):
+                changed = dict(final)
+                identity = list(changed[name].identity); identity[1] += 1000
+                changed[name] = replace(changed[name], identity=tuple(identity))
+                with self.assertRaises(M.Refused):
+                    M.validate_snapshot(original, changed, case, True, UID, GID)
+            changed = dict(final); changed["ios/foreign"] = final["keep.txt"]
+            with self.assertRaises(M.Refused):
+                M.validate_snapshot(original, changed, case, True, UID, GID)
+
+    def test_archive_reader_accounts_regular_data_and_never_removes_output(self):
+        with inert_ios_archive() as data:
+            result = data.fixtures._archive_readback(data.fd, data.result)
+            self.assertEqual((result["entries"], result["bytes"]), (data.result["entries"], data.result["bytes"]))
+            self.assertTrue(result["savedIdentityMatched"] and result["retainedNotDeleted"])
+            self.assertRegex(result["inventorySha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(data.fixtures.fds, {data.fd})
+            self.assertEqual({name: (data.archive / name).read_bytes() for name in data.files}, data.files)
+
+    def test_archive_reader_refuses_aliases_special_modes_missing_binary_and_changed_inventory(self):
+        variants = ("symlink", "hardlink", "writable", "missing-binary", "directory-binary", "wrong-count", "wrong-bytes", "signed", "collision")
+        for variant in variants:
+            with self.subTest(variant=variant), inert_ios_archive() as data:
+                app = data.archive / "Products/Applications/MRKObserved.app/MRKObserved"
+                if variant == "symlink":
+                    (data.archive / "alias").symlink_to("Info.plist")
+                elif variant == "hardlink":
+                    M.os.link(app, data.archive / "alias")
+                elif variant == "writable":
+                    app.chmod(0o666)
+                elif variant == "missing-binary":
+                    data.result["entries"] -= 1; data.result["bytes"] -= app.stat().st_size; app.unlink()
+                elif variant == "directory-binary":
+                    data.result["bytes"] -= app.stat().st_size; app.unlink(); app.mkdir(mode=0o700)
+                elif variant == "wrong-count":
+                    data.result["entries"] += 1
+                elif variant == "wrong-bytes":
+                    data.result["bytes"] += 1
+                elif variant == "signed":
+                    (app.parent / "_CodeSignature").mkdir(mode=0o700); data.result["entries"] += 1
+                elif variant == "collision":
+                    (data.archive / "info.plist").write_bytes(b""); (data.archive / "info.plist").chmod(0o600)
+                with self.assertRaises(M.Refused):
+                    data.fixtures._archive_readback(data.fd, data.result)
+                self.assertEqual(data.fixtures.fds, {data.fd})
+
+    def test_archive_reader_refuses_changed_identity_invalid_plist_budget_and_expired_readback(self):
+        for variant in ("identity", "plist", "deadline", "bytes"):
+            with self.subTest(variant=variant), inert_ios_archive() as data:
+                if variant in ("identity", "plist"):
+                    path = data.archive / "Products/Applications/MRKObserved.app/Info.plist"
+                    old = path.read_bytes()
+                    new = old.replace(b"org.example.mrk.observed", b"org.example.mrk.changed!") if variant == "identity" else b"not a plist"
+                    path.write_bytes(new); data.result["bytes"] += len(new) - len(old)
+                if variant == "deadline":
+                    with patch("time.monotonic", side_effect=[0, 21]), self.assertRaisesRegex(M.Refused, "^ios-output-readback-deadline$"):
+                        data.fixtures._archive_readback(data.fd, data.result)
+                elif variant == "bytes":
+                    # Sparse DATA file avoids allocating/reading the byte budget.
+                    path = data.archive / "oversized"
+                    with path.open("wb") as stream:
+                        stream.truncate(64 * 1024 * 1024 + 1)
+                    path.chmod(0o600)
+                    with self.assertRaisesRegex(M.Refused, "^ios-output-byte-budget$"):
+                        data.fixtures._archive_readback(data.fd, data.result)
+                else:
+                    with self.assertRaises(M.Refused):
+                        data.fixtures._archive_readback(data.fd, data.result)
+                self.assertEqual(data.fixtures.fds, {data.fd})
 
 
 if __name__ == "__main__":

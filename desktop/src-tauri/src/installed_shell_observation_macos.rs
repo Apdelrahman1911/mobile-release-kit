@@ -1,4 +1,4 @@
-//! Four fixed observations of the ordinary installed AppKit/WK application.
+//! Fixed project-save and unsigned-iOS observations of the installed AppKit/WK application.
 //! The existing relay is the only controller. Its endpoint vetoes success and
 //! actions; the separately reviewed original invocation owner bounds process
 //! return/EOF. No replacement document, reply, cleanup owner or runtime exists.
@@ -16,6 +16,9 @@ use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, Install
     error::BridgeError, supervisor::Supervisor};
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
     ObservedPanel, OpenAction, OpenActionBody, OpenRecheckBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
+
+#[path = "installed_shell_observation_macos_ios.rs"]
+pub(crate) mod ios;
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
@@ -53,6 +56,8 @@ const FAILURE_REASONS: &[&str] = &[
     "project-result-path-app-child", "project-result-path-descendant", "project-result-path-ancestor",
     "project-result-path-sibling", "project-result-path-tmp-spelling", "project-result-path-data-spelling",
     "native-completion-custody", "native-completion-data", "native-completion-unknown", "native-completion-selection",
+    "ios-original-witness", "ios-request-contract", "ios-status-contract", "ios-version-contract",
+    "ios-finality-contract", "ios-fixture-contract", "ios-dom-contract",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
@@ -98,8 +103,8 @@ fn panel_readiness(panel: &ObservedPanel, id: u32, quit: bool, ever_attached: bo
     Ok(true)
 }
 
-const METHODS: [&str; 8] = ["capabilities", "catalog", "project.snapshot", "config.validate",
-    "config.suggest", "config.preview", "environment.requirements", "github.setup.propose"];
+const METHODS: [&str; 9] = ["capabilities", "catalog", "project.snapshot", "config.validate",
+    "config.suggest", "config.preview", "environment.requirements", "github.setup.propose", "release.version.observe"];
 const APP_ID: &str = "org.example.mrk.observed";
 const VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n";
 const SOURCE: &[u8] = b"plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
@@ -151,16 +156,17 @@ const CONFIG: &[u8] = br#"{
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss }
+enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case) }
 impl Case {
     fn name(self) -> &'static str { match self {
         Self::FirstSave => "first-save", Self::NoopStale => "noop-stale",
         Self::PickerLoss => "picker-loss", Self::SaveLoss => "save-loss",
+        Self::Ios(case) => case.name(),
     }}
     fn selected_id(self) -> u32 { if self == Self::FirstSave { 2 } else { 1 } }
     fn quit_id(self) -> u32 { if self == Self::FirstSave { 4 } else { 2 } }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss => 0 } }
+    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) => 0 } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -173,6 +179,7 @@ enum Step {
     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
     PickerPending, Reload, Lost,
+    Ios(ios::Step),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -524,7 +531,8 @@ fn directory(path: &Path, uid: u32, mode: u32, entries: &[&str]) -> Result<[u64;
 }
 struct Fixture {
     root: PathBuf, uid: u32, root_identity: [u64; 6], app_identity: [u64; 6],
-    untouched: [FileFact; 3], ignore: FileFact, config: Option<FileFact>, release: Option<[u64; 6]>,
+    untouched: Option<[FileFact; 3]>, ignore: FileFact, config: Option<FileFact>, release: Option<[u64; 6]>,
+    ios: Option<ios::Fixture>,
     written: bool, mutated: bool,
 }
 impl Fixture {
@@ -534,6 +542,13 @@ impl Fixture {
         if mutated { bytes.extend_from_slice(STALE_MARKER); } bytes
     }
     fn capture(root: PathBuf, uid: u32, case: Case) -> Result<Self, ()> {
+        if let Case::Ios(case) = case {
+            let fixture = ios::Fixture::capture(&root, uid, case)?;
+            let root_identity = directory(&root, uid, 0o700, &fixture.root_entries())?;
+            return Ok(Self { root, uid, root_identity, app_identity: fixture.source_identity(), untouched: None,
+                ignore: fixture.ignore(), config: Some(fixture.config()), release: Some(fixture.release_identity()),
+                ios: Some(fixture), written: false, mutated: false });
+        }
         let saved = case == Case::NoopStale;
         let root_identity = directory(&root, uid, 0o700, if saved {
             &[".gitignore", "app", "keep.txt", "release", "version.properties"]
@@ -544,16 +559,21 @@ impl Fixture {
         let ignore = file_fact(&root.join(".gitignore"), &Self::ignore_bytes(saved, false), uid)?;
         let (config, release) = if saved { (Some(file_fact(&root.join("release/mobile-release.json"), CONFIG, uid)?),
             Some(directory(&root.join("release"), uid, 0o755, &["mobile-release.json"])?)) } else { (None, None) };
-        Ok(Self { root, uid, root_identity, app_identity, untouched, ignore, config, release, written: false, mutated: false })
+        Ok(Self { root, uid, root_identity, app_identity, untouched: Some(untouched), ignore, config, release,
+            ios: None, written: false, mutated: false })
     }
     fn verify(&self, saved: bool) -> Result<(), ()> {
+        if let Some(ios) = &self.ios {
+            if directory(&self.root, self.uid, 0o700, &ios.root_entries())?[..5] != self.root_identity[..5] { return Err(()); }
+            return ios.verify(&self.root, self.uid);
+        }
         let root = directory(&self.root, self.uid, 0o700, if saved { &[".gitignore", "app", "keep.txt", "release", "version.properties"] }
             else { &[".gitignore", "app", "keep.txt", "version.properties"] })?;
         if root[..5] != self.root_identity[..5] || directory(&self.root.join("app"), self.uid, 0o700, &["build.gradle.kts"])? != self.app_identity {
             return Err(());
         }
         for ((path, bytes), original) in [("app/build.gradle.kts", SOURCE), ("version.properties", VERSION), ("keep.txt", KEEP)]
-            .into_iter().zip(&self.untouched) {
+            .into_iter().zip(self.untouched.as_ref().ok_or(())?) {
             if &file_fact(&self.root.join(path), bytes, self.uid)? != original { return Err(()); }
         }
         if file_fact(&self.root.join(".gitignore"), &Self::ignore_bytes(saved, self.mutated), self.uid)? != self.ignore { return Err(()); }
@@ -643,6 +663,7 @@ struct Record {
     quit_cancelled: bool, close_count: u8, reload_requested: bool, reload_returned: bool, reload_navigation: bool,
     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
     failure_close_requested: bool, failure_quit_attempted: bool,
+    ios_record: Option<ios::Record>,
     fixture: Fixture,
 }
 impl Record {
@@ -782,12 +803,14 @@ pub(super) struct Observation {
     // retains the exact receiver/token/owners here past the finite wait.
     open_custody: Mutex<Option<OpenFlight>>,
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
+    ios: Option<Arc<ios::Control>>,
     failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
 }
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
-        let base = crate::protocol::strict_json(CONFIG).map_err(|_| ())?;
-        let end = Instant::now() + Duration::from_secs(45);
+        let base = crate::protocol::strict_json(if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
+        let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(_)) { 315 } else { 45 });
+        let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_path = fixture.root.clone();
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
@@ -808,11 +831,12 @@ impl Observation {
                 keep_reviewing: false, saved_visible: false, noop_visible: false, stale_visible: false, file_readback: false,
                 quit_cancelled: false, close_count: 0, reload_requested: false, reload_returned: false, reload_navigation: false,
                 loss_seen: false, loss_settled: false, relay_joined: false, actual_exit: false, originals_final: false,
-                failure_close_requested: false, failure_quit_attempted: false, fixture,
+                failure_close_requested: false, failure_quit_attempted: false,
+                ios_record: matches!(case, Case::Ios(_)).then(ios::Record::default), fixture,
             });
         let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
         Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
-            project_path, base, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
+            project_path, base, ios, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
     fn fail_with(&self, reason: &'static str) { latch_failure(&self.failure_reason, &self.failed, reason); }
@@ -999,7 +1023,8 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         let saved = self.case == Case::NoopStale || r.snapshot_requests == 2;
         let failure = match result {
-            Ok(value) => snapshot_value_failure(value, &self.project_path, saved, &self.base),
+            Ok(value) => if let Case::Ios(case) = self.case { ios::snapshot_failure(value, &self.project_path, case, &self.base) }
+                else { snapshot_value_failure(value, &self.project_path, saved, &self.base) },
             Err(error) => Some(snapshot_error_reason(&error.code)),
         };
         if let Some(reason) = failure { self.fail_with(reason); return; }
@@ -1364,6 +1389,25 @@ impl Observation {
                         let checked = if self.case == Case::FirstSave { r.fixture.saved() } else { r.fixture.verify(true) };
                         if checked.is_err() { self.fail(); return; } r.file_readback = true;
                     }
+                },
+                Step::Ios(step) => {
+                    let Some(control) = self.ios.as_ref() else { self.fail_with("ios-original-witness"); return; };
+                    if step == ios::Step::MutateVersion {
+                        let root = r.fixture.root.clone(); let uid = r.fixture.uid;
+                        if r.fixture.ios.as_mut().is_none_or(|fixture| fixture.mutate_version(&root, uid, self.end, &self.failed).is_err()) {
+                            self.fail_with("ios-fixture-contract"); return;
+                        }
+                        if !r.ios_record.as_mut().is_some_and(ios::Record::version_mutated) {
+                            self.fail_with("ios-fixture-contract"); return;
+                        }
+                        r.step = Step::Ios(ios::Step::Start); return;
+                    }
+                    let Some(record) = r.ios_record.as_mut() else { self.fail_with("ios-original-witness"); return; };
+                    let Some(next) = record.advance(step, control, &state.document) else { return; };
+                    r.step = Step::Ios(next);
+                    // ReleaseHold only releases its original DATA channel; no
+                    // DOM call or replacement worker is allowed for Running.
+                    if next == ios::Step::Running { return; }
                 },
                 Step::Snapshot if r.snapshots != 1 => return,
                 Step::Suggestion if r.suggestion.is_none() => return,
@@ -2007,6 +2051,29 @@ impl Observation {
         let Some(object) = v.as_object() else { self.fail_with("dom-callback-object"); return; };
         if v["state"] == "wait" && object.len() == 1 { return; }
         if v["state"] != "ready" { self.fail_with("dom-callback-state"); return; }
+        if let Step::Ios(step) = step {
+            let Case::Ios(case) = self.case else { self.fail_with("ios-dom-contract"); return; };
+            let Some(record) = r.ios_record.as_ref() else { self.fail_with("ios-dom-contract"); return; };
+            // Comparison DATA only, not an owner/token. Validate a candidate
+            // before publishing any ready flag at the same original cutoff.
+            let mut observed = record.clone();
+            match observed.dom(case, step, &v) {
+                Ok(Some(next)) => {
+                    if !self.timely() { return; }
+                    r.ios_record = Some(observed); r.step = Step::Ios(next);
+                },
+                Ok(None) => {
+                    let Some(snapshot) = observed.terminal().cloned() else { self.fail_with("ios-finality-contract"); return; };
+                    let root = r.fixture.root.clone(); let uid = r.fixture.uid;
+                    if r.fixture.ios.as_mut().is_none_or(|fixture| fixture.finalize(&root, uid, &snapshot).is_err())
+                        || r.fixture.verify(true).is_err() { self.fail_with("ios-fixture-contract"); return; }
+                    if !self.timely() { return; }
+                    r.ios_record = Some(observed); r.file_readback = true; r.step = Step::Close;
+                },
+                Err(()) => self.fail_with("ios-dom-contract"),
+            }
+            return;
+        }
         let review_round = match step { Step::Review(i) => Some(i), Step::KeptReview => Some(0), Step::RetainedReview => Some(1), _ => None };
         if let Some(i) = review_round {
             if !r.sessions.get(i).is_some_and(|s| s.live_review() && s.review.as_ref() == v.get("review"))
@@ -2018,10 +2085,10 @@ impl Observation {
         let valid = match step {
             Step::ReadEnvironment => v["mode"] == "available" && v["title"] == "Bundled runtime"
                 && v["platform"] == "macos" && v["rows"].as_u64() == Some(r.methods as u64)
-                && v["available"].as_u64() == Some(8) && v["unavailable"].as_u64() == Some((r.methods - 8) as u64),
+                && v["available"].as_u64() == Some(METHODS.len() as u64) && v["unavailable"].as_u64() == Some((r.methods - METHODS.len()) as u64),
             Step::ReadCancelled => r.cancel_settled && v["unselected"] == true && v["chooseEnabled"] == true,
             Step::Snapshot => r.project_settled && r.snapshots == 1 && v["name"] == self.case.name()
-                && v["configuration"] == (if self.case == Case::NoopStale { "Format-valid only" } else { "Not configured" }),
+                && v["configuration"] == (if matches!(self.case, Case::NoopStale | Case::Ios(_)) { "Format-valid only" } else { "Not configured" }),
             Step::Suggestion => r.suggestion.as_ref() == v.get("provenance"),
             Step::Draft => v["source"] == "version.properties" && v["saveAvailable"] == true
                 && v["dirty"].as_bool() == Some(self.case != Case::NoopStale),
@@ -2064,7 +2131,8 @@ impl Observation {
             Step::Dashboard => if self.case == Case::FirstSave { Step::ChooseCancel } else { Step::ChooseProject },
             Step::ChooseCancel => { r.project_calls += 1; Step::CancelProject }, Step::ReadCancelled => Step::ChooseProject,
             Step::ChooseProject => { r.project_calls += 1; if self.case == Case::PickerLoss { Step::PickerPending } else { Step::OpenProject } },
-            Step::Snapshot => Step::Settings, Step::Settings => if self.case == Case::NoopStale { Step::Draft } else { Step::Suggest },
+            Step::Snapshot => if matches!(self.case, Case::Ios(_)) { Step::Ios(ios::Step::Navigate) } else { Step::Settings },
+            Step::Settings => if self.case == Case::NoopStale { Step::Draft } else { Step::Suggest },
             Step::Suggest => Step::Suggestion, Step::Suggestion => Step::Adopt, Step::Adopt => Step::Draft,
             Step::Draft => { r.draft_visible = true; Step::Validate }, Step::Validate => Step::Validation,
             Step::Validation => Step::Preview, Step::Preview => Step::Previewed,
@@ -2132,6 +2200,9 @@ impl Observation {
                 && r.native_actions_returned == [false,false,false,true] && r.loss_settled && r.close_count == 1,
             Case::SaveLoss => r.project_settled && r.review_witness.is_some() && r.loss_settled && r.close_count == 1
                 && r.native_actions_returned == [false,true,false,true] && r.sessions[0].apply_requested == false,
+            Case::Ios(case) => r.project_settled && r.snapshots == 1 && r.close_count == 1
+                && r.native_actions_returned == [false,true,false,true]
+                && r.ios_record.as_ref().is_some_and(|record| record.report(case).is_some()),
         };
         if !common || !specific || r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale)).is_err() { return None; }
         let sessions: Vec<_> = r.sessions.iter().map(|s| {
@@ -2143,9 +2214,9 @@ impl Observation {
                 "nativeFinality":s.projection.native_finality,"writerFrames":f.writer_frames,"stdoutFrames":f.stdout_frames,
                 "originalsJoined":finality(f,&s.projection,if s.apply_requested { 3 } else { 2 })}))
         }).collect::<Option<Vec<_>>>()?;
-        let report = json!({"schemaVersion":1,"sourceCommit":option_env!("GITHUB_SHA"),"runId":option_env!("GITHUB_RUN_ID"),
+        let mut report = json!({"schemaVersion":1,"sourceCommit":option_env!("GITHUB_SHA"),"runId":option_env!("GITHUB_RUN_ID"),
             "runAttempt":option_env!("GITHUB_RUN_ATTEMPT"),"case":self.case.name(),"instrumentedEngineeringApp":true,
-            "shippingBinaryQualified":false,"distributionQualified":false,"methods":"eight-passive","actionsAvailable":false,
+            "shippingBinaryQualified":false,"distributionQualified":false,"methods":"nine-passive","actionsAvailable":false,
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.project_settled && r.completion_selection.is_some_and(|s| s.succeeded(self.case.selected_id())),
                 "originalWindow":r.original_window.map(OriginalWindowSample::value),
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
@@ -2159,6 +2230,7 @@ impl Observation {
                 "secondStarted":r.loss_seen,"originalLossSettled":r.loss_settled,"webProcessCrashTested":false},
             "originalRelayJoined":r.relay_joined,"actualExit":r.actual_exit,
             "scope":"programmatic genuine controls; no Store, release, distribution or physical-device evidence"});
+        if let Case::Ios(case) = self.case { report["iosArchive"] = r.ios_record.as_ref()?.report(case)?; }
         self.timely().then_some(report)
     }
 }
@@ -2527,12 +2599,13 @@ fn project_path_mismatch_data_checks() -> bool {
 // replay. Every returned read is from actual DOM/controller rendering.
 fn script(step: Step) -> Option<String> {
     let body = match step {
+        Step::Ios(step) => ios::script(step)?,
         Step::Environment|Step::RequirementsPage => "return nav('Environment');",
         Step::Dashboard|Step::ReadbackPage => "return nav('Dashboard');",
         Step::Settings|Step::ReturnSettings|Step::SavedSettings => "return nav('Project settings');",
         Step::GitHubPage => "return nav('GitHub');",
         Step::ReadEnvironment => r#"const card=document.querySelector('.runtime-card'),rows=[...document.querySelectorAll('.capability-list > div')];
-            if (!selected('Environment')||!card||rows.length<8) return wait(); if(rows.length>64)throw 0;
+            if (!selected('Environment')||!card||rows.length<9) return wait(); if(rows.length>64)throw 0;
             show(card);const versions=[...card.querySelectorAll('.runtime-versions strong')].map(text);if(versions.length!==3)throw 0;
             return {state:'ready',title:text(card.querySelector('h2')),mode:text(card.querySelector('.badge')),platform:versions[2],rows:rows.length,
                 available:rows.filter(r=>text(r.querySelector('.badge'))==='Available · passive').length,
@@ -2621,6 +2694,8 @@ fn script(step: Step) -> Option<String> {
         const show=e=>{{if(!e)throw 0;e.scrollIntoView({{block:'center'}});if(!visible(e))throw 0}};
         const selected=name=>!!document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="'+name+'"][aria-current="page"]');
         const nav=name=>{{const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="'+name+'"]');if(!b)return wait();if(b.disabled)throw 0;show(b);b.click();return ready()}};
+        const ios=()=>{{if(!selected('Releases'))return null;const rows=document.querySelectorAll('[data-mrk-ios-archive="status"]');
+            if(rows.length!==1)return null;const r=rows[0];if(r.querySelector('[role="alert"]'))throw 0;return r}};
         const number=e=>{{const s=text(e);if(!/^[0-9]{{1,7}}$/.test(s))throw 0;return Number(s)}};
         const field=()=>{{const rows=[...document.querySelectorAll('.form-field')].filter(f=>f.querySelector('.help-button')?.getAttribute('aria-label')==='Help: Committed version file');
             if(!rows.length)return null;if(rows.length!==1)throw 0;const input=rows[0].querySelector('input[type="text"]');if(!input||input.disabled||input.value.length>512)throw 0;return input}};
@@ -2654,7 +2729,7 @@ fn script(step: Step) -> Option<String> {
     }}catch{{return {{state:'error'}}}}}})()"#, ignore_limit = IGNORE_LINES.len()))
 }
 
-fn route() -> Option<(PathBuf,u32)> {
+fn route(case: Case) -> Option<(PathBuf,u32)> {
     let (source,run,attempt) = (option_env!("GITHUB_SHA")?,option_env!("GITHUB_RUN_ID")?,option_env!("GITHUB_RUN_ATTEMPT")?);
     let decimal = |s: &str| !s.is_empty() && s.len() <= 20 && !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit());
     // The reviewed invocation owner checks its actual hosted source/ref/run
@@ -2666,7 +2741,10 @@ fn route() -> Option<(PathBuf,u32)> {
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
     let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}"));
-    directory(&root,uid,0o700,&["first-save","noop-stale","picker-loss","save-loss","state"]).ok()?;
+    let roster = if matches!(case, Case::Ios(_)) {
+        vec!["ios-toolchain-prerequisite","ios-version-stale","ios-unsigned-archive","ios-cancel","ios-finality","state"]
+    } else { vec!["first-save","noop-stale","picker-loss","save-loss","state"] };
+    directory(&root,uid,0o700,&roster).ok()?;
     Some((root,uid))
 }
 
@@ -2856,7 +2934,7 @@ fn observer_data_checks() -> bool {
         || profile.evidence_selection_profile_available() { return false; }
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
-        || !original_window_witness_data_check() || !completion_ownership_data_check() { return false; }
+        || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks() { return false; }
     let mut prepared = OpenInputSample::preparing(2);
     prepared.prepared = true;
     if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
@@ -3051,9 +3129,10 @@ pub(crate) fn main() -> std::process::ExitCode {
     let case = match args.next().as_deref() {
         Some(v) if v == OsStr::new("first-save") => Case::FirstSave, Some(v) if v == OsStr::new("noop-stale") => Case::NoopStale,
         Some(v) if v == OsStr::new("picker-loss") => Case::PickerLoss, Some(v) if v == OsStr::new("save-loss") => Case::SaveLoss,
+        Some(v) if ios::Case::parse(v).is_some() => Case::Ios(ios::Case::parse(v).expect("exact iOS selector")),
         _ => { super::diagnostic(b"MRK_MACOS_AQUA=route-refused\n"); return std::process::ExitCode::FAILURE; },
     };
-    let input = route().filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(root.join(case.name()),uid,case).ok())
+    let input = route(case).filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(root.join(case.name()),uid,case).ok())
         .and_then(|fixture| Observation::new(case,fixture).ok());
     let Some(q) = input.map(Arc::new) else { super::diagnostic(b"MRK_MACOS_AQUA=fixture-refused\n"); return std::process::ExitCode::FAILURE; };
     let report = observe(&q);

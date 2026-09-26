@@ -521,11 +521,14 @@ test('passive/evidence admission uses reciprocal callback, while source integrat
   const retire = app.indexOf('offlinePreflightControllerRef.current?.beforeWorkspaceAction(action)');
   assert.ok(retire >= 0 && retire < app.indexOf('workspaceReducer(previous, action)') && retire < app.indexOf('if (next === previous) return'));
   assert.match(app, /new OfflinePreflightController/); assert.match(app, /useSyncExternalStore\(offlinePreflight.subscribe/);
-  assert.match(app, /savedCommandBusy = useCallback\(\(excludeVersion = false\) => preflightBusy\(\) \?\? androidBusy\(\)/);
+  assert.match(app, /savedCommandBusy = useCallback\(\(excludeVersion = false, excludeGitHubPreflight = false\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\) \?\? recoveryBusy\(\)/);
+  assert.match(app, /!excludeGitHubPreflight && githubPreflightControllerRef\.current \? githubPreflightOwnerReason\(/);
+  assert.match(app, /savedCommandBusy\(false, true\)/);
   assert.match(app, /!excludeVersion && versionEditControllerRef\.current \? versionOwnerReason\(/);
-  assert.match(app, /otherOperationReason: \(\) => androidBusy\(\) \?\? recoveryBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? recoveryBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
-  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
+  assert.match(app, /otherOperationReason: \(\) => androidBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
+  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? recoveryBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
+  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
+  assert.match(app, /otherOperationReason: \(\) => preflightBusy\(\) \?\? androidBusy\(\) \?\? recoveryBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
   assert.match(app, /page !== 'releases'.*OfflinePreflight/); assert.match(app, /onApply=.*config-save-intent/);
   assert.match(app, /new GitHubConnectionController\(savedCommandBusy\)/); assert.match(app, /new LifecycleEvidenceController\(savedCommandBusy\)/);
   assert.match(app, /otherOperationReason: savedCommandBusy/); assert.match(app, /savedCommandBusy\(\).*diagnosticsOwnerReason/);
