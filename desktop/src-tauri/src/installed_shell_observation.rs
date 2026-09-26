@@ -3324,6 +3324,131 @@ struct MetadataOpen {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MetadataOpenMatch { First, Reply }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataOpenHeading { Empty, ProtocolUnverified, Opening, Preparing, Other }
+impl MetadataOpenHeading {
+    fn token(self) -> &'static str { match self {
+        Self::Empty => "empty", Self::ProtocolUnverified => "protocol-unverified", Self::Opening => "opening",
+        Self::Preparing => "preparing", Self::Other => "other",
+    } }
+    fn parse(value: &str) -> Option<Self> { match value {
+        "empty" => Some(Self::Empty), "protocol-unverified" => Some(Self::ProtocolUnverified),
+        "opening" => Some(Self::Opening), "preparing" => Some(Self::Preparing), "other" => Some(Self::Other), _ => None,
+    } }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataOpenWait { ReviewMissing, HeadingNotReview }
+impl MetadataOpenWait {
+    fn token(self) -> &'static str { match self { Self::ReviewMissing => "review-missing", Self::HeadingNotReview => "heading-not-review" } }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MetadataOpenSample { index: u8, evaluation: u16, wait: MetadataOpenWait, heading: Option<MetadataOpenHeading> }
+impl MetadataOpenSample {
+    fn parse(index: u8, evaluation: u16, value: &Value) -> Option<Self> {
+        if index > 1 || !(1..=128).contains(&evaluation) || !keys(value, &["state", "reason", "heading"])
+            || value["state"] != "wait" { return None; }
+        let (wait, heading) = match (value["reason"].as_str()?, value["heading"].as_str()?) {
+            ("review-missing", "na") => (MetadataOpenWait::ReviewMissing, None),
+            ("heading-not-review", heading) => (MetadataOpenWait::HeadingNotReview, Some(MetadataOpenHeading::parse(heading)?)),
+            _ => return None,
+        };
+        Some(Self { index, evaluation, wait, heading })
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataOpenFailureOrigin { EvaluationBudget, Deadline }
+impl MetadataOpenFailureOrigin {
+    fn token(self) -> &'static str { match self { Self::EvaluationBudget => "evaluation-budget", Self::Deadline => "deadline" } }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MetadataOpenFailure { index: u8, evaluations: u16, origin: MetadataOpenFailureOrigin, last_sample: Option<MetadataOpenSample> }
+impl MetadataOpenFailure {
+    fn sample(step: Step, evaluations: u16, origin: MetadataOpenFailureOrigin, cached: Option<MetadataOpenSample>) -> Option<Self> {
+        let Step::MetadataSave(MetadataStep::OpenText(index)) = step else { return None; };
+        if index > 1 || evaluations > 128 { return None; }
+        Some(Self { index, evaluations, origin,
+            last_sample: cached.filter(|value| value.index == index && value.evaluation <= evaluations) })
+    }
+}
+// One complete prefix-first frame, within the original 512B sink. A cached
+// last DOM sample is not an atomic native/DOM snapshot or cleanup evidence.
+fn metadata_open_failure_frame(trace: (Step, Boundary), progress: BootstrapProgress, site: Option<u16>,
+    failure: Option<MetadataOpenFailure>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+    let Step::MetadataSave(MetadataStep::OpenText(index)) = trace.0 else { return None; };
+    if index > 1 || site == Some(0) { return None; }
+    if let Some(value) = failure {
+        if value.index != index || value.evaluations > 128 || match value.origin {
+            MetadataOpenFailureOrigin::EvaluationBudget => trace.1 != Boundary::Settlement || value.evaluations != 128 || site.is_none(),
+            MetadataOpenFailureOrigin::Deadline => trace.1 != Boundary::Deadline || site.is_some(),
+        } { return None; }
+        if value.last_sample.is_some_and(|sample| sample.index != index || !(1..=value.evaluations).contains(&sample.evaluation)
+            || (sample.wait == MetadataOpenWait::ReviewMissing) != sample.heading.is_none()) { return None; }
+    }
+    let mut bytes = [0_u8; FAILURE_PAIR_LIMIT];
+    let length = {
+        let mut output = &mut bytes[..];
+        output.write_all(b"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE=v1;site=").ok()?;
+        if let Some(site) = site { write!(output, "{site}").ok()?; } else { output.write_all(b"na").ok()?; }
+        write!(output, ";origin={};eval=", failure.map_or("not-recorded", |value| value.origin.token())).ok()?;
+        if let Some(value) = failure { write!(output, "{}", value.evaluations).ok()?; } else { output.write_all(b"na").ok()?; }
+        write!(output, ";index={index};sample=").ok()?;
+        let sample = failure.and_then(|value| value.last_sample);
+        if let Some(sample) = sample { write!(output, "{}", sample.evaluation).ok()?; } else { output.write_all(b"na").ok()?; }
+        writeln!(output, ";wait={};heading={}", sample.map_or("na", |value| value.wait.token()),
+            sample.and_then(|value| value.heading).map_or("na", MetadataOpenHeading::token)).ok()?;
+        for line in [trace.0.failure_line(), trace.1.failure_line(), progress.failure_line()] { output.write_all(line).ok()?; }
+        FAILURE_PAIR_LIMIT - output.len()
+    };
+    (length <= 384).then_some((bytes, length))
+}
+fn assert_metadata_open_diagnostic_contract() {
+    let step = Step::MetadataSave(MetadataStep::OpenText(1));
+    let wait = serde_json::json!({"state":"wait","reason":"review-missing","heading":"na"});
+    let sample = MetadataOpenSample::parse(1, 127, &wait).unwrap();
+    assert_eq!(sample.wait, MetadataOpenWait::ReviewMissing);
+    assert_eq!(sample.heading, None);
+    for heading in [MetadataOpenHeading::Empty, MetadataOpenHeading::ProtocolUnverified, MetadataOpenHeading::Opening,
+        MetadataOpenHeading::Preparing, MetadataOpenHeading::Other] {
+        let value = serde_json::json!({"state":"wait","reason":"heading-not-review","heading":heading.token()});
+        assert_eq!(MetadataOpenSample::parse(0, 1, &value).unwrap().heading, Some(heading));
+    }
+    for invalid in [serde_json::json!({"state":"wait"}), serde_json::json!({"state":"ready","reason":"review-missing","heading":"na"}),
+        serde_json::json!({"state":"wait","reason":"heading-not-review","heading":"na"}),
+        serde_json::json!({"state":"wait","reason":"review-missing","heading":"other"}),
+        serde_json::json!({"state":"wait","reason":"heading-not-review","heading":"private title"}),
+        serde_json::json!({"state":"wait","reason":"review-missing","heading":"na","extra":false})] {
+        assert!(MetadataOpenSample::parse(1, 1, &invalid).is_none());
+    }
+    assert!(MetadataOpenSample::parse(2, 1, &wait).is_none() && MetadataOpenSample::parse(0, 0, &wait).is_none()
+        && MetadataOpenSample::parse(0, 129, &wait).is_none());
+    let first = MetadataOpenFailure::sample(step, 128, MetadataOpenFailureOrigin::EvaluationBudget, Some(sample)).unwrap();
+    let latch = FailureLatch::new(false); let mut frozen = None;
+    if latch.mark_site(65535) { frozen = Some(first); }
+    let late = MetadataOpenFailure::sample(step, 128, MetadataOpenFailureOrigin::Deadline, None);
+    if latch.mark_unknown() { frozen = late; }
+    assert_eq!(frozen, Some(first));
+    let (bytes, length) = metadata_open_failure_frame((step, Boundary::Settlement), BootstrapProgress::AppInfoReturnedBeforeHold,
+        latch.site(), frozen).unwrap();
+    assert!(length <= 384 && bytes[..length].starts_with(b"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE=v1;site=65535;origin=evaluation-budget;eval=128;index=1;sample=127;wait=review-missing;heading=na\n"));
+    let longest = MetadataOpenFailure { last_sample: Some(MetadataOpenSample { index: 1, evaluation: 128,
+        wait: MetadataOpenWait::HeadingNotReview, heading: Some(MetadataOpenHeading::ProtocolUnverified) }), ..first };
+    assert!(metadata_open_failure_frame((step, Boundary::Settlement), BootstrapProgress::AppInfoReturnedBeforeHold,
+        Some(65535), Some(longest)).is_some_and(|(_, length)| length <= 384));
+    let generic = FailureLatch::new(false); assert!(generic.mark_site(1)); let mut unavailable = None;
+    if generic.mark_unknown() { unavailable = Some(first); }
+    let (bytes, length) = metadata_open_failure_frame((step, Boundary::Dom), BootstrapProgress::Advanced, generic.site(), unavailable).unwrap();
+    assert!(std::str::from_utf8(&bytes[..length]).unwrap().contains(";origin=not-recorded;eval=na;index=1;sample=na;wait=na;heading=na\n"));
+    let deadline = MetadataOpenFailure::sample(step, 128, MetadataOpenFailureOrigin::Deadline, Some(sample)).unwrap();
+    assert!(metadata_open_failure_frame((step, Boundary::Deadline), BootstrapProgress::Advanced, None, Some(deadline)).is_some());
+    for (boundary, site, value) in [(Boundary::Dom, Some(1), first), (Boundary::Settlement, None, first),
+        (Boundary::Deadline, Some(1), deadline), (Boundary::Settlement, None, deadline)] {
+        assert!(metadata_open_failure_frame((step, boundary), BootstrapProgress::Advanced, site, Some(value)).is_none());
+    }
+    assert!(MetadataOpenFailure::sample(step, 126, MetadataOpenFailureOrigin::Deadline, Some(sample)).unwrap().last_sample.is_none());
+    assert!(MetadataOpenFailure::sample(Step::MetadataSave(MetadataStep::OpenText(0)), 128,
+        MetadataOpenFailureOrigin::Deadline, Some(sample)).unwrap().last_sample.is_none());
+    assert!(metadata_open_failure_frame((Step::Close, Boundary::Settlement), BootstrapProgress::Advanced, Some(1), None).is_none());
+}
 #[derive(Default)]
 struct MetadataRecord {
     capability: bool, ready: bool, native_revision: Option<u32>, saved_config: Option<Value>,
@@ -3332,6 +3457,7 @@ struct MetadataRecord {
     sessions: Vec<MetadataSession>, requests: [u8;4], open_pending: Option<MetadataOpen>, prepare_pending: Option<usize>,
     retained_after_close: bool, confirmation_opened: u8, initially_disabled: bool, checkbox_only_disabled: bool,
     typed_save: bool, acknowledged: bool, saved_visible: bool, readback_visible: bool,
+    open_sample: Option<MetadataOpenSample>, open_failure: Option<MetadataOpenFailure>,
 }
 impl MetadataRecord {
     fn open_match(&self, status: &metadata::MetadataTextEditStatus, returned: bool) -> Option<MetadataOpenMatch> {
@@ -4013,9 +4139,9 @@ impl Observation {
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let (trace, progress, session, path, evidence, snapshot, site) = match self.record.try_lock() {
+        let (trace, progress, session, path, evidence, snapshot, site, metadata) = match self.record.try_lock() {
             Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,
-                r.snapshot_diagnostic, self.failed.site()), Err(_) => return };
+                r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure), Err(_) => return };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed enums and bounded cached counters/recipe indices, outside every
         // record/GTK lock. No identifiers, DTOs, inputs or exception bodies.
@@ -4023,6 +4149,8 @@ impl Observation {
         // retried, formatted or allowed to affect the original failure latch.
         let frame = if snapshot.is_some() || site.is_some() && matches!(trace.0, Step::Selected | Step::ReadSnapshot) {
             snapshot_failure_frame(trace, progress, site, snapshot)
+        } else if matches!(trace.0, Step::MetadataSave(MetadataStep::OpenText(_))) && session.is_none() && path.is_none() && evidence.is_none() {
+            metadata_open_failure_frame(trace, progress, site, metadata)
         } else { failure_frame(trace, progress, session, path, evidence) };
         if let Some((bytes, length)) = frame {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
@@ -5285,6 +5413,13 @@ impl Observation {
         let Some(mut r) = self.record_at(Boundary::Dom) else { return; };
         if self.case != Case::MetadataSave || r.pending.take() != Some(Pending::Dom(Step::MetadataSave(step)))
             || r.step != Step::MetadataSave(step) { self.fail(); return; }
+        if let MetadataStep::OpenText(index) = step {
+            if value["state"] == "wait" {
+                let Some(sample) = MetadataOpenSample::parse(index, r.evaluations, value) else { self.fail(); return; };
+                if !self.failed.load(Ordering::SeqCst) { r.metadata.open_sample = Some(sample); }
+                return;
+            }
+        }
         match value.get("state").and_then(Value::as_str) {
             Some("wait") if object.len() == 1 => return,
             Some("ready") => {}, _ => { self.fail(); return; },
@@ -5691,11 +5826,13 @@ impl Observation {
             if let Some(mut r) = self.record() {
                 let diagnostic = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic);
                 let path_diagnostic = PathDiagnostic::sample(r.step,self.start.elapsed().as_millis(),r.paths.diagnostic);
+                let metadata_diagnostic = MetadataOpenFailure::sample(r.step,r.evaluations,MetadataOpenFailureOrigin::Deadline,r.metadata.open_sample);
                 let Record { step, trace, bootstrap, .. } = &mut *r;
                 let progress = *bootstrap;
                 if latch_failure(&self.failed, trace, bootstrap, (*step, Boundary::Deadline), progress) {
                     r.session.diagnostic = diagnostic;
                     r.paths.diagnostic = path_diagnostic;
+                    r.metadata.open_failure = metadata_diagnostic;
                 }
             }
             self.failure_tick(app); return;
@@ -5895,7 +6032,15 @@ impl Observation {
                 Step::Cancel | Step::SetProject | Step::SelectProject => Pending::Project(step),
                 Step::CancelEvidence | Step::SetEvidence | Step::SelectEvidence => Pending::Evidence(step),
                 _ => {
-                    if r.evaluations >= 128 { self.fail(); return; }
+                    if r.evaluations >= 128 {
+                        if matches!(step, Step::MetadataSave(MetadataStep::OpenText(_))) {
+                            if self.failed.mark_caller() {
+                                r.metadata.open_failure = MetadataOpenFailure::sample(step,r.evaluations,
+                                    MetadataOpenFailureOrigin::EvaluationBudget,r.metadata.open_sample);
+                            }
+                        } else { self.fail(); }
+                        return;
+                    }
                     r.evaluations += 1; Pending::Dom(step)
                 },
             });
@@ -7796,8 +7941,11 @@ fn metadata_script(step: MetadataStep) -> Option<String> {
             return {state:'ready',display:display(m)};"#,
         MetadataStep::Review(_) => r#"const m=controls();if (m.review.disabled || document.querySelector('dialog')) return {state:'wait'};
             show(m.review);m.review.click();return {state:'ready'};"#,
-        MetadataStep::OpenText(_) => r#"if (!document.querySelector('.metadata-native-review')) return {state:'wait'};
-            const p=panel();if (text(p.querySelector('.section-heading h2'))!=='Review text changes') return {state:'wait'};
+        MetadataStep::OpenText(_) => r#"if (!document.querySelector('.metadata-native-review')) return {state:'wait',reason:'review-missing',heading:'na'};
+            const p=panel(),heading=text(p.querySelector('.section-heading h2'));
+            if (heading!=='Review text changes') return {state:'wait',reason:'heading-not-review',heading:heading===''?'empty':
+                heading==='Text status could not be verified'?'protocol-unverified':heading==='Checking the saved locale…'?'opening':
+                heading==='Preparing text changes…'?'preparing':'other'};
             const rows=p.querySelectorAll('.metadata-file-review');if (rows.length!==3 || document.querySelector('dialog')) throw 0;
             for (const row of rows) {const summary=row.querySelector(':scope > summary');show(summary);if (!row.open) summary.click();}
             return {state:'ready'};"#,
@@ -8641,6 +8789,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     assert_failure_latch_contract();
     assert_snapshot_rejection_contract();
     assert_snapshot_frame_contract();
+    assert_metadata_open_diagnostic_contract();
     assert_failure_quit_contract();
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     crate::credential_assessment::assert_installed_assessment_failure_contract();

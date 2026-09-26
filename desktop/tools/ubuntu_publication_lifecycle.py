@@ -4137,10 +4137,15 @@ def _shell_label_pair(raw):
         return None
     lines = raw.splitlines(keepends=True)
     path_detail = evidence_detail = snapshot_detail = None
+    metadata_open_detail = None
     if lines[0].startswith(b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE="):
         if len(lines) != 4:
             return None
         snapshot_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE="):
+        if len(lines) != 4 or len(raw) > 384:
+            return None
+        metadata_open_detail, lines = lines[0], lines[1:]
     elif lines[0].startswith(b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE="):
         if len(lines) != 4:
             return None
@@ -4181,6 +4186,39 @@ def _shell_label_pair(raw):
             return None
         result["snapshotFailure"] = {"sourceLine": int(site), "check": check.decode("ascii"), "error": error.decode("ascii")}
         return result  # Diagnostic DATA only; never a success/finality/cleanup receipt.
+    if metadata_open_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE=v1;site=(na|[1-9][0-9]{0,4})"
+                             rb";origin=(evaluation-budget|deadline|not-recorded);eval=(na|0|[1-9][0-9]{0,2})"
+                             rb";index=([01]);sample=(na|[1-9][0-9]{0,2});wait=(na|review-missing|heading-not-review)"
+                             rb";heading=(na|empty|protocol-unverified|opening|preparing|other)\n", metadata_open_detail)
+        if match is None or len(lines) != 3 or result["step"] != "MetadataOpenText":
+            return None
+        site, origin, evaluations, index, sample, wait, heading = match.groups()
+        source_line = None if site == b"na" else int(site)
+        count = None if evaluations == b"na" else int(evaluations)
+        sampled = None if sample == b"na" else int(sample)
+        if source_line is not None and source_line > 65535 or count is not None and count > 128:
+            return None
+        if origin == b"not-recorded":
+            if (evaluations, sample, wait, heading) != (b"na",) * 4:
+                return None
+        elif (count is None or origin == b"evaluation-budget" and
+              (result["boundary"] != "settlement" or count != 128 or source_line is None)
+              or origin == b"deadline" and (result["boundary"] != "deadline" or source_line is not None)):
+            return None
+        if sampled is None:
+            if wait != b"na" or heading != b"na":
+                return None
+        elif (count is None or sampled > count or wait == b"na"
+              or (wait == b"review-missing") != (heading == b"na")):
+            return None
+        result["metadataOpenFailure"] = {
+            "sourceLine": source_line, "origin": origin.decode("ascii"), "evaluations": count,
+            "reviewIndex": int(index), "lastSampleEvaluation": sampled,
+            "wait": None if wait == b"na" else wait.decode("ascii"),
+            "heading": None if heading == b"na" else heading.decode("ascii"),
+        }
+        return result  # First failure/last-sample DATA, not success or cleanup authority.
     session = result["step"].startswith("Session")  # Membership was checked above, not prefix admission.
     if len(lines) != (4 if session else 3):
         return None

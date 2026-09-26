@@ -2878,8 +2878,8 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertLess(frame.index('b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback="'), frame.index("&legacy[..legacy_length]"))
         self.assertIn("bytes.get_mut(length..end)?", frame)
         latch = source.split("fn latch_evidence_diagnostic(", 1)[1].split("#[derive(Default)]", 1)[0]
-        self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
-        self.assertIn("if !failed.swap(true, Ordering::SeqCst)", latch)
+        self.assertEqual(latch.count("failed.mark_unknown()"), 1)
+        self.assertIn("if failed.mark_unknown()", latch)
         self.assertIn("*trace = (next.step, Boundary::Result); *retained = Some(next);", latch)
         caller = source.split("fn evidence_fail(", 1)[1].split("fn report_failure(", 1)[0]
         self.assertIn("latch_evidence_diagnostic(&self.failed, trace, evidence_diagnostic, next)", caller)
@@ -3920,10 +3920,11 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn(winner, deadline)
         self.assertLess(deadline.index("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)"), deadline.index(winner))
         self.assertLess(deadline.index("PathDiagnostic::sample(r.step,self.start.elapsed().as_millis(),r.paths.diagnostic)"), deadline.index(winner))
-        self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;\n                }", deadline)
+        self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;"
+                      "\n                    r.metadata.open_failure = metadata_diagnostic;\n                }", deadline)
         latch = source.split("fn latch_failure(", 1)[1].split("fn latch_session_diagnostic(", 1)[0]
-        self.assertEqual(latch.count("failed.swap(true, Ordering::SeqCst)"), 1)
-        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", latch)
+        self.assertEqual(latch.count("failed.mark_unknown()"), 1)
+        self.assertIn("if failed.mark_unknown() { *trace = next_trace; *progress = next_progress; true } else { false }", latch)
         self.assertEqual(deadline.count("Boundary::Deadline"), 1)
         self.assertIn("\n            }\n            self.failure_tick(app); return;\n        }", deadline)
         self.assertIn("if self.failed.load(Ordering::SeqCst) { self.failure_tick(app); return; }", tick)
@@ -3964,7 +3965,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("Step::ReadCancelled => Step::ChooseSelect,", dom)  # Every success-requiring case keeps its original next intent.
         for forbidden in ("r.step =", "r.originals_final =", "r.exit =", "r.relay_joined =", "window.close", "app.exit", "self.end ="):
             self.assertNotIn(forbidden, failed_recipe)
-        self.assertIn("if !failed.swap(true, Ordering::SeqCst) { *trace = next_trace; *progress = next_progress; true } else { false }", source)
+        self.assertIn("if failed.mark_unknown() { *trace = next_trace; *progress = next_progress; true } else { false }", source)
         self.assertIn('cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure)', source)
         self.assertIn("Case::SettledFailure => return std::process::ExitCode::FAILURE,", source)
         self.assertNotIn("MRK_INSTALLED_SHELL_OBSERVATION=settled-failure-verified", source)

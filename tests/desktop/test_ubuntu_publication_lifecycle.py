@@ -5216,6 +5216,99 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class FailureLabelSinkContracts(unittest.TestCase):
+    @staticmethod
+    def metadata_open_frame(*, site=b"65535", origin=b"evaluation-budget", evaluations=b"128", index=b"1",
+                            sample=b"127", wait=b"heading-not-review", heading=b"protocol-unverified", boundary=b"settlement"):
+        return (b"MRK_INSTALLED_SHELL_METADATA_OPEN_FAILURE=v1;site=" + site + b";origin=" + origin
+                + b";eval=" + evaluations + b";index=" + index + b";sample=" + sample + b";wait=" + wait + b";heading=" + heading
+                + b"\nMRK_INSTALLED_SHELL_FAILURE_STEP=MetadataOpenText\nMRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary
+                + b"\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=app-info-returned-before-hold\n")
+
+    def test_metadata_open_failure_records_first_winner_and_explicit_unavailable_samples(self):
+        raw = self.metadata_open_frame()
+        self.assertLessEqual(len(raw), 384)
+        parsed = L._shell_label_pair(raw)
+        self.assertEqual(parsed, {"step": "MetadataOpenText", "boundary": "settlement", "bootstrapProgress": "app-info-returned-before-hold",
+                         "metadataOpenFailure": {"sourceLine": 65535, "origin": "evaluation-budget", "evaluations": 128,
+                         "reviewIndex": 1, "lastSampleEvaluation": 127, "wait": "heading-not-review", "heading": "protocol-unverified"}})
+        for index in (b"0", b"1"):
+            for heading in (b"empty", b"protocol-unverified", b"opening", b"preparing", b"other"):
+                sample = L._shell_label_pair(self.metadata_open_frame(index=index, sample=b"128", heading=heading))
+                self.assertEqual(sample["metadataOpenFailure"]["heading"], heading.decode("ascii"))
+                self.assertEqual(sample["metadataOpenFailure"]["lastSampleEvaluation"], 128)
+        missing = L._shell_label_pair(self.metadata_open_frame(wait=b"review-missing", heading=b"na"))
+        self.assertIsNone(missing["metadataOpenFailure"]["heading"])
+        for site in (b"na", b"1"):
+            unknown = L._shell_label_pair(self.metadata_open_frame(site=site, origin=b"not-recorded", evaluations=b"na",
+                                         sample=b"na", wait=b"na", heading=b"na", boundary=b"dom"))["metadataOpenFailure"]
+            self.assertIsNone(unknown["evaluations"])
+            self.assertIsNone(unknown["lastSampleEvaluation"])
+            self.assertIsNone(unknown["wait"])
+            self.assertIsNone(unknown["heading"])
+        for evaluations, sample in ((b"0", b"na"), (b"128", b"128")):
+            deadline = L._shell_label_pair(self.metadata_open_frame(site=b"na", origin=b"deadline", evaluations=evaluations,
+                                          sample=sample, wait=b"na" if sample == b"na" else b"review-missing", heading=b"na", boundary=b"deadline"))
+            self.assertIsNone(deadline["metadataOpenFailure"]["sourceLine"])
+            self.assertEqual(deadline["metadataOpenFailure"]["evaluations"], int(evaluations))
+        legacy = raw.split(b"\n", 1)[1]
+        self.assertEqual(L._shell_label_pair(legacy), {key: value for key, value in parsed.items() if key != "metadataOpenFailure"})
+        snapshot = (b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=1;check=stage;error=none\n"
+                    + legacy.replace(b"PHASE=settlement", b"PHASE=result"))
+        self.assertEqual(L._shell_label_pair(snapshot)["snapshotFailure"]["check"], "stage")
+
+    def test_metadata_open_failure_rejects_truncation_unknowns_and_contradictory_stamps(self):
+        raw = self.metadata_open_frame()
+        for end in range(1, len(raw)):
+            self.assertIsNone(L._shell_label_pair(raw[:end]))
+        mutations = [dict(site=b"0"), dict(site=b"65536"), dict(site=b"01"), dict(site=b"na"), dict(index=b"2"), dict(index=b"01"),
+                     dict(evaluations=b"127"), dict(evaluations=b"129"), dict(sample=b"129"), dict(sample=b"0"),
+                     dict(wait=b"review-missing"), dict(heading=b"na"), dict(heading=b"private title"), dict(wait=b"other"),
+                     dict(sample=b"na"), dict(boundary=b"dom"), dict(origin=b"deadline"), dict(origin=b"not-recorded"),
+                     dict(origin=b"deadline", site=b"na", boundary=b"deadline", evaluations=b"126", sample=b"127"),
+                     dict(origin=b"not-recorded", evaluations=b"na", sample=b"na", wait=b"na"),
+                     dict(origin=b"deadline", site=b"na", boundary=b"deadline", evaluations=b"na")]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertIsNone(L._shell_label_pair(self.metadata_open_frame(**mutation)))
+        for bad in (raw + b"\n", raw.replace(b";eval=", b";extra=0;eval="), raw.replace(b";index=1;sample=127", b";sample=127;index=1"),
+                    raw.replace(b"MetadataOpenText", b"MetadataReadReview"), raw.replace(b"MetadataOpenText", b"SessionReview"),
+                    raw.replace(b"\n", b"\r\n"), raw.split(b"\n", 1)[1] + raw.split(b"\n", 1)[0] + b"\n",
+                    raw.decode("ascii"), bytearray(raw)):
+            self.assertIsNone(L._shell_label_pair(bad))
+
+    def test_metadata_open_diagnostic_wiring_retains_original_guards_and_first_winner(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        report = source.split("fn report_failure(&self)", 1)[1].split("fn report_failure_handoff", 1)[0]
+        self.assertLess(report.index("snapshot_failure_frame("), report.index("metadata_open_failure_frame("))
+        self.assertIn("session.is_none() && path.is_none() && evidence.is_none()", report)
+        self.assertIn("self.failed.site(), r.metadata.open_failure)", report)
+        self.assertNotIn("r.metadata.open_sample", report)
+        self.assertEqual(report.count("rustix::io::write"), 1)
+        self.assertLess(report.index("Err(_) => return"), report.index("metadata_open_failure_frame("))
+        dom = source.split("fn metadata_dom(&self", 1)[1].split("fn ", 1)[0]
+        self.assertIn("MetadataOpenSample::parse(index, r.evaluations, value)", dom)
+        self.assertIn("if !self.failed.load(Ordering::SeqCst) { r.metadata.open_sample = Some(sample); }", dom)
+        self.assertNotIn("open_failure =", dom)
+        tick = source.split("pub(super) fn tick(", 1)[1].split("fn dom(", 1)[0]
+        deadline = tick.split("if Instant::now() >= self.end", 1)[1].split("self.failure_tick(app); return;", 1)[0]
+        self.assertLess(deadline.index("if latch_failure("), deadline.index("r.metadata.open_failure = metadata_diagnostic"))
+        budget = tick.split("if r.evaluations >= 128", 1)[1].split("r.evaluations += 1", 1)[0]
+        self.assertLess(budget.index("if self.failed.mark_caller()"), budget.index("r.metadata.open_failure ="))
+        self.assertIn("} else { self.fail(); }", budget)
+        self.assertIn("Duration::from_secs(45)", source)
+        native = tick.split("let native_pending = match r.step", 1)[1].split("Step::Workflow", 1)[0]
+        self.assertIn("s.prepare_returned && s.live_review()", native)
+        script = source.split("fn metadata_script(", 1)[1].split("fn ", 1)[0]
+        open_text = script.split("MetadataStep::OpenText(_) =>", 1)[1].split("MetadataStep::ReadReview(_) =>", 1)[0]
+        self.assertIn("reason:'review-missing',heading:'na'", open_text)
+        self.assertIn("const p=panel(),heading=text(p.querySelector('.section-heading h2'))", open_text)
+        self.assertIn("if (heading!=='Review text changes')", open_text)
+        self.assertIn("rows.length!==3 || document.querySelector('dialog')", open_text)
+        self.assertIn("if (!row.open) summary.click();", open_text)
+        self.assertEqual(open_text.count(".section-heading h2"), 1)
+        self.assertIn("if (!e || typeof e.textContent!=='string' || e.textContent.length>4096) throw 0", script)
+        self.assertIn("assert_metadata_open_diagnostic_contract();", source.split("pub(crate) fn main()", 1)[1])
+
     def test_snapshot_first_origin_is_complete_closed_and_preserves_actual_wrong_stage(self):
         def frame(site=b"65535", check=b"root", error=b"none", step=b"ReadSnapshot", boundary=b"result"):
             return (b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE=v1;site=" + site + b";check=" + check + b";error=" + error + b"\n"
@@ -5921,7 +6014,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("r.held", outstanding)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
         self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,", report)
-        self.assertIn("r.snapshot_diagnostic, self.failed.site())", report)
+        self.assertIn("r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure)", report)
         self.assertIn("snapshot_failure_frame(trace, progress, site, snapshot)", report)
         self.assertIn("failure_frame(trace, progress, session, path, evidence)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
