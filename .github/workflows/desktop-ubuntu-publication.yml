@@ -90,8 +90,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: '36238334234'
-          artifact-ids: '10905226275'
+          run-id: '36252225056'
+          artifact-ids: '10909746838'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
@@ -106,7 +106,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Independently reviewed entry bytes; verified before root imports.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '150f19f149c645a1cec63bd0f3466fdfa6ef92d68014448e236cd1fb886e328b'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '8473cd47c0bf33c1a893cd77ff90f766f5948ebe71ae8c7775b588719eab070f'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
