@@ -1155,18 +1155,18 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            # Twenty logs plus nineteen failure leaves retain the64MiB
-            # ceiling. Version adds six fixture and twelve GUI environment
-            # nodes beyond the existing nineteen cases.
-            # Only the shell roster cap is165;
+            # Twenty-one logs plus twenty failure leaves retain the64MiB
+            # ceiling. The new iOS case adds eight fixture and twelve GUI
+            # environment nodes without changing any earlier fixture.
+            # Only the shell roster cap is170;
             # the other profiles and32MiB aggregate evidence cap stay fixed.
             session_bytes = sum(len(data) for case in L.SHELL_SESSION_CASES
                 for _, mode, _, data in L._shell_session_roster(value, case) if not stat.S_ISDIR(mode))
             tools_bytes = sum(len(data) for case in L.SHELL_TOOLS_OFFLINE_CASES
                 for _, mode, _, data in L._shell_tools_offline_roster(value, case, True) if stat.S_ISREG(mode))
             version_bytes = len(L.SHELL_PROJECT_CONFIG) + len(L.SHELL_PROJECT_IGNORE) + len(b"keep unrelated version fixture data\n") + 34
-            required = baseline + ((2496 << 20) + 7235 + session_bytes + tools_bytes + 1186 + 11 + version_bytes + 411 if profile == "shell" else 0)
-            inodes = 2 * 16 + 2 * 8192 + (165 + 430 if profile == "shell" else 128)
+            required = baseline + ((2624 << 20) + 7235 + session_bytes + tools_bytes + 1186 + 11 + version_bytes + 431 if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + (170 + 451 if profile == "shell" else 128)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
@@ -2595,10 +2595,10 @@ def positive_capture(receipt=None, lifecycle=None):
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
-            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 21, 4096, 11, 11],
+            "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 22, 4096, 11, 11],
             "children": ["candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
                          "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project",
-                         "session-deadline", "session-inputs", "session-loss", "session-refusals", "tools-cancel",
+                         "session-deadline", "session-inputs", "session-ios-firebase", "session-loss", "session-refusals", "tools-cancel",
                          "tools-observed", "tools-settlement", "version-project", "workflow-project"],
             "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
             "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
@@ -2623,7 +2623,7 @@ def session_fixture_data(value, case, *, changed=False):
         row.update({"children": expected} if kind == "directory" else {"target": expected} if kind == "symlink"
                    else {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest()})
         rows.append(row)
-    return {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case,
+    return {"schemaVersion": 1, "fixture": "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1", "case": case,
             "root": namespace["root"] + "/" + case, "changed": changed, "entries": rows,
             "absent": L._shell_session_absent(case, changed), "namespace": namespace}
 
@@ -3403,7 +3403,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(native.count(marker), 1)
         declared, entries = native.split(marker, 1)[1].split("] = [", 1)
         names = tuple(json.loads("[" + entries.split("];", 1)[0].strip().removesuffix(",") + "]"))
-        self.assertEqual((int(declared), len(names), len(set(names))), (19, 19, 19))
+        self.assertEqual((int(declared), len(names), len(set(names))), (20, 20, 20))
         self.assertEqual(names, L.SHELL_FIXTURE_CHILDREN)
         namespace = fixture_namespace_data(value)
         self.assertEqual(namespace["children"], list(names))
@@ -3414,7 +3414,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertNotIn("id[5] > 20", session_capture)
         self.assertNotIn("id[5] > 20", tools_native)
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
-                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
                                        "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                                        "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save"))
         roster = L.public_files(value)
@@ -3440,10 +3440,13 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual({name for name in roster if name.startswith("shell-version-save")},
                          {"shell-version-save.stdout", "shell-version-save.stderr", "shell-version-save-xvfb.stderr",
                           "shell-version-save-before.json", "shell-version-save-after.json"})
-        self.assertEqual(len(roster), 163)
-        self.assertEqual(len(roster) + 2, 165)
-        self.assertEqual(len(L.root_phases(value)), 34)
-        self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 165)
+        self.assertEqual({name for name in roster if name.startswith("shell-session-ios-firebase")},
+                         {"shell-session-ios-firebase" + suffix for suffix in
+                          (".stdout", ".stderr", "-xvfb.stderr", "-before.json", "-after.json")})
+        self.assertEqual(len(roster), 168)
+        self.assertEqual(len(roster) + 2, 170)
+        self.assertEqual(len(L.root_phases(value)), 35)
+        self.assertEqual(L.SHELL_PUBLIC_FILE_LIMIT, 170)
         self.assertEqual(L.TOTAL_LIMIT, 32 << 20)
         self.assertLessEqual(len(roster), L.SHELL_PUBLIC_FILE_LIMIT)
         for case in ("positive", "refuse-writable", "refuse-pth"):
@@ -4117,15 +4120,15 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
         unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
         loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
-                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
-        branch = loop.body[1]
-        self.assertIsInstance(branch, ast.If)
+                    and ast.unparse(node.iter) == "shell_cases(value)")
+        transaction = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
         self.assertEqual(ast.unparse(branch.orelse[0]),
                          "result = command('shell-' + case, shell_argv(value, case), maximum=60, env=environment, shell_log=(value, case, log_binding))")
         self.assertEqual(ast.unparse(branch.orelse[1]),
                          "failure_labels = read(_ROOT / 'public/shell-settled-failure-failure.labels', SHELL_FAILURE_LABEL_LIMIT) if case == 'settled-failure' else None")
         self.assertEqual(ast.unparse(branch.orelse[2]),
-                         "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected, failure_labels=failure_labels)")
+                         "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, github_expected if shell_github(value) else expected, failure_labels=failure_labels)")
         metadata = next(node for node in branch.orelse[3:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
         self.assertEqual(len(metadata.body), 3)
         self.assertEqual([ast.unparse(node) for node in metadata.body[:3]], [
@@ -4133,8 +4136,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             "_retain('shell-metadata-save-after.json', metadata_after)",
             "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
         final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
-        self.assertEqual(len(final.body), 4)  # Docstring, common comparisons, session loop and Tools/Offline loop.
-        recheck = final.body[1].value
+        self.assertEqual(len(final.body), 5)  # Docstring, separate GitHub return, common comparisons and two original loops.
+        self.assertIsInstance(final.body[1], ast.If)
+        self.assertEqual(ast.unparse(final.body[1].test), "shell_github(value)")
+        self.assertIsInstance(final.body[1].body[-1], ast.Return)
+        recheck = final.body[2].value
         self.assertEqual(ast.unparse(recheck.func), "need")
         self.assertEqual([ast.unparse(node) for node in recheck.args[0].values], [
             "canonical(_shell_project_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-positive-project-after.json', 8192)",
@@ -4143,17 +4149,17 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             "canonical(_shell_workflow_inventory(value, namespace, installed=True)) == read(_ROOT / 'public/shell-workflow-apply-after.json', 8192)",
             "canonical(_shell_metadata_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-metadata-save-after.json', 8192)",
             "canonical(_shell_version_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-version-save-after.json', 8192)"])
-        session_loop = final.body[2]
+        session_loop = final.body[3]
         self.assertEqual(ast.unparse(session_loop.iter), "SHELL_SESSION_CASES")
         self.assertEqual(ast.unparse(session_loop.body[0].value.args[0]),
             "canonical(_shell_session_inventory(value, namespace, case, changed=case == 'session-refusals')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_SESSION_INVENTORY_LIMIT)")
-        tools_loop = final.body[3]
+        tools_loop = final.body[4]
         self.assertEqual(ast.unparse(tools_loop.iter), "SHELL_TOOLS_OFFLINE_CASES")
         self.assertEqual(ast.unparse(tools_loop.body[0].value.args[0]),
             "canonical(_shell_tools_offline_inventory(value, namespace, case, after=True)) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)")
         shell = next(node for node in unit.body if isinstance(node, ast.If) and ast.unparse(node.test) == "'shell' in value")
-        self.assertIs(shell.body[3], loop)
-        self.assertEqual(ast.unparse(shell.body[4]), "_shell_fixtures_final(value, namespace)")
+        loop_index = shell.body.index(loop)
+        self.assertEqual(ast.unparse(shell.body[loop_index + 1]), "_shell_fixtures_final(value, namespace)")
         self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(final)))
         calls = [node for node in ast.walk(unit) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                  and node.func.id == "_shell_metadata_inventory"]
@@ -4168,7 +4174,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          and node.func.id == "_shell_version_inventory"]
         self.assertEqual(len(version_calls), 1)
         self.assertTrue(version.body[0].lineno <= version_calls[0].lineno <= version.body[0].end_lineno)
-        self.assertFalse(any(isinstance(node, ast.Try) for node in ast.walk(loop)))
+        self.assertEqual([node for node in ast.walk(loop) if isinstance(node, ast.Try)], [transaction])
+        self.assertEqual((transaction.handlers, transaction.orelse), ([], []))
+        self.assertEqual([ast.unparse(node) for node in transaction.finalbody],
+                         ["if boundary is not None:\n    _github_boundary_close_after(boundary)"])
 
 
 
@@ -4849,8 +4858,9 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
     def test_after_inventory_is_only_after_success_in_the_existing_original_case_branch(self):
         tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
         body = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
-        loop = next(n for n in ast.walk(body) if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "SHELL_CASES")
-        branch = next(n for n in loop.body if isinstance(n, ast.If))
+        loop = next(n for n in ast.walk(body) if isinstance(n, ast.For) and ast.unparse(n.iter) == "shell_cases(value)")
+        transaction = next(n for n in loop.body if isinstance(n, ast.Try))
+        branch = next(n for n in transaction.body if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'normal'")
         gate = next(i for i,n in enumerate(branch.orelse) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                     and isinstance(n.value.func, ast.Name) and n.value.func.id == "shell_result")
         path_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'project-paths'")
@@ -4868,7 +4878,7 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(metadata_calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in metadata_calls[0].keywords], [("saved", True)])
         self.assertEqual(L.SHELL_CASES, ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
-                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
+                                       "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
                                        "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                                        "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save"))
 
@@ -5089,6 +5099,14 @@ class ToolsOfflineLifecycleContracts(unittest.TestCase):
 
 class SessionFixtureContracts(unittest.TestCase):
     def test_private_fixture_actual_snapshot_matches_installed_session_contract(self):
+        self._assert_private_fixture_actual_snapshot(L.SHELL_SESSION_CONFIG, 608,
+            "ce38aeb0676d4221a3054744083162158e5a33afade4e77ca4dcf9e7c96d53c3")
+
+    def test_ios_private_fixture_actual_snapshot_matches_its_distinct_case(self):
+        self._assert_private_fixture_actual_snapshot(L.SHELL_SESSION_IOS_FIREBASE_CONFIG, 684,
+            "fa6e91784d45703c39ab22db99abea8957f5dc33efbdb8aa02cae3f493dabc02")
+
+    def _assert_private_fixture_actual_snapshot(self, fixture, count, digest):
         from mobile_release.api._snapshot import project_snapshot
 
         # Use the actual static reader, not only configuration validation or a
@@ -5098,7 +5116,7 @@ class SessionFixtureContracts(unittest.TestCase):
             root.mkdir(mode=0o700)
             (root / "release").mkdir(mode=0o700)
             files = {
-                "release/mobile-release.json": L.SHELL_SESSION_CONFIG,
+                "release/mobile-release.json": fixture,
                 "version.properties": L.SHELL_PROJECT_VERSION,
             }
             for name, data in files.items():
@@ -5122,16 +5140,16 @@ class SessionFixtureContracts(unittest.TestCase):
             self.assertEqual(config["path"], "release/mobile-release.json")
             self.assertEqual(config["state"], "format-valid")
             self.assertEqual(config["issues"], [])
-            self.assertEqual(config["data"], json.loads(L.SHELL_SESSION_CONFIG))
+            self.assertEqual(config["data"], json.loads(fixture))
             self.assertEqual(config["content"], {
-                "bytes": 608,
-                "sha256": "ce38aeb0676d4221a3054744083162158e5a33afade4e77ca4dcf9e7c96d53c3",
+                "bytes": count,
+                "sha256": digest,
             })
             self.assertEqual(actual["issues"], [])
             self.assertEqual(actual["discovery"]["state"], "unverified")
             self.assertIs(actual["discovery"]["partial"], False)
             self.assertEqual(actual["discovery"]["scan"], {
-                "sourceFiles": 2, "sourceBytes": 642, "entries": 3, "excludedEntries": 0,
+                "sourceFiles": 2, "sourceBytes": count + 34, "entries": 3, "excludedEntries": 0,
             })
             self.assertEqual(actual["assurance"]["basis"], "static-text")
             self.assertEqual(actual["assurance"]["releaseReadiness"], "unknown")
@@ -5152,6 +5170,103 @@ class SessionFixtureContracts(unittest.TestCase):
         self.assertEqual(draft["services"], {"androidFirebase": "required", "iosFirebase": "disabled"})
         self.assertIs(draft["source"]["projectReadTokenRequired"], True)
         self.assertEqual(draft["version"]["source"], "version.properties")
+
+    def test_ios_fixture_is_exact_private_credential_free_data_not_an_old_kind_relabel(self):
+        from mobile_release.config import validate_config_data
+        original = json.loads(L.SHELL_SESSION_CONFIG)
+        expected = deepcopy(original)
+        expected["ios"] = {"bundleId": "org.assessment.fixture", "enabled": True, "identityStatus": "unverified"}
+        expected["metadata"]["iosLocales"] = ["en-US"]
+        expected["services"]["iosFirebase"] = "required"
+        actual = json.loads(L.SHELL_SESSION_IOS_FIREBASE_CONFIG)
+        validate_config_data(actual)
+        self.assertEqual(actual, expected)
+        self.assertEqual(json.loads(L.SHELL_SESSION_CONFIG), original)
+        for raw, count, digest in (
+            (L.SHELL_SESSION_IOS_FIREBASE_CONFIG, 684, "fa6e91784d45703c39ab22db99abea8957f5dc33efbdb8aa02cae3f493dabc02"),
+            (L.SHELL_SESSION_IOS_FIREBASE, 141, "971fa5224444f8bfa2cdbfdf280196035c9d00b6f426472069aad4b09c19a516"),
+            (L.SHELL_SESSION_IOS_FIREBASE_MISMATCH, 139, "db6ae4ba7f56f7c230201e047a7b85b8379545bc025196cae6ca5a95670e41ad"),
+        ):
+            self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (count, digest))
+        self.assertEqual(L.SHELL_SESSION_IOS_FIREBASE_MISMATCH,
+                         L.SHELL_SESSION_IOS_FIREBASE.replace(b"org.assessment.fixture", b"org.assessment.other"))
+        nodes = L._shell_session_roster(installed_handoff(), "session-ios-firebase")
+        self.assertEqual([name for name, mode, _, _ in nodes if stat.S_ISDIR(mode)], [".", "project", "project/release", "sources"])
+        self.assertEqual([name for name, mode, _, _ in nodes if stat.S_ISREG(mode)],
+                         ["project/release/mobile-release.json", "project/version.properties", "sources/firebase-ios-mismatch.plist", "sources/firebase-ios.plist"])
+        self.assertEqual(len(nodes), 8)
+        self.assertTrue(all(stat.S_IMODE(mode) == (0o700 if stat.S_ISDIR(mode) else 0o600) for _, mode, _, _ in nodes))
+        value = installed_handoff(); before = session_fixture_data(value, "session-ios-firebase")
+        for mutate in (
+            lambda v: v.update(fixture="four-kind-session-v1"),
+            lambda v: next(r for r in v["entries"] if r["path"] == "sources/firebase-ios.plist").update(sha256="0" * 64),
+            lambda v: next(r for r in v["entries"] if r["path"] == "sources/firebase-ios-mismatch.plist").update(size=141),
+        ):
+            after = deepcopy(before); mutate(after)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_session_fixture(value, "session-ios-firebase", L.canonical(before), L.canonical(after))
+
+    def test_ios_observer_recipe_preserves_old_actions_and_binds_exact_original_projections(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        for name, digest in (
+            ("SESSION_INPUTS", "f5866909363e146f2825bc99b5d4e1d4f2b4a5901cdba8ebfeb953b7ea7ffdde"),
+            ("SESSION_REFUSALS", "2465c781a85d55498b12f474ce60b45143e1df17fed1fd95b5bab575bf8f0938"),
+            ("SESSION_INTERRUPTION", "fde9a3a08ed6006a4d17f307cdeb3df8535b08b3c7a670be152802b1a128c8f6"),
+        ):
+            marker = "const " + name + ": &[SA] = &["
+            statement = marker + source.split(marker, 1)[1].split("\n];", 1)[0] + "\n];"
+            self.assertEqual(hashlib.sha256(statement.encode()).hexdigest(), digest)
+        recipe = source.split("const SESSION_IOS_FIREBASE: &[SA] = &[", 1)[1].split("];", 1)[0]
+        expected = '''SA::Open, SA::Platform("ios"), SA::Kind("ios-firebase"),
+            SA::Choose("firebase-ios.plist","ios-firebase",None), SA::Prepare("ios-firebase","save"), SA::Keep, SA::Assign,
+            SA::Choose("firebase-ios-mismatch.plist","ios-firebase",None), SA::Prepare("ios-firebase","mismatch"), SA::CancelOperation,
+            SA::Replacement(0), SA::Choose("","ios-firebase",Some("user-cancelled")), SA::Discard, SA::ConfirmDiscard, SA::Open,'''
+        self.assertEqual("".join(recipe.split()), "".join(expected.split()))
+        context = source.split("pub(super) fn session_context_input", 1)[1].split("pub(super) fn session_choose_input", 1)[0]
+        for guard in ('"ios" => Platform::Ios', 'r.session.draft.as_ref() != Some(args.draft)', 'args.platform != expected_platform'):
+            self.assertIn(guard, context)
+        prepare = source.split("pub(super) fn session_prepare_input", 1)[1].split("pub(super) fn session_confirmation_input", 1)[0]
+        self.assertIn('["android-keystore","android-firebase","ios-firebase"].contains(&kind)', prepare)
+        self.assertIn('before.status["operation"]["selectionToken"].as_str() == Some(*token)', prepare)
+        self.assertIn('before.status["context"]["revision"].as_u64() != Some(u64::from(args.context_revision))', prepare)
+        predicate = source.split("fn session_ios_file_assessment", 1)[1].split("fn assert_session_ios_assessment_contract", 1)[0]
+        for guard in ('"save" => ("format-valid", "match"', '"mismatch" => ("invalid", "mismatch"',
+                      '"identity-mismatch"', 'assessment["fields"] == serde_json::json!([{',
+                      '"MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64"', '"presence":"supplied"',
+                      '"scope":"plist-document","outcome":"asserted-pass"', '"scope":"firebase-shape","outcome":"passed"',
+                      '"scope":"application-identity","outcome":outcome'):
+            self.assertIn(guard, predicate)
+        self.assertIn('assert_session_ios_assessment_contract();', source)
+        self.assertIn('!session_ios_file_assessment(assessment,expected)', source)
+        self.assertIn('match file { "firebase-ios.plist" => 141, "firebase-ios-mismatch.plist" => 139, _ => return false }', source)
+        self.assertIn('&& s.ios_matched && s.mismatch && s.refused.is_empty() && s.cancel_preserved && s.cancel_revoked && s.reopened', source)
+        self.assertIn('"ios-firebase" => Some("iOS Firebase client document")', source)
+        self.assertIn("startsWith('Select the iOS GoogleService-Info.plist')", source)
+        native = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        observer = native.split("fn observed_session_file", 1)[1].split("pub(super) fn select_observed_session_file", 1)[0]
+        self.assertIn('"ios-firebase" => "Choose iOS Firebase XML plist"', observer)
+
+    def test_ios_receipt_requires_each_actual_behavior_without_widening_legacy_kinds(self):
+        case = "session-ios-firebase"
+        expected = L.SHELL_SESSION_RECEIPTS[case]
+        self.assertEqual(expected["profile"], "installed-linux-session-ios-firebase")
+        self.assertEqual(expected["behavior"], {
+            "kinds": ["ios-firebase"], "assessments": 2, "fileChoosers": 3, "capturedFiles": 2, "capturesClosed": 2,
+            "kept": 1, "assigned": 1, "xmlFormatAndBundleIdentityMatched": True, "firebaseMismatchRefused": True,
+            "cancelledReplacementPreservedBytes": True, "cancelledReplacementRevokedAssignment": True, "discardReopenEmpty": True,
+        })
+        self.assertLessEqual(len(L.canonical(expected)), 2048)
+        for key, value in expected["behavior"].items():
+            wrong = deepcopy(expected)
+            wrong["behavior"][key] = False if type(value) is bool else value + 1 if type(value) is int else ["android-firebase"]
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                L.shell_session_receipt(L.canonical(wrong), case)
+        self.assertEqual(L.SHELL_SESSION_RECEIPTS["session-inputs"]["behavior"]["kinds"],
+                         ["android-keystore", "android-firebase", "google-wif", "project-read-token"])
+        for old in L.SHELL_SESSION_CASES[:4]:
+            self.assertEqual(L.SHELL_SESSION_RECEIPTS[old]["profile"], "installed-linux-session-inputs")
+            with self.subTest(old=old), self.assertRaises(ValueError):
+                L.shell_session_receipt(L.canonical(expected), old)
 
     def test_original_session_receipt_framing_profile_finality_and_redaction_are_closed(self):
         for case in L.SHELL_SESSION_CASES:
@@ -5214,10 +5329,10 @@ class SessionFixtureContracts(unittest.TestCase):
             with self.assertRaises(ValueError): L.shell_result(altered, b"", case, 0, mappings)
         with self.assertRaises(ValueError): L.shell_result(stdout, b"", case, 0, {})
 
-    def test_closed_four_case_fixtures_and_only_original_leaf_rename_are_accounted(self):
+    def test_original_four_and_separate_ios_fixtures_only_original_leaf_rename_are_accounted(self):
         value = installed_handoff(); value.update(runId="9" * 20, attempt="9" * 20)
-        self.assertEqual(L.SHELL_SESSION_CASES, ("session-inputs", "session-refusals", "session-loss", "session-deadline"))
-        self.assertEqual(sum(len(L._shell_session_roster(value, case)) for case in L.SHELL_SESSION_CASES), 42)
+        self.assertEqual(L.SHELL_SESSION_CASES, ("session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase"))
+        self.assertEqual(sum(len(L._shell_session_roster(value, case)) for case in L.SHELL_SESSION_CASES), 50)
         self.assertEqual(L.SHELL_SESSION_JKS, bytes.fromhex("feedfeed0000000200000000"))
         self.assertEqual(L.SHELL_SESSION_REPLACEMENT_JKS, bytes.fromhex("feedfeed0000000100000000"))
         for case in L.SHELL_SESSION_CASES:
@@ -5225,7 +5340,8 @@ class SessionFixtureContracts(unittest.TestCase):
             after = L.canonical(session_fixture_data(value, case, changed=case == "session-refusals"))
             with self.subTest(case=case):
                 result = L.shell_session_fixture(value, case, before, after)
-                self.assertEqual((result["beforeCount"], result["afterCount"]), (15, 14) if case == "session-refusals" else (9, 9))
+                self.assertEqual((result["beforeCount"], result["afterCount"]), (15, 14) if case == "session-refusals" else (8, 8) if case == "session-ios-firebase" else (9, 9))
+                self.assertEqual(result["fixture"], "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1")
                 self.assertEqual(result["mutations"], ["changed-leaf-rename"] if case == "session-refusals" else [])
                 self.assertTrue(result["projectUnchanged"] and result["sourcesOutsideProject"] and result["originalsAccounted"])
                 self.assertEqual(result["before"] == result["after"], case != "session-refusals")
@@ -5237,6 +5353,7 @@ class SessionFixtureContracts(unittest.TestCase):
         for case in L.SHELL_SESSION_CASES:
             before = session_fixture_data(value, case)
             after = session_fixture_data(value, case, changed=case == "session-refusals")
+            source = "sources/firebase-ios.plist" if case == "session-ios-firebase" else "sources/input.jks"
             mutations = [
                 lambda doc: doc.update(case="positive"), lambda doc: doc.update(changed=1),
                 lambda doc: doc.update(root=doc["root"] + "/project"), lambda doc: doc.update(schemaVersion=True),
@@ -5245,8 +5362,8 @@ class SessionFixtureContracts(unittest.TestCase):
                 lambda doc: doc["entries"][0]["children"].append("unrelated"),
                 lambda doc: doc["entries"][1]["identity"].__setitem__(2, stat.S_IFDIR | 0o755),
                 lambda doc: doc["entries"][1]["identity"].__setitem__(1, doc["entries"][0]["identity"][1]),
-                lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/input.jks").update(size=True),
-                lambda doc: next(row for row in doc["entries"] if row["path"] == "sources/input.jks")["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == source).update(size=True),
+                lambda doc: next(row for row in doc["entries"] if row["path"] == source)["identity"].__setitem__(2, stat.S_IFREG | 0o644),
                 lambda doc: next(row for row in doc["entries"] if row["path"] == "project/release/mobile-release.json").update(sha256="0" * 64),
             ]
             if case == "session-refusals":
@@ -5359,8 +5476,9 @@ class SessionFixtureContracts(unittest.TestCase):
         tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
         unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
         loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For)
-                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
-        branch = next(node for node in loop.body if isinstance(node, ast.If))
+                    and ast.unparse(node.iter) == "shell_cases(value)")
+        transaction = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
         gate = next(node for node in branch.orelse if isinstance(node, ast.Assign)
                     and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
         session = next(node for node in branch.orelse if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_SESSION_CASES")
@@ -7079,8 +7197,8 @@ class InstalledGitHubReadOnlyDataContracts(unittest.TestCase):
                          {"github-real-ca-refusal", "github-ambient-no-rescue"})
         legacy = deepcopy(value); legacy["shell"].pop("githubReadOnly")
         self.assertEqual(L.shell_cases(legacy), L.SHELL_CASES)
-        self.assertEqual(len(L.shell_cases(legacy)), 20)
-        self.assertEqual(L.shell_public_limit(legacy), 165)
+        self.assertEqual(len(L.shell_cases(legacy)), 21)
+        self.assertEqual(L.shell_public_limit(legacy), 170)
         self.assertEqual(L.shell_fixture_children(value), ("github-project",))
         for case in ("normal", "github-normal-negative", "github-other"):
             with self.subTest(case=case), self.assertRaises(L.Refused):

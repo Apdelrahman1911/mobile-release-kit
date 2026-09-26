@@ -1765,6 +1765,7 @@ mod owned_gtk {
         let title = match kind {
             "android-keystore" => "Choose an Android JKS keystore",
             "android-firebase" => "Choose Android Firebase JSON",
+            "ios-firebase" => "Choose iOS Firebase XML plist",
             _ => { q.session_file_failed(R::GtkDialogProperties); return Err(()); },
         };
         let Some(main) = app.get_webview_window(MAIN_WINDOW) else { q.session_file_failed(R::GtkDialogProperties); return Err(()); };

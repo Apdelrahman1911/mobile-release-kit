@@ -3451,7 +3451,7 @@ def shell_project_draft_observation(observed, lifecycle):
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
-    # The twenty-case root cap is165 (163 exact names); its exporter adds the original client's
+    # The twenty-one-case root cap is170 (168 exact names); its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
     D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_CASES)
            and type(combined) is dict and set(combined) == {"native", "fixture"}
@@ -3624,11 +3624,11 @@ def _shell_workflow_apply_observation(case, combined, files, lifecycle):
 def _shell_session_inputs_observation(cases, combined, files, lifecycle):
     """Original native receipts and exact private fixture export pins agree.
 
-    The four admitted session observers cannot relabel the unchanged ordinary
+    The five admitted session observers cannot relabel the unchanged ordinary
     twelve-method cases, qualify persistence or activate the normal product.
     """
     D.need(type(combined) is dict and set(combined) == set(lifecycle.SHELL_SESSION_CASES),
-           "Closed four-case session observation is missing")
+           "Closed five-case session observation is missing")
     for name in lifecycle.SHELL_SESSION_CASES:
         case, pair = cases[name], combined[name]
         D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "sessionInputs"}
@@ -3655,9 +3655,10 @@ def _shell_session_inputs_observation(cases, combined, files, lifecycle):
                        and type(row["inode"]) is int and 0 < row["inode"] < 1 << 64,
                        "Closed session original R1 map shape differs")
         changed = name == "session-refusals"
-        expected = {"fixture": "four-kind-session-v1", "case": name, "rootRetained": True, "originalsAccounted": True,
+        ios = name == "session-ios-firebase"
+        expected = {"fixture": "ios-firebase-session-v1" if ios else "four-kind-session-v1", "case": name, "rootRetained": True, "originalsAccounted": True,
             "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
-            "beforeCount": 15 if changed else 9, "afterCount": 14 if changed else 9,
+            "beforeCount": 15 if changed else 8 if ios else 9, "afterCount": 14 if changed else 8 if ios else 9,
             "mutations": ["changed-leaf-rename"] if changed else []}
         fixture = pair["fixture"]
         D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}

@@ -19,10 +19,11 @@ pub(crate) mod commands;
 #[path = "installed_shell_github_observation.rs"]
 pub(crate) mod github;
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline }
+pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline, IosFirebase }
 impl SessionCase {
-    fn name(self) -> &'static str { match self { Self::Inputs => "session-inputs", Self::Refusals => "session-refusals", Self::Loss => "session-loss", Self::Deadline => "session-deadline" } }
-    fn assessments(self) -> usize { match self { Self::Inputs => 7, Self::Refusals => 6, _ => 1 } }
+    fn name(self) -> &'static str { match self { Self::Inputs => "session-inputs", Self::Refusals => "session-refusals", Self::Loss => "session-loss", Self::Deadline => "session-deadline", Self::IosFirebase => "session-ios-firebase" } }
+    fn assessments(self) -> usize { match self { Self::Inputs => 7, Self::Refusals => 6, Self::IosFirebase => 2, _ => 1 } }
+    fn profile(self) -> &'static str { if self == Self::IosFirebase { "installed-linux-session-ios-firebase" } else { "installed-linux-session-inputs" } }
 }
 impl Case {
     fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } }
@@ -641,7 +642,14 @@ const SESSION_REFUSALS: &[SA] = &[
 const SESSION_INTERRUPTION: &[SA] = &[
     SA::Open, SA::Choose("input.jks","android-keystore",None), SA::Fields("android-keystore"), SA::Prepare("android-keystore","held"), SA::Held,
 ];
-impl SessionCase { fn recipe(self) -> &'static [SA] { match self { Self::Inputs => SESSION_INPUTS, Self::Refusals => SESSION_REFUSALS, _ => SESSION_INTERRUPTION } } }
+// A separate installed Linux witness, not an expansion of the four-kind receipt.
+const SESSION_IOS_FIREBASE: &[SA] = &[
+    SA::Open, SA::Platform("ios"), SA::Kind("ios-firebase"),
+    SA::Choose("firebase-ios.plist","ios-firebase",None), SA::Prepare("ios-firebase","save"), SA::Keep, SA::Assign,
+    SA::Choose("firebase-ios-mismatch.plist","ios-firebase",None), SA::Prepare("ios-firebase","mismatch"), SA::CancelOperation,
+    SA::Replacement(0), SA::Choose("","ios-firebase",Some("user-cancelled")), SA::Discard, SA::ConfirmDiscard, SA::Open,
+];
+impl SessionCase { fn recipe(self) -> &'static [SA] { match self { Self::Inputs => SESSION_INPUTS, Self::Refusals => SESSION_REFUSALS, Self::IosFirebase => SESSION_IOS_FIREBASE, _ => SESSION_INTERRUPTION } } }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionCommand { Status, Open, Context, Choose, Prepare, Delete, Commit, Bind, Discard, Lock }
 impl SessionCommand { fn index(self) -> usize { self as usize } }
@@ -696,7 +704,7 @@ struct SessionRecord {
     replacement: Option<(String,u32,usize)>, files: Vec<SessionFile>,
     kind: &'static str, platform: &'static str, recipe_done: usize, captures: u8, captures_closed: u8,
     assessed: u8, kept: u8, assigned: u8, removed: u8, reassessed: bool, context_revoked: bool, replaced: bool,
-    refused: Vec<&'static str>, missing: bool, mismatch: bool, stale_keep: bool, stale_assign: bool,
+    refused: Vec<&'static str>, missing: bool, mismatch: bool, ios_matched: bool, stale_keep: bool, stale_assign: bool,
     cancel_preserved: bool, cancel_revoked: bool, reopened: bool,
     quit_cancel: Picker, quit_cancel_id: Option<u32>, cancel_close_prevented: bool, quit_review: Option<InstalledSessionSnapshot>, quit_preserved: bool,
     navigation: u8, loss: bool, loss_rendered: bool, deadline: bool, cleanup: Option<Instant>,
@@ -707,7 +715,7 @@ impl SessionRecord {
         admission_issued:false,admitted:false,fixture:None,diagnostic:None,draft:None,requests:[0;10],returns:[0;10],base_requests:[0;10],replies:std::array::from_fn(|_| SessionReply::default()),
         before:None,sampled:None,remembered:None,replacement:None,files:Vec::new(),kind:"android-keystore",platform:"android",recipe_done:0,
         captures:0,captures_closed:0,assessed:0,kept:0,assigned:0,removed:0,reassessed:false,context_revoked:false,replaced:false,refused:Vec::new(),
-        missing:false,mismatch:false,stale_keep:false,stale_assign:false,cancel_preserved:false,cancel_revoked:false,reopened:false,
+        missing:false,mismatch:false,ios_matched:false,stale_keep:false,stale_assign:false,cancel_preserved:false,cancel_revoked:false,reopened:false,
         quit_cancel:Picker::default(),quit_cancel_id:None,cancel_close_prevented:false,quit_review:None,quit_preserved:false,navigation:0,loss:false,loss_rendered:false,deadline:false,cleanup:None,
         queries:None,r1_final:false,
     } }
@@ -715,7 +723,53 @@ impl SessionRecord {
 
 fn session_kind_label(kind: &str) -> Option<&'static str> {
     match kind { "android-keystore" => Some("Android upload keystore"), "android-firebase" => Some("Android Firebase client document"),
+        "ios-firebase" => Some("iOS Firebase client document"),
         "google-wif" => Some("Google workload identity federation"), "project-read-token" => Some("Private project dependency access"), _ => None }
+}
+fn session_ios_file_assessment(assessment: &Value, expected: &str) -> bool {
+    let (state, identity, issues, outcome) = match expected {
+        "save" => ("format-valid", "match", serde_json::json!([]), "passed"),
+        "mismatch" => ("invalid", "mismatch", serde_json::json!(["identity-mismatch"]), "failed"),
+        _ => return false,
+    };
+    assessment["kind"] == "ios-firebase" && assessment["state"] == state && assessment["identity"] == identity
+        && assessment["fields"] == serde_json::json!([{
+            "id":"file","requirement":"MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
+            "presence":"supplied","state":state,"issues":issues,"checks":[
+                {"scope":"plist-document","outcome":"asserted-pass"},
+                {"scope":"firebase-shape","outcome":"passed"},
+                {"scope":"application-identity","outcome":outcome}],
+        }])
+}
+fn assert_session_ios_assessment_contract() {
+    // Inert predicate coverage inside the existing observer contracts; these
+    // invented values never enter a session or constitute native evidence.
+    let matching = serde_json::json!({"kind":"ios-firebase","state":"format-valid","identity":"match","fields":[{
+        "id":"file","requirement":"MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64","presence":"supplied",
+        "state":"format-valid","issues":[],"checks":[{"scope":"plist-document","outcome":"asserted-pass"},
+            {"scope":"firebase-shape","outcome":"passed"},{"scope":"application-identity","outcome":"passed"}]}]});
+    assert!(session_ios_file_assessment(&matching,"save"));
+    let mut mismatch = matching.clone();
+    mismatch["state"] = Value::String("invalid".into()); mismatch["identity"] = Value::String("mismatch".into());
+    mismatch["fields"][0]["state"] = Value::String("invalid".into());
+    mismatch["fields"][0]["issues"] = serde_json::json!(["identity-mismatch"]);
+    mismatch["fields"][0]["checks"][2]["outcome"] = Value::String("failed".into());
+    assert!(session_ios_file_assessment(&mismatch,"mismatch"));
+    assert!(!session_ios_file_assessment(&matching,"mismatch") && !session_ios_file_assessment(&mismatch,"save"));
+    for expected in ["bind", "missing", "held", "other"] { assert!(!session_ios_file_assessment(&matching,expected)); }
+    let mutations: &[fn(&mut Value)] = &[
+        |v| v["kind"] = Value::String("android-firebase".into()),
+        |v| v["state"] = Value::String("configured".into()), |v| v["identity"] = Value::String("not-assessed".into()),
+        |v| v["fields"] = serde_json::json!([]), |v| v["fields"][0]["id"] = Value::Null,
+        |v| v["fields"][0]["requirement"] = Value::Null, |v| v["fields"][0]["presence"] = Value::String("missing".into()),
+        |v| v["fields"][0]["issues"] = serde_json::json!(["malformed-container"]),
+        |v| v["fields"][0]["checks"][0]["scope"] = Value::String("json-document".into()),
+        |v| v["fields"][0]["checks"][1]["outcome"] = Value::String("failed".into()),
+        |v| v["fields"][0]["checks"][2]["outcome"] = Value::String("not-run".into()),
+    ];
+    for (original, expected) in [(&matching,"save"),(&mismatch,"mismatch")] {
+        for mutate in mutations { let mut wrong=original.clone(); mutate(&mut wrong); assert!(!session_ios_file_assessment(&wrong,expected)); }
+    }
 }
 fn session_field_names(kind: &str) -> &'static [&'static str] {
     match kind { "android-keystore" => &["storePassword","keyAlias","keyPassword"], "google-wif" => &["provider","serviceAccount"],
@@ -787,14 +841,16 @@ fn session_original_clock(original: Option<Instant>, current: Option<Instant>, s
     original.is_some() && if settled { current.is_none() } else { current == original }
 }
 fn assert_session_recipe_contract() {
+    assert_session_ios_assessment_contract();
     for (case, assessments, choosers) in [(SessionCase::Inputs,7,3),(SessionCase::Refusals,6,9),
-        (SessionCase::Loss,1,1),(SessionCase::Deadline,1,1)] {
+        (SessionCase::Loss,1,1),(SessionCase::Deadline,1,1),(SessionCase::IosFirebase,2,3)] {
         let recipe=case.recipe();
         assert!(recipe.len()<64 && recipe.first()==Some(&SA::Open));
         assert_eq!(recipe.iter().filter(|a| matches!(a,SA::Prepare(..)|SA::Reassess(..))).count(),assessments);
         assert_eq!(case.assessments(),assessments);
         assert_eq!(recipe.iter().filter(|a| matches!(a,SA::Choose(..))).count(),choosers);
         assert!(recipe.iter().all(|a| !matches!(a,SA::Fields("android-firebase"))));
+        assert!(recipe.iter().all(|a| !matches!(a,SA::Fields("ios-firebase"))));
         // Exercise the actual per-file reservations, not a second GTK model.
         // Original owner/id/endpoint binding remains in the Record transaction.
         for (index,action) in recipe.iter().enumerate() {
@@ -1334,6 +1390,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::Session(SessionCase::Refusals) => "shell-session-refusals-failure.labels",
         Case::Session(SessionCase::Loss) => "shell-session-loss-failure.labels",
         Case::Session(SessionCase::Deadline) => "shell-session-deadline-failure.labels",
+        Case::Session(SessionCase::IosFirebase) => "shell-session-ios-firebase-failure.labels",
         Case::MetadataSave => "shell-metadata-save-failure.labels",
         Case::VersionSave => "shell-version-save-failure.labels",
         Case::Commands(case) => case.failure_leaf(),
@@ -2950,20 +3007,26 @@ impl SnapshotDiagnostic {
             && (self.rejection.check != SnapshotCheck::Stage || !matches!(self.step, Step::Selected | Step::ReadSnapshot))
     }
 }
-fn session_snapshot_expected() -> Value {
-    serde_json::json!({"android":{"applicationId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"},"ios":{"enabled":false},
+fn session_snapshot_expected(case: SessionCase) -> Value {
+    let mut expected = serde_json::json!({"android":{"applicationId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"},"ios":{"enabled":false},
         "metadata":{"androidLocales":["en-US"],"iosLocales":[],"root":"release/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},
         "schemaVersion":1,"services":{"androidFirebase":"required","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"main","projectReadTokenRequired":true},
-        "version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"version.properties"}})
+        "version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"version.properties"}});
+    if case == SessionCase::IosFirebase {
+        expected["ios"] = serde_json::json!({"bundleId":"org.assessment.fixture","enabled":true,"identityStatus":"unverified"});
+        expected["metadata"]["iosLocales"] = serde_json::json!(["en-US"]);
+        expected["services"]["iosFirebase"] = Value::String("required".into());
+    }
+    expected
 }
 fn snapshot_require(valid: bool, check: SnapshotCheck) -> Result<(), SnapshotRejection> {
     if valid { Ok(()) } else { Err(SnapshotRejection::plain(check)) }
 }
 fn session_snapshot_check(project: Option<&Project>, project_id: &str, result: &Result<Value, BridgeError>,
-    requests: u8, observed: bool, step: Step) -> Result<(), SnapshotRejection> {
+    requests: u8, observed: bool, step: Step, case: SessionCase) -> Result<(), SnapshotRejection> {
     // Same conjunction and short-circuit precedence as the original callback.
     // Only the rejected predicate is retained; never the supplied DTO or error.
-    let expected = session_snapshot_expected();
+    let expected = session_snapshot_expected(case);
     let value = result.as_ref().map_err(|error| SnapshotRejection {
         check: SnapshotCheck::Bridge, error: EvidenceError::classify(error) })?;
     let project = project.filter(|p| p.id == project_id).ok_or(SnapshotRejection::plain(SnapshotCheck::Project))?;
@@ -3016,11 +3079,11 @@ fn snapshot_failure_frame(trace: (Step, Boundary), progress: BootstrapProgress, 
 fn assert_snapshot_rejection_contract() {
     let project = Project { id: "selected".into(), name: "fixture".into(), path: "/private/fixture".into() };
     let value = serde_json::json!({"root":project.path.as_str(),"observationScope":"single-request-non-atomic",
-        "config":{"path":"release/mobile-release.json","state":"format-valid","issues":[],"data":session_snapshot_expected()},
+        "config":{"path":"release/mobile-release.json","state":"format-valid","issues":[],"data":session_snapshot_expected(SessionCase::Inputs)},
         "issues":[],"discovery":{"state":"unverified","partial":false},"assurance":{"basis":"static-text","releaseReadiness":"unknown",
             "projectCodeExecuted":false,"toolsProbed":false,"credentialsRead":false,"gitObserved":false,"storeContacted":false,"writesPerformed":false}});
     let legacy = |project: Option<&Project>, id: &str, result: &Result<Value, BridgeError>, requests: u8, observed: bool, step: Step| {
-        let expected = session_snapshot_expected();
+        let expected = session_snapshot_expected(SessionCase::Inputs);
         result.as_ref().is_ok_and(|value| project.is_some_and(|p| p.id == id && value["root"].as_str() == Some(p.path.as_str()))
             && value["observationScope"] == "single-request-non-atomic" && value["config"]["path"] == "release/mobile-release.json"
             && value["config"]["state"] == "format-valid" && value["config"]["issues"].as_array().is_some_and(Vec::is_empty)
@@ -3031,7 +3094,17 @@ fn assert_snapshot_rejection_contract() {
     for step in [Step::Selected, Step::ReadSnapshot] {
         let result = Ok(value.clone());
         assert!(legacy(Some(&project), "selected", &result, 1, false, step));
-        assert!(session_snapshot_check(Some(&project), "selected", &result, 1, false, step).is_ok());
+        assert!(session_snapshot_check(Some(&project), "selected", &result, 1, false, step, SessionCase::Inputs).is_ok());
+        assert!(session_snapshot_check(Some(&project), "selected", &result, 1, false, step, SessionCase::IosFirebase)
+            == Err(SnapshotRejection::plain(SnapshotCheck::ConfigData)));
+        let mut ios = value.clone(); ios["config"]["data"] = session_snapshot_expected(SessionCase::IosFirebase);
+        let result = Ok(ios);
+        assert!(session_snapshot_check(Some(&project), "selected", &result, 1, false, step, SessionCase::IosFirebase).is_ok());
+        for old_case in [SessionCase::Inputs, SessionCase::Refusals, SessionCase::Loss, SessionCase::Deadline] {
+            assert_eq!(session_snapshot_expected(old_case),session_snapshot_expected(SessionCase::Inputs));
+            assert!(session_snapshot_check(Some(&project), "selected", &result, 1, false, step, old_case)
+                == Err(SnapshotRejection::plain(SnapshotCheck::ConfigData)));
+        }
     }
     let mutations: &[(SnapshotCheck, fn(&mut Value))] = &[
         (SnapshotCheck::Root, |v| v["root"] = Value::Null),
@@ -3049,7 +3122,7 @@ fn assert_snapshot_rejection_contract() {
         let mut wrong = value.clone(); mutate(&mut wrong); let result = Ok(wrong);
         for (requests, observed, step) in [(1, false, Step::Selected), (0, true, Step::Close)] {
             assert!(!legacy(Some(&project), "selected", &result, requests, observed, step));
-            assert!(session_snapshot_check(Some(&project), "selected", &result, requests, observed, step)
+            assert!(session_snapshot_check(Some(&project), "selected", &result, requests, observed, step, SessionCase::Inputs)
                 == Err(SnapshotRejection::plain(*check)));
         }
     }
@@ -3063,10 +3136,10 @@ fn assert_snapshot_rejection_contract() {
         (Some(&project), "selected", 1, false, Step::Close, SnapshotCheck::Stage),
     ] {
         assert!(!legacy(selected, id, &result, requests, observed, step));
-        assert!(session_snapshot_check(selected, id, &result, requests, observed, step) == Err(SnapshotRejection::plain(check)));
+        assert!(session_snapshot_check(selected, id, &result, requests, observed, step, SessionCase::Inputs) == Err(SnapshotRejection::plain(check)));
     }
     let error = Err(BridgeError::new("query_timeout", "private error must never enter a failure frame"));
-    assert!(session_snapshot_check(None, "other", &error, 0, true, Step::Close)
+    assert!(session_snapshot_check(None, "other", &error, 0, true, Step::Close, SessionCase::Inputs)
         == Err(SnapshotRejection { check: SnapshotCheck::Bridge, error: EvidenceError::QueryTimeout }));
 }
 fn assert_snapshot_frame_contract() {
@@ -7315,8 +7388,15 @@ impl Observation {
                 "assessments":s.assessed,"fileChoosers":s.files.len(),"originalDeadline":s.deadline,"firstCleanupPreserved":s.cleanup.is_some() && s.deadline,
                 "noPreview":s.deadline,"queryResult":"query_timeout","assetReason":"deadline",
             }),
+            SessionCase::IosFirebase => serde_json::json!({
+                "kinds":["ios-firebase"],"assessments":s.assessed,"fileChoosers":s.files.len(),
+                "capturedFiles":s.captures,"capturesClosed":s.captures_closed,"kept":s.kept,"assigned":s.assigned,
+                "xmlFormatAndBundleIdentityMatched":s.ios_matched,"firebaseMismatchRefused":s.mismatch,
+                "cancelledReplacementPreservedBytes":s.cancel_preserved,"cancelledReplacementRevokedAssignment":s.cancel_revoked,
+                "discardReopenEmpty":s.reopened,
+            }),
         };
-        serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"case":case.name(),"profile":"installed-linux-session-inputs",
+        serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"case":case.name(),"profile":case.profile(),
             "methods":"thirteen-passive-including-supplied-input-assessment",
             "project":{"cancelSettled":r.cancelled && r.pickers[0].settled(false),"selectedSettled":r.selected && r.pickers[1].settled(true),"snapshotMatched":r.snapshot && r.snapshot_visible},
             "safety":{"persistentStorage":false,"storeContacted":false,"signingVerified":false,"releaseReady":false},
@@ -7511,8 +7591,10 @@ impl Observation {
         let Some(r) = self.record_at(Boundary::Request) else { return; };
         let platform = match self.session_action(r.step) { Some((_,SA::Platform(platform))) => platform, _ => r.session.platform };
         use crate::asset_commands::{Platform,Stage,Purpose};
+        let expected_platform = match platform { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project,
+            _ => { self.fail(); return; } };
         if !r.project.as_ref().is_some_and(|p| p.id == args.project_id) || r.session.draft.as_ref() != Some(args.draft)
-            || args.platform != (if platform == "android" { Platform::Android } else { Platform::Project })
+            || args.platform != expected_platform
             || args.stage != Stage::Candidate || args.purpose != Purpose::Full { self.fail(); }
     }
     pub(super) fn session_choose_input(&self, args: &crate::asset_commands::Choose<'_>) {
@@ -7530,7 +7612,7 @@ impl Observation {
         let Some(before) = r.session.before.as_ref() else { self.fail(); return; };
         use crate::asset_commands::Source;
         let valid = match (self.session_action(r.step), &args.source) {
-            (Some((_,SA::Prepare(kind,_))), Source::Selection(token)) => ["android-keystore","android-firebase"].contains(&kind)
+            (Some((_,SA::Prepare(kind,_))), Source::Selection(token)) => ["android-keystore","android-firebase","ios-firebase"].contains(&kind)
                 && before.status["operation"]["selectionToken"].as_str() == Some(*token),
             (Some((_,SA::Prepare(kind,_))), Source::Scalar { kind: actual, replacement }) => actual.name() == kind
                 && replacement.as_ref().map(|record| (record.record_id,record.expected_revision)) == r.session.replacement.as_ref().map(|(id,revision,_)| (id.as_str(),*revision)),
@@ -7550,8 +7632,9 @@ impl Observation {
             && (before.status["operation"]["preview"]["action"] == "bind") == bind) { self.fail(); }
     }
     fn session_snapshot_result(&self, project_id: &str, result: &Result<Value,BridgeError>) {
+        let Some(case) = self.case.session() else { self.fail(); return; };
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        if let Err(rejection) = session_snapshot_check(r.project.as_ref(), project_id, result, r.snapshot_requests, r.snapshot, r.step) {
+        if let Err(rejection) = session_snapshot_check(r.project.as_ref(), project_id, result, r.snapshot_requests, r.snapshot, r.step, case) {
             let next = SnapshotDiagnostic { step: r.step, rejection };
             let Record { trace, snapshot_diagnostic, .. } = &mut *r;
             latch_snapshot_diagnostic(&self.failed, trace, snapshot_diagnostic, next); return;
@@ -7648,9 +7731,12 @@ impl Observation {
                         s.cancel_preserved=true; s.cancel_revoked=true;
                     }
                 } else {
+                    let expected_bytes = if kind == "ios-firebase" {
+                        match file { "firebase-ios.plist" => 141, "firebase-ios-mismatch.plist" => 139, _ => return false }
+                    } else if kind == "android-keystore" { 12 } else if file == "firebase-mismatch.json" { 93 } else { 95 };
                     if op["reason"] != "none" || op["source"] != "captured" || !op["selectionToken"].as_str().is_some_and(|t| t.len()==32)
                         || !facts.eof || facts.reads < 2 || !facts.terminal_checked || !facts.terminal_matched
-                        || facts.bytes != (if kind == "android-keystore" { 12 } else if file == "firebase-mismatch.json" { 93 } else { 95 }) { return false; }
+                        || facts.bytes != expected_bytes { return false; }
                     s.captures += 1;
                 }
                 if let Some((id,revision,_)) = &s.replacement {
@@ -7669,6 +7755,7 @@ impl Observation {
                     || assurance["basis"]!="supplied-input-only" || assurance["selectedFilesRead"]!=false || assurance["keyringAccessed"]!=false
                     || assurance["storageWritesPerformed"]!=false || assurance["projectCodeExecuted"]!=false || assurance["nativeValidation"]!="not-run"
                     || assurance["serviceValidation"]!="not-run" || assurance["releaseReadiness"]!="unknown" { return false; }
+                if kind == "ios-firebase" && !session_ios_file_assessment(assessment,expected) { return false; }
                 if expected == "missing" {
                     if !op["preview"].is_null() || assessment["state"]!="missing" || !assessment["fields"].as_array().is_some_and(|fields|
                         fields.iter().filter(|f| f["id"]!="file").all(|f| f["presence"]=="missing" && f["issues"].as_array().is_some_and(|issues| issues.iter().any(|i| i=="required-missing")))) { return false; }
@@ -7685,6 +7772,7 @@ impl Observation {
                         if op["preview"]["subject"]["recordId"]!=record["recordId"] || op["preview"]["subject"]["recordRevision"]!=record["revision"]
                             || snapshot.sources!=before.sources { return false; } s.reassessed=true;
                     }
+                    if kind == "ios-firebase" { s.ios_matched=true; }
                 }
                 s.assessed+=1;
             },
@@ -7925,8 +8013,8 @@ impl Observation {
                 let controls=&value["controls"];
                 let valid=match action {
                     SA::Kind(kind) => controls["kind"].as_str()==Some(kind)
-                        && controls["formNames"]==serde_json::json!(if ["android-keystore","android-firebase"].contains(&kind) { &[][..] } else { session_field_names(kind) })
-                        && controls["filePrompt"].as_str()==Some(if kind=="android-keystore" { "jks" } else if kind=="android-firebase" { "firebase" } else { "none" }),
+                        && controls["formNames"]==serde_json::json!(if ["android-keystore","android-firebase","ios-firebase"].contains(&kind) { &[][..] } else { session_field_names(kind) })
+                        && controls["filePrompt"].as_str()==Some(if kind=="android-keystore" { "jks" } else if kind=="android-firebase" { "firebase" } else if kind=="ios-firebase" { "firebase-ios" } else { "none" }),
                     SA::Replacement(index) => snapshot.status["records"].get(usize::from(index)).is_some_and(|record| controls["replacement"].as_str()==Some(format!("Replace session item {} · revision {}",index+1,record["revision"].as_u64().unwrap_or(0)).as_str())),
                     SA::Platform(platform) => controls["platform"].as_str()==Some(platform),
                     SA::Discard => controls["discardConfirmation"]==true,
@@ -7967,6 +8055,8 @@ impl Observation {
                     && s.requests[SessionCommand::Discard.index()]<=1 && (s.requests[SessionCommand::Discard.index()]==0
                         || s.replies[SessionCommand::Discard.index()].error.as_deref()==Some("asset_document_lost")),
                 SessionCase::Deadline=>s.files.len()==1 && s.captures==1 && s.deadline && s.cleanup.is_some() && s.kept==0 && s.assigned==0,
+                SessionCase::IosFirebase=>s.files.len()==3 && s.captures==2 && s.captures_closed==2 && s.kept==1 && s.assigned==1 && s.removed==0
+                    && s.ios_matched && s.mismatch && s.refused.is_empty() && s.cancel_preserved && s.cancel_revoked && s.reopened,
             }
     }
 }
@@ -8234,7 +8324,7 @@ fn session_script(step: SessionStep, kind: &str, platform: &str, replacement: Op
         const readControls=()=>{{const p=panel(),kind=select('What would you like to provide?'),platform=select('Platform'),replacement=select('New or replacement copy?');
             const names=['storePassword','keyAlias','keyPassword','provider','serviceAccount','token'];
             const formNames=[...p.querySelectorAll('form.session-inputs input')].map(input=>{{if(input.type!=='password')throw 0;const matches=names.filter(n=>input.id.endsWith('-'+n));if(matches.length!==1)throw 0;return matches[0];}});
-            const prompts=[...p.querySelectorAll('.session-selection > p')].map(text);const filePrompt=prompts.some(p=>p.startsWith('Select a private .jks'))?'jks':prompts.some(p=>p.startsWith('Select the Android google-services.json'))?'firebase':'none';
+            const prompts=[...p.querySelectorAll('.session-selection > p')].map(text);const filePrompt=prompts.some(p=>p.startsWith('Select a private .jks'))?'jks':prompts.some(p=>p.startsWith('Select the Android google-services.json'))?'firebase':prompts.some(p=>p.startsWith('Select the iOS GoogleService-Info.plist'))?'firebase-ios':'none';
             return {{platform:platform?.options[platform.selectedIndex]?.value??null,kind:kind?.options[kind.selectedIndex]?.value??null,
                 replacement:replacement?text(replacement.options[replacement.selectedIndex]):null,formNames,filePrompt,discardConfirmation:!!p.querySelector('[aria-label="Confirm session discard"]')}};}};
         {body}
@@ -9426,6 +9516,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("session-refusals") => Some(Case::Session(SessionCase::Refusals)),
         Some(value) if value == OsStr::new("session-loss") => Some(Case::Session(SessionCase::Loss)),
         Some(value) if value == OsStr::new("session-deadline") => Some(Case::Session(SessionCase::Deadline)),
+        Some(value) if value == OsStr::new("session-ios-firebase") => Some(Case::Session(SessionCase::IosFirebase)),
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
         Some(value) if value == OsStr::new("version-save") => Some(Case::VersionSave),
         Some(value) if cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure),
@@ -9520,6 +9611,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::Session(SessionCase::Refusals) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-refusals-verified\n",
         Case::Session(SessionCase::Loss) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-loss-verified\n",
         Case::Session(SessionCase::Deadline) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-deadline-verified\n",
+        Case::Session(SessionCase::IosFirebase) => b"MRK_INSTALLED_SHELL_OBSERVATION=session-ios-firebase-verified\n",
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
         Case::VersionSave => b"MRK_INSTALLED_SHELL_OBSERVATION=version-save-verified\n",
         Case::Commands(case) => case.verified_line(),
@@ -9588,9 +9680,9 @@ pub(crate) fn main() -> std::process::ExitCode {
 // Metadata and finite directory rosters only. The outside publication owner
 // hashes the fictional bytes; SourceBook alone owns any open source original.
 // This object never opens a file body, repairs a fixture, or grants cleanup.
-const SESSION_FIXTURE_NAMESPACE: [&str; 19] = [
+const SESSION_FIXTURE_NAMESPACE: [&str; 20] = [
     "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative", "offline-pass", "offline-settlement",
-    "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs", "session-loss", "session-refusals",
+    "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs", "session-ios-firebase", "session-loss", "session-refusals",
     "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project",
 ];
 const SESSION_FIXTURE_COMMON: [(&str, u64, u64); 9] = [
@@ -9610,6 +9702,14 @@ const SESSION_FIXTURE_REFUSALS: [(&str, u64, u64); 6] = [
     ("sources/firebase-mismatch.json", 0o100600, 93),
     ("sources/link.jks", 0o120777, 9),
 ];
+const SESSION_FIXTURE_IOS_FIREBASE: [(&str, u64, u64); 8] = [
+    (".", 0o040700, 0), ("project", 0o040700, 0),
+    ("project/release", 0o040700, 0), ("sources", 0o040700, 0),
+    ("project/release/mobile-release.json", 0o100600, 684),
+    ("project/version.properties", 0o100600, 34),
+    ("sources/firebase-ios.plist", 0o100600, 141),
+    ("sources/firebase-ios-mismatch.plist", 0o100600, 139),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SessionFixturePhase { Original, Attempted, Changed }
@@ -9626,7 +9726,7 @@ struct SessionFixture {
 }
 
 fn session_fixture_nodes(case: SessionCase, changed: bool) -> Vec<(&'static str, u64, u64)> {
-    let mut nodes = SESSION_FIXTURE_COMMON.to_vec();
+    let mut nodes = if case == SessionCase::IosFirebase { SESSION_FIXTURE_IOS_FIREBASE.to_vec() } else { SESSION_FIXTURE_COMMON.to_vec() };
     if case == SessionCase::Refusals {
         nodes.extend(SESSION_FIXTURE_REFUSALS.into_iter()
             .filter(|(name, _, _)| !changed || *name != "sources/changed-next.jks"));
@@ -9645,9 +9745,9 @@ fn session_fixture_children(nodes: &[(&'static str, u64, u64)], name: &str) -> V
 fn assert_session_fixture_roster_contract() {
     // Exercise the actual bounded child-name derivation, without filesystem
     // access or treating these synthetic rows as a native observation.
-    for case in [SessionCase::Inputs, SessionCase::Refusals, SessionCase::Loss, SessionCase::Deadline] {
+    for case in [SessionCase::Inputs, SessionCase::Refusals, SessionCase::Loss, SessionCase::Deadline, SessionCase::IosFirebase] {
         let nodes = session_fixture_nodes(case, false);
-        assert_eq!(nodes.len(), if case == SessionCase::Refusals { 15 } else { 9 });
+        assert_eq!(nodes.len(), if case == SessionCase::Refusals { 15 } else if case == SessionCase::IosFirebase { 8 } else { 9 });
         let mut names: Vec<_> = nodes.iter().map(|(name, _, _)| *name).collect();
         names.sort(); names.dedup(); assert_eq!(names.len(), nodes.len());
         let children = |parent| { let mut names = session_fixture_children(&nodes, parent); names.sort(); names };
@@ -9658,6 +9758,7 @@ fn assert_session_fixture_roster_contract() {
         } else { vec!["release", "version.properties"] });
         assert_eq!(children("sources"), if case == SessionCase::Refusals {
             vec!["changed-next.jks", "changed.jks", "firebase-mismatch.json", "firebase.json", "input.jks", "link.jks", "public.jks", "replacement.jks"]
+        } else if case == SessionCase::IosFirebase { vec!["firebase-ios-mismatch.plist", "firebase-ios.plist"]
         } else { vec!["firebase.json", "input.jks", "replacement.jks"] });
     }
     let before = session_fixture_nodes(SessionCase::Refusals, false);

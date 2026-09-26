@@ -1351,9 +1351,10 @@ def closed_project_draft_data(lifecycle):
     for case in lifecycle.SHELL_SESSION_CASES:
         receipt = deepcopy(lifecycle.SHELL_SESSION_RECEIPTS[case])
         changed = case == "session-refusals"
-        fixture = {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+        ios = case == "session-ios-firebase"
+        fixture = {"fixture": "ios-firebase-session-v1" if ios else "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
             "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
-            "beforeCount": 15 if changed else 9, "afterCount": 14 if changed else 9,
+            "beforeCount": 15 if changed else 8 if ios else 9, "afterCount": 14 if changed else 8 if ios else 9,
             "mutations": ["changed-leaf-rename"] if changed else [],
             "before": {"size": 4096 if changed else 3072, "sha256": "7" * 64},
             "after": {"size": 3900 if changed else 3072, "sha256": ("8" if changed else "7") * 64}}
@@ -1469,7 +1470,7 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
         self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
-                                                "session-inputs", "session-refusals", "session-loss", "session-deadline", "metadata-save",
+                                                "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
                                                 "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                                                 "offline-drift", "offline-cancel", "offline-settlement", "settled-failure", "version-save"})
 
@@ -1632,17 +1633,17 @@ class InstalledCandidateDocumentsReceiptContracts(unittest.TestCase):
         expected_exports = ["lifecycle-shell-" + family + "-" + phase + ".json"
                             for family in ("positive-project", "positive-candidate", "project-paths",
                                            "workflow-apply", "metadata-save", "version-save", "session-inputs",
-                                           "session-refusals", "session-loss", "session-deadline", *lifecycle.SHELL_TOOLS_OFFLINE_CASES)
+                                           "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", *lifecycle.SHELL_TOOLS_OFFLINE_CASES)
                             for phase in ("before", "after")]
         self.assertCountEqual([item["path"] for item in observed["files"]], expected_exports)
-        # Only this shell profile allows165 root slots plus the same client's
+        # Only this shell profile allows170 root slots plus the same client's
         # two captures. The non-shell128 and aggregate32MiB caps do not change.
         observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64}
-                                 for index in range(167 - len(observed["files"])))
-        self.assertEqual(len(observed["files"]), 167)
+                                 for index in range(172 - len(observed["files"])))
+        self.assertEqual(len(observed["files"]), 172)
         S.shell_project_draft_observation(observed, lifecycle)
         observed["files"].append({"path": "over-cap", "size": 0, "sha256": "0" * 64})
-        self.assertEqual(len(observed["files"]), 168)
+        self.assertEqual(len(observed["files"]), 173)
         with self.assertRaises(S.D.Refused):
             S.shell_project_draft_observation(observed, lifecycle)
 
@@ -2115,7 +2116,7 @@ class InstalledVersionSaveReceiptContracts(unittest.TestCase):
 
 
 class InstalledSessionReceiptContracts(unittest.TestCase):
-    def test_all_four_session_receipts_remain_distinct_from_ordinary_twelve_methods(self):
+    def test_original_four_and_separate_ios_receipts_remain_distinct_from_ordinary_twelve_methods(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         observed = closed_project_draft_data(lifecycle)
         result = S.shell_project_draft_observation(observed, lifecycle)
@@ -2124,11 +2125,35 @@ class InstalledSessionReceiptContracts(unittest.TestCase):
             receipt = observed["sessionInputs"][name]["native"]
             self.assertEqual(receipt["case"], name)
             self.assertEqual(receipt["methods"], "thirteen-passive-including-supplied-input-assessment")
-            self.assertEqual(receipt["profile"], "installed-linux-session-inputs")
+            self.assertEqual(receipt["profile"], "installed-linux-session-ios-firebase" if name == "session-ios-firebase" else "installed-linux-session-inputs")
             self.assertEqual(len(observed["cases"][name]["maps"]), receipt["behavior"]["assessments"])
             self.assertTrue(all(len(rows) == 6 for rows in observed["cases"][name]["maps"]))
             self.assertEqual(receipt["safety"], {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False})
             self.assertTrue(all(value is True for value in receipt["originals"].values()))
+
+    def test_ios_case_requires_its_exact_receipt_fixture_counts_and_original_maps(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        case = "session-ios-firebase"
+        mutations = (
+            lambda doc: doc["sessionInputs"].pop(case), lambda doc: doc["cases"].pop(case),
+            lambda doc: doc["cases"][case]["sessionInputs"].update(profile="installed-linux-session-inputs"),
+            lambda doc: doc["cases"][case]["sessionInputs"]["behavior"].update(kinds=["android-firebase"]),
+            lambda doc: doc["cases"][case]["sessionInputs"]["behavior"].update(assessments=3),
+            lambda doc: doc["cases"][case]["sessionInputs"]["behavior"].update(xmlFormatAndBundleIdentityMatched=False),
+            lambda doc: doc["cases"][case]["sessionInputs"]["behavior"].update(firebaseMismatchRefused=False),
+            lambda doc: doc["cases"][case]["sessionInputs"]["behavior"].update(cancelledReplacementPreservedBytes=False),
+            lambda doc: doc["cases"][case]["sessionInputs"]["behavior"].update(discardReopenEmpty=False),
+            lambda doc: doc["cases"][case]["maps"].pop(),
+            lambda doc: doc["cases"][case]["maps"][0][0].update(inode=True),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(fixture="four-kind-session-v1"),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(beforeCount=9),
+            lambda doc: doc["sessionInputs"][case]["fixture"].update(afterCount=9),
+            lambda doc: doc["sessionInputs"][case]["fixture"]["after"].update(sha256="0" * 64),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(observed, lifecycle)
 
     def test_missing_originals_mixed_cases_and_unbound_private_fixture_pins_refuse(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -2174,7 +2199,7 @@ class InstalledToolsOfflineReceiptContracts(unittest.TestCase):
     def test_eight_closed_engineering_cases_preserve_negative_refused_and_no_child_facts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle"); observed = closed_project_draft_data(lifecycle)
         self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
-        self.assertEqual(len(observed["cases"]), 20)
+        self.assertEqual(len(observed["cases"]), 21)
         self.assertEqual(set(observed["toolsOffline"]), set(lifecycle.SHELL_TOOLS_OFFLINE_CASES))
         for case, pair in observed["toolsOffline"].items():
             receipt = pair["native"]
