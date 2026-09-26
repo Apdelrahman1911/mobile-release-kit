@@ -13,7 +13,8 @@ import { ReleaseVersionController } from './releaseVersion.ts';
 import { ReleaseVersionEditController, versionOwnerReason, versionProjectDirty, versionRetainsDraft } from './releaseVersionEditController.ts';
 import { versionEditError } from './releaseVersionEdit.ts';
 import { ReleaseInputGuidanceController } from './releaseInputGuidance.ts';
-import { CandidateEvidenceController } from './candidateEvidence.ts';
+import { LifecycleEvidenceController } from './lifecycleEvidence.ts';
+import { ReleaseEvidence, ReleaseEvidenceGuidance } from './components/ReleaseEvidence.tsx';
 import { EnvironmentDiagnosticsController, diagnosticsOwnerReason } from './environmentDiagnosticsController.ts';
 import { OfflinePreflightController, offlinePreflightOwnerReason } from './offlinePreflight.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
@@ -283,8 +284,8 @@ export function App() {
   assetControllerRef.current = assetSession;
   const assetState = useSyncExternalStore(assetSession.subscribe, assetSession.getSnapshot, assetSession.getSnapshot);
   // Evidence selection has deliberately no source-project or draft callback.
-  const [candidateEvidence] = useState(() => new CandidateEvidenceController(savedCommandBusy));
-  const evidenceState = useSyncExternalStore(candidateEvidence.subscribe, candidateEvidence.getSnapshot, candidateEvidence.getSnapshot);
+  const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
+  const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
   const savedCommandPrerequisiteReason = (excludeVersion = false): string | null => {
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
@@ -297,9 +298,9 @@ export function App() {
     if (assets.blocked || assets.observationFailed || assets.originPending || assets.busy || assets.updatingContext ||
         assets.status?.operation && (assets.status.operation.phase !== 'idle' || assets.status.operation.settlement !== 'known'))
       return 'An original credential-session operation is active or unverified. Settle or cancel it first.';
-    const evidence = candidateEvidence.getSnapshot();
+    const evidence = releaseEvidence.getSnapshot();
     if (evidence.integrityFailed || evidence.uncertain || evidence.pending || evidence.cancelling ||
-        evidence.status && ['choosing', 'observing', 'unknown'].includes(evidence.status.phase))
+        evidence.status && ['choosing', 'observing', 'stopping', 'unknown'].includes(evidence.status.phase))
       return 'An original evidence operation is active or unverified. Evidence selection is not source-project authority.';
     const connection = githubConnection.getSnapshot();
     if (connection.blocked || connection.uncertain || connection.busy || connection.retirementPending || (connection.status ?? connection.retained)?.session)
@@ -369,7 +370,7 @@ export function App() {
     releaseVersion.beginConnection();
     releaseInputs.beginConnection();
     diagnostics.beginConnection();
-    candidateEvidence.beginConnection();
+    releaseEvidence.beginConnection();
     metadataText.beginConnection();
     setLoading(true);
     setBootError(null);
@@ -384,7 +385,7 @@ export function App() {
       void offlinePreflight.connect(connection);
       void androidBuild.connect(connection);
       void diagnostics.connect(connection);
-      void candidateEvidence.connect(connection);
+      void releaseEvidence.connect(connection);
       const port: GitHubConnectionObservationPort = {
         mode: connection.mode, subscribe: connection.subscribeGitHubConnection, status: connection.githubConnectionStatus,
         refresh: connection.refreshGitHubConnection, disconnect: connection.disconnectGitHubConnection,
@@ -436,7 +437,7 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
     }
-  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, candidateEvidence, offlinePreflight, androidBuild, androidBusy, savedCommandBusy, metadataText, versionEdit, syncConnectionContext, retirePathPicker]);
+  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, offlinePreflight, androidBuild, androidBusy, savedCommandBusy, metadataText, versionEdit, syncConnectionContext, retirePathPicker]);
 
   // Subscribe before bootstrap. A version read/replacement retires consent
   // synchronously, before React publishes another frame of the review.
@@ -456,7 +457,7 @@ export function App() {
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
   useEffect(() => () => offlinePreflight.dispose(), [offlinePreflight]);
   useEffect(() => () => androidBuild.dispose(), [androidBuild]);
-  useEffect(() => () => candidateEvidence.dispose(), [candidateEvidence]);
+  useEffect(() => () => releaseEvidence.dispose(), [releaseEvidence]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
   useEffect(() => () => workflowEdit.dispose(), [workflowEdit]);
@@ -723,16 +724,16 @@ export function App() {
             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
             handoff={connectionHandoffRef.current} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}</>} />}
-        {page === 'releases' && <Releases info={info} offlineChecks={<OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
+        {page === 'releases' && <Releases info={info} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
           onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} />}
           androidBuild={<AndroidBuild state={androidBuildState} controller={androidBuild}
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp} />} />}
-        {page === 'artifacts' && <><Artifacts state={evidenceState} controller={candidateEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />
+        {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
-        {page === 'recovery' && <Recovery info={info}
+        {page === 'recovery' && <Recovery info={info} evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState} onOpenEvidence={() => navigate('releases')} />}
           attention={retainedEditAttention(workspace.projects, saveState.recoveryProjects, workflowState.recoveryProjects, metadataState.edit.recoveryProjects, versionEditState.edit.recoveryProjects)}
           choosingProject={choosing} onOpenProject={showRetainedEditProject} onHelp={setHelp} />}
         <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>

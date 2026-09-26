@@ -57,6 +57,8 @@ SOURCES = (
     'desktop/native/linux-mount-observation/Cargo.toml',
     'desktop/native/linux-mount-observation/src/lib.rs',
     'desktop/native/session_gtk_input_linux.c',
+    'desktop/native/windows-installed-native/src/ui.rs',
+    'desktop/native/windows-installed-native/src/ui_startup_data.rs',
     'desktop/offline_preflight_bootstrap.py',
     'desktop/package-lock.json',
     'desktop/package.json',
@@ -97,6 +99,7 @@ SOURCES = (
     'desktop/src-tauri/src/hosted_tests.rs',
     'desktop/src-tauri/src/installed_runtime.rs',
     'desktop/src-tauri/src/lib.rs',
+    'desktop/src-tauri/src/lifecycle_evidence_protocol.rs',
     'desktop/src-tauri/src/main.rs',
     'desktop/src-tauri/src/metadata_text_commands.rs',
     'desktop/src-tauri/src/metadata_text_edit_protocol.rs',
@@ -107,6 +110,8 @@ SOURCES = (
     'desktop/src-tauri/src/offline_preflight_shell_tests.rs',
     'desktop/src-tauri/src/passive_management_tests.rs',
     'desktop/src-tauri/src/protocol.rs',
+    'desktop/src-tauri/src/release_version_edit_commands.rs',
+    'desktop/src-tauri/src/release_version_edit_protocol.rs',
     'desktop/src-tauri/src/release_version_protocol.rs',
     'desktop/src-tauri/src/runtime.rs',
     'desktop/src-tauri/src/saved_command_owner.rs',
@@ -114,7 +119,10 @@ SOURCES = (
     'desktop/src-tauri/src/session_gtk_qualification.rs',
     'desktop/src-tauri/src/session_gtk_qualification/native_contract.rs',
     'desktop/src-tauri/src/shell.rs',
+    'desktop/src-tauri/src/shell_windows.rs',
     'desktop/src-tauri/src/supervisor.rs',
+    'desktop/src-tauri/src/vault_keyring_linux.rs',
+    'desktop/src-tauri/src/windows_startup.rs',
     'desktop/src-tauri/tauri.conf.json',
     'desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py',
     'desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem',
@@ -156,7 +164,9 @@ SOURCES = (
     'desktop/src/components/Icon.tsx',
     'desktop/src/components/MetadataTextEditor.tsx',
     'desktop/src/components/OfflinePreflight.tsx',
+    'desktop/src/components/ReleaseEvidence.tsx',
     'desktop/src/components/ReleaseInputGuidance.tsx',
+    'desktop/src/components/ReleaseVersionEditor.tsx',
     'desktop/src/components/RemovedFields.tsx',
     'desktop/src/configEdit.ts',
     'desktop/src/configEditController.ts',
@@ -176,11 +186,13 @@ SOURCES = (
     'desktop/src/githubWorkflowEditController.ts',
     'desktop/src/githubWorkflowEditProtocol.ts',
     'desktop/src/githubWorkflowEditTypes.ts',
+    'desktop/src/lifecycleEvidence.ts',
     'desktop/src/main.tsx',
     'desktop/src/metadataText.ts',
     'desktop/src/metadataTextEditController.ts',
     'desktop/src/metadataTextProtocol.ts',
     'desktop/src/offlinePreflight.ts',
+    'desktop/src/offlinePreflightFindings.ts',
     'desktop/src/offlinePreflightProtocol.ts',
     'desktop/src/offlinePreflightTypes.ts',
     'desktop/src/pages/Artifacts.tsx',
@@ -192,12 +204,17 @@ SOURCES = (
     'desktop/src/pages/Metadata.tsx',
     'desktop/src/preparation.ts',
     'desktop/src/preview.ts',
+    'desktop/src/projectPaths.ts',
     'desktop/src/releaseInputGuidance.ts',
     'desktop/src/releaseVersion.ts',
+    'desktop/src/releaseVersionEdit.ts',
+    'desktop/src/releaseVersionEditController.ts',
     'desktop/src/requirementProtocol.ts',
+    'desktop/src/setupGuidance.ts',
     'desktop/src/styles.css',
     'desktop/src/types.ts',
     'desktop/tests/fixtures/candidate-evidence.json',
+    'desktop/tests/fixtures/lifecycle-evidence.json',
     'desktop/tools/qualify_session_gtk.py',
     'desktop/tsconfig.json',
     'desktop/vite.config.mjs',
@@ -248,6 +265,7 @@ SOURCES = (
     'src/mobile_release/api/_github_connection.py',
     'src/mobile_release/api/_github_setup.py',
     'src/mobile_release/api/_json.py',
+    'src/mobile_release/api/_lifecycle_evidence.py',
     'src/mobile_release/api/_metadata_text.py',
     'src/mobile_release/api/_preview.py',
     'src/mobile_release/api/_release_version.py',
@@ -261,6 +279,7 @@ SOURCES = (
     'src/mobile_release/api/data/github-setup-v1.json',
     'src/mobile_release/api/data/metadata-text-help-v1.json',
     'src/mobile_release/api/data/project.schema.json',
+    'src/mobile_release/api/data/release-version-help-v1.json',
     'src/mobile_release/build_inputs.py',
     'src/mobile_release/cancellation.py',
     'src/mobile_release/checked_files.py',
@@ -278,6 +297,7 @@ SOURCES = (
     'src/mobile_release/environment_diagnostics.py',
     'src/mobile_release/environment_diagnostics_tools.py',
     'src/mobile_release/errors.py',
+    'src/mobile_release/evidence_layout.py',
     'src/mobile_release/github_workflow_edit.py',
     'src/mobile_release/init_transaction.py',
     'src/mobile_release/init_workspace_custody.py',
@@ -299,10 +319,12 @@ SOURCES = (
     'src/mobile_release/owned_process.py',
     'src/mobile_release/preflight.py',
     'src/mobile_release/provenance.py',
+    'src/mobile_release/release_version_edit.py',
     'src/mobile_release/reporting.py',
     'src/mobile_release/stores.py',
     'src/mobile_release/toolchain_policy.py',
     'src/mobile_release/tooling.py',
+    'src/mobile_release/version_text.py',
     'src/mobile_release/workflow.py',
     'src/mobile_release/workflow_payloads.py',
     'templates/workflows/mobile-candidate.yml',
@@ -385,7 +407,7 @@ class FiniteJson:
 
     Only an already bounded string token is passed to json.loads. Native DTOs
     require canonical declaration order and one LF. DATA has a larger key/map
-    budget for all268 source names; final/prefix additionally require their
+    budget for all290 source names; final/prefix additionally require their
     producer's sorted compact encoding with no LF. Freeze DATA may be spaced.
     """
     def __init__(self, data: bytes, *, native: bool, large: bool = False):
@@ -397,7 +419,7 @@ class FiniteJson:
         self.limit = (2048 if large else 768) if native else 16000
         self.depth = 12
         self.array = 128 if native else 512
-        self.mapping = 128 if native else 268
+        self.mapping = 128 if native else 290
         self.key_limit = 64 if native else 128
         self.integer_max = 2**32 - 1 if native else 2**64 - 1
 
@@ -1636,7 +1658,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 268, "complete frozen268 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 290, "complete frozen290 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2701,7 +2723,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 268 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 290 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

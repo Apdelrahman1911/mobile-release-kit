@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import unicodedata
-from typing import Any, NoReturn, cast
+from typing import Any, Callable, NoReturn, cast
 
 from ..errors import ValidationError
 from ..provenance import (validate_evidence_document, validate_operation_intent,
@@ -157,7 +157,8 @@ def _nodes(value: object, inventory: _snapshot._Inventory, *, maximum: int, dept
     return count
 
 
-def _document(text: str, inventory: _snapshot._Inventory) -> tuple[dict[str, Any], int]:
+def _decoded_document(text: str, inventory: _snapshot._Inventory) -> tuple[Any, int]:
+    """Return the count even for non-object values, before semantic rejection."""
     _tick(inventory)
     try:
         value = json.loads(text, object_pairs_hook=_pairs, parse_int=_integer,
@@ -168,18 +169,23 @@ def _document(text: str, inventory: _snapshot._Inventory) -> tuple[dict[str, Any
         raise _InvalidDocument() from None
     _tick(inventory)
     count = _nodes(value, inventory, maximum=MAX_DOCUMENT_NODES, depth_limit=MAX_DOCUMENT_DEPTH)
+    return value, count
+
+
+def _document(text: str, inventory: _snapshot._Inventory) -> tuple[dict[str, Any], int]:
+    value, count = _decoded_document(text, inventory)
     if type(value) is not dict:
         raise _InvalidDocument() from None
     return value, count
 
 
 def _validate(document: dict[str, Any], kind: str, document_type: str, version: int,
-              inventory: _snapshot._Inventory) -> dict[str, Any]:
+              inventory: _snapshot._Inventory, *, stage: str = "candidate") -> dict[str, Any]:
     # Fixed role admission, not a duplicate implementation of provenance policy.
     if (document.get("documentType") != document_type
             or type(document.get("schemaVersion")) is not int
             or document["schemaVersion"] != version
-            or (kind != "manifest" and document.get("stage") != "candidate")):
+            or (kind != "manifest" and document.get("stage") != stage)):
         raise _InvalidDocument() from None
     _tick(inventory)
     if kind == "intent":
@@ -338,10 +344,16 @@ def _failure(error: Exception, inventory: _snapshot._Inventory) -> str:
 
 def observe_candidate_evidence(params: object) -> CandidateEvidenceResult:
     root, expected = _params(params)
+    return cast(CandidateEvidenceResult, _observe_selected_evidence(root, expected, _read_outcome))
+
+
+def _observe_selected_evidence(root: str, expected: tuple[int, ...],
+                               read_outcome: Callable[..., dict[str, Any]]) -> dict[str, Any]:
+    """Shared original named-reader lifetime, not a public callable bridge."""
     if not candidate_evidence_observation_available():
         _refuse("artifacts_unavailable")
     inventory = _snapshot._Inventory()
-    result: CandidateEvidenceResult | None = None
+    result: dict[str, Any] | None = None
     failure: str | None = None
     try:
         root = _snapshot.validate_root(root)
@@ -352,7 +364,7 @@ def observe_candidate_evidence(params: object) -> CandidateEvidenceResult:
                     raise _Refusal("artifacts_changed")
                 with _snapshot._named_text_reads(descriptor, inventory) as reader:
                     try:
-                        result = _read_outcome(reader, inventory)
+                        result = read_outcome(reader, inventory)
                     except Exception as error:
                         # Even ordinary invalid/limit/refusal paths finish the
                         # original context's normal-return checks before output.

@@ -1213,8 +1213,10 @@ fn assert_failure_quit_contract() {
 const PROJECT_SOURCE: &str = "plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
 const APP_ID: &str = "org.example.mrk.observed";
 const FIELD: &str = "version.source";
-const METHODS: [&str; 12] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-    "github.setup.propose", "metadata.text.observe", "metadata.text.validate", "environment.requirements", "release.version.observe", "artifacts.candidate.observe"];
+// Bootstrap inventory only: the legacy candidate witness below does not
+// exercise or qualify the separate lifecycle routes and shared release UI.
+const METHODS: [&str; 13] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+    "github.setup.propose", "metadata.text.observe", "metadata.text.validate", "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"];
 const TOOLKIT_REPOSITORY: &str = "example/toolkit";
 const TOOLKIT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONFLICT_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -6409,6 +6411,7 @@ impl Observation {
                         "Validate a configuration draft", "Suggest an unverified configuration draft", "Review draft changes and field requirements",
                         "Prepare a GitHub setup preview", "Read selected public metadata text", "Validate supplied public text",
                         "Explain project toolchain requirements", "release.version.observe", "artifacts.candidate.observe",
+                        "Inspect selected local release documents",
                     ]).all(|(actual, expected)| actual.as_str() == Some(expected)))
             },
             Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)

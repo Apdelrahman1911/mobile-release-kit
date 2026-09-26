@@ -10,6 +10,7 @@ pub mod protocol;
 mod environment;
 mod release_version_protocol;
 mod candidate_evidence_protocol;
+mod lifecycle_evidence_protocol;
 mod environment_diagnostics_protocol;
 mod environment_diagnostics_owner;
 mod offline_preflight_protocol;

@@ -135,6 +135,10 @@ export const previewApi: DesktopApi = {
   evidenceStatus: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   observeEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   cancelEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  chooseReleaseEvidenceFolder: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  releaseEvidenceStatus: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  observeReleaseEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  cancelReleaseEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   snapshot: async () => structuredClone(example),
   observeReleaseVersion: async () => {
     // No successful saved-file fixture, including after native bridge failure.

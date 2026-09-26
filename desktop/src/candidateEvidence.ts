@@ -1,4 +1,5 @@
 import type { ApiError, BridgeMode, HelpContent } from './types.ts';
+import type { LifecycleEvidenceStatus, EvidenceStage } from './lifecycleEvidence.ts';
 
 export const EVIDENCE_ASSURANCE = 'Local document consistency; provenance and artifact bytes unverified.';
 const roles = ['android-aab', 'android-mapping', 'android-native-symbols', 'ios-ipa', 'ios-archive', 'ios-dsyms', 'store-metadata', 'validation-report'] as const;
@@ -111,15 +112,23 @@ function resultShape(input: unknown): input is CandidateEvidence {
       || !one(input.outcome, ['consistent', 'incomplete', 'invalid', 'inconsistent']) || !Array.isArray(input.documents) || input.documents.length !== 3) return false;
   const kinds = ['manifest', 'receipt', 'intent'];
   if (!input.documents.every((row: unknown, i) => fields(row, ['kind', 'state']) && row.kind === kinds[i] && one(row.state, ['missing', 'invalid', 'valid']))) return false;
-  const a = input.assurance;
-  if (!fields(a, ['level', 'documentsOnly', 'artifactBytesVerified', 'workflowAuthenticated', 'storeStateObserved', 'comparedWithSourceProject', 'releaseReady', 'recoveryAuthorized'])
-      || a.level !== 'local-document-consistency' || a.documentsOnly !== true
-      || !['artifactBytesVerified', 'workflowAuthenticated', 'storeStateObserved', 'comparedWithSourceProject', 'releaseReady', 'recoveryAuthorized'].every((key) => a[key] === false)) return false;
+  if (!assuranceShape(input.assurance)) return false;
   const invalid = input.documents.some((row: ObjectValue) => row.state === 'invalid');
   const missing = input.documents.some((row: ObjectValue) => row.state === 'missing');
   if (input.outcome !== 'consistent') return input.summary === null && (input.outcome === 'invalid' ? invalid : input.outcome === 'incomplete' ? !invalid && missing : !invalid && !missing);
-  const s = input.summary;
-  if (invalid || missing || !fields(s, ['platform', 'applicationId', 'version', 'source', 'artifacts', 'recordedRuns', 'documentPayloadSha256'])
+  return !invalid && !missing && summaryShape(input.summary);
+}
+function assuranceShape(a: unknown): a is CandidateEvidence['assurance'] {
+  if (!fields(a, ['level', 'documentsOnly', 'artifactBytesVerified', 'workflowAuthenticated', 'storeStateObserved', 'comparedWithSourceProject', 'releaseReady', 'recoveryAuthorized'])
+      || a.level !== 'local-document-consistency' || a.documentsOnly !== true
+      || !['artifactBytesVerified', 'workflowAuthenticated', 'storeStateObserved', 'comparedWithSourceProject', 'releaseReady', 'recoveryAuthorized'].every((key) => a[key] === false)) return false;
+  return true;
+}
+function runsShape(value: unknown): value is NonNullable<CandidateEvidence['summary']>['recordedRuns'] {
+  return fields(value, ['authorizedBy', 'executedBy', 'producedBy']) && Object.values(value).every((run) => fields(run, ['runId', 'attempt']) && decimal(run.runId, true, 64) && decimal(run.attempt, true, 64));
+}
+function summaryShape(s: unknown): s is NonNullable<CandidateEvidence['summary']> {
+  if (!fields(s, ['platform', 'applicationId', 'version', 'source', 'artifacts', 'recordedRuns', 'documentPayloadSha256'])
       || !one(s.platform, ['android', 'ios']) || !text(s.applicationId, 255, 1024) || [...s.applicationId].length < 3 || !fields(s.version, ['marketing', 'build'])
       || !text(s.version.marketing, 64, 256) || !/^[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?(?![\s\S])/.test(s.version.marketing)
       || typeof s.version.build !== 'number' || !Number.isSafeInteger(s.version.build) || s.version.build < 1 || s.version.build > 2100000000
@@ -134,7 +143,7 @@ function resultShape(input: unknown): input is CandidateEvidence {
   if (!present('store-metadata') || !present('validation-report')) return false;
   if (s.platform === 'android' ? !present('android-aab') || (s.artifacts as ObjectValue[]).some((a) => String(a.logicalName).startsWith('ios-'))
     : !present('ios-ipa') || !present('ios-archive') || (s.artifacts as ObjectValue[]).some((a) => String(a.logicalName).startsWith('android-'))) return false;
-  if (!fields(s.recordedRuns, ['authorizedBy', 'executedBy', 'producedBy']) || !Object.values(s.recordedRuns).every((run) => fields(run, ['runId', 'attempt']) && decimal(run.runId, true, 64) && decimal(run.attempt, true, 64))) return false;
+  if (!runsShape(s.recordedRuns)) return false;
   return fields(s.documentPayloadSha256, ['manifest', 'receipt', 'intent']) && Object.values(s.documentPayloadSha256).every(sha);
 }
 export function parseCandidateEvidence(value: unknown): CandidateEvidence | null {
@@ -192,15 +201,21 @@ export function evidenceError(error: unknown): ApiError {
 }
 export function evidenceProblemText(problem: EvidenceProblem): string { return messages[`artifact_evidence_${problem}`]!; }
 
-export interface EvidenceView {
-  mode: BridgeMode; status: EvidenceStatus | null; error: ApiError | null; pending: 'choose' | 'observe' | null;
+type EvidenceWireStatus = EvidenceStatus | LifecycleEvidenceStatus;
+export interface EvidenceView<S extends EvidenceWireStatus = EvidenceStatus> {
+  mode: BridgeMode; status: S | null; stage: EvidenceStage | null; error: ApiError | null; pending: 'choose' | 'observe' | null;
   cancelling: boolean; checking: boolean; uncertain: boolean; integrityFailed: boolean;
-  stale: { selection: EvidenceSelection; result: CandidateEvidence } | null;
+  stale: { selection: NonNullable<S['selection']>; result: NonNullable<S['result']> } | null;
 }
 type Port = CandidateEvidenceApi & { mode: BridgeMode };
-interface RequestBinding { generation: number; kind: 'choose' | 'observe'; selectionId: string | null; after: string; priorOperation: string; originalId: string | null }
-interface CancellationBinding { generation: number; operation: EvidenceOperation; after: string }
-const active = (status: EvidenceStatus | null) => status !== null && ['choosing', 'observing', 'stopping'].includes(status.phase);
+export interface EvidencePort<S extends EvidenceWireStatus> {
+  mode: BridgeMode; evidenceStatus(): Promise<S>; chooseEvidenceFolder(stage: EvidenceStage | null): Promise<S>;
+  observeEvidence(selectionId: string): Promise<S>; cancelEvidence(operationId: string, selectionId: string | null): Promise<S>;
+}
+
+interface RequestBinding { purpose: 'candidate' | 'lifecycle'; stage: EvidenceStage | null; generation: number; kind: 'choose' | 'observe'; selectionId: string | null; after: string; priorOperation: string; originalId: string | null }
+interface CancellationBinding { purpose: 'candidate' | 'lifecycle'; stage: EvidenceStage | null; generation: number; operation: EvidenceWireStatus['operation']; after: string }
+const active = (status: EvidenceWireStatus | null) => status !== null && ['choosing', 'observing', 'stopping'].includes(status.phase);
 function same(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (!left || !right || typeof left !== 'object' || typeof right !== 'object' || Array.isArray(left) !== Array.isArray(right)) return false;
@@ -209,9 +224,9 @@ function same(left: unknown, right: unknown): boolean {
 }
 
 /** No project/draft callback exists here: selecting evidence cannot select a project. */
-export class CandidateEvidenceController {
-  private state: EvidenceView = freeze({ mode: 'unavailable', status: null, error: null, pending: null, cancelling: false, checking: false, uncertain: true, integrityFailed: false, stale: null });
-  private api: Port | null = null;
+export class EvidenceController<S extends EvidenceWireStatus> {
+  private state: EvidenceView<S> = freeze({ stage: null, mode: 'unavailable', status: null, error: null, pending: null, cancelling: false, checking: false, uncertain: true, integrityFailed: false, stale: null });
+  private api: EvidencePort<S> | null = null;
   private generation = 0;
   private request: RequestBinding | null = null;
   private cancellation: CancellationBinding | null = null;
@@ -219,14 +234,20 @@ export class CandidateEvidenceController {
   private disposed = false;
   private listeners = new Set<() => void>();
   private otherOperationReason: () => string | null;
-  constructor(otherOperationReason: () => string | null = () => null) { this.otherOperationReason = otherOperationReason; }
-  getSnapshot = (): EvidenceView => this.state;
+  private purpose: 'candidate' | 'lifecycle';
+  private parseStatus: (value: unknown) => S | null;
+  private stageChosen = false;
+  protected constructor(otherOperationReason: () => string | null, purpose: 'candidate' | 'lifecycle', parseStatus: (value: unknown) => S | null) {
+    this.otherOperationReason = otherOperationReason; this.purpose = purpose; this.parseStatus = parseStatus;
+    if (purpose === 'lifecycle') this.state = freeze({ ...this.state, stage: 'candidate' });
+  }
+  getSnapshot = (): EvidenceView<S> => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  private update(patch: Partial<EvidenceView>): void {
+  private update(patch: Partial<EvidenceView<S>>): void {
     if (this.disposed) return;
     this.state = freeze({ ...this.state, ...patch }); for (const listener of this.listeners) listener();
   }
-  private prior(): EvidenceView['stale'] { const s = this.state.status; return s?.selection && s.result ? { selection: s.selection, result: s.result } : this.state.stale; }
+  private prior(): EvidenceView<S>['stale'] { const s = this.state.status; return s?.selection && s.result ? { selection: s.selection, result: s.result } : this.state.stale; }
   private clearTimer(): void { if (this.timer !== null) clearTimeout(this.timer); this.timer = null; }
   private schedule(): void {
     this.clearTimer();
@@ -234,12 +255,12 @@ export class CandidateEvidenceController {
     if (active(this.state.status) || this.request && this.request.originalId === null) this.timer = setTimeout(() => { this.timer = null; void this.check(); }, 300);
   }
   beginConnection(): void {
-    this.clearTimer(); this.api = null; this.request = null; this.cancellation = null;
+    this.clearTimer(); this.api = null; this.request = null; this.cancellation = null; this.stageChosen = false;
     if (this.generation === Number.MAX_SAFE_INTEGER) { this.update({ integrityFailed: true, status: null }); return; }
     this.generation++;
     this.update({ mode: 'unavailable', status: null, error: null, pending: null, cancelling: false, checking: false, uncertain: true, stale: this.prior() });
   }
-  async connect(api: Port): Promise<void> {
+  protected async connectEvidence(api: EvidencePort<S>): Promise<void> {
     if (this.disposed || this.state.integrityFailed) return;
     this.api = api; this.update({ mode: api.mode, error: null });
     if (api.mode === 'native') await this.check();
@@ -254,8 +275,21 @@ export class CandidateEvidenceController {
     if (this.state.uncertain || !this.state.status) return 'Check the native operation status before starting an evidence action.';
     return active(this.state.status) ? 'Wait for this original evidence operation to settle, or request its cancellation.' : null;
   }
-  private receive(value: unknown): EvidenceStatus | null {
-    const status = parseEvidenceStatus(value);
+  protected changeStage(stage: EvidenceStage): void {
+    if (this.purpose !== 'lifecycle' || this.startReason() || !['candidate', 'external-testing', 'production-submit'].includes(stage)) return;
+    this.stageChosen = true; this.update({ stage });
+  }
+  private stageOf(value: EvidenceWireStatus['operation'] | EvidenceWireStatus['selection']): EvidenceStage | null {
+    return value && 'stage' in value ? value.stage : null;
+  }
+  observeReason(): string | null {
+    const reason = this.startReason(); if (reason) return reason;
+    const selection = this.state.status?.selection;
+    if (!selection) return 'Choose an evidence folder first.';
+    return this.stageOf(selection) !== this.state.stage ? 'Choose a new folder for this stage. An earlier selection cannot be reclassified.' : null;
+  }
+  private receive(value: unknown): S | null {
+    const status = this.parseStatus(value);
     if (!status) { this.update({ status: null, stale: this.prior(), uncertain: true, integrityFailed: true, error: evidenceError(null) }); this.clearTimer(); return null; }
     const current = this.state.status;
     if (current && compareDecimal(status.revision, current.revision) < 0) return current;
@@ -265,10 +299,15 @@ export class CandidateEvidenceController {
     if (current?.phase === 'unknown' && status.phase !== 'unknown') {
       this.update({ uncertain: true, integrityFailed: true, error: evidenceError(null) }); this.clearTimer(); return null;
     }
+    if (current?.selection && status.selection && current.selection.selectionId === status.selection.selectionId && !same(current.selection, status.selection)
+        || current?.operation && status.operation && current.operation.operationId === status.operation.operationId && !same(current.operation, status.operation)) {
+      this.receive(null); return null;
+    }
     let pending = this.state.pending; let cancelling = this.state.cancelling;
     if (this.request && status.operation && compareDecimal(status.revision, this.request.after) > 0
         && compareDecimal(status.operation.operationId, this.request.priorOperation) > 0
         && status.operation.kind === this.request.kind && status.operation.selectionId === this.request.selectionId) {
+      if (this.request.purpose !== this.purpose || this.request.stage !== this.stageOf(status.operation)) { this.receive(null); return null; }
       if (this.request.originalId !== null && this.request.originalId !== status.operation.operationId) {
         this.update({ status: null, stale: this.prior(), uncertain: true, integrityFailed: true, error: evidenceError(null) }); return null;
       }
@@ -281,11 +320,13 @@ export class CandidateEvidenceController {
       }
     }
     if (this.cancellation && compareDecimal(status.revision, this.cancellation.after) > 0
+        && this.cancellation.purpose === this.purpose && this.cancellation.stage === this.stageOf(status.operation)
         && same(status.operation, this.cancellation.operation) && !['choosing', 'observing'].includes(status.phase)) {
       this.cancellation = null; cancelling = false;
     }
     const stale = status.result ? null : this.prior();
-    this.update({ status, stale, pending, cancelling, uncertain: false, error: null }); return status;
+    const stage = this.purpose === 'lifecycle' && !this.stageChosen ? this.stageOf(status.operation) ?? this.state.stage : this.state.stage;
+    this.update({ status, stale, pending, cancelling, stage, uncertain: false, error: null }); return status;
   }
   async check(): Promise<void> {
     if (!this.api || this.api.mode !== 'native' || this.disposed || this.state.checking || this.state.integrityFailed) return;
@@ -299,15 +340,16 @@ export class CandidateEvidenceController {
   private async start(kind: 'choose' | 'observe'): Promise<void> {
     if (!this.api || this.disposed || this.startReason()) return;
     const selection = this.state.status?.selection;
-    if (kind === 'observe' && !selection) return;
-    const request: RequestBinding = { generation: this.generation, kind, selectionId: kind === 'observe' ? selection!.selectionId : null,
+    if (kind === 'observe' && this.observeReason()) return;
+    this.stageChosen = true;
+    const request: RequestBinding = { purpose: this.purpose, stage: this.state.stage, generation: this.generation, kind, selectionId: kind === 'observe' ? selection!.selectionId : null,
       after: this.state.status?.revision ?? '0', priorOperation: this.state.status?.operation?.operationId ?? '0', originalId: null };
     this.request = request; this.update({ pending: kind, stale: this.prior(), error: null }); this.schedule();
     try {
-      const raw = await (kind === 'choose' ? this.api.chooseEvidenceFolder() : this.api.observeEvidence(request.selectionId!));
+      const raw = await (kind === 'choose' ? this.api.chooseEvidenceFolder(request.stage) : this.api.observeEvidence(request.selectionId!));
       if (request.generation !== this.generation || this.disposed || this.request !== request) return;
-      const value = parseEvidenceStatus(raw); const op = value?.operation;
-      if (!value || !op || op.kind !== kind || op.selectionId !== request.selectionId || compareDecimal(value.revision, request.after) <= 0
+      const value = this.parseStatus(raw); const op = value?.operation;
+      if (!value || !op || request.purpose !== this.purpose || request.stage !== this.stageOf(op) || op.kind !== kind || op.selectionId !== request.selectionId || compareDecimal(value.revision, request.after) <= 0
           || compareDecimal(op.operationId, request.priorOperation) <= 0 || request.originalId !== null && request.originalId !== op.operationId) {
         this.receive(null); return;
       }
@@ -327,18 +369,27 @@ export class CandidateEvidenceController {
     const op = this.state.status?.operation;
     if (!this.api || this.api.mode !== 'native' || !op || this.disposed || this.state.cancelling || this.state.integrityFailed
         || !active(this.state.status) && this.state.status?.phase !== 'unknown') return;
-    const request: CancellationBinding = { generation: this.generation, operation: { ...op }, after: this.state.status!.revision };
+    const request: CancellationBinding = { purpose: this.purpose, stage: this.stageOf(op), generation: this.generation, operation: { ...op }, after: this.state.status!.revision };
     this.cancellation = request; this.update({ cancelling: true });
     try {
-      const value = parseEvidenceStatus(await this.api.cancelEvidence(request.operation.operationId, request.operation.selectionId));
+      const value = this.parseStatus(await this.api.cancelEvidence(op.operationId, op.selectionId));
       if (request.generation !== this.generation || this.disposed || this.cancellation !== request) return;
-      if (!value || !same(value.operation, request.operation)) { this.receive(null); return; }
+      if (!value || request.purpose !== this.purpose || request.stage !== this.stageOf(value.operation) || !same(value.operation, request.operation)) { this.receive(null); return; }
       this.receive(value);
     } catch (error) { if (request.generation === this.generation && this.cancellation === request) this.update({ uncertain: true, error: evidenceError(error) }); }
     finally { if (request.generation === this.generation && this.cancellation === request) { this.cancellation = null; this.update({ cancelling: false }); this.schedule(); } }
   }
   dispose(): void { this.clearTimer(); this.disposed = true; this.api = null; this.request = null; this.cancellation = null; this.listeners.clear(); }
 }
+
+/** The v1 facade keeps its exact routes, requests and DTO parser. */
+export class CandidateEvidenceController extends EvidenceController<EvidenceStatus> {
+  constructor(otherOperationReason: () => string | null = () => null) { super(otherOperationReason, 'candidate', parseEvidenceStatus); }
+  connect(api: Port): Promise<void> { return this.connectEvidence(api); }
+}
+// Narrow reuse of the existing bounded own-DATA admission, never legacy-result
+// coercion. Callers clean before any of these shape validators.
+export { clean as cleanEvidenceData, fields, one, text, decimal, counter, operationId, selectionId, sha, freeze, same, summaryShape, assuranceShape, runsShape };
 
 const help = (label: string, what: string, why: string, where: string, format: string, failure: string): HelpContent => ({
   label, requiredness: 'optional', requiredWhen: 'Only when you want to inspect saved candidate evidence; not required for editing a project draft.', what, why, where, format, failure,

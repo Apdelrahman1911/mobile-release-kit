@@ -14,9 +14,14 @@ The installed read-only/preparation renderer commands are `app_info`, `choose_pr
 `release_version_observe {projectId}`,
 `metadata_text_observe {projectId, platform, locale}`, and
 `metadata_text_validate {platform, fields}`.
-Evidence has separate lifecycle commands: `artifact_evidence_choose {}`,
+Legacy candidate evidence retains its strict commands: `artifact_evidence_choose {}`,
 `artifact_evidence_status {}`, `artifact_evidence_observe {selectionId}`, and
-`artifact_evidence_cancel {operationId, selectionId}`. Cancellation addresses
+`artifact_evidence_cancel {operationId, selectionId}`. The new separate family is
+`release_evidence_choose {stage}`, `release_evidence_status {}`,
+`release_evidence_observe {selectionId}`, and
+`release_evidence_cancel {operationId, selectionId}`. Stage is exactly
+`candidate`, `external-testing` or `production-submit`; choosing natively binds
+it to the folder ID, original operation and result. Cancellation addresses
 the original owner; it is not another passive core method.
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
@@ -43,7 +48,8 @@ or renderer override. Other platforms/profiles do not gain production launch.
 That installed profile admits exactly `capabilities`, `catalog`,
 `project.snapshot`, `config.validate`, `config.suggest`, `config.preview`,
 `environment.requirements`, `github.setup.propose`, `release.version.observe`,
-`metadata.text.observe`, `metadata.text.validate` and `artifacts.candidate.observe`.
+`metadata.text.observe`, `metadata.text.validate`, `artifacts.candidate.observe`
+and `release.evidence.observe` (13 methods).
 The native bridge intersects core availability with this allowlist. A separate
 project-only gate uses the existing document/picker/source/registry chain, not
 the closed credential/asset-session grant. `app_info.projectSelection` is
@@ -55,12 +61,20 @@ The two guidance methods use the current draft: prerequisites do not inspect
 installed tools, and workflow proposals do not observe or modify a repository,
 resolve a remote ref, contact GitHub or grant Apply authority.
 Version and public-text reads use the saved configuration, never unsaved drafts.
-Candidate inspection has a separate evidence registry and native folder picker;
-its gate intersects installed project-selection availability with the exact
-candidate passive method, while retaining the original shared lifecycle gates.
-It never grants private-asset authority or replaces the source project. Its
-three document checks prove consistency only, not artifact bytes, authenticated
-provenance, Store state, source correspondence, readiness or recovery authority.
+Both evidence wire families share one evidence registry, native folder picker,
+OriginalWork coordinator and Supervisor query owner. The gate intersects
+installed project-selection availability with the exact requested passive
+method, retaining the original shared lifecycle gates. Purpose and stage are
+checked across selection, binding, job and result; an incompatible active route
+cannot replace, stop or reconcile the original. Stage changes need a new native
+choice, and status recovery never repeats inspection. Neither family grants
+private-asset authority or replaces the source project. The legacy fixed-three
+DTO is unchanged; lifecycle reads the fixed 3/5/10-document JSON projection of
+the selected final bundle, capped at 2 MiB/document, 6 MiB accepted aggregate,
+20,000 decoded values/document and 60,000 total. Complete consistent chains alone
+export summary/recorded stages; all six assurance flags stay false. These checks
+do not authenticate a full inventory, provenance, artifact bytes, live Store
+state, source correspondence, readiness or recovery authority.
 Configuration saving separately uses the existing `EditOwner`, a sealed
 configuration-only installed-A selector and its own original runtime ledger.
 Passive queries never grant write authority. Inspection and acquisition workers
@@ -72,6 +86,14 @@ Installed-shell/project/guidance/Save and the read-only batch's native acceptanc
 are still pending. These changes
 do not qualify a standalone installer, general Linux, macOS or Windows. There
 is no source, PATH, ambient-Python, browser-preview or synthetic-result fallback.
+The installed observer's 13-method bootstrap inventory is source accounting,
+not qualification of the new lifecycle UI. Its legacy candidate-only witness
+does not exercise the new routes or shared Releases/Artifacts/Recovery state.
+GTK/compiler/core ZIP rosters include the new inputs without reopening any
+fixture admission; old conventional payload pins intentionally refuse changed
+bytes until final reviewed package freeze. New source-bound installed evidence
+is required for the new path.
+
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;
 its result contains no executable/core/bootstrap paths and active app commands
 never reach it. Its current pathname-based reads are not a safe execution admission
