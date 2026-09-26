@@ -1573,7 +1573,7 @@ mod tests {
         assert_eq!(REQUIRED_RUNTIME_RESOURCES, [
             "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
             "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-            "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py",
+            "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "ios_archive_bootstrap.py",
             "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
         ]);
         for name in REQUIRED_RUNTIME_RESOURCES { assert!(safe_payload_path(name)); }
