@@ -21,6 +21,7 @@ def load(name):
 
 S = load("observe_hosted_android")
 PYTHON = load("observe_hosted_python")
+L = load("ubuntu_publication_lifecycle")
 
 
 def canonical(value):
@@ -91,6 +92,32 @@ class HostedAndroidDataContracts(unittest.TestCase):
         sums = S.package_members(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  usr/bin/echo\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  unrelated/private\n", paths, digests=True)
         self.assertEqual(sums["selectedMembers"], {"/usr/bin/echo": "a" * 32})
 
+    def test_documented_image_array_preserves_only_public_corresponding_identity(self):
+        value = [{"group": "Operating System", "detail": "Ubuntu\n24.04.3\nLTS"},
+                 {"group": "Runner Image", "detail": "Image: ubuntu-24.04\nVersion: 20260920.314.1\n"
+                  "Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md\n"
+                  "Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314"}]
+        result = S.image_identity(json.dumps(value).encode())
+        self.assertEqual(result, {"identity": {
+            "os_name": "Ubuntu 24.04.3 LTS", "image_name": "ubuntu-24.04", "image_version": "20260920.314.1",
+            "image_url": "https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md",
+            "image_release": "https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314"},
+            "producerExecutionProven": False})
+        raw = json.dumps(value)
+        for changed in (raw.replace('"group": "Operating System"', '"group": "Operating System", "private": "hidden"'),
+                        raw.replace('"group": "Runner Image"', '"group": "Operating System"'),
+                        raw.replace('"group": "Operating System"', '"group": "Operating System", "group": "Operating System"'),
+                        raw.replace('Ubuntu\\n', 'Ubuntu\\u0001\\n'),
+                        raw.replace('Version: ', 'Version: \\n'),
+                        raw.replace('Image: ubuntu-24.04', 'Image: ubuntu-22.04'),
+                        raw.replace('Version: 20260920.314.1', 'Version: 20260920.315.1'),
+                        raw.replace('https://github.com/', 'https://github.com.unreviewed.invalid/'),
+                        raw.replace('%2F', '%252F'), raw.replace('%2F', '%2f'),
+                        raw.replace('24.04.3\\nLTS', '24.04.3\\nLTS\\n'),
+                        json.dumps([*value, value[0]])):
+            with self.subTest(mutation=changed[:64]), self.assertRaises(S.Refused):
+                S.image_identity(changed.encode())
+
     def test_body_change_and_final_original_change_refuse_the_entire_file_row(self):
         raw = b"public"
         original = {"path": "/fixed", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
@@ -102,6 +129,41 @@ class HostedAndroidDataContracts(unittest.TestCase):
                  patch.object(reader, "_body", return_value=(b"secret" if changed_body else raw, len(raw))):
                 with self.assertRaises(S.Refused):
                     reader.file("/fixed", 100, lambda value: value.decode())
+                self.assertEqual(reader.phase, "file-body" if changed_body else "file-rebind")
+
+    def test_failed_row_diagnostics_are_finite_and_never_reflect_error_values(self):
+        for error, expected in ((S.Refused("receipt-format"), "receipt-format"),
+                                (S.Refused("image-known-fields-missing"), "image-known-fields-missing"),
+                                (S.Refused("supplier-directory-owner"), "supplier-directory-owner"),
+                                (ValueError("Native OS input has a nonroot owner"), "file-owner"),
+                                (PermissionError("/private/DO-NOT-EXPORT"), "permission-denied"),
+                                (ValueError("/private/DO-NOT-EXPORT"), "invalid-or-changed"),
+                                (KeyError("/private/DO-NOT-EXPORT"), "invalid-or-changed")):
+            self.assertEqual(S.diagnostic_reason(error), expected)
+        pub = SimpleNamespace(D=SimpleNamespace(canonical=canonical))
+        fake = SimpleNamespace(remaining=S.READ_LIMIT, point=Mock())
+        def file(name, limit, parse=None):
+            if name in (S.SDK_LICENSE, S.IMAGE_DATA):
+                fake.phase = "file-parse"
+                raise S.Refused("receipt-format" if name == S.SDK_LICENSE else "image-known-fields-missing")
+            return row(name)
+        def ca(reader):
+            reader.phase = "ca-root"
+            raise S.Refused("supplier-directory-owner")
+        fake.file = Mock(side_effect=file)
+        fake.directory = Mock(return_value={"status": "empty"})
+        github = {"qualified": False, "runtimeSelfAdmission": False, "nftExecuted": False, "dnsQueryIssued": False}
+        with patch.object(S, "Reader", return_value=fake), patch.object(S, "supplier_cas", side_effect=ca), \
+             patch.object(S, "github_materials", return_value=github):
+            value = S.collect(pub, {}, 10)
+        self.assertIsNone(value["stopped"])
+        for name, phase, refusal in (("supplierCaInputs", "ca-root", "supplier-directory-owner"),
+                                      ("sdkLicense", "file-parse", "receipt-format"),
+                                      ("imageGeneration", "file-parse", "image-known-fields-missing")):
+            self.assertEqual(value["observations"][name], {"status": "unavailable", "reason": "invalid-or-changed",
+                                                          "phase": phase, "refusal": refusal})
+        self.assertEqual(value["observations"][S.PROGRAMS[0]], row(S.PROGRAMS[0]))
+        self.assertEqual(value["observations"]["githubNormalBoundary"], {"status": "observed", "data": github})
 
     def test_custom_directory_never_exports_a_name_and_close_failure_refuses(self):
         info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0,
@@ -196,8 +258,11 @@ class HostedAndroidDataContracts(unittest.TestCase):
                 if name == S.PROGRAMS[2] and stop == "deadline":
                     raise S.Stopped("deadline")
                 if name == S.IMAGE_DATA and stop == "malformed-image":
-                    # Actually exercise the independent deeply nested parser failure.
-                    return S.image_identity(b'{"ignored":' + b'[' * 2000 + b'0' + b']' * 2000 + b'}')
+                    # Inject this actual parser error class instead of depending
+                    # on an interpreter-specific JSON recursion threshold.
+                    fake.phase = "file-parse"
+                    with patch.object(S.json, "loads", side_effect=RecursionError("private parser detail")):
+                        return S.image_identity(b'{"ignored":[]}')
                 value = row(name)
                 if name == S.PROGRAMS[2] and stop == "output-budget":
                     value["data"] = "x" * S.OUTPUT_LIMIT
@@ -227,11 +292,20 @@ class HostedAndroidDataContracts(unittest.TestCase):
                     self.assertEqual(value["observations"]["githubNormalBoundary"]["data"], github)
                     if stop == "malformed-image":
                         self.assertEqual(value["observations"]["imageGeneration"],
-                                         {"status": "unavailable", "reason": "invalid-or-changed"})
+                                         {"status": "unavailable", "reason": "invalid-or-changed",
+                                          "phase": "file-parse", "refusal": "invalid-or-changed"})
 
     def test_workflow_metadata_route_cannot_compile_or_invoke_native_observation(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
         steps = workflow.split("      - name: ")[1:]
+        prerequisites = next(s for s in steps if s.startswith("Prepare shared Ubuntu shell inputs only on this disposable runner\n"))
+        self.assertIn("packages=(libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy)", prerequisites)
+        self.assertIn('if [[ "$GITHUB_REF" == ' + S.METADATA_REF
+                      + ' || "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 ]]; then\n'
+                      + '            packages+=(libgif7)\n          fi\n', prerequisites)
+        self.assertEqual(prerequisites.count("libgif7"), 1)
+        self.assertIn('sudo apt-get install -y --no-install-recommends "${packages[@]}"', prerequisites)
+        self.assertIn('dpkg-query -W -f=\'${Package} ${Version}\\n\' "${packages[@]}"', prerequisites)
         observer = next(s for s in steps if s.startswith("Observe only the missing public Android and GitHub host DATA\n"))
         for item in ("if: github.ref == '" + S.METADATA_REF + "'", "timeout-minutes: 2", "/usr/bin/env -i",
                      "--signal=TERM --kill-after=2s 60s", "python3.12 -I -S -B desktop/tools/observe_hosted_android.py </dev/null",
@@ -252,6 +326,96 @@ class HostedAndroidDataContracts(unittest.TestCase):
         for forbidden in ("subprocess.run", "subprocess.Popen", "os.system", "os.execve", "socket.socket",
                           "lifecycle._github_boundary_host_projection", "lifecycle._github_boundary_host_admission"):
             self.assertNotIn(forbidden, calls)
+
+
+class GithubHostDiagnosticContracts(unittest.TestCase):
+    def test_kernel_open_read_close_labels_preserve_original_single_close(self):
+        for label in ("legacy-v4", "legacy-v6"):
+            for fault in (None, "open", "read", "close"):
+                diagnostic = {}
+                with self.subTest(label=label, fault=fault), \
+                     patch.object(L.os, "open", side_effect=PermissionError("private") if fault == "open" else None,
+                                  return_value=91) as opened, \
+                     patch.object(L.os, "read", side_effect=PermissionError("private") if fault == "read" else [b"", b""]) as read, \
+                     patch.object(L.os, "close", side_effect=OSError("private") if fault == "close" else None) as close:
+                    if fault:
+                        with self.assertRaises(OSError):
+                            L._kernel("/inert/never-opened", 4096, diagnostic=diagnostic, label=label)
+                    else:
+                        self.assertEqual(L._kernel("/inert/never-opened", 4096, diagnostic=diagnostic, label=label), "")
+                    self.assertEqual(diagnostic, {"phase": label + "-" + (fault or "read")})
+                    opened.assert_called_once()
+                    if fault == "open":
+                        read.assert_not_called()
+                        close.assert_not_called()
+                    else:
+                        close.assert_called_once_with(91)
+                    self.assertNotIn("private", json.dumps(diagnostic))
+
+    def test_resolver_custody_labels_are_fixed_and_unknown_errors_are_redacted(self):
+        ordinary = SimpleNamespace(st_uid=0, st_gid=0, st_nlink=1, st_mode=stat.S_IFREG | 0o644)
+        for changes, expected in (({"st_uid": 7}, "file-owner"), ({"st_nlink": 2}, "file-links"),
+                                  ({"st_mode": stat.S_IFREG | 0o666}, "file-permissions")):
+            item = SimpleNamespace(**{**vars(ordinary), **changes})
+            diagnostic = {}
+            with patch.object(L, "directory"), patch.object(Path, "lstat", return_value=item), \
+                 patch.object(L, "protected_record") as record:
+                with self.assertRaises(L.Refused) as raised:
+                    L._github_boundary_material_file("/etc/resolv.conf", diagnostic=diagnostic)
+                self.assertEqual(L._github_boundary_material_reason(raised.exception), expected)
+                self.assertEqual(diagnostic, {"phase": "resolver-file"})
+                record.assert_not_called()
+        for error, expected in ((L.Refused("Unprotected lifecycle ancestor path='/private/DO-NOT-EXPORT'"), "ancestry-protection"),
+                                (L.Refused("Unreviewed normal resolver material link"), "resolver-link-target"),
+                                (PermissionError("DO-NOT-EXPORT"), "permission-denied"),
+                                (ValueError("DO-NOT-EXPORT"), "invalid-or-changed")):
+            self.assertEqual(L._github_boundary_material_reason(error), expected)
+
+    def test_missing_resolver_is_not_parsed_and_legacy_failure_preserves_kernel(self):
+        for missing_resolver, legacy_failure in ((False, None), (True, "legacy-v4"), (False, "legacy-v6")):
+            def material(name, *, diagnostic=None):
+                if name == "/etc/resolv.conf" and missing_resolver:
+                    diagnostic["phase"] = "resolver-link"
+                    raise L.Refused("Unreviewed normal resolver material link")
+                return {"path": name, "selectedPath": name, "links": [], "file": {"sha256": "a" * 64}}
+            def body(path, limit):
+                return {"/etc/nsswitch.conf": b"hosts: files dns\n", "/etc/hosts": b"127.0.0.1 localhost\n",
+                        "/etc/resolv.conf": b"nameserver 127.0.0.53\noptions timeout:7 attempts:2\n",
+                        "/boot/config-inert": b"CONFIG_CGROUPS=y\n"}[str(path)]
+            def kernel(path, limit, *, diagnostic=None, label=None):
+                if label:
+                    diagnostic["phase"] = label + "-read"
+                    if label == legacy_failure:
+                        raise PermissionError("DO-NOT-EXPORT")
+                    return ""
+                return "inert\n"
+            with self.subTest(missing=missing_resolver, legacy=legacy_failure), \
+                 patch.object(L, "_github_boundary_material_file", side_effect=material), \
+                 patch.object(L, "read", side_effect=body), patch.object(L, "_github_boundary_package_data", return_value={}), \
+                 patch.object(L, "_kernel", side_effect=kernel), patch.object(L.os, "uname", return_value=SimpleNamespace(release="inert")), \
+                 patch.object(Path, "lstat", side_effect=FileNotFoundError), \
+                 patch.object(L, "_github_boundary_resolver_shape", wraps=L._github_boundary_resolver_shape) as parse:
+                value = L.shell_github_boundary_host_materials()
+            self.assertEqual(value["kernel"]["release"], "inert")
+            if missing_resolver:
+                parse.assert_not_called()
+                self.assertNotIn("/etc/resolv.conf", value["files"])
+                self.assertIn({"material": "normal-resolver-shape", "errorType": "Refused",
+                               "phase": "resolver-prerequisite", "refusal": "prerequisite-unavailable"}, value["failures"])
+            else:
+                parse.assert_called_once()
+            if legacy_failure:
+                self.assertIsNone(value["legacyTables"])
+                self.assertIsNone(value["delegatedSockets"])
+                self.assertIn({"material": "kernel-and-host-packet-path", "errorType": "PermissionError",
+                               "phase": legacy_failure + "-read", "refusal": "permission-denied"}, value["failures"])
+            else:
+                self.assertEqual(value["failures"], [])
+                self.assertEqual(value["legacyTables"], {"/proc/net/ip_tables_names": [], "/proc/net/ip6_tables_names": []})
+                self.assertEqual(value["delegatedSockets"], {"/run/nscd/socket": {"present": False}, "/var/run/nscd/socket": {"present": False}})
+            self.assertNotIn("DO-NOT-EXPORT", json.dumps(value))
+            for flag in ("qualified", "runtimeSelfAdmission", "nftExecuted", "dnsQueryIssued"):
+                self.assertIs(value[flag], False)
 
 
 if __name__ == "__main__":

@@ -58,9 +58,13 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
+          packages=(libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy)
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-shell-host-metadata || "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 ]]; then
+            packages+=(libgif7)
+          fi
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-          dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          dpkg-query -W -f='${Package} ${Version}\n' "${packages[@]}"
       - name: Prepare the fixed JDK17 pair only on this disposable shell runner
         id: tools_inputs
         if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'
@@ -590,8 +594,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: '36074195702'
-          artifact-ids: '10839621457'
+          run-id: '36238334234'
+          artifact-ids: '10905226275'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
@@ -608,7 +612,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'eb95e89cf180fb4c56f84b3ab49b749a47b49796663d4ae160f2f2bb86493176'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '1d65d264e147709ceaedf8e61d8ccf56df463090c940b56694f7372c1c308b01'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
@@ -687,8 +691,8 @@ jobs:
         with:
           repository: Apdelrahman1911/mobile-release-kit
           # Independently accepted U originals; full artifact membership is verified.
-          run-id: '36109151701'
-          artifact-ids: '10852835550'
+          run-id: '36239971300'
+          artifact-ids: '10905825592'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare_native.outputs.root }}/work/admitted-u
           merge-multiple: true
@@ -705,7 +709,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'eb95e89cf180fb4c56f84b3ab49b749a47b49796663d4ae160f2f2bb86493176'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '1d65d264e147709ceaedf8e61d8ccf56df463090c940b56694f7372c1c308b01'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

@@ -3199,15 +3199,26 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                          [hashlib.sha256(entry).hexdigest()] * 2)
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        github_source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
         steps = {line.encode("ascii") + b"\n" for line in re.findall(
             r'b"(MRK_INSTALLED_SHELL_FAILURE_STEP=[A-Za-z]+)\\n"', source)}
+        # Only these two GitHub steps opt into the generic diagnostic frame.
+        # GitHubEntry requires its separate complete-prefix parser instead.
+        github_guidance = {
+            b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubGuidanceReady\n",
+            b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubGuidanceReload\n",
+        }
+        github_steps = {line.encode("ascii") + b"\n" for line in re.findall(
+            r'b"(MRK_INSTALLED_SHELL_FAILURE_STEP=[A-Za-z]+)\\n"', github_source)}
+        self.assertTrue(github_guidance <= github_steps)
+        self.assertTrue(steps.isdisjoint(github_guidance))
         boundaries = {line.encode("ascii") + b"\n" for line in re.findall(
             r'b"(MRK_INSTALLED_SHELL_FAILURE_PHASE=[a-z]+)\\n"', source)}
         progress = {line.encode("ascii") + b"\n" for line in re.findall(
             r'b"(MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=[a-z-]+)\\n"', source)}
-        self.assertEqual(set(lifecycle.SHELL_FAILURE_STEPS), steps)
+        self.assertEqual(set(lifecycle.SHELL_FAILURE_STEPS), steps | github_guidance)
         self.assertEqual(set(lifecycle.SHELL_FAILURE_BOUNDARIES), boundaries)
-        self.assertEqual(len(lifecycle.SHELL_FAILURE_STEPS), len(steps))
+        self.assertEqual(len(lifecycle.SHELL_FAILURE_STEPS), len(steps) + len(github_guidance))
         self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
         self.assertEqual(set(lifecycle.SHELL_BOOTSTRAP_PROGRESS), progress)
         self.assertEqual(len(lifecycle.SHELL_BOOTSTRAP_PROGRESS), len(progress))
@@ -3333,14 +3344,14 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(canonical).hexdigest(), "bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710")
         self.assertEqual(public_tokens, lifecycle.SHELL_SESSION_PUBLIC_MAP_WORKERS)
         self.assertTrue(set(public_tokens).isdisjoint(map_tokens))
-        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"
+        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66"
         accepted = {version + suffix for suffix in ("/python/bin/python3", "/python/lib/libssl.so.3", "/python/lib/libcrypto.so.3")}
         accepted.update(prefix + name for prefix in ("/usr/lib/x86_64-linux-gnu/", "/lib/x86_64-linux-gnu/")
                         for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"))
         accepted.add("/lib64/ld-linux-x86-64.so.2")
         self.assertTrue(set(public_paths).isdisjoint(accepted))
         role = supervisor.split("    fn role(path: &str) -> Option<MapRole> {", 1)[1].split("    #[derive(Clone, Copy)]", 1)[0]
-        self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "aa4101e33f69e2bff0480a304a86c1a7923f82a0592f49de4b329b927b1c18dc")
+        self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "81b3ae0552e8a79cdb3d5e8353d83299e88b7093e951cbb69e74878c35838240")
         parser = supervisor.split("    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
             '    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),\n'
             '        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]', 1)[0]
@@ -3349,7 +3360,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                    "path, historical, major, minor, inode))?")
         self.assertEqual(parser.count(refusal), 1)
         self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
-                         "6b884ac9df8f44c52c96a34f926445e11f18564946f4f126e600afbab94d24fe")
+                         "40b22fc8658a78932040bc83788073f3ba9dd47517c28072623d59998e1e23b9")
         lookup = supervisor.split("    fn executable_file_refusal(path: &str) -> MapRefusal {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn(".position(|(candidate, _)| path == *candidate)", lookup)
         for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!", "to_owned", ".await", "Instant::now"):
@@ -3374,7 +3385,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertLess(snapshot.index("match exec_checkpoint("), snapshot.index("let raw = original_bytes("))
         pending = snapshot.split("Some(false)", 1)[1].split("Some(true)", 1)[0]
         self.assertIn("continue;", pending); self.assertNotIn("original_bytes", pending)
-        self.assertEqual(snapshot.count("mappings(&raw, historical).map_err(ObservationFailure::MapsCheck)?"), 1)
+        self.assertEqual(snapshot.count("mappings_for_case(&raw, historical, case).map_err(ObservationFailure::MapsCheck)?"), 1)
         self.assertIn("if !live(end, stop) { return Ok(None); }\n            let raw", snapshot)
         self.assertIn("if !live(end, stop) { return Ok(None); }\n                let mut environment", snapshot)
         self.assertLess(snapshot.index("need(clear).map_err(|_| ObservationFailure::EnvironmentCheck)?"),
@@ -3383,8 +3394,8 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(environment.encode()).hexdigest(), "2e1038fc893b8a7a08faa133da5f4c18a32b8d3afa9a9b669095c7273cec7695")
         observer = supervisor.split("    pub(super) fn observe_original_child(", 1)[1].split("    pub(super) fn report(", 1)[0]
         self.assertEqual(observer.count("let mut phase = ExecPhase::BeforeExec;"), 1)
-        self.assertEqual(observer.count("child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase)"), 2)
-        self.assertEqual(observer.count("current_python_original(end, &stop)?"), 1)
+        self.assertEqual(observer.count("child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase, case)"), 2)
+        self.assertEqual(observer.count("current_python_original(end, &stop, case)?"), 1)
         self.assertEqual(observer.count('proc_exec_original(Path::new("/proc/self/exe"), end, &stop)?'), 1)
         self.assertIn("let closed = parent.close();\n            closed.and(returned)", observer)
         self.assertIn("let closed = python.close();\n        closed.and(observed)", observer)
@@ -3441,7 +3452,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         diagnostics = supervisor.split("    pub(super) fn assert_mappings_diagnostic_contract()", 1)[1].split("    fn child_snapshot(", 1)[0]
         self.assertIn("assert_exec_image_contract();", diagnostics)
         driver = supervisor.split("    resources.child = child;\n", 1)[1].split('    #[cfg(all(test, debug_assertions, feature = "development-runtime"', 1)[0]
-        self.assertEqual(hashlib.sha256(driver.encode()).hexdigest(), "7afc83d174f1d94b57eb4d8e90b091a503c8658033bc776813bca1db620a002e")
+        self.assertEqual(hashlib.sha256(driver.encode()).hexdigest(), "c6dbb4798dc55fbf56868e57ffb58a1bbb4a19faf7d6bdb55d4a40323cb7db0f")
         self.assertEqual(tuple(value.encode("ascii") for value in re.findall(r'Self::Exec(?:Read|Check) => b"([a-z-]+)"', native)),
                          (b"exec-read", b"exec-check"))
         stages = re.findall(r'WorkerStage::[A-Za-z]+ => join.token\(b"([a-z]+)-c", b"\1-x", b"\1-f"\)', workers)

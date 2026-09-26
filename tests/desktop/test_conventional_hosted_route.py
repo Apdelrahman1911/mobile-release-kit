@@ -257,8 +257,8 @@ class DataContracts(unittest.TestCase):
 
     def test_current_roster_is_closed_not_historical_or_discovered_authority(self):
         admitted = data.records(helper.CONVENTIONAL_CURRENT_SOURCE_FILES, absolute=True)
-        self.assertEqual(len(admitted), 114)
-        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 106)
+        self.assertEqual(len(admitted), 116)
+        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 108)
         variants = [CURRENT_CORE[:-1], HISTORICAL_CORE, list(reversed(CURRENT_CORE)), [*CURRENT_CORE, CURRENT_CORE[-1]],
             sorted([*CURRENT_CORE, record("/work/inputs/core-source/src/mobile_release/new.py")], key=lambda row: row["path"])]
         for key, wrong in (("sha256", "f" * 64), ("size", 6), ("size", True), ("path", "/other/core.py")):

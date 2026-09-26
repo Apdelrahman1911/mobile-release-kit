@@ -1747,7 +1747,7 @@ mod installed_native_fixture {
     use std::{fs, io::{Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
     use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
-    const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417";
+    const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66";
     #[derive(Clone, Copy, Default, Eq, PartialEq)]
     pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
@@ -1856,8 +1856,8 @@ mod installed_native_fixture {
                 use crate::runtime::GitHubReadOnlyObservationProfile as P;
                 return match profile {
                     P::Normal => VERSION,
-                    P::DialRealCa => "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90",
-                    P::DialSyntheticCa => "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359",
+                    P::DialRealCa => "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/d0bbe240f5301938b211705e5a250ee338410b79ea088b2af02de9e11db7ee34",
+                    P::DialSyntheticCa => "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/0f6b03dcf385646611f22cdfdc365e50bcbc51306d938bab4b0cea6cb94c3e42",
                 };
             }
             VERSION
@@ -3583,8 +3583,8 @@ mod installed_native_fixture {
         let source = option_env!("GITHUB_SHA").expect("compiled original source binding");
         assert!(source.len() == 40 && source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
         assert_eq!(std::env::var("GITHUB_SHA").ok().as_deref(), Some(source));
-        assert_eq!(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), Some("556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"));
-        assert_eq!(option_env!("MRK_BUNDLED_PROTOCOL_SHA256"), Some("860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"));
+        assert_eq!(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), Some("8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66"));
+        assert_eq!(option_env!("MRK_BUNDLED_PROTOCOL_SHA256"), Some("083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"));
         assert_ne!(rustix::process::getuid().as_raw(), 0);
         assert_eq!(rustix::process::getuid(), rustix::process::geteuid());
         let _ = (run_number("GITHUB_RUN_ID"), run_number("GITHUB_RUN_ATTEMPT"));

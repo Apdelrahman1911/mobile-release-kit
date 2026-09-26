@@ -29,9 +29,9 @@ import time
 ENTRY = "desktop/tools/ubuntu_publication_lifecycle.py"
 TARGET = "x86_64-unknown-linux-gnu"
 PACKAGE = "mobile-release-kit-desktop"
-M = "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"
-F1 = "1270d1d7d9427fff260bb1e79f51c1c3c14145651db87014b0ee9d08d601c112"
-Q = "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
+M = "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66"
+F1 = "6f3005c479a8b14992f9e73135b6c3f21119a014d5212c5603cafa3b3b395757"
+Q = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"
 USER_TEST = "installed_runtime::platform_native_tests::nonroot_exact_ubuntu_platform"
@@ -1986,20 +1986,20 @@ SHELL_GITHUB_AMBIENT_CASES = ("github-ambient-fixed", "github-ambient-no-rescue"
 SHELL_GITHUB_NORMAL_NEGATIVE = "github-normal-negative"
 SHELL_GITHUB_PAYLOADS = {
     "N": {"manifestSha256": M, "manifestBytes": 85440,
-          "coreSha256": "d6be3fcbcedb68569ef1f4b2e7cae67cfcbdd7d7b53666db428fb664d426c2a2",
+          "coreSha256": "6b0010179373626cff884301bdb9155755643eabc177fd6bb1862a368ea651c0",
           "caSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
-          "inventorySha256": "40917b867379373e98fdca4205646d8e05ff485e514e161f76b36f2ffe9abdb7"},
-    "D-R": {"manifestSha256": "5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90",
-            "manifestBytes": 106080, "coreSha256": "58e4ba255326742b51f68d962f9b6a1fd84827c56daed10623ff0121a0e2846e",
+          "inventorySha256": "0162527ab2c4dc45b4385d9ee95ca51c8c0d87786a9d195130824ae151a61b2a"},
+    "D-R": {"manifestSha256": "d0bbe240f5301938b211705e5a250ee338410b79ea088b2af02de9e11db7ee34",
+            "manifestBytes": 106080, "coreSha256": "5f8d102784209c33699854b8af6c6ec0b0024e6cf3d303eb5b9a66560a00fff0",
             "caSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
-            "inventorySha256": "86bf41454518e3cbbc5ba82e37381a0f0faea91aaf71b270a358f078032057a4"},
-    "D-S": {"manifestSha256": "fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359",
-            "manifestBytes": 106077, "coreSha256": "58e4ba255326742b51f68d962f9b6a1fd84827c56daed10623ff0121a0e2846e",
+            "inventorySha256": "7e491db3ea2bf5641c698f631511e59a2aee8c206355f5d5ef7cbe75c68cde9a"},
+    "D-S": {"manifestSha256": "0f6b03dcf385646611f22cdfdc365e50bcbc51306d938bab4b0cea6cb94c3e42",
+            "manifestBytes": 106077, "coreSha256": "5f8d102784209c33699854b8af6c6ec0b0024e6cf3d303eb5b9a66560a00fff0",
             "caSha256": "3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025",
-            "inventorySha256": "f0adf8d31195fa6199e190ee63d84b9dbd32c6fe1cbf3a7903c456be45ab5204"},
+            "inventorySha256": "5204fabc05a6a6d165443c3d83dfa4abea9c37eceae926047c6e4b05a2d0089f"},
 }
-SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256 = "9ebd6922af04aacbef9d7d1db4c2da6185a7fcc42797556c2c0651421b3a03d2"
-SHELL_GITHUB_PEER_PINS = {'github_tls/api-expired.pem': (790, 'd0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f'), 'github_tls/api-valid.pem': (786, '33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2'), 'github_tls/other-root-ca.pem': (778, '69b4eda8770c518de6e83caa5037bcf5d38f9f9ec16ef3c1e7c11023627a018c'), 'github_tls/root-ca.pem': (761, '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025'), 'github_tls/server-key.pem': (241, '33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109'), 'github_tls/wrong-san.pem': (786, '8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108'), 'github_tls_peer.py': (61665, '26628a8d91c4c76169ae579a91a4ad16ee7352ba247b45a3b98cdda0fc177449')}
+SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256 = "ea0e7d5580e7fdda7bc125dd9ddd143838ad8c4218eca94c25c36e10f1aec2fd"
+SHELL_GITHUB_PEER_PINS = {'github_tls/api-expired.pem': (790, 'd0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f'), 'github_tls/api-valid.pem': (786, '33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2'), 'github_tls/other-root-ca.pem': (778, '69b4eda8770c518de6e83caa5037bcf5d38f9f9ec16ef3c1e7c11023627a018c'), 'github_tls/root-ca.pem': (761, '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025'), 'github_tls/server-key.pem': (241, '33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109'), 'github_tls/wrong-san.pem': (786, '8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108'), 'github_tls_peer.py': (61665, '85fb9f73077426672efdc64a08de41baf9b117753b59f4a87b4b4c591c8561da')}
 SHELL_GITHUB_MATERIAL_LIMIT = 2 << 20
 SHELL_GITHUB_FIXTURE_LIMIT = 8192
 SHELL_GITHUB_PUBLIC_FILE_LIMIT = 135
@@ -2528,19 +2528,77 @@ _GITHUB_BOUNDARY_STOP = None
 _GITHUB_BOUNDARY_BODY_ERRORS = []
 
 
-def _github_boundary_material_file(name):
+def _github_boundary_material_phase(diagnostic, phase):
+    if diagnostic is not None:
+        diagnostic["phase"] = phase
+
+
+def _github_boundary_material_reason(error):
+    """Export only fixed diagnostic classes, not exception text or host values."""
+    if isinstance(error, FileNotFoundError):
+        return "absent"
+    if isinstance(error, PermissionError):
+        return "permission-denied"
+    if isinstance(error, OSError):
+        return "read-or-close-error"
+    fixed = {
+        "Unprotected normal-boundary material": "file-owner",
+        "Normal-boundary material link count differs": "file-links",
+        "Mutable/special normal-boundary material": "file-permissions",
+        "Changed normal-boundary material link": "link-changed",
+        "Unreviewed normal resolver material link": "resolver-link-target",
+        "Normal-boundary material link bound exceeded": "link-bound",
+        "Nonordinary or oversized lifecycle file": "file-type-or-bound",
+        "Lifecycle file changed before read": "file-open-changed",
+        "Lifecycle file grew": "file-grew",
+        "Lifecycle file changed during read": "file-read-changed",
+        "Lifecycle file changed after original close": "file-close-changed",
+        "Root input has mutable/special permissions": "file-owner-or-permissions",
+        "Protected input changed after readback": "file-binding-changed",
+        "Normal resolver material changed during observation": "resolver-body-changed",
+        "Original normal-boundary material changed": "file-original-changed",
+        "Normal resolver prerequisite unavailable": "prerequisite-unavailable",
+        "Normal resolver material bound differs": "resolver-data-bound",
+        "Normal NSS hosts database is malformed": "nss-hosts-format",
+        "Normal NSS is delegated, cached, conditional or unreviewed": "nss-hosts-sources",
+        "Normal hosts input shortcuts the original GitHub DNS question": "hosts-shortcut",
+        "Normal resolver nameserver shape differs": "resolver-nameserver-shape",
+        "Normal resolver search bound differs": "resolver-search-bound",
+        "Normal resolver option is unreviewed or duplicated": "resolver-option",
+        "Normal resolver flag has an unexpected value": "resolver-flag-value",
+        "Normal resolver retry option is not bounded": "resolver-retry-bound",
+        "Normal resolver directive is unreviewed": "resolver-directive",
+        "Normal resolver is not the one bounded direct IPv4 loopback recipe": "resolver-recipe",
+        "Actual normal unanswered resolver interval does not exceed the original operation endpoint": "resolver-interval",
+        "Kernel DATA bound exceeded": "kernel-data-bound",
+    }
+    value = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+    if isinstance(error, ValueError) and value is not None:
+        if value in fixed:
+            return fixed[value]
+        for prefix, code in (("Nonordinary lifecycle ancestor path=", "ancestry-type"),
+                             ("Unprotected lifecycle ancestor path=", "ancestry-protection")):
+            if value.startswith(prefix):
+                return code
+    return "invalid-or-changed"
+
+
+def _github_boundary_material_file(name, *, diagnostic=None):
     """Bounded protected link/file DATA, never execution or resolver editing."""
     path, links = Path(name), []
     for _ in range(4):
+        _github_boundary_material_phase(diagnostic, "resolver-ancestry")
         directory(path.parent, protected=True)
+        _github_boundary_material_phase(diagnostic, "resolver-file")
         before = path.lstat()
-        need(before.st_uid == before.st_gid == 0 and before.st_nlink == 1,
-             "Unprotected normal-boundary material")
+        need(before.st_uid == before.st_gid == 0, "Unprotected normal-boundary material")
+        need(before.st_nlink == 1, "Normal-boundary material link count differs")
         if not stat.S_ISLNK(before.st_mode):
             need(not before.st_mode & 0o7022, "Mutable/special normal-boundary material")
             cap = FILE_LIMIT if name == SHELL_GITHUB_BOUNDARY_NFT else 512 << 10 if name.startswith("/boot/config-") else 128 << 10
             row = protected_record(path, cap)
             return {"path": name, "selectedPath": str(path), "links": links, "file": row}
+        _github_boundary_material_phase(diagnostic, "resolver-link")
         target = os.readlink(path)
         need(type(target) is str and 0 < len(target) <= 256 and "\0" not in target
              and identity(path.lstat()) == identity(before), "Changed normal-boundary material link")
@@ -2646,32 +2704,45 @@ def _github_boundary_resolver_shape(nss, hosts, resolver):
 def shell_github_boundary_host_materials():
     """Read-only hosted material observation; no nft/query/socket/subprocess."""
     failures, files, bodies = [], {}, {}
-    def unavailable(label, error):
+    def unavailable(label, error, diagnostic=None):
         need(len(failures) < 24, "Normal-boundary material failure bound")
-        failures.append({"material": label, "errorType": type(error).__name__})
+        row = {"material": label, "errorType": type(error).__name__}
+        if diagnostic is not None:
+            row.update(phase=diagnostic["phase"], refusal=_github_boundary_material_reason(error))
+        failures.append(row)
     for name in SHELL_GITHUB_BOUNDARY_INPUTS:
+        diagnostic = {"phase": "resolver-file"} if name == "/etc/resolv.conf" else None
         try:
-            row = _github_boundary_material_file(name)
+            row = (_github_boundary_material_file(name, diagnostic=diagnostic) if diagnostic is not None
+                   else _github_boundary_material_file(name))
             files[name] = row
             if name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"):
+                _github_boundary_material_phase(diagnostic, "resolver-body")
                 bodies[name] = read(Path(row["selectedPath"]), 128 << 10)
+                _github_boundary_material_phase(diagnostic, "resolver-recheck")
                 need(_github_boundary_material_file(name) == row, "Normal resolver material changed during observation")
         except (OSError, ValueError, UnicodeError) as error:
-            unavailable(name, error)
+            unavailable(name, error, diagnostic)
     packages, resolver, kernel, legacy, shortcuts = None, None, None, None, None
     try:
         packages = _github_boundary_package_data()
     except (OSError, ValueError, UnicodeError) as error:
         unavailable("selected-package-stanzas", error)
+    diagnostic = {"phase": "resolver-prerequisite"}
     try:
+        need(all(name in bodies for name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")),
+             "Normal resolver prerequisite unavailable")
+        diagnostic["phase"] = "resolver-parse"
         resolver = _github_boundary_resolver_shape(*(bodies[name] for name in
             ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")))
     except (OSError, ValueError, UnicodeError, KeyError) as error:
-        unavailable("normal-resolver-shape", error)
+        unavailable("normal-resolver-shape", error, diagnostic)
+    diagnostic = {"phase": "kernel-release"}
     try:
         release = _kernel("/proc/sys/kernel/osrelease", 256).strip()
         need(re.fullmatch(r"[A-Za-z0-9.+_-]{1,128}", release) is not None and release == os.uname().release,
              "Normal-boundary kernel release differs")
+        diagnostic["phase"] = "kernel-configuration"
         config = _github_boundary_material_file("/boot/config-" + release)
         raw = read(Path(config["selectedPath"]), 512 << 10)
         relevant = ("CONFIG_CGROUPS", "CONFIG_CGROUP_BPF", "CONFIG_SOCK_CGROUP_DATA", "CONFIG_NF_TABLES",
@@ -2684,11 +2755,16 @@ def shell_github_boundary_host_materials():
                 need(key not in values and value in ("y", "m", "n"), "Duplicate/unreviewed kernel material option")
                 values[key] = value
         need(_github_boundary_material_file("/boot/config-" + release) == config, "Kernel material changed")
+        diagnostic["phase"] = "kernel-version"
         kernel = {"release": release, "version": _kernel("/proc/version", 1024).strip(),
                   "configuration": config, "features": values}
-        legacy = {name: _kernel(name, 4096).splitlines() for name in
-                  ("/proc/net/ip_tables_names", "/proc/net/ip6_tables_names")}
+        observed_legacy = {}
+        for name, label in (("/proc/net/ip_tables_names", "legacy-v4"),
+                            ("/proc/net/ip6_tables_names", "legacy-v6")):
+            observed_legacy[name] = _kernel(name, 4096, diagnostic=diagnostic, label=label).splitlines()
+        legacy = observed_legacy
         shortcuts = {}
+        diagnostic["phase"] = "delegated-sockets"
         for name in ("/run/nscd/socket", "/var/run/nscd/socket"):
             # /var/run is the conventional /run link; only named absence DATA,
             # not an open/delegation to a daemon, is retained.
@@ -2698,12 +2774,13 @@ def shell_github_boundary_host_materials():
             except FileNotFoundError:
                 shortcuts[name] = {"present": False}
     except (OSError, ValueError, UnicodeError) as error:
-        unavailable("kernel-and-host-packet-path", error)
+        unavailable("kernel-and-host-packet-path", error, diagnostic)
     for name, before in list(files.items()):
+        diagnostic = {"phase": "resolver-recheck"} if name == "/etc/resolv.conf" else None
         try:
             need(_github_boundary_material_file(name) == before, "Original normal-boundary material changed")
         except (OSError, ValueError, UnicodeError) as error:
-            unavailable(name + "-post", error)
+            unavailable(name + "-post", error, diagnostic)
     return {"schema": "installed-github-normal-boundary-host-materials-v1", "qualified": False,
             "runtimeSelfAdmission": False, "nftExecuted": False, "dnsQueryIssued": False,
             "files": files, "packages": packages, "kernel": kernel, "resolver": resolver,
@@ -3703,14 +3780,23 @@ def _root_ids():
          and status["NoNewPrivs"].strip() == "1", "Root filesystem IDs/no-new-privs differ")
 
 
-def _kernel(path, limit=64 << 10):
+def _kernel(path, limit=64 << 10, *, diagnostic=None, label=None):
+    if diagnostic is not None:
+        _github_boundary_material_phase(diagnostic, label + "-open")
     fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
+        if diagnostic is not None:
+            _github_boundary_material_phase(diagnostic, label + "-read")
         raw = os.read(fd, limit + 1)
         need(len(raw) <= limit and not os.read(fd, 1), "Kernel DATA bound exceeded")
         return raw.decode("ascii")
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except BaseException:
+            if diagnostic is not None:
+                _github_boundary_material_phase(diagnostic, label + "-close")
+            raise
 
 
 def _status():
@@ -6755,14 +6841,14 @@ def shell_github_dial_core(raw):
     """One exact, inventoried ZIP DATA transform; never import its members."""
     import io
     import zipfile
-    need(type(raw) is bytes and len(raw) == 706266
+    need(type(raw) is bytes and len(raw) == 710642
          and hashlib.sha256(raw).hexdigest() == SHELL_GITHUB_PAYLOADS["N"]["coreSha256"],
          "GitHub normal core ZIP differs")
     output = io.BytesIO()
     originals = {}
     with zipfile.ZipFile(io.BytesIO(raw), "r") as source:
         infos = source.infolist()
-        need(len(infos) == 106 and len({info.filename for info in infos}) == 106
+        need(len(infos) == 108 and len({info.filename for info in infos}) == 108
              and sum(info.file_size for info in infos) <= 16 << 20,
              "GitHub normal inner core roster differs")
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as target:
@@ -6786,7 +6872,7 @@ def shell_github_dial_core(raw):
                 target.writestr(deepcopy(info), body, compress_type=info.compress_type, compresslevel=9)
     result = output.getvalue()
     output.close()
-    need(len(result) == 701534 and hashlib.sha256(result).hexdigest() == SHELL_GITHUB_PAYLOADS["D-R"]["coreSha256"],
+    need(len(result) == 705899 and hashlib.sha256(result).hexdigest() == SHELL_GITHUB_PAYLOADS["D-R"]["coreSha256"],
          "GitHub derivative ZIP reproduction differs; no alternative compressor is permitted")
     with zipfile.ZipFile(io.BytesIO(result), "r") as check:
         infos = check.infolist()
@@ -6815,14 +6901,14 @@ def shell_github_manifest(normal_raw, role):
          "GitHub N manifest schema/profile differs")
     rows = _D.records(normal["files"])
     need(len(rows) == 606 and normal["files"] == sorted(normal["files"], key=lambda row: row["path"])
-         and rows["core.zip"] == {"path": "core.zip", "size": 706266, "sha256": SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]}
+         and rows["core.zip"] == {"path": "core.zip", "size": 710642, "sha256": SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]}
          and rows["github-ca.pem"] == {"path": "github-ca.pem", "size": 240216, "sha256": SHELL_GITHUB_PAYLOADS["N"]["caSha256"]}
          and hashlib.sha256(canonical(normal["files"])[:-1]).hexdigest() == normal["inventorySha256"],
          "GitHub N complete inventory differs")
     if role == "N":
         return normal_raw
     changed = deepcopy(normal)
-    replacements = {"core.zip": {"path": "core.zip", "size": 701534, "sha256": SHELL_GITHUB_PAYLOADS[role]["coreSha256"]}}
+    replacements = {"core.zip": {"path": "core.zip", "size": 705899, "sha256": SHELL_GITHUB_PAYLOADS[role]["coreSha256"]}}
     if role == "D-S":
         replacements["github-ca.pem"] = {"path": "github-ca.pem", "size": 761, "sha256": SHELL_GITHUB_PAYLOADS[role]["caSha256"]}
     changed["files"] = [replacements.get(row["path"], row) for row in changed["files"]]
@@ -6920,7 +7006,7 @@ def _shell_github_materials_prepare(value, proof, normal, normal_maps):
     need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES)
          and _tree(PREFIX / M, M, published=True) == normal, "GitHub N original changed before derivative construction")
     normal_raw = read(PREFIX / M / "manifest.json", 85440)
-    core = shell_github_dial_core(read(PREFIX / M / "core.zip", 706266))
+    core = shell_github_dial_core(read(PREFIX / M / "core.zip", 710642))
     for role in ("D-R", "D-S"):
         _shell_github_publish_payload(value, role, normal, core, normal_raw)
         need(_tree(PREFIX / M, M, published=True) == normal, "GitHub derivative construction changed N")

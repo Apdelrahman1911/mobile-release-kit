@@ -92,6 +92,42 @@ def reason(error):
     return "invalid-or-changed"
 
 
+def diagnostic_reason(error):
+    """Finite public labels only; never reflect exception text or path values."""
+    fixed = {
+        "parsed-body-correspondence", "parsed-original-changed", "original-owner-changed",
+        "original-binding-changed", "supplier-directory-role", "supplier-directory-type",
+        "supplier-directory-owner", "supplier-directory-permissions", "supplier-directory-open-changed",
+        "supplier-directory-post-changed", "supplier-file-role", "supplier-file-type",
+        "supplier-file-owner", "supplier-file-permissions", "supplier-file-links", "supplier-file-bound",
+        "supplier-file-open-changed", "supplier-file-grew", "supplier-file-short", "supplier-file-post-changed",
+        "public-directory-roster", "supplier-ca-root", "supplier-ca-directory", "supplier-ca-member",
+        "supplier-ca-roster-changed", "receipt-format", "receipt-roster", "image-duplicate", "image-object",
+        "image-field", "image-origin-url", "image-public-label", "image-known-fields-missing",
+        "image-array-shape", "image-correspondence",
+    }
+    shared = {
+        "Absolute native OS input required": "file-path",
+        "Unprotected native OS root": "file-ancestry",
+        "Native OS input link/ancestry bound": "file-ancestry-bound",
+        "Native OS input has a nonroot owner": "file-owner",
+        "Native OS input link changed/exceeded bound": "file-link",
+        "Native OS input has nonordinary/writable/special ancestry": "file-ancestry",
+        "Resolved native OS input differs": "file-binding",
+        "Native OS input is not an ordinary file": "file-type-or-links",
+        "Native OS ancestry changed while reading": "file-ancestry-changed",
+        "Native OS link changed while reading": "file-link-changed",
+        "Native OS input binding changed": "file-binding-changed",
+    }
+    value = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+    if isinstance(error, ValueError):
+        if value in fixed:
+            return value
+        if value in shared:
+            return shared[value]
+    return reason(error)
+
+
 class Reader:
     """Accounting for this finite observation only; not a new command owner."""
 
@@ -99,6 +135,7 @@ class Reader:
         self.s = publisher
         self.deadline = deadline
         self.remaining = READ_LIMIT
+        self.phase = "observation"
 
     def point(self):
         if time.monotonic() >= self.deadline:
@@ -124,13 +161,17 @@ class Reader:
 
     def file(self, name, limit, parse=None):
         # All callers supply a fixed path or a bounded public distro CA member.
+        self.phase = "file-bind"
         before = self.charged(limit, lambda bound: self._record(name, bound))
         result = {"status": "observed", "file": before}
         if parse is not None:
+            self.phase = "file-body"
             raw = self.charged(limit, lambda bound: self._body(before["path"], bound), overread=1)
             need(len(raw) == before["size"] and hashlib.sha256(raw).hexdigest() == before["sha256"],
                  "parsed-body-correspondence")
+            self.phase = "file-parse"
             result["data"] = parse(raw)
+            self.phase = "file-rebind"
             after = self.charged(limit, lambda bound: self._record(name, bound))
             need(self.s.D.same(before, after), "parsed-original-changed")
         return result
@@ -138,8 +179,8 @@ class Reader:
     def _record(self, name, bound):
         row = self.s.protected_host_file(Path(name), bound)
         item = Path(row["path"]).lstat()
-        need(item.st_uid == item.st_gid == 0 and list(self.s.D.state(item)) == row["identity"],
-             "original-owner-changed")
+        need(item.st_uid == item.st_gid == 0, "original-owner-changed")
+        need(list(self.s.D.state(item)) == row["identity"], "original-binding-changed")
         return {**row, "uid": 0, "gid": 0, "mode": stat.S_IMODE(item.st_mode)}, row["size"]
 
     def _body(self, name, bound):
@@ -155,8 +196,9 @@ class Reader:
         with ExitStack() as closes:
             for part in ("/", *Path(name).parts[1:]):
                 before = os.stat(part, dir_fd=parent, follow_symlinks=False)
-                need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                     and not before.st_mode & 0o7022, "supplier-directory-type")
+                need(stat.S_ISDIR(before.st_mode), "supplier-directory-type")
+                need(before.st_uid == before.st_gid == 0, "supplier-directory-owner")
+                need(not before.st_mode & 0o7022, "supplier-directory-permissions")
                 fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                              dir_fd=parent)
                 try:
@@ -190,9 +232,11 @@ class Reader:
         def observe(bound):
             with self.ca_namespace(str(path.parent)) as (parent, binding, closes):
                 before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
-                need(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 0
-                     and not before.st_mode & 0o7022 and before.st_nlink == 1
-                     and 0 < before.st_size <= bound, "supplier-file-type")
+                need(stat.S_ISREG(before.st_mode), "supplier-file-type")
+                need(before.st_uid == before.st_gid == 0, "supplier-file-owner")
+                need(not before.st_mode & 0o7022, "supplier-file-permissions")
+                need(before.st_nlink == 1, "supplier-file-links")
+                need(0 < before.st_size <= bound, "supplier-file-bound")
                 fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
                              dir_fd=parent)
                 try:
@@ -271,6 +315,31 @@ def license_ids(raw):
     return {"existingIds": ids, "originProven": False, "newConsent": False}
 
 
+def image_array_identity(value):
+    """The documented runner-images ubuntu24/x64 report, not arbitrary JSON."""
+    need(len(value) == 2 and all(type(row) is dict and set(row) == {"group", "detail"} for row in value)
+         and [row["group"] for row in value] == ["Operating System", "Runner Image"], "image-array-shape")
+    details = [row["detail"] for row in value]
+    need(all(type(item) is str and 0 < len(item) <= 2048 and item.isascii()
+             and all(c == "\n" or 32 <= ord(c) < 127 for c in item) for item in details), "image-field")
+    os_lines, lines = (item.split("\n") for item in details)
+    need(1 <= len(os_lines) <= 8 and all(os_lines) and len(lines) == 4
+         and all(line.startswith(prefix) for line, prefix in zip(lines,
+             ("Image: ", "Version: ", "Included Software: ", "Image Release: "))), "image-array-shape")
+    name, version, software, release = (line.split(": ", 1)[1] for line in lines)
+    os_name = " ".join(os_lines)
+    need(len(os_name) <= 512 and re.fullmatch(r"[A-Za-z0-9 ._()+\-/]+", os_name), "image-public-label")
+    need(name == "ubuntu-24.04" and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", version),
+         "image-correspondence")
+    build = ".".join(version.split(".")[:2])
+    need(software == "https://github.com/actions/runner-images/blob/ubuntu24/" + build
+         + "/images/ubuntu/Ubuntu2404-Readme.md"
+         and release == "https://github.com/actions/runner-images/releases/tag/ubuntu24%2F" + build,
+         "image-origin-url")
+    return {"identity": {"os_name": os_name, "image_name": name, "image_version": version,
+                         "image_url": software, "image_release": release}, "producerExecutionProven": False}
+
+
 def image_identity(raw):
     # Do not reflect arbitrary JSON from even this public metadata file.
     def unique(pairs):
@@ -280,6 +349,8 @@ def image_identity(raw):
             result[key] = value
         return result
     value = json.loads(raw, object_pairs_hook=unique)
+    if type(value) is list:
+        return image_array_identity(value)
     need(type(value) is dict, "image-object")
     result = {}
     for key in ("image_version", "image_name", "os_name", "os_version", "image_url", "image_release"):
@@ -323,14 +394,18 @@ def package_status(raw):
 
 
 def supplier_cas(reader):
+    reader.phase = "ca-root"
     root = reader.directory(CA_ROOT)
     need(root["status"] == "observed" and root["names"] == ["mozilla"], "supplier-ca-root")
+    reader.phase = "ca-mozilla"
     directory = reader.directory(CA_ROOT + "/mozilla")
     need(directory["status"] == "observed" and directory["names"], "supplier-ca-directory")
     rows = []
     for name in directory["names"]:
+        reader.phase = "ca-member"
         need(name.endswith(".crt"), "supplier-ca-member")
         rows.append(reader.ca_file(CA_ROOT + "/mozilla/" + name))
+    reader.phase = "ca-final"
     need(reader.s.D.same(reader.directory(CA_ROOT), root)
          and reader.s.D.same(reader.directory(CA_ROOT + "/mozilla"), directory), "supplier-ca-roster-changed")
     return {"status": "observed", "root": root, "directory": directory, "files": rows,
@@ -422,6 +497,7 @@ def collect(publisher, run, deadline):
     observations.update({name: {"status": "not-observed"} for name, _ in tasks})
     need(len(observations) == len(tasks) <= 128, "observation-roster")
     for name, action in tasks:
+        reader.phase = "observation"
         try:
             reader.point()
             row = action()
@@ -440,9 +516,13 @@ def collect(publisher, run, deadline):
         except Stopped as error:
             record["stopped"] = error.args[0]
             observations[name] = {"status": "unavailable", "reason": error.args[0]}
+            if name in {"supplierCaInputs", "sdkLicense", "imageGeneration"}:
+                observations[name].update(phase=reader.phase, refusal=error.args[0])
             break
         except (OSError, ValueError, UnicodeError, KeyError, RecursionError) as error:
             observations[name] = {"status": "unavailable", "reason": reason(error)}
+            if name in {"supplierCaInputs", "sdkLicense", "imageGeneration"}:
+                observations[name].update(phase=reader.phase, refusal=diagnostic_reason(error))
     record["androidChargedReadBytes"] = READ_LIMIT - reader.remaining
     return record
 

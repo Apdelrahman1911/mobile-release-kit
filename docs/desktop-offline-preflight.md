@@ -4,9 +4,9 @@
 
 **Run offline checks (Android)** is selected only for the fixed installed Linux
 x86_64 engineering build (`x86_64-unknown-linux-gnu`) with manifest anchor
-`556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417`
+`8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66`
 and protocol anchor
-`860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e`.
+`083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
 Actual runtime admission additionally requires kernel `6.17.0-1022-azure`.
 Other profiles, macOS and Windows remain unavailable. This is not portable Linux,
 cross-platform or standalone-distribution qualification.

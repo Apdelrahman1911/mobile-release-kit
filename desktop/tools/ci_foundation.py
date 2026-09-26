@@ -265,7 +265,7 @@ CONVENTIONAL_PREPARE_INPUTS: dict | None = {
     }
 }
 # Current payload authority, separate from the unchanged H supplier admission above.
-# Current composed source:106 core leaves, six fixed bootstraps, CA and
+# Current composed source:108 core leaves, six fixed bootstraps, CA and
 # the reviewed current preparer. Never replace this closed roster with
 # a discovered checkout inventory or H's historical core-source-files.json.
 CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
@@ -288,7 +288,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9436,"sha256":"860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"},
+    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9464,"sha256":"083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py","size":5794,"sha256":"b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py","size":6574,"sha256":"0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc"},
     {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py","size":19517,"sha256":"1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b"},
@@ -314,8 +314,8 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
     {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
     {"path":"/work/inputs/core-source/src/mobile_release/android_zip_integrity.py","size":15169,"sha256":"80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":8616,"sha256":"cf5f6fea61f9612e8b584d615fcf46ce4f498058592a3213d4e010c63835009f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16373,"sha256":"7918786377fdffdc7b0ce07ffcbb99fc75b9297d4ab1cdde40979ee0ee684f90"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":9264,"sha256":"df0553cbacb757af487715c1f235469be8d72e5044820a28cb454bc7b2abc879"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16989,"sha256":"d86e658d861d37c8e4f43095a5de71cd9607b0eb1260ebc1de76e64ff02b3366"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_catalog.py","size":15772,"sha256":"72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py","size":19158,"sha256":"834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_guide.py","size":7905,"sha256":"bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb"},
@@ -323,13 +323,14 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/api/_github_connection.py","size":16515,"sha256":"a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_github_setup.py","size":12630,"sha256":"87fa322b2fcd02e399eff4b49eb15ebc84864f1fdcd25b3f958944ea21f9f825"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_json.py","size":2851,"sha256":"84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/_lifecycle_evidence.py","size":8942,"sha256":"f094cdd8af9418c44e69f4c7578349251511d5857af2b22ff74cf3e8ee918618"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_metadata_text.py","size":10878,"sha256":"759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_preview.py","size":10213,"sha256":"ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_release_version.py","size":8391,"sha256":"54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot.py","size":33629,"sha256":"54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py","size":19049,"sha256":"c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py","size":26733,"sha256":"a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":27721,"sha256":"0594cbd14f91fb85a6d8d9769f294bc9f75b692e9cb2ff7fe363d4fb51efd5aa"},
+    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":29210,"sha256":"28430514789c40b873e27efc0c8af0c23d1d71d38bff131d59df7e3509faae0c"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json","size":39128,"sha256":"7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/data/field-help.json","size":28837,"sha256":"890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16"},
     {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json","size":9225,"sha256":"75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714"},
@@ -354,6 +355,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
     {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py","size":24700,"sha256":"a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0"},
     {"path":"/work/inputs/core-source/src/mobile_release/errors.py","size":749,"sha256":"26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"},
+    {"path":"/work/inputs/core-source/src/mobile_release/evidence_layout.py","size":2011,"sha256":"e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e"},
     {"path":"/work/inputs/core-source/src/mobile_release/github_workflow_edit.py","size":21086,"sha256":"cd059224ec5174ece0f0ddb5d74464a9df4497ac991bc3f86fa160f932d0dcaf"},
     {"path":"/work/inputs/core-source/src/mobile_release/init_transaction.py","size":88826,"sha256":"b19ee28073fd59a6903414ee7429a64e0b9dcf17864d0428009be646e93dda9c"},
     {"path":"/work/inputs/core-source/src/mobile_release/init_workspace_custody.py","size":33409,"sha256":"3a1ff617db9ecf54209e2b99daa5547b414b146a46bf8c655d0e5cdbb8b5296c"},
@@ -374,20 +376,20 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/metadata_text_edit.py","size":16301,"sha256":"e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815"},
     {"path":"/work/inputs/core-source/src/mobile_release/owned_process.py","size":7631,"sha256":"430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"},
     {"path":"/work/inputs/core-source/src/mobile_release/preflight.py","size":60891,"sha256":"d49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173"},
-    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":202867,"sha256":"50933fa89350e46e267854750bbd45ae3afc4efb0546013366d881f63cc94830"},
+    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":203226,"sha256":"30567c328615b0fd2825e51c08dbfdf82e8c83868ab1d4a8c8017af9330c5442"},
     {"path":"/work/inputs/core-source/src/mobile_release/release_version_edit.py","size":15399,"sha256":"2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167"},
     {"path":"/work/inputs/core-source/src/mobile_release/reporting.py","size":7628,"sha256":"4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900"},
     {"path":"/work/inputs/core-source/src/mobile_release/stores.py","size":51125,"sha256":"287135d7177200ada0ba0b64b71fa7ce5c533cb8d8b32af6ccfaaa3e2db28c53"},
     {"path":"/work/inputs/core-source/src/mobile_release/toolchain_policy.py","size":517,"sha256":"1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61"},
     {"path":"/work/inputs/core-source/src/mobile_release/tooling.py","size":7495,"sha256":"3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d"},
     {"path":"/work/inputs/core-source/src/mobile_release/version_text.py","size":10275,"sha256":"408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":129517,"sha256":"47cd5e408b42f67fe9ad43bb0c11f04c9b2a4b542304f55206bbfce4494f74eb"},
+    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":128551,"sha256":"095d2c7dbca450c6dbbb79c9cdd4332073a134aa3150cc51ce2d3b5bb378dd52"},
     {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
-    "manifestSha256": "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
+    "manifestSha256": "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66",
     "preparedArtifact": {
-        "artifactId": "10839621457",
+        "artifactId": "10905226275",
         "attempt": 1,
         "files": [
             {
@@ -582,17 +584,17 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "outer.json",
-                "sha256": "0db5fec9210037429663643c09f86013e730c78548d4ab5ccc2b84183b906bba",
+                "sha256": "aefdc3d140d6668ca514a13a43de74d8f0341a825edc27d33f7145b5f5e558f8",
                 "size": 327
             },
             {
                 "path": "preparation.json",
-                "sha256": "10fac89bcc57732ef667703e2fb33b188c23352d9e5b9f214acf0f3b105876c3",
+                "sha256": "c80f014a206831662b70f570278ba3e425215e8b0e7eedec9e11cb9050b34902",
                 "size": 2539
             },
             {
                 "path": "prepared-runtime.tar",
-                "sha256": "881edca0ee48e4aec909a3fdac35ed89b6c253daf303b48294ba028226bc9933",
+                "sha256": "098727e8030da5d9e2905475e4c4dcf51348d228f054ec7c2f9c9e887cd6c5a6",
                 "size": 28815360
             },
             {
@@ -607,8 +609,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "source-bindings.json",
-                "sha256": "bd487a7103a29860fbccdabaf05ac34d8811d20da44fc1a878bbad4ce30d93d8",
-                "size": 18814
+                "sha256": "c2c151f26a9b436cdec8f3ce602ac394bdf8b6bd54354f49a927bc4bd588df2b",
+                "size": 19146
             },
             {
                 "path": "source-kit/hosted-evidence.tar",
@@ -627,10 +629,10 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             }
         ],
         "repository": "Apdelrahman1911/mobile-release-kit",
-        "runId": "36074195702",
-        "sourceSha": "0deaed83c3038433926db6110271f845b72f5369"
+        "runId": "36238334234",
+        "sourceSha": "095e776eadaf7014f5c125459585753bf54003c3"
     },
-    "protocolSha256": "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
+    "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 }
 # H's explicit trusted GitHub-hosted platform boundary, not a claimed complete
 # interpreter closure. Each image selects its own exact {path,size,sha256} body.

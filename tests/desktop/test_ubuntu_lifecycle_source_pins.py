@@ -101,7 +101,7 @@ class LifecycleSourcePinTests(unittest.TestCase):
         self.assertEqual(len(branches), 1)
         profiles = {
             "verify/desktop-ubuntu-publication": ("  publisher-helpers:", 1),
-            "verify/desktop-installed-shell, verify/desktop-shell-host-metadata": ("  compile:", 2),
+            "verify/desktop-installed-shell, verify/desktop-installed-github-readonly, verify/desktop-installed-github-normal-boundaries, verify/desktop-shell-host-metadata": ("  compile:", 2),
         }
         self.assertIn(branches[0], profiles, "Unknown or mixed publication route")
         job_header, pin_count = profiles[branches[0]]

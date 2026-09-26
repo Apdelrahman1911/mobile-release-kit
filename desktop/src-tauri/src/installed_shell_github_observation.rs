@@ -775,7 +775,7 @@ impl Control {
         serde_json::to_vec(&json!({
             "schemaVersion":1,"fixture":"github-readonly-installed-v1","case":self.case.name(),"sourceCommit":option_env!("GITHUB_SHA")?,
             "normalManifestSha256":N,"productManifestSha256":self.case.manifest(),
-            "protocolSha256":"860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e",
+            "protocolSha256":"083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
             "peerSha256":if self.case.no_peer(){None}else{Some(PEER_SHA)},
             "project":{"cancelSettled":shell.cancelled&&shell.pickers[0].settled(false),
                 "registered":shell.selected&&shell.pickers[1].settled(true)&&shell.project_witness.is_some(),

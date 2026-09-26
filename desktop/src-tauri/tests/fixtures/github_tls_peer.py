@@ -52,9 +52,9 @@ AUTH_ALERTS = frozenset({"TLSV1_ALERT_UNKNOWN_CA", "SSLV3_ALERT_BAD_CERTIFICATE"
 
 INSTALLED_SCOPE = "github-installed-tls-peer-v1"
 INSTALLED_MODE = "github-readonly-installed-tls-v1"
-NORMAL_MANIFEST = "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"
-REAL_DIAL_MANIFEST = "5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90"
-SYNTHETIC_DIAL_MANIFEST = "fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359"
+NORMAL_MANIFEST = "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66"
+REAL_DIAL_MANIFEST = "d0bbe240f5301938b211705e5a250ee338410b79ea088b2af02de9e11db7ee34"
+SYNTHETIC_DIAL_MANIFEST = "0f6b03dcf385646611f22cdfdc365e50bcbc51306d938bab4b0cea6cb94c3e42"
 # Closed observer identity -> original finite script. No endpoint/CA/input path
 # selector is accepted. Normal DNS alone uses the fixed nonresponding UDP peer.
 INSTALLED_CASES = {
