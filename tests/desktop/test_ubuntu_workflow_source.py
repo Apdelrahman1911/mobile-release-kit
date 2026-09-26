@@ -115,7 +115,8 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertIn("        id: compile\n", compiler)
         self.assertIn("        id: upload\n", upload)
         self.assertIn("        id: prepare_native\n", native_owner)
-        gate = ("        if: github.ref == 'refs/heads/verify/desktop-installed-shell'"
+        gate = ("        if: (github.ref == 'refs/heads/verify/desktop-installed-shell'"
+                " || github.ref == 'refs/heads/verify/desktop-installed-github-readonly')"
                 " && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'\n")
         for section in (route, native_owner, download, consumer):
             self.assertIn(gate, section)
@@ -390,6 +391,65 @@ class JvmNamespaceWorkflowSource(unittest.TestCase):
                       'read_file(directories["/usr/bin"][0], name, 16 << 20)',
                       "same(identity(os.fstat(fd)), original)", "same(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), original)"):
             self.assertIn(token, program)
+
+
+
+class InstalledGitHubWorkflowSourceContracts(unittest.TestCase):
+    def test_github_is_one_shared_lane_not_a_jdk_producer_or_normal_destination_action(self):
+        workflow = WORKFLOW.read_text()
+        ref = "refs/heads/verify/desktop-installed-github-readonly"
+        self.assertIn("branches: [verify/desktop-installed-shell, verify/desktop-installed-github-readonly,", workflow)
+        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9_-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["compile"])
+        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        compile_steps = [step for step in sections if "\n        id: compile\n" in step]
+        self.assertEqual(len(compile_steps), 1)
+        self.assertIn("without executing either\n", compile_steps[0])
+        self.assertIn(ref, compile_steps[0])
+        consumers = [step for step in sections if step.startswith(
+            "Observe only the fixed installed shell route with original finality\n")]
+        self.assertEqual(len(consumers), 1); self.assertIn(ref, consumers[0])
+        jdk = next(step for step in sections if step.startswith("Prepare the fixed JDK17 pair"))
+        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell'\n", jdk)
+        self.assertNotIn(ref, jdk)
+        for forbidden in ("workflow_dispatch:", "github-normal-negative", "ubuntu-runtime-publisher",
+                          "build_conventional_runtime.py", "shell-github-observer", "continue-on-error:"):
+            self.assertNotIn(forbidden, workflow)
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
+                         [hashlib.sha256(lifecycle).hexdigest()] * 2)
+        text = lifecycle.decode()
+        self.assertIn('unit = root_path(value).name + ".service"', text)
+        self.assertIn('group = "/system.slice/" + unit', text)
+        self.assertIn('props["ControlGroup"] == group and _kernel("/proc/self/cgroup") == "0::" + group + "\\n"', text)
+        # These text contracts do not establish a real service/GUI observation.
+
+
+class InstalledGitHubNormalBoundaryWorkflowSourceContracts(unittest.TestCase):
+    def test_pair_ref_reuses_single_compiler_consumer_and_keeps_nft_host_gate_closed(self):
+        workflow = WORKFLOW.read_text()
+        ref = "refs/heads/verify/desktop-installed-github-normal-boundaries"
+        self.assertIn("verify/desktop-installed-github-normal-boundaries,", workflow)
+        self.assertIn(ref + ":compile|", workflow)
+        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        for identity in ("compile", "prepare", "prepare_native"):
+            steps = [step for step in sections if "\n        id: " + identity + "\n" in step]
+            self.assertEqual(len(steps), 1)
+            self.assertIn(ref, steps[0])
+        consumers = [step for step in sections if step.startswith(
+            "Observe only the fixed installed shell route with original finality\n")]
+        self.assertEqual(len(consumers), 1)
+        self.assertIn(ref, consumers[0])
+        jdk = next(step for step in sections if step.startswith("Prepare the fixed JDK17 pair"))
+        self.assertNotIn(ref, jdk)
+        self.assertIn("SOURCE host tuple gate is closed until reviewed", workflow)
+        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9_-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["compile"])
+        for forbidden in ("workflow_dispatch:", "continue-on-error:", "nft --check", "iptables ", "modprobe ",
+                          " install nftables", "github-normal-negative"):
+            self.assertNotIn(forbidden, workflow)
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        self.assertIn(b"SHELL_GITHUB_BOUNDARY_HOST_PROFILE = None\n", lifecycle)
+        self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
+                         [hashlib.sha256(lifecycle).hexdigest()] * 2)
 
 
 if __name__ == "__main__":

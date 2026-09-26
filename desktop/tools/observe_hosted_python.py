@@ -9,7 +9,11 @@ METADATA_REF = 'refs/heads/verify/desktop-shell-host-metadata'
 SHELL_REF = 'refs/heads/verify/desktop-installed-shell'
 ROUTES = ((METADATA_REF, 'host-metadata-only', 'compile'),
           (SHELL_REF, 'compile', 'compile'),
-          (SHELL_REF, 'observe', 'compile'))
+          (SHELL_REF, 'observe', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-readonly', 'compile', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-readonly', 'observe', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-normal-boundaries', 'compile', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-normal-boundaries', 'observe', 'compile'))
 
 class Refused(Exception):
     pass

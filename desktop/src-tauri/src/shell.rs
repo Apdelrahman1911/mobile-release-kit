@@ -697,24 +697,36 @@ async fn github_connection_status(webview: Webview, request: tauri::ipc::Request
     let body = github_connection_body(&webview, &request)?;
     github_connection_wire::decode_command_value("github_connection_status", body)
         .map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))?;
-    Ok(state.document.github_connection_status())
+    let result = Ok(state.document.github_connection_status());
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Status, &result); }
+    result
 }
 #[tauri::command]
 async fn github_connection_connect_token(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
     // No await before native synchronous registration. Qualification/admission
     // is checked by that SAME document gate before its decoder copies a token.
-    state.document.github_connection_connect_token(github_connection_body(&webview, &request)?)
+    let result = state.document.github_connection_connect_token(github_connection_body(&webview, &request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Connect, &result); }
+    result
 }
 #[tauri::command]
 async fn github_connection_refresh(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
-    state.document.github_connection_refresh(github_connection_body(&webview, &request)?)
+    let result = state.document.github_connection_refresh(github_connection_body(&webview, &request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Refresh, &result); }
+    result
 }
 #[tauri::command]
 async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
-    state.document.github_connection_disconnect(github_connection_body(&webview, &request)?)
+    let result = state.document.github_connection_disconnect(github_connection_body(&webview, &request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Disconnect, &result); }
+    result
 }
 
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
@@ -986,6 +998,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             let status = document.status();
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
             let status = document.github_connection_status();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
             let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
             if let Ok(status) = document.environment_diagnostics_status() {
                 if diagnostics_revision != Some(status.status_revision) {
@@ -1062,6 +1076,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
             // business operation. Windows extends this SAME finality path with
             // retained original-STA controller/browser/UDF cleanup below.
             if document.can_exit() {
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() {
+                    if !q.github_exit(&app).await || !document.can_exit() { return; }
+                }
                 if !settle_relay(&app).await || !document.can_exit() { return; }
                 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
                 if !owned_windows::settle_for_exit(&app, &document).await || !document.can_exit() { return; }
@@ -2038,9 +2056,12 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         .setup(move |app| {
             diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n");
             let resources = app.path().resource_dir()?;
-            let bridge = Arc::new(DesktopBridge::new(resources));
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let observation = app.try_state::<Arc<installed_observation::Observation>>().map(|q| q.inner().clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let bridge = Arc::new(match &observation { Some(q) => q.build_bridge(resources)?, None => DesktopBridge::new(resources) });
+            #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            let bridge = Arc::new(DesktopBridge::new(resources));
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             if let Some(q) = &observation { q.attach(&bridge.supervisor)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

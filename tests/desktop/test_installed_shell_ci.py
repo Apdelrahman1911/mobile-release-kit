@@ -541,7 +541,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                      and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
         names = ast.literal_eval(paths)
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(len(names), 42)
+        self.assertEqual(len(names), 59)
         self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
             "edit_owner", "release_version_edit_commands", "release_version_edit_protocol", "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
             "supervisor", "installed_shell_shutdown_observation", "error", "protocol", "installed_runtime",
@@ -551,6 +551,14 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertTrue({"desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
                          "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
                          "desktop/src/releaseVersionEditController.ts"} <= set(names))
+        self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
+            "github_connection_session", "github_tls_peer_owner", "installed_shell_github_observation", "hosted_tests")} <= set(names))
+        self.assertTrue({"desktop/src/githubConnectionProtocol.ts", "desktop/src/bridge.ts",
+                         "desktop/src/components/GitHubConnection.tsx", "desktop/tests/github-connection.test.mjs",
+                         "desktop/src-tauri/tests/fixtures/github_tls_peer.py", "desktop/tools/hosted_glibc_policy.py",
+                         "desktop/tools/observe_hosted_python.py"} <= set(names))
+        self.assertTrue({"desktop/src-tauri/tests/fixtures/github_tls/" + name for name in (
+            "api-expired.pem", "api-valid.pem", "other-root-ca.pem", "root-ca.pem", "server-key.pem", "wrong-san.pem")} <= set(names))
 
     def test_observer_module_roster_matches_production_supported_platforms(self):
         # The actual-main observer has its own crate root. Library compilation
@@ -2955,7 +2963,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure()))", installed)
         for label in ("SelectionProfileClosed", "SelectionCompileBinding", "SelectionMethodOutsideProfile"):
             self.assertIn("LinuxPassiveCause::" + label, runtime)
-        acquisition = supervisor.split("fn acquire_passive_original(", 1)[1].split("async fn settle_passive(", 1)[0]
+        acquisition = supervisor.split("fn acquire_passive_original(", 1)[1].split("// Closed dispatch over the same registered originals", 1)[0]
         self.assertIn("slots.capability().map_err(AcquisitionError::capability)?", acquisition)
         self.assertIn("LinuxPassiveCause::FinalClaimOwnerGate", acquisition)
         after_claim = acquisition.split("prepared.runtime.claim_once().map_err(AcquisitionError::final_claim)?;", 1)[1]
@@ -4056,6 +4064,103 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn('target_os = "linux"', entry)
         # The source contract is not a substitute for the next actual shared
         # normal/observer compiler gate or runtime FD behavior on the host.
+
+
+
+class InstalledGitHubReadOnlyRouteContracts(unittest.TestCase):
+    def test_both_fixed_shell_refs_use_only_compile_and_observe_in_the_same_job(self):
+        common = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                  "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_JOB": "compile",
+                  "MRK_UBUNTU_PUBLICATION_VERIFY": "1", "GITHUB_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40,
+                  "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2",
+                  "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit"}
+        for ref in (S.SHELL_REF, S.SHELL_GITHUB_REF):
+            for case in ("compile", "observe"):
+                env = {**common, "GITHUB_REF": ref, "MRK_INSTALLED_SHELL_CASE": case}
+                self.assertEqual(S.route(env), "a" * 40)
+                for change in ({"GITHUB_JOB": "native"}, {"MRK_INSTALLED_CASE": "positive"},
+                               {"MRK_INSTALLED_SHELL_CASE": "github-normal-negative"},
+                               {"MRK_INSTALLED_SHELL_CASE": True}, {"GITHUB_REF": "refs/heads/main"},
+                               {"RUNNER_ENVIRONMENT": "self-hosted"}, {"MRK_UBUNTU_PUBLICATION_VERIFY": False}):
+                    with self.subTest(ref=ref, case=case, change=change), self.assertRaises(S.D.Refused):
+                        S.route({**env, **change})
+
+    def test_github_branch_uses_the_same_compiler_and_one_service_without_tools_preparation(self):
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        compile_body = source.split("def verify_installed_shell_compile():", 1)[1].split("\ndef ", 1)[0]
+        self.assertEqual(compile_body.count("shell_compile_argv("), 1)
+        argv = S.shell_compile_argv("/compiler", Path("/source"), Path("/target"))
+        self.assertEqual(argv[:2], ["/compiler", "build"])
+        self.assertEqual(S.SHELL_FEATURES, ["custom-protocol", "desktop-shell"])
+        self.assertEqual(argv[argv.index("--features") + 1], "desktop-shell,custom-protocol")
+        self.assertIn("--no-default-features", argv)
+        body = source.split("def verify_installed_shell():", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)', body)
+        self.assertIn("tools_inputs = None if github else shell_tools_inputs_for_observation()", body)
+        self.assertEqual(body.count('check.command("root-shell-connection"'), 1)
+        self.assertEqual(body.count("lifecycle.verify_service_result("), 1)
+        self.assertLess(body.index("lifecycle.verify_service_result("), body.index("shell_github_observation("))
+        branch = body.split("        if github:\n            github_readonly =", 1)[1].split("\n        project_draft =", 1)[0]
+        for forbidden in ("shell_tools_inputs_for_observation(", "shell_project_draft_observation(", "shell_compile_argv("):
+            self.assertNotIn(forbidden, branch)
+        self.assertIn('"normalDestinationAction": normal_boundaries', branch)
+        self.assertIn('"normalTransportPositive": False', branch)
+        self.assertIn('"compilerRerun": False', branch)
+        self.assertTrue(branch.rstrip().endswith("return"))
+
+
+class InstalledGitHubNormalBoundaryRouteContracts(unittest.TestCase):
+    def test_read_only_host_material_refusal_precedes_package_and_compiler_work_in_same_consumer(self):
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        body = source.split("def verify_installed_shell_compile():", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('if os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF:', body)
+        collect = body.index("lifecycle.shell_github_boundary_host_materials()")
+        retained = body.index('D.write(public / "github-boundary-host-materials.json"')
+        admitted = body.index("lifecycle._github_boundary_host_admit(materials)")
+        self.assertLess(body.index("check_source_pins(source)"), collect)
+        self.assertLess(collect, retained)
+        self.assertLess(retained, admitted)
+        self.assertLess(admitted, body.index("prepared = package_inputs("))
+        self.assertLess(admitted, body.index('check.command("rust-acquire"'))
+        self.assertEqual(body.count("shell_compile_argv("), 1)
+        interval = body[collect:admitted]
+        self.assertIn('"compilerStarted": False', interval)
+        self.assertIn('"runtimeSelfAdmission": False', interval)
+        for forbidden in ("run_owned(", "check.command(", "Popen(", "getaddrinfo(", "nft --check"):
+            self.assertNotIn(forbidden, interval)
+        consumer = source.split("def verify_installed_shell():", 1)[1].split("\ndef ", 1)[0]
+        self.assertEqual(consumer.count('check.command("root-shell-connection"'), 1)
+        self.assertIn('shell["githubReadOnly"] = lifecycle.shell_github_selection(github_profile)', consumer)
+        self.assertIn("runner_uid=os.getuid(), runner_gid=os.getgid()", consumer)
+
+    def test_fixed_new_ref_has_only_existing_compile_observe_and_material_helper_routes(self):
+        repository, ref, sha = "Apdelrahman1911/mobile-release-kit", S.SHELL_GITHUB_BOUNDARY_REF, "a" * 40
+        common = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                  "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_JOB": "compile",
+                  "MRK_UBUNTU_PUBLICATION_VERIFY": "1", "GITHUB_SHA": sha, "MRK_PUSH_EVENT_AFTER": sha,
+                  "GITHUB_WORKFLOW_SHA": sha, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2",
+                  "GITHUB_REPOSITORY": repository, "GITHUB_REF": ref,
+                  "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref,
+                  "ImageOS": "ubuntu24", "ImageVersion": "20260922.1.1"}
+        policy, python_data = S.local("hosted_glibc_policy"), S.local("observe_hosted_python")
+        for case in ("compile", "observe"):
+            env = {**common, "MRK_INSTALLED_SHELL_CASE": case}
+            self.assertEqual(S.route(env), sha)
+            self.assertEqual(python_data.context(env)["GITHUB_REF"], ref)
+            if case == "compile":
+                self.assertEqual(policy.context(env)["GITHUB_REF"], ref)
+            else:
+                with self.assertRaises(policy.Refused):
+                    policy.context(env)
+            for change in ({"GITHUB_REF": ref + "-arbitrary"}, {"MRK_INSTALLED_SHELL_CASE": "github-normal-negative"},
+                           {"GITHUB_JOB": "boundary"}, {"GITHUB_EVENT_NAME": "workflow_dispatch"},
+                           {"MRK_INSTALLED_SHELL_CASE": True}):
+                with self.subTest(case=case, change=change), self.assertRaises((S.D.Refused, KeyError)):
+                    S.route({**env, **change})
+                with self.assertRaises(python_data.Refused):
+                    python_data.context({**env, **change})
+                with self.assertRaises(policy.Refused):
+                    policy.context({**env, **change})
 
 
 if __name__ == "__main__":

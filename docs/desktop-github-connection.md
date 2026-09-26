@@ -1,15 +1,25 @@
 # GitHub connection and read-only observations
 
-## Current status: integrated read-only connection source, not enabled
+## Current status: unpublished installed-Linux integration candidate
 
-The Desktop application does **not yet provide a usable GitHub login**. The
-source now includes the guided connection UI, fixed native commands, session
-lifecycle, original-process supervisor integration, private engine protocol and
-fixed-host HTTPS transport. These extend the earlier credential-free guidance
-and pure projector; they are not just an unconnected UI proposal. Native session
-and TLS qualification gates nevertheless remain false. Ordinary builds refuse
-credential admission before copying a token into the native session, and cannot
-use a test fixture to activate the connection.
+The candidate connects the existing guided UI to a **separate installed Linux
+session-only, read-only GitHub profile**. This is source integration, **not yet
+verified shipping availability**. Its exact-source independent implementation,
+installed native and delivery checks remain required.
+
+Only the normal x86_64 GNU Linux shell/custom-protocol build with the fixed
+runtime manifest/protocol and admitted Ubuntu/kernel profile can expose entry.
+The native document checks that same selector before copying a token, then its
+original Supervisor repeats selection and retains installed custody through
+inspection, one-use transfer/claim, child wait/IO and original settlement.
+Passive/workflow/asset authority cannot substitute for GitHub custody. The
+historical development GitHub/TLS gates stay closed; macOS/Windows GitHub
+connection is not enabled by this change.
+
+No GitHub App/publisher registration or GNOME credential vault is required for
+a session-only token. The selected project's original native registration and
+generation still are required. App/device login and persistent credential
+storage remain separate, unavailable features.
 
 The exact commit `d84a15db77e4776c5d89e23b87b868e21fb3a314` passed the
 [focused Linux native job](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/35299903903)
@@ -154,9 +164,12 @@ port. The observation interface has Status, Refresh, Disconnect and subscription
 methods, but no token field. A separate one-shot native handoff implements
 Connect; the controller never stores its token in public state. The fixed native
 port is wired, while preview/unavailable ports are never called. The exported
-entry-availability constant remains false and the component has no active
-credential input. Hypothetical available statuses in inert tests do not change
-any runtime capability.
+entry-availability constant indicates that the UI is implemented, not native
+qualification: input appears only with current core help, a selected project,
+the explicit repository and current native availability. A closed/lost native
+capability refuses the handoff. The native handler independently rechecks its
+gate before the one private copy. Hypothetical statuses in inert tests cannot
+change an actual runtime capability.
 
 The controller subscribes before its first retained Status read. Document,
 project-generation, target and service changes invalidate callbacks before
@@ -202,7 +215,7 @@ the subsequent gated native integration does not turn guidance into authority:
 1. **Core help only:** `api/_catalog.py` and `api/contracts.py` expose nullable
    `githubConnection` help. Only the fixed guide is read; unrelated errors still
    propagate. Projection is not registered as a query or network method.
-2. **Useful disabled UI:** `types.ts`, `bridge.ts` and `preview.ts` consume the
+2. **Guided, native-gated UI:** `types.ts`, `bridge.ts` and `preview.ts` consume the
    strict core guide. Missing/invalid additive help becomes null. `App.tsx` mounts
    the component on the GitHub page and attaches the fixed observation port.
    Native Status can explain an unavailable gate; a working observation port
@@ -249,13 +262,74 @@ promise erasure of allocator/serializer/OS copies.
 Preferred App/device login separately requires the owner's publisher registration,
 public client-ID/permissions/distribution binding and qualified fixed native
 browser/authentication flow. This increment invents none of those. Advanced
-session-only token development does not require a keyring or a publisher App,
+session-only token entry does not require a keyring or a publisher App,
 but still needs its own native qualification. Optional persistence needs a later
 qualified OS-keyring lifecycle; plaintext fallback is never allowed. Local
 Disconnect is not remote revocation; the fixed help gives manual GitHub Settings
 navigation without opening a browser or retaining a credential.
 
-## Verification boundaries
+## Installed candidate and verification boundaries
+
+The normal **N** material keeps the unchanged Python/core/bootstrap and real CA.
+An installed test route must distinguish separately inventoried **D-R** (test-only
+fixed loopback TCP dial, real CA) and **D-S** (that dial derivative with a
+synthetic CA); neither can be selected by the normal profile. The private
+installed-observer enum has only N/D-R/D-S. It carries a compile-anchored manifest
+into the **same GitHub original-custody inspection**; normal N discovery,
+catalogue and project registration do not change. Inspecting N and launching D
+is not permitted. No runtime renderer/argv/environment endpoint or CA selector
+is added. Strict certificate verification, api.github.com SNI/HTTP Host, parser, budgets and close accounting
+remain unchanged. The test listener uses the exclusive high loopback port18443,
+not private mount/network namespaces or the historical resolver-mount fixture.
+A collision refuses; it never authorizes adopting or stopping an unrelated peer.
+
+Loopback tests cannot establish real normal DNS-withholding or stalled remote
+TCP-connect deadlines. Historical development TLS evidence is not installed
+custody or GUI evidence. These obligations remain gaps until exact applicable
+evidence is reconciled. Any separately approved normal destination request uses
+only a literal public noncredential; it is not successful account authentication.
+No live request or native success is claimed by this source change.
+
+The additional normal-boundary candidate uses a **separate fixed two-case
+selection**, `github-readonly-installed-normal-boundaries-v1`, in the same
+targeted Ubuntu consumer. It does not rename, replace or claim a pass for the
+existing 22-case synthetic selection. Both selections require their own
+applicable native receipts before the remaining boundary gaps can be closed.
+
+- `github-dns-deadline` uses unchanged N/libc DNS. A retained nonresponding peer
+  binds only `127.0.0.53:18553`; the reviewed task-owned per-packet policy changes
+  only matching UDP destination port53 to18553. The resolver destination address,
+  source address and normal helper are unchanged. No NAT, shared resolver edit,
+  reply or cached translation is introduced. The first bounded actual question
+  source is joined to the original unreaped Child's UDP FD/inode/UID/endpoints,
+  not just a namespace-wide socket table. Later libc retry ports cannot replace
+  that first observation. Bare RD, trust-ad and bounded empty EDNS0 A/AAAA queries
+  are admitted; no response, TLS or HTTP is produced.
+- `github-connect-deadline` also uses unchanged N and ordinary DNS. The original
+  Child must actually be in TCP SYN_SENT to a nonloopback port443 destination
+  before its original operation deadline, with a positive owned acquisition-SYN
+  drop count. There is no peer, refusal/reset substitute, established socket,
+  TLS stall or public HTTP exchange. An inert literal never reaches a request.
+
+Every policy effect requires **both the original nonroot UID and original
+service cgroup**, not a shared runner UID alone. The DNS case requires zero
+HTTPS acquisition-SYN count. The policy must remain owned and unchanged until
+the original product/peer books settle; its deletion requires authenticated
+ownership/finality and an observed absence postcondition. Failure disposition
+must enter the original bounded StopPost route before missing-result or resource
+denial success gates, preserve the first error, and never delete colliding or
+uncertain policy. The existing command owner and its unknown/fatal refusal stay
+authoritative. Unknown ownership/finality closes later cases and requires actual
+disposable-runner retirement, not broader cleanup.
+
+These are SOURCE contracts, **not native evidence**. Actual resolver/NSS,
+nft executable/package, kernel selectors/packet path, conflict admission,
+original socket observations, original timeout and finality must all pass the
+reviewed disposable-hosted route. Unsupported or unknown material refuses; it
+does not authorize changing a shared host, weakening the normal profile,
+fabricating receipts or enabling production. Each inner receipt names only the
+normal boundary it observed; the other boundary remains explicitly unproved.
+
 
 Focused Python supplied-data, UI fake-port and Rust state/protocol tests protect
 projection, privacy, wire contracts and lifecycle decisions. The TypeScript

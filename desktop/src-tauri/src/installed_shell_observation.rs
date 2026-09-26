@@ -13,9 +13,11 @@ use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, I
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), SettledFailure }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), GitHub(github::Case), SettledFailure }
 #[path = "installed_tools_observation.rs"]
 pub(crate) mod commands;
+#[path = "installed_shell_github_observation.rs"]
+pub(crate) mod github;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline }
 impl SessionCase {
@@ -25,6 +27,7 @@ impl SessionCase {
 impl Case {
     fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } }
     fn commands(self) -> Option<commands::Case> { match self { Self::Commands(case) => Some(case), _ => None } }
+    fn github(self) -> Option<github::Case> { match self { Self::GitHub(case) => Some(case), _ => None } }
 }
 // A moved, private, one-use setup token, never renderer/environment authority.
 pub(crate) struct SessionAdmission { original: std::sync::Weak<Observation>, case: SessionCase }
@@ -49,7 +52,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step), GitHubReadOnly(github::Step),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -142,6 +145,7 @@ impl Step {
             Self::MetadataSave(step) => step.failure_line(),
             Self::VersionSave(step) => step.failure_line(),
             Self::Commands(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+            Self::GitHubReadOnly(step) => step.failure_line(),
         }
     }
 }
@@ -1165,6 +1169,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::MetadataSave => "shell-metadata-save-failure.labels",
         Case::VersionSave => "shell-version-save-failure.labels",
         Case::Commands(case) => case.failure_leaf(),
+        Case::GitHub(case) => case.failure_leaf(),
         Case::SettledFailure => "shell-settled-failure-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
@@ -3299,7 +3304,7 @@ fn saved_read_context(r: &Record) -> bool {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, start: Instant, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
-    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>,
+    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>, github: Option<Arc<github::Control>>,
 }
 impl Observation {
     fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
@@ -3309,6 +3314,7 @@ impl Observation {
                 Case::WorkflowApply => path.with_file_name("workflow-project"),
                 Case::Session(case) => path.with_file_name(case.name()).join("project"),
                 Case::Commands(case) => path.with_file_name(case.name()).join("project"),
+                Case::GitHub(_) => path.with_file_name("github-project"),
                 Case::MetadataSave => path.with_file_name("metadata-project"),
                 Case::VersionSave => path.with_file_name("version-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
@@ -3316,7 +3322,7 @@ impl Observation {
         Self { case, main: std::thread::current().id(), start, end,
             failed: AtomicBool::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
-            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), record: Mutex::new(Record {
+            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), github: case.github().map(github::Control::new), record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled,
@@ -3448,11 +3454,31 @@ impl Observation {
             },
         }
     }
-    pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
+    pub(super) fn build_bridge(&self, resources: PathBuf) -> Result<crate::bridge::DesktopBridge, BridgeError> {
+        if self.failed.load(Ordering::SeqCst) || !route() { return Err(BridgeError::invalid()); }
+        match &self.github {
+            Some(control) => crate::bridge::DesktopBridge::for_installed_github_observation(resources, control.profile()),
+            None => Ok(crate::bridge::DesktopBridge::new(resources)),
+        }
+    }
+    pub(super) fn github_result(&self, command: github::Command, result: &Result<crate::github_connection_protocol::Status, BridgeError>) {
+        if let Some(control) = &self.github { control.result(command, result); }
+    }
+    pub(super) fn github_status(&self, status: &crate::github_connection_protocol::Status) {
+        if let Some(control) = &self.github { control.status(status); }
+    }
+    pub(super) async fn github_relay(&self, app: &tauri::AppHandle) {
+        if let Some(control) = &self.github { control.relay(app).await; }
+    }
+    pub(super) async fn github_exit(&self, app: &tauri::AppHandle) -> bool {
+        match &self.github { Some(control) => control.settle_for_exit(app).await, None => true }
+    }
+    pub(super) fn attach(self: &Arc<Self>, supervisor: &Supervisor) -> Result<(), BridgeError> {
         if std::thread::current().id() != self.main { self.fail(); return Err(BridgeError::invalid()); }
         // This is the supervisor just created by DesktopBridge::new in setup,
         // before the real window/bootstrap. Positive leaves all hooks unarmed.
         if self.case == Case::Outstanding { supervisor.arm_initial_app_info_shutdown()?; }
+        if let Some(control) = &self.github { control.attach(self, supervisor)?; }
         let mut record = self.record_at(Boundary::Bootstrap).ok_or_else(BridgeError::cleanup_unknown)?;
         if record.attached { self.fail(); return Err(BridgeError::invalid()); }
         record.attached = true;
@@ -3540,7 +3566,7 @@ impl Observation {
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
                 && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project",
-                    Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project",
+                    Case::Session(_) | Case::Commands(_) => "project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
                     Case::VersionSave => "version-project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
@@ -5082,7 +5108,7 @@ impl Observation {
             }
             if r.step == Step::Bootstrap && self.case != Case::Outstanding {
                 if !r.info || !r.catalog { r.bootstrap = BootstrapProgress::AppInfoCatalog; return; }
-                r.step = if self.case.session().is_some() || self.commands.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
+                r.step = if self.case.session().is_some() || self.commands.is_some() || self.github.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
             }
             if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::HeldAppInfo; }
             // Wait for already-requested native replies without spending DOM
@@ -5217,6 +5243,10 @@ impl Observation {
             let Some(commands) = &self.commands else { self.fail(); return; };
             if !commands.tick(app, step) { return; }
         }
+        if let Step::GitHubReadOnly(step) = step {
+            let Some(control) = &self.github else { self.fail(); return; };
+            if !control.tick(app, step) { return; }
+        }
         {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             // A failed handoff cannot race a later recipe Close/GTK reservation.
@@ -5243,6 +5273,8 @@ impl Observation {
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4] || r.metadata.requests != [0;4]) { self.fail(); return; }
                     if self.commands.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
                         || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.github.as_ref().is_some_and(|c| !c.ready_to_close() || r.requests != [0;4]
+                        || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
                 },
                 Step::Quit => { if !r.close_prevented { self.fail(); return; } Pending::Gtk },
@@ -5310,6 +5342,9 @@ impl Observation {
         if let Step::Commands(step) = step {
             if let Some(commands) = &self.commands { commands.dom(step, &value); } else { self.fail(); } return;
         }
+        if let Step::GitHubReadOnly(step) = step {
+            if let Some(control) = &self.github { control.dom(step, &value); } else { self.fail(); } return;
+        }
         if let Step::Session(session) = step { self.session_dom(session,&value); return; }
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
         if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
@@ -5354,7 +5389,7 @@ impl Observation {
                     else if self.case == Case::MetadataSave { "3 recognized files" }
                     else if self.case == Case::VersionSave { "1 recognized files" } else { "2 recognized files" })
                 && value["name"].as_str() == Some(match self.case { Case::ProjectPaths => "path-project",
-                    Case::WorkflowApply => "workflow-project", Case::MetadataSave => "metadata-project",
+                    Case::WorkflowApply => "workflow-project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
                     Case::VersionSave => "version-project", _ => "positive-project" }),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
             Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 5 && r.adopted && r.capability && source() && draft(false, true)
@@ -5448,7 +5483,8 @@ impl Observation {
             Step::ReadCancelled => Step::ChooseSelect,
             Step::ChooseSelect => Step::SetProject,
             Step::ReadSnapshot => { r.snapshot_visible = true;
-                if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
+                if self.github.is_some() { Step::GitHubReadOnly(github::Step::Navigate) }
+                else if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
                 else if self.case.session().is_some() { Step::Session(SessionStep::Navigate) }
                 else if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) }
                 else if self.case == Case::VersionSave { Step::VersionSave(VersionStep::Open(0)) } else { Step::Settings } },
@@ -5654,7 +5690,7 @@ impl Observation {
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
         }
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
-            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_)) && id != 3
+            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -5789,8 +5825,8 @@ impl Observation {
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
-            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_)) { r.project_witness.is_some()
-                && self.commands.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
+            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) { r.project_witness.is_some()
+                && self.commands.as_ref().is_none_or(|c| c.complete()) && self.github.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
             else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
                 && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
@@ -5825,7 +5861,7 @@ impl Observation {
             r.session.queries = Some(queries); r.session.r1_final = retired; retired
         } else { self.case.session().is_none() };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_), None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_), None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -5871,7 +5907,7 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
                 && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final
-                || self.commands.as_ref().is_some_and(|c| c.complete()) && r.info && r.catalog && !r.environment
+                || (self.commands.as_ref().is_some_and(|c| c.complete()) || self.github.as_ref().is_some_and(|c| c.complete())) && r.info && r.catalog && !r.environment
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
@@ -7422,11 +7458,12 @@ fn workflow_script(step: WorkflowStep) -> Option<String> {
 
 fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Commands(step) = step { return commands::script(step, case.commands()?); }
+    if let Step::GitHubReadOnly(step) = step { return github::script(step); }
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
     if let Step::MetadataSave(metadata) = step { return metadata_script(metadata); }
     if let Step::VersionSave(version) = step { return version_script(version); }
-    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project",
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
         Case::VersionSave => "version-project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
@@ -7974,7 +8011,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
         Some(value) if value == OsStr::new("version-save") => Some(Case::VersionSave),
         Some(value) if cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure),
-        Some(value) => commands::Case::parse(value).map(Case::Commands),
+        Some(value) => commands::Case::parse(value).map(Case::Commands).or_else(|| github::Case::parse(value).map(Case::GitHub)),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -8041,6 +8078,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         assert_version_open_race_contract();
     }
     if case.commands().is_some() { commands::assert_contracts(); }
+    if case.github().is_some() { github::assert_contracts(); }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
     let returned = super::run_builder(super::builder().manage(q.clone()));
@@ -8062,12 +8100,18 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
         Case::VersionSave => b"MRK_INSTALLED_SHELL_OBSERVATION=version-save-verified\n",
         Case::Commands(case) => case.verified_line(),
+        Case::GitHub(case) => case.verified_line(),
         // A missing deliberate rejection must never become a positive receipt.
         Case::SettledFailure => return std::process::ExitCode::FAILURE,
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if let Some(control) = &q.github {
+                let report = control.report().ok_or_else(|| std::io::Error::other("GitHub receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_GITHUB_READONLY=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if let Some(commands) = &q.commands {
                 let report = commands.report().ok_or_else(|| std::io::Error::other("tools/offline receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=")?;

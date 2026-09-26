@@ -1,7 +1,7 @@
 """Fixed synthetic T1--T6 peer. Not a general server or production trust path.
 
 SOURCE authoring is not permission to run this file. Only the independently
-admitted disposable Linux namespace entry may start it, with an original Child
+admitted disposable Linux profile entry may start it, with an original Child
 and bounded pipe readers already retained by the Rust fixture. The parent's
 16-second endpoint starts at original creation; our secondary endpoint never
 renews it. No thread, child, TLS/private API, arbitrary endpoint or input script.
@@ -50,6 +50,91 @@ _OUTPUT_BYTES = 0
 AUTH_ALERTS = frozenset({"TLSV1_ALERT_UNKNOWN_CA", "SSLV3_ALERT_BAD_CERTIFICATE",
                          "TLSV1_ALERT_CERTIFICATE_UNKNOWN", "SSLV3_ALERT_CERTIFICATE_EXPIRED"})
 
+INSTALLED_SCOPE = "github-installed-tls-peer-v1"
+INSTALLED_MODE = "github-readonly-installed-tls-v1"
+NORMAL_MANIFEST = "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417"
+REAL_DIAL_MANIFEST = "5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90"
+SYNTHETIC_DIAL_MANIFEST = "fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359"
+# Closed observer identity -> original finite script. No endpoint/CA/input path
+# selector is accepted. Normal DNS alone uses the fixed nonresponding UDP peer.
+INSTALLED_CASES = {
+    "github-connect-refresh": ("G-connect-refresh", SYNTHETIC_DIAL_MANIFEST),
+    "github-real-ca-refusal": ("T2-root", REAL_DIAL_MANIFEST),
+    "github-wrong-name": ("T2-name", SYNTHETIC_DIAL_MANIFEST),
+    "github-expired": ("T2-expired", SYNTHETIC_DIAL_MANIFEST),
+    "github-ragged": ("T3-ragged", SYNTHETIC_DIAL_MANIFEST),
+    "github-length": ("T3-length", SYNTHETIC_DIAL_MANIFEST),
+    "github-chunk": ("T3-chunk", SYNTHETIC_DIAL_MANIFEST),
+    "github-header-limit": ("T6-header", SYNTHETIC_DIAL_MANIFEST),
+    "github-body-limit": ("T6-body", SYNTHETIC_DIAL_MANIFEST),
+    "github-chunk-limit": ("T6-chunk-metadata", SYNTHETIC_DIAL_MANIFEST),
+    "github-unauthorized": ("T6-unauthorized", SYNTHETIC_DIAL_MANIFEST),
+    "github-rate": ("T6-rate-expiry", SYNTHETIC_DIAL_MANIFEST),
+    "github-identity": ("T6-target", SYNTHETIC_DIAL_MANIFEST),
+    "github-redirect": ("T6-redirect", SYNTHETIC_DIAL_MANIFEST),
+    "github-ambient-fixed": ("T4-ambient-fixed", SYNTHETIC_DIAL_MANIFEST),
+    "github-ambient-no-rescue": ("T4-ambient-no-rescue", REAL_DIAL_MANIFEST),
+    "github-dns-deadline": ("G-dns-withhold", NORMAL_MANIFEST),
+    "github-handshake-deadline": ("T5-handshake", SYNTHETIC_DIAL_MANIFEST),
+    "github-header-deadline": ("G-header-withhold", SYNTHETIC_DIAL_MANIFEST),
+    "github-body-deadline": ("T5-read", SYNTHETIC_DIAL_MANIFEST),
+    "github-cancel": ("T5-read", SYNTHETIC_DIAL_MANIFEST),
+    "github-quit": ("T5-read", SYNTHETIC_DIAL_MANIFEST),
+    "github-unknown": ("T5-read", SYNTHETIC_DIAL_MANIFEST),
+}
+INSTALLED_PEMS = {
+    "api-valid.pem": (786, "33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2"),
+    "wrong-san.pem": (786, "8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108"),
+    "api-expired.pem": (790, "d0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f"),
+    "server-key.pem": (241, "33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109"),
+}
+
+
+def installed_mode() -> bool:
+    return os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") == INSTALLED_MODE
+
+
+def installed_binding() -> dict:
+    # Called only after admit(). Never echo unadmitted environment data.
+    return {"installedCase": os.environ["MRK_TLS_INSTALLED_CASE"],
+            "ownerTag": os.environ["MRK_TLS_PEER_OWNER_TAG"],
+            "manifestSha256": os.environ["MRK_TLS_RUNTIME_MANIFEST_SHA256"],
+            "peerSha256": os.environ["MRK_TLS_PEER_SHA256"],
+            "primaryPort": 18553 if os.environ["MRK_TLS_INSTALLED_CASE"] == "github-dns-deadline" else 18443}
+
+
+def installed_inputs(source: Path, case: str) -> None:
+    require(INSTALLED_CASES.get(os.environ["MRK_TLS_INSTALLED_CASE"])
+            == (case, os.environ["MRK_TLS_RUNTIME_MANIFEST_SHA256"])
+            and re.fullmatch(r"[0-9a-f]{16}", os.environ["MRK_TLS_PEER_OWNER_TAG"]) is not None,
+            "installed-admission")
+    control = source.parent.parent
+    require(source.parent.name == "github-peer"
+            and re.fullmatch(r"mrk-ubuntu-native-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}", control.name) is not None
+            and control.parent == Path("/var/lib"), "installed-inputs")
+    for path in (source.parent, control, *control.parents):
+        st = path.lstat()
+        require(stat.S_ISDIR(st.st_mode) and st.st_uid == st.st_gid == 0
+                and st.st_mode & 0o7022 == 0, "installed-inputs")
+    with open("/proc/self/cgroup", "rb") as original:
+        group = original.read(4097)
+    require(group == ("0::/system.slice/" + control.name + ".service\n").encode("ascii"),
+            "installed-domain")
+    for kind, role in (("user", "USERNS"), ("pid", "PIDNS")):
+        parent = os.environ["MRK_TLS_PARENT_" + role]
+        current = os.environ["MRK_TLS_" + role]
+        require(re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", parent) is not None
+                and current == parent and os.readlink("/proc/self/ns/" + kind) == current,
+                "installed-domain")
+    require(os.uname().sysname == "Linux" and os.uname().machine == "x86_64"
+            and os.uname().release == "6.17.0-1022-azure", "installed-domain")
+    python = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/" + NORMAL_MANIFEST + "/python/bin/python3"
+    require(sys.executable == python, "installed-python")
+    fixtures = source.with_name("github_tls")
+    for name, pin in INSTALLED_PEMS.items():
+        raw = fixed_body(fixtures / name, FIXTURE_LIMIT)
+        require((len(raw), hashlib.sha256(raw).hexdigest()) == pin, "installed-pem")
+
 
 class Refused(Exception):
     """Only an internally selected, redacted code; never a peer/input repr."""
@@ -74,7 +159,8 @@ def identity(value: os.stat_result) -> tuple[int, ...]:
 def fixed_body(path: Path, maximum: int) -> bytes:
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
-            and before.st_uid == os.geteuid() and before.st_mode & 0o022 == 0
+            and before.st_uid == (0 if installed_mode() else os.geteuid()) and before.st_mode & 0o022 == 0
+            and (not installed_mode() or stat.S_IMODE(before.st_mode) == 0o444)
             and 0 < before.st_size <= maximum, "inputs")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
@@ -95,15 +181,18 @@ def fixed_body(path: Path, maximum: int) -> bytes:
         os.close(original)  # One original close; a failure is not retried.
 
 
-def admit() -> Path:
+def admit(*, installed: bool = False, case: str = "") -> Path:
     expected = {"MRK_DESKTOP_HOSTED_CHECKS", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT",
                 "MRK_TLS_ORIGINAL_UID", "MRK_TLS_ORIGINAL_GID", "MRK_TLS_PARENT_NETNS",
                 "MRK_TLS_PARENT_MNTNS", "MRK_TLS_NETNS", "MRK_TLS_MNTNS",
                 "MRK_TLS_PEER_SHA256", "LANG", "LC_ALL"}
+    if installed:
+        expected |= {"MRK_TLS_PARENT_USERNS", "MRK_TLS_USERNS", "MRK_TLS_PARENT_PIDNS", "MRK_TLS_PIDNS",
+                     "MRK_TLS_INSTALLED_CASE", "MRK_TLS_RUNTIME_MANIFEST_SHA256", "MRK_TLS_PEER_OWNER_TAG"}
     require(set(os.environ) == expected and sys.platform == "linux"
             and sys.flags.isolated == 1 and sys.flags.no_site == 1
             and sys.dont_write_bytecode and sys.flags.optimize == 0
-            and os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == "github-readonly-tls-v1"
+            and os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == (INSTALLED_MODE if installed else "github-readonly-tls-v1")
             and os.environ["GITHUB_ACTIONS"] == "true"
             and os.environ["RUNNER_ENVIRONMENT"] == "github-hosted"
             and os.environ["LANG"] == os.environ["LC_ALL"] == "C", "admission")
@@ -120,7 +209,8 @@ def admit() -> Path:
         current = os.environ["MRK_TLS_" + variable]
         require(re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", parent) is not None
                 and re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", current) is not None
-                and current != parent and os.readlink("/proc/self/ns/" + kind) == current,
+                and (current == parent if installed else current != parent)
+                and os.readlink("/proc/self/ns/" + kind) == current,
                 "admission")
     with open("/proc/self/status", "rb") as status:
         raw = status.read(16 * 1024 + 1)
@@ -137,18 +227,24 @@ def admit() -> Path:
         resource.setrlimit(resource_id, (limit, limit))
     source = Path(__file__)
     require(source.is_absolute() and source.name == "github_tls_peer.py", "inputs")
+    if installed:
+        installed_inputs(source, case)
     expected_hash = os.environ["MRK_TLS_PEER_SHA256"]
     require(re.fullmatch(r"[0-9a-f]{64}", expected_hash) is not None
             and hashlib.sha256(fixed_body(source, 64 * 1024)).hexdigest() == expected_hash,
             "inputs")
     fixtures = source.with_name("github_tls")
     directory = fixtures.lstat()
-    require(stat.S_ISDIR(directory.st_mode) and directory.st_uid == ids[0]
-            and directory.st_mode & 0o022 == 0, "inputs")
+    require(stat.S_ISDIR(directory.st_mode) and directory.st_uid == (0 if installed else ids[0])
+            and directory.st_mode & 0o022 == 0
+            and (not installed or stat.S_IMODE(directory.st_mode) == 0o555), "inputs")
     return fixtures
 
 
 def script(case: str) -> tuple[tuple[bytes, bytes, bool], ...]:
+    if case == "G-connect-refresh":
+        require(installed_mode(), "script")
+        return script("T1-source") * 2  # Same exact four GETs for Connect and explicit Refresh.
     account = {"id": 11, "login": "owner"}
     repository = {"id": 22, "full_name": "owner/app", "default_branch": "main",
                   "visibility": "private", "archived": False,
@@ -429,16 +525,17 @@ def emit(value: dict) -> None:
 
 
 def original_main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in CASES:
+    installed = installed_mode()
+    if len(sys.argv) != 2 or not (sys.argv[1] in CASES or installed and sys.argv[1] == "G-connect-refresh"):
         os.write(2, b"github-tls-peer: admission\n")
         return 71
     case = sys.argv[1]
-    controlled = case in STREAMING_CASES
+    controlled = installed or case in STREAMING_CASES
     completion = {"bytes": 0, "eof": False, "closed": False,
                   "primaryEmpty": False, "primaryUnexpected": 0, "primaryClosed": False,
                   "redirect": {"empty": False, "unexpected": 0, "closed": False}
                               if case == "T6-redirect" else None} if controlled else None
-    base = {"schemaVersion": 1, "scope": SCOPE, "case": case}
+    base = {"schemaVersion": 1, "scope": INSTALLED_SCOPE if installed else SCOPE, "case": case}
     record = {**base, "state": "finished", "status": "failed", "code": "admission",
               "connections": 0, "handshakes": 0, "requests": 0, "decryptedBytes": 0,
               "authBytes": 0, "closeNotify": 0, "tlsRefused": False,
@@ -453,7 +550,9 @@ def original_main() -> int:
     complete = False
     emission_failed = False
     try:
-        directory = admit()
+        directory = admit(installed=installed, case=case)
+        if installed:
+            record.update(installed_binding())
         if control_fd is not None:
             original_control = os.fstat(control_fd)
             require(stat.S_ISFIFO(original_control.st_mode) and original_control.st_uid == os.geteuid(), "control")
@@ -490,7 +589,7 @@ def original_main() -> int:
         # Reuse only retired TCP TIME_WAIT slots, never share an active listener:
         # SO_REUSEPORT is deliberately absent and bind/listen still fail closed.
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 443))
+        listener.bind(("127.0.0.1", 18443 if installed else 443))
         listener.listen(1)
         if case == "T6-redirect":
             # Original sink exists before the302 can be consumed. It is plain
@@ -502,7 +601,7 @@ def original_main() -> int:
             redirect.bind(("127.0.0.1", REDIRECT_PORT))
             redirect.listen(1)
             redirect.setblocking(False)
-        emit({**base, "state": "ready"})
+        emit({**base, **(installed_binding() if installed else {}), "state": "ready"})
         for index, (path, reply, clean) in enumerate(schedule):
             listener.settimeout(remaining())
             unregistered, address = listener.accept()
@@ -622,14 +721,28 @@ def original_main() -> int:
     return 0 if record["status"] == "passed" else 71
 
 
-def dns_question(raw: bytes) -> tuple[int, int]:
-    """Closed libc question shape, not a DNS server/parser for arbitrary data."""
+def dns_question(raw: bytes, *, installed: bool = False) -> tuple[int, int]:
+    """One api.github.com A/AAAA question; optional empty EDNS0, no server."""
     name = b"\x03api\x06github\x03com\x00"
-    require(len(raw) == 12 + len(name) + 4 and len(raw) <= 512
-            and raw[2:12] == b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
-            and raw[12:12 + len(name)] == name and raw[-2:] == b"\x00\x01",
+    end = 12 + len(name) + 4
+    require(type(raw) is bytes and end <= len(raw) <= 512
+            and raw[12:12 + len(name)] == name and raw[end - 2:end] == b"\x00\x01",
             "dns-question")
-    kind = int.from_bytes(raw[-4:-2], "big")
+    if installed:
+        require(raw[2:4] in {b"\x01\x00", b"\x01\x20"}
+                and raw[4:10] == b"\x00\x01\x00\x00\x00\x00", "dns-question")
+        additional = int.from_bytes(raw[10:12], "big")
+        require(additional in {0, 1} and len(raw) == end + 11 * additional, "dns-question")
+        if additional:
+            opt = raw[end:]
+            # RFC6891 root owner/type41, bounded UDP size, version0, no DO,
+            # extended response code or option payload. No compression/cookies.
+            require(opt[:3] == b"\x00\x00\x29" and 512 <= int.from_bytes(opt[3:5], "big") <= 4096
+                    and opt[5:] == b"\x00" * 6, "dns-question")
+    else:
+        require(len(raw) == end and raw[2:12] == b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00",
+                "dns-question")
+    kind = int.from_bytes(raw[end - 4:end - 2], "big")
     require(kind in {1, 28}, "dns-question")
     return int.from_bytes(raw[:2], "big"), kind
 
@@ -642,10 +755,12 @@ class DeadlinePeer:
     itself. Rust must send it only after its original client book settles.
     """
 
-    def __init__(self, case: str) -> None:
-        require(case in DEADLINE_CASES, "admission")
+    def __init__(self, case: str, *, installed: bool = False) -> None:
+        require(case in DEADLINE_CASES or installed and case in {"G-header-withhold", "G-dns-withhold"}, "admission")
+        self.installed = installed
+        self.normal_dns = installed and case == "G-dns-withhold"
         self.case = case
-        self.base = {"schemaVersion": 1, "scope": SCOPE, "case": case}
+        self.base = {"schemaVersion": 1, "scope": INSTALLED_SCOPE if installed else SCOPE, "case": case}
         self.record = {**self.base, "state": "finished", "status": "failed", "code": "admission",
             "connections": 0, "handshakes": 0, "requests": 0, "decryptedBytes": 0,
             "authBytes": 0, "closeNotify": 0, "tlsRefused": False, "sni": 0,
@@ -660,6 +775,9 @@ class DeadlinePeer:
             "dnsEmpty": False if case == "T5-dns" else None,
             "dnsClosed": False if case == "T5-dns" else None}
         self.record["completion"] = self.completion
+        if self.normal_dns:
+            self.record["dnsSource"] = None
+            self.completion.update(primaryEmpty=None, primaryClosed=None, dnsEmpty=False, dnsClosed=False)
         # Original slots, including allocation-failure accept custody, precede
         # creation/readiness. Every sole close is independently attempted later.
         self.sockets = {"primary": None, "proxy": None, "dns": None}
@@ -687,10 +805,11 @@ class DeadlinePeer:
             "wireReadBytes": sum(item.read_bytes for item in self.connections),
             "wireWriteBytes": sum(item.written_bytes for item in self.connections),
             "dnsQuestions": self.record["dnsQuestions"], "dnsA": self.record["dnsA"],
-            "dnsAAAA": self.record["dnsAAAA"], "clientStop": self.record["clientStop"]})
+            "dnsAAAA": self.record["dnsAAAA"], "clientStop": self.record["clientStop"],
+            **({"dnsSource": self.record["dnsSource"]} if self.normal_dns else {})})
 
     def listen(self, role: str, port: int) -> None:
-        require((role, port) in {("primary", 443), ("proxy", PROXY_PORT)}
+        require((role, port) in {("primary", 18443 if self.installed else 443), ("proxy", PROXY_PORT)}
                 and self.sockets[role] is None, "socket-state")
         self.sockets[role] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         original = self.sockets[role]
@@ -730,9 +849,22 @@ class DeadlinePeer:
                 raw, address = self.sockets["dns"].recvfrom(513)
             except BlockingIOError:
                 return
-            require(address[0] == "127.0.0.1" and 0 < address[1] < 65536
-                    and self.record["dnsQuestions"] < DNS_LIMIT, "dns-question")
-            transaction, kind = dns_question(raw)
+            parts = address[0].split(".")
+            loopback = (len(parts) == 4 and parts[0] == "127"
+                        and all(part.isascii() and part.isdecimal() and str(int(part)) == part
+                                and 0 <= int(part) <= 255 for part in parts))
+            require((loopback if self.normal_dns else address[0] == "127.0.0.1")
+                    and 0 < address[1] < 65536 and self.record["dnsQuestions"] < DNS_LIMIT, "dns-question")
+            transaction, kind = dns_question(raw, installed=self.normal_dns)
+            if self.normal_dns:
+                source = {"address": address[0], "port": address[1], "questionId": transaction, "questionType": kind}
+                if self.record["dnsSource"] is None:
+                    self.record["dnsSource"] = source
+                else:
+                    # libc may recreate its UDP socket for a bounded retry.
+                    # The retained receipt names the FIRST actual endpoint,
+                    # joined to the original Child while that FD is still live.
+                    require(self.record["dnsSource"]["address"] == source["address"], "dns-source-changed")
             # A/AAAA may legitimately have equal16-bit IDs. Bind each original
             # question's (ID,type), allow its retransmission, and retain no raw
             # packet. The eight-datagram bound includes every retransmission.
@@ -757,8 +889,9 @@ class DeadlinePeer:
             require(self.signal == b"S", "control")
 
     def stopped(self, kind: str) -> None:
-        require(self.case in {"T5-handshake", "T5-read", "T5-helper-read"}
-                and self.record["phase"] in {"handshake", "read"}
+        require((self.case in {"T5-handshake", "T5-read", "T5-helper-read"}
+                 or self.installed and self.case == "G-header-withhold")
+                and self.record["phase"] in {"handshake", "read", "headers"}
                 and self.record["clientStop"] is None
                 and kind in {"tcp-eof", "connection-reset", "broken-pipe", "tls-close-notify"}, "client-stop")
         self.record["clientStop"] = kind
@@ -784,7 +917,7 @@ class DeadlinePeer:
         # No client application bytes are valid after the one original GET;
         # after an unsent ServerHello even a further client TLS flight is not
         # this fixed withheld-handshake script. Never send a server alert here.
-        require(self.record["phase"] == "read", "unexpected-request")
+        require(self.record["phase"] in ("read", "headers"), "unexpected-request")
         require(connection.incoming.write(block) == len(block), "tls-alert")
         try:
             decoded = connection.tls.read(1)
@@ -834,7 +967,9 @@ class DeadlinePeer:
         if self.client is not None:
             self.client.original.setblocking(False)
         while not self.completion["eof"]:
-            readers = [0, self.sockets["primary"]]
+            readers = [0]
+            if self.sockets["primary"] is not None:
+                readers.append(self.sockets["primary"])
             readers.extend(self.sockets[role] for role in ("proxy", "dns") if self.sockets[role] is not None)
             if self.client is not None and self.record["clientStop"] is None:
                 readers.append(self.client.original)
@@ -857,7 +992,8 @@ class DeadlinePeer:
             if not self.completion["eof"] and self.next_byte is not None and time.monotonic() >= self.next_byte:
                 self.send_byte()
         remaining()
-        self.completion["primaryEmpty"] = self.no_pending("primary")
+        if self.sockets["primary"] is not None:
+            self.completion["primaryEmpty"] = self.no_pending("primary")
         if self.sockets["proxy"] is not None:
             self.completion["proxy"]["empty"] = self.no_pending("proxy")
         if self.sockets["dns"] is not None:
@@ -896,12 +1032,14 @@ class DeadlinePeer:
         # server flight remains in this same MemoryBIO through client settlement.
 
     def run(self) -> None:
-        directory = admit()  # Peer keeps FSIZE=0; the real probe must NOT inherit it.
+        directory = admit(installed=self.installed, case=self.case)  # Peer alone keeps FSIZE=0.
+        if self.installed:
+            self.record.update(installed_binding())
         control = os.fstat(0)
         require(stat.S_ISFIFO(control.st_mode) and control.st_uid == os.geteuid(), "control")
         os.set_blocking(0, False)
         context = None
-        if self.case != "T5-dns":
+        if self.case != "T5-dns" and not self.normal_dns:
             certificate, key = directory / "api-valid.pem", directory / "server-key.pem"
             before = (fixed_body(certificate, FIXTURE_LIMIT), fixed_body(key, FIXTURE_LIMIT))
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -919,19 +1057,22 @@ class DeadlinePeer:
                 return None
 
             context.set_servername_callback(server_name)
-        self.listen("primary", 443)
+        if not self.normal_dns:
+            self.listen("primary", 18443 if self.installed else 443)
         if self.case.startswith("T4-"):
             self.listen("proxy", PROXY_PORT)
-        if self.case == "T5-dns":
+        if self.case == "T5-dns" or self.normal_dns:
             self.sockets["dns"] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sockets["dns"].bind(("127.0.0.1", 53))
+            # N retains its normal libc destination127.0.0.53:53. The reviewed
+            # root per-packet port-only rule delivers to this exact high port.
+            self.sockets["dns"].bind(("127.0.0.53", 18553) if self.normal_dns else ("127.0.0.1", 53))
             self.sockets["dns"].setblocking(False)
             self.record["phase"] = "dns"
         remaining()
-        emit({**self.base, "state": "ready"})
+        emit({**self.base, **(installed_binding() if self.installed else {}), "state": "ready"})
         if self.case == "T5-handshake":
             self.withhold_handshake(context)
-        elif self.case in {"T5-read", "T5-helper-read"}:
+        elif self.case in {"T5-read", "T5-helper-read", "G-header-withhold"}:
             self.client = self.accept(context)
             self.client.handshake()
             self.record["handshakes"] += 1
@@ -941,8 +1082,11 @@ class DeadlinePeer:
             self.progress("first-get")
             headers = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
                        b"Content-Length: " + str(len(TRICKLE_BODY)).encode("ascii") + b"\r\n\r\n")
-            self.client.respond(headers, False)
-            self.send_byte()
+            if self.case != "G-header-withhold":
+                self.client.respond(headers, False)
+                self.send_byte()
+            else:
+                self.record["phase"] = "headers"  # Actual GET seen; no HTTP response byte is emitted.
         elif self.case.startswith("T4-"):
             refused = self.case == "T4-ambient-no-rescue"
             schedule = script("T2-root" if refused else "T1-source")
@@ -1012,24 +1156,25 @@ class DeadlinePeer:
                 self.completion["closed"] = True
             except BaseException:
                 close_error()
-        self.completion["primaryClosed"] = self.closed["primary"]
+        self.completion["primaryClosed"] = None if self.normal_dns else self.closed["primary"]
         if self.completion["proxy"] is not None:
             self.completion["proxy"]["closed"] = self.closed["proxy"]
-        if self.case == "T5-dns":
+        if self.case == "T5-dns" or self.normal_dns:
             self.completion["dnsClosed"] = self.closed["dns"]
         self.record["wireReadBytes"] = [item.read_bytes for item in self.connections]
         self.record["wireWriteBytes"] = [item.written_bytes for item in self.connections]
         self.record["replyBytes"] = [item.reply_bytes for item in self.connections]
-        self.record["allSocketsClosed"] = (self.sockets["primary"] is not None and unregistered_closed
+        self.record["allSocketsClosed"] = (self.sockets["dns" if self.normal_dns else "primary"] is not None and unregistered_closed
             and all(item.closed for item in self.connections)
             and all(original is None or self.closed[role] for role, original in self.sockets.items())
             and all(original is None or self.unexpected_closed[role] for role, original in self.unexpected.items()))
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in DEADLINE_CASES:
+    installed = installed_mode()
+    if len(sys.argv) != 2 or not (sys.argv[1] in DEADLINE_CASES or installed and sys.argv[1] in {"G-header-withhold", "G-dns-withhold"}):
         return original_main()  # Original sixteen scripts/frames/expectations unchanged.
-    peer = DeadlinePeer(sys.argv[1])
+    peer = DeadlinePeer(sys.argv[1], installed=installed)
     complete = False
     emission_failed = False
     try:

@@ -2,7 +2,7 @@
 
 Only selected definitions/constants are loaded from the actual fixture AST.
 No fixture imports, main/admit/run, socket/SSL constructors, fd IO, resource
-limits, network, process or clock wait is executed by these six test methods.
+limits, network, process or clock wait is executed by these eight test methods.
 Execution still belongs to the separately reviewed focused-test environment.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ PEER = Path(__file__).resolve().parents[2] / "desktop/src-tauri/tests/fixtures/g
 def model() -> tuple[dict, list]:
     tree = ast.parse(PEER.read_text(encoding="utf-8"), filename=str(PEER))
     definitions = {"Refused", "require", "dns_question", "DeadlinePeer"}
-    constants = {"DEADLINE_CASES", "SCOPE", "PROXY_PORT", "DNS_LIMIT", "TRICKLE_BODY", "TRICKLE_COUNT", "WIRE_LIMIT"}
+    constants = {"DEADLINE_CASES", "SCOPE", "INSTALLED_SCOPE", "PROXY_PORT", "DNS_LIMIT", "TRICKLE_BODY", "TRICKLE_COUNT", "WIRE_LIMIT"}
     selected = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for item in tree.body:
         if isinstance(item, (ast.ClassDef, ast.FunctionDef)) and item.name in definitions:
@@ -67,6 +67,80 @@ class DeadlinePeerContractTests(unittest.TestCase):
         with self.assertRaises(env["Refused"]):
             peer.receive_dns()
         self.assertEqual(peer.record["dnsQuestions"], 8)
+
+
+    def test_installed_dns_admits_only_normal_empty_edns0_and_trust_ad_questions(self):
+        env, _ = model()
+        decode = env["dns_question"]
+
+        def normal_query(flags=0x0100, udp_size=1232):
+            raw = question(1)
+            return (raw[:2] + flags.to_bytes(2, "big") + raw[4:10] + b"\x00\x01" + raw[12:]
+                    + b"\x00\x00\x29" + udp_size.to_bytes(2, "big") + b"\x00" * 6)
+
+        for raw in (question(1), question(28), normal_query(), normal_query(flags=0x0120),
+                    normal_query(udp_size=512), normal_query(udp_size=4096)):
+            with self.subTest(raw=raw):
+                self.assertIn(decode(raw, installed=True), ((42, 1), (42, 28)))
+        valid = normal_query()
+        for raw in (normal_query(flags=0x8180), normal_query(flags=0x0110),
+                    normal_query(udp_size=511), normal_query(udp_size=4097),
+                    valid[:-1] + b"\x01", valid[:-6] + b"\x01" + b"\x00" * 5,
+                    valid[:-5] + b"\x01" + b"\x00" * 4,
+                    valid[:-4] + b"\x80" + b"\x00" * 3,
+                    valid + b"x", valid[:10] + b"\x00\x02" + valid[12:]):
+            with self.subTest(raw=raw), self.assertRaises(env["Refused"]):
+                decode(raw, installed=True)
+        # The legacy fixed T5 schema is not silently broadened.
+        with self.assertRaises(env["Refused"]):
+            decode(valid)
+        with self.assertRaises(env["Refused"]):
+            decode(normal_query(flags=0x0120))
+
+    def test_installed_dns_keeps_actual_source_and_closes_only_acquired_originals(self):
+        env, events = model()
+        peer = env["DeadlinePeer"]("G-dns-withhold", installed=True)
+        original = SimpleNamespace(recvfrom=Mock(side_effect=[
+            (question(1, 19), ("127.0.0.7", 45000)),
+            (question(28, 20), ("127.0.0.7", 45000)), BlockingIOError()]), close=Mock())
+        peer.sockets["dns"] = original
+        peer.receive_dns()
+        source = {"address": "127.0.0.7", "port": 45000, "questionId": 19, "questionType": 1}
+        self.assertEqual(peer.record["dnsSource"], source)
+        self.assertEqual([event["dnsSource"] for event in events], [source, source])
+        self.assertEqual((peer.record["dnsQuestions"], peer.record["dnsReplies"], peer.record["requests"]), (2, 0, 0))
+        self.assertIsNone(peer.sockets["primary"])
+        # A real libc retry can use a new UDP port. It does not replace the
+        # first endpoint that the existing original Child observer must join.
+        original.recvfrom.side_effect = [(question(1), ("127.0.0.7", 45001)), BlockingIOError()]
+        peer.receive_dns()
+        self.assertEqual(peer.record["dnsSource"], source)
+        self.assertEqual(events[-1]["dnsSource"], source)
+        self.assertEqual(peer.record["dnsQuestions"], 3)
+        for address in (("127.0.0.1", 45000), ("127.0.0.7", 0), ("192.0.2.1", 45000)):
+            original.recvfrom.side_effect = [(question(1), address)]
+            with self.subTest(address=address), self.assertRaises(env["Refused"]):
+                peer.receive_dns()
+            self.assertEqual(peer.record["dnsQuestions"], 3)
+        original.recvfrom.side_effect = [BlockingIOError()]
+        env["select"].select.return_value = ([0], [], [])
+        env["os"].read.side_effect = [b"S", b""]
+        peer.finish_observation()
+        self.assertTrue(peer.completion["dnsEmpty"])
+        self.assertFalse(peer.completion["dnsClosed"])
+        self.assertIsNone(peer.completion["primaryEmpty"])
+        self.assertIsNone(peer.completion["primaryClosed"])
+        original.close.assert_not_called()
+        peer.close()
+        peer.close()
+        original.close.assert_called_once_with()
+        env["os"].close.assert_called_once_with(0)
+        self.assertTrue(peer.record["allSocketsClosed"])
+        self.assertTrue(peer.completion["dnsClosed"])
+        self.assertIsNone(peer.completion["primaryClosed"])
+        self.assertEqual(peer.record["wireReadBytes"], [])
+        self.assertEqual(peer.record["wireWriteBytes"], [])
+        self.assertEqual(peer.record["replyBytes"], [])
 
     def test_control_requires_exact_byte_then_original_eof(self):
         env, _ = model()

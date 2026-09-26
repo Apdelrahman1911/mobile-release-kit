@@ -40,6 +40,8 @@ REF = "refs/heads/verify/desktop-ubuntu-publication"
 INSTALLED_REF = "refs/heads/verify/desktop-installed-passive"
 INSTALLED_CASES = {"positive", "refuse-writable", "refuse-pth"}
 SHELL_REF = "refs/heads/verify/desktop-installed-shell"
+SHELL_GITHUB_REF = "refs/heads/verify/desktop-installed-github-readonly"
+SHELL_GITHUB_BOUNDARY_REF = "refs/heads/verify/desktop-installed-github-normal-boundaries"
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_FEATURE_ARG = "desktop-shell,custom-protocol"
 SHELL_PERMISSIONS = "desktop/src-tauri/permissions"
@@ -424,7 +426,7 @@ def route(env):
     installed = env.get("MRK_INSTALLED_CASE")
     shell = env.get("MRK_INSTALLED_SHELL_CASE")
     if shell is not None:
-        fixed = (installed is None and env.get("GITHUB_REF") == SHELL_REF and shell in {"compile", "observe"}
+        fixed = (installed is None and env.get("GITHUB_REF") in {SHELL_REF, SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF} and shell in {"compile", "observe"}
                  and env.get("GITHUB_JOB") == "compile")
     else:
         fixed = (env.get("GITHUB_REF") == INSTALLED_REF and installed in INSTALLED_CASES | {"compile"}
@@ -2138,7 +2140,24 @@ def shell_source_manifest(source):
              "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
              "desktop/src/releaseVersionEditController.ts", "desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
              "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py",
-             "desktop/tools/prepare_hosted_ubuntu_data.py")
+             "desktop/tools/prepare_hosted_ubuntu_data.py",
+             'desktop/src-tauri/src/github_connection_session.rs',
+             'desktop/src-tauri/src/github_tls_peer_owner.rs',
+             'desktop/src-tauri/src/installed_shell_github_observation.rs',
+             'desktop/src-tauri/src/hosted_tests.rs',
+             'desktop/src/githubConnectionProtocol.ts',
+             'desktop/src/bridge.ts',
+             'desktop/src/components/GitHubConnection.tsx',
+             'desktop/tests/github-connection.test.mjs',
+             'desktop/src-tauri/tests/fixtures/github_tls_peer.py',
+             'desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/api-valid.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/server-key.pem',
+             'desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem',
+             'desktop/tools/hosted_glibc_policy.py',
+             'desktop/tools/observe_hosted_python.py')
     return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
 
 
@@ -2940,6 +2959,22 @@ def verify_installed_shell_compile():
                          "lifecycleEntrySha256": entry_sha, "originalDeadline": repr(deadline),
                          "nativeQualification": False, "scope": "Fresh normal shell and distinct observer compile only; no new package."}
         D.write(public / "source.json", D.canonical(source_record))
+        if os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF:
+            # This is the SAME compiler consumer, before any package/compiler
+            # work. Read-only DATA is retained on refusal; it is not a runtime
+            # admission token, an nft invocation, or a normal DNS/HTTP action.
+            check.phase = "normal-boundary-read-only-host-materials"
+            lifecycle = local("ubuntu_publication_lifecycle")
+            D.need(lifecycle.SHELL_GITHUB_BOUNDARY_REF == SHELL_GITHUB_BOUNDARY_REF,
+                   "Fixed normal-boundary material route differs")
+            materials = lifecycle.shell_github_boundary_host_materials()
+            D.write(public / "github-boundary-host-materials.json", D.canonical({
+                "schema": "installed-github-normal-boundary-engineering-data-v1",
+                "sourceSha": sha, "sourceTree": tree, "runId": os.environ["GITHUB_RUN_ID"],
+                "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "profile": lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE,
+                "materials": materials, "qualified": False, "nativeEntry": False, "compilerStarted": False,
+                "runtimeSelfAdmission": False, "normalDestinationAction": False, "normalHttpRequests": False}))
+            lifecycle._github_boundary_host_admit(materials)  # Closed until a separately reviewed SOURCE tuple exists.
         check.phase = "original-shell-a-data"
         prepared = package_inputs(source, work, fixtures=False)
         D.write(public / "runtime-inputs.json", D.canonical({"admission": C.CONVENTIONAL_SMOKE_INPUTS,
@@ -4146,10 +4181,129 @@ def _shell_tools_offline_observation(cases, combined, files, lifecycle):
                "Closed Tools/Offline inventory changed outside its fixed in-place mutation")
 
 
+
+def shell_github_observation(observed, lifecycle, profile="github-readonly-installed-tls-v1", *, runner_uid=None, runner_gid=None):
+    """Reconcile only the existing service-finality-gated exports and receipt."""
+    selection = lifecycle.shell_github_selection(profile)
+    normal_boundaries = profile == lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE
+    selected_cases = tuple(selection["cases"])
+    state = "installed-github-normal-boundaries-observed" if normal_boundaries else "installed-github-readonly-synthetic-observed"
+    D.need(type(observed) is dict and observed.get("state") == state
+           and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
+           and observed.get("shellPackageBuilt") is False, "GitHub closed observation was relabelled as qualification")
+    github, cases, files = observed.get("githubReadOnly"), observed.get("cases"), observed.get("files")
+    fields = {"selection", "expectedMaps", "materials", "fixture", "casesCapture",
+              "normalDestinationAction", "normalTransportPositive", "remainingCoverage"}
+    if normal_boundaries:
+        fields |= {"normalNetworkScope", "normalHttpRequests", "boundaries"}
+    remaining = (["current-twenty-two-synthetic-regressions", "separately-approved-normal-destination-negative"]
+                 if normal_boundaries else ["normal-resolver-withholding", "real-stalled-tcp-connect",
+                                            "separately-approved-normal-destination-negative"])
+    D.need(type(github) is dict and set(github) == fields
+           and D.canonical(github["selection"]) == D.canonical(selection)
+           and github["normalDestinationAction"] is normal_boundaries and github["normalTransportPositive"] is False
+           and github["remainingCoverage"] == remaining, "GitHub closed scope/selection differs")
+    if normal_boundaries:
+        D.need(github["normalNetworkScope"] == "normal-dns-and-scoped-https-acquisition-syns-only"
+               and github["normalHttpRequests"] is False, "Normal DNS/SYN boundaries were relabelled as HTTP transport")
+    D.need(type(cases) is dict and set(cases) == set(selected_cases)
+           and type(observed.get("sourceSha")) is str and re.fullmatch(r"[0-9a-f]{40}", observed["sourceSha"]) is not None,
+           "GitHub closed SOURCE/case roster differs")
+    maps = lifecycle.shell_github_maps(github["expectedMaps"])
+    for name in selected_cases:
+        row = cases[name]
+        D.need(type(row) is dict and set(row) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "githubReadOnly"},
+               "GitHub closed native case fields differ")
+        receipt = lifecycle.shell_github_receipt(D.canonical(row["githubReadOnly"]), name, maps)
+        wanted = {"case": name, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "githubReadOnly": receipt}
+        D.need(D.canonical(row) == D.canonical(wanted) and receipt["sourceCommit"] == observed["sourceSha"],
+               "GitHub closed native receipt/source correspondence differs")
+    root_value = {"shell": {"githubReadOnly": selection}}
+    names = {"lifecycle-" + name for name in lifecycle.public_files(root_value) | {"client.stdout", "client.stderr"}}
+    D.need(type(files) is list and len(files) == len(names) <= lifecycle.SHELL_GITHUB_PUBLIC_FILE_LIMIT + 2,
+           "GitHub original export count differs")
+    indexed = {}
+    for row in files:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["path"]) is str
+               and row["path"] in names and row["path"] not in indexed and type(row["size"]) is int
+               and 0 <= row["size"] <= lifecycle.LIMIT and type(row["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "GitHub original export record differs")
+        indexed[row["path"]] = row
+    D.need(set(indexed) == names, "GitHub original public export roster differs")
+
+    def captured(name, pin, limit):
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+               and 0 < pin["size"] <= limit and type(pin["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None
+               and D.canonical(indexed["lifecycle-" + name]) == D.canonical({"path": "lifecycle-" + name, **pin}),
+               "GitHub original closed export pin differs")
+
+    material = github["materials"]
+    D.need(type(material) is dict and set(material) == {"before", "after"}
+           and D.canonical(material["before"]) == D.canonical(material["after"]), "GitHub N/D/peer interval changed")
+    for phase in ("before", "after"):
+        captured("shell-github-materials-" + phase + ".json", material[phase], lifecycle.SHELL_GITHUB_MATERIAL_LIMIT)
+    fixture = github["fixture"]
+    D.need(type(fixture) is dict and set(fixture) == {"project", "namespace", "unchanged", "sourceSha256", "versionSha256",
+           "releaseConfigCreated", "sourceSha", "before", "after"} and fixture["unchanged"] is True
+           and fixture["releaseConfigCreated"] is False and fixture["sourceSha"] == observed["sourceSha"]
+           and fixture["sourceSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_SOURCE).hexdigest()
+           and fixture["versionSha256"] == hashlib.sha256(lifecycle.SHELL_PROJECT_VERSION).hexdigest()
+           and D.canonical(fixture["before"]) == D.canonical(fixture["after"]),
+           "GitHub registered read-only fixture changed or invented release outputs")
+    D.need(type(observed.get("unit")) is str, "GitHub original service identity is missing")
+    unit = re.fullmatch(r"mrk-ubuntu-native-([1-9][0-9]{0,19})-([1-9][0-9]{0,19})\.service", observed["unit"])
+    D.need(unit is not None and unit.group(2) == observed.get("consumerAttempt"), "GitHub original service/attempt differs")
+    root_value.update(runId=unit.group(1), attempt=unit.group(2))
+    namespace = lifecycle._shell_namespace_data(root_value, fixture["namespace"])
+    D.need(fixture["project"] == str(Path(namespace["root"]) / "github-project"), "GitHub registered project path differs")
+    for phase in ("before", "after"):
+        captured("shell-github-project-" + phase + ".json", fixture[phase], lifecycle.SHELL_GITHUB_FIXTURE_LIMIT)
+    captured("shell-cases.json", github["casesCapture"], lifecycle.LIMIT)
+    D.need(D.canonical(github["casesCapture"]) == D.canonical(lifecycle._shell_github_pin(D.canonical(cases))),
+           "GitHub closed case copy is not the original exported capture")
+    if normal_boundaries:
+        D.need(all(type(number) is int and 0 < number < 1 << 31 for number in (runner_uid, runner_gid))
+               and type(observed.get("invocationId")) is str
+               and re.fullmatch(r"[0-9a-f]{32}", observed["invocationId"]) is not None,
+               "Normal-boundary CI requires the actual original nonroot UID and service invocation")
+        root_value.update(sourceSha=observed["sourceSha"], runnerUid=runner_uid, runnerGid=runner_gid)
+        boundary = github["boundaries"]
+        D.need(type(boundary) is dict and set(boundary) == {"host", "policies", "normalResolverWithholdingObserved",
+               "realStalledTcpConnectObserved", "rootUidAndCgroupScoped", "normalHttpRequests"}
+               and all(boundary[name] is True for name in ("normalResolverWithholdingObserved", "realStalledTcpConnectObserved",
+                                                         "rootUidAndCgroupScoped"))
+               and boundary["normalHttpRequests"] is False, "Closed normal-boundary root proof is missing")
+        host = boundary["host"]
+        D.need(type(host) is dict and set(host) == {"before", "after"}
+               and D.canonical(host["before"]) == D.canonical(host["after"]), "Normal-boundary host interval changed")
+        for phase in ("before", "after"):
+            captured("github-boundary-host-" + phase + ".json", host[phase], lifecycle.SHELL_GITHUB_BOUNDARY_LIMIT)
+        policies = boundary["policies"]
+        D.need(type(policies) is dict and set(policies) == set(selected_cases), "Closed original boundary policy roster differs")
+        original_domain = None
+        for name in selected_cases:
+            row = policies[name]
+            D.need(type(row) is dict and set(row) == {"capture", "evidence"}, "Closed original policy record differs")
+            proof = lifecycle.shell_github_boundary_policy_data(root_value, name, row["evidence"], cases[name]["githubReadOnly"])
+            D.need(proof["domain"]["invocationId"] == observed["invocationId"]
+                   and (original_domain is None or D.canonical(original_domain) == D.canonical(proof["domain"])),
+                   "Normal-boundary proof adopted another service/cgroup/UID original")
+            original_domain = proof["domain"]
+            prefix = lifecycle._github_boundary_prefix(name)
+            captured(prefix + "-policy.json", row["capture"], lifecycle.SHELL_GITHUB_BOUNDARY_LIMIT)
+            D.need(D.canonical(row["capture"]) == D.canonical(lifecycle._shell_github_pin(D.canonical(proof))),
+                   "Closed policy summary is not the original exported root capture")
+            captured(prefix + "-absence.stdout", proof["absence"], lifecycle.SHELL_GITHUB_BOUNDARY_LIMIT)
+    return github
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
     sha, source, _, root, deadline = resumed_preparation()
+    github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)
+    normal_boundaries = os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF
     work, public = root / "work", root / "public"
     check, phase = None, "accepted-shell-data"
     try:
@@ -4177,7 +4331,7 @@ def verify_installed_shell():
                    "Shell source is not the exact original clean checkout")
 
         source_check("before")
-        tools_inputs = shell_tools_inputs_for_observation()
+        tools_inputs = None if github else shell_tools_inputs_for_observation()
         policy = installed_shell_os_inputs(check, work, native, compiler, old_compiler)
         check.phase = "shell-handoff"
         lifecycle = local("ubuntu_publication_lifecycle")
@@ -4190,12 +4344,24 @@ def verify_installed_shell():
         projection["originalRecord"] = D.file_record(work / "admitted-shell/compiler.json", SHELL_METADATA_LIMIT)
         shell = {"binaries": binaries, "compiler": projection, "rosterSha256": roster_sha,
                  "producerAttempt": producer_attempt, "artifactId": artifact_id, "acceptedU": accepted, "loaderPolicy": policy}
+        if github:
+            D.need(lifecycle.SHELL_GITHUB_REF == SHELL_GITHUB_REF
+                   and lifecycle.SHELL_GITHUB_BOUNDARY_REF == SHELL_GITHUB_BOUNDARY_REF,
+                   "GitHub source-bound fixed verification routes differ")
+            github_profile = lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE if normal_boundaries else lifecycle.SHELL_GITHUB_PROFILE
+            shell["githubReadOnly"] = lifecycle.shell_github_selection(github_profile)
         source_record = {"sourceSha": sha, "sourceTree": compiler["sourceTree"], "runId": os.environ["GITHUB_RUN_ID"],
             "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "features": SHELL_FEATURES, "acceptedU": accepted,
             "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, "shellArtifactId": artifact_id,
             "platformLibrarySourceSha": old_compiler["sourceSha"], "imageOS": os.environ["ImageOS"],
             "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False,
             "toolsInputPreparation": tools_inputs}
+        if github:
+            source_record.update(githubReadOnlyProfile=github_profile, normalDestinationAction=normal_boundaries,
+                                 toolsInputPreparationRun=False, unrelatedShellCasesRun=False)
+            if normal_boundaries:
+                source_record.update(normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                                     normalHttpRequests=False)
         D.write(public / "source.json", D.canonical(source_record))
         request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "deadline": deadline, "runnerUid": os.getuid(), "runnerGid": os.getgid(), "source": str(source), "taskRoot": str(root),
@@ -4208,6 +4374,24 @@ def verify_installed_shell():
             {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(work / "home")},
             work, timeout=1200, limit=2 << 20)
         observed = lifecycle.verify_service_result(path, pin["sha256"], entry_sha, client, public)
+        if github:
+            github_readonly = shell_github_observation(observed, lifecycle, github_profile, runner_uid=os.getuid(), runner_gid=os.getgid())
+            source_check("after")
+            D.need(time.monotonic() < deadline, "Original GitHub shell result endpoint expired")
+            D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+                "githubReadOnly": github_readonly, "commands": check.commands,
+                "cases": list(shell["githubReadOnly"]["cases"]), "compilerRerun": False,
+                "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
+                "normalDestinationAction": normal_boundaries, "normalTransportPositive": False,
+                "remainingCoverage": github_readonly["remainingCoverage"],
+                "scope": ("installed-github-normal-DNS-and-scoped-SYN-boundaries-no-normal-HTTP"
+                          if normal_boundaries else "installed-github-readonly-N-startup-and-separated-D-synthetic-cases-only")}))
+            D.need(time.monotonic() < deadline, "Original GitHub result close/readback was late")
+            if normal_boundaries:
+                print("Two original N DNS/SYN boundaries and root policy retirement retained after service finality; no normal HTTP, twenty-two regression rerun, or delivery.", flush=True)
+            else:
+                print("Twenty-two original GitHub synthetic cases retained after service finality; N/D roles remain separate, no normal-destination action or delivery.", flush=True)
+            return
         project_draft = shell_project_draft_observation(observed, lifecycle)
         source_check("after")
         D.need(D.canonical(shell_tools_inputs_for_observation()) == D.canonical(tools_inputs),

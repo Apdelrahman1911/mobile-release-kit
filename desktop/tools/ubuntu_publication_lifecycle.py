@@ -12,6 +12,7 @@ import errno
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import math
 import os
@@ -1910,15 +1911,1651 @@ def handoff(path, digest):
     return value
 
 
+
+# Closed installed GitHub consumer. This selects observation cases, never a
+# product endpoint, trust store, credential, import path, or enable override.
+SHELL_GITHUB_PROFILE = "github-readonly-installed-tls-v1"
+SHELL_GITHUB_REF = "refs/heads/verify/desktop-installed-github-readonly"
+SHELL_GITHUB_BOUNDARY_PROFILE = "github-readonly-installed-normal-boundaries-v1"
+SHELL_GITHUB_BOUNDARY_REF = "refs/heads/verify/desktop-installed-github-normal-boundaries"
+SHELL_GITHUB_BOUNDARY_CASES = ("github-dns-deadline", "github-connect-deadline")
+SHELL_GITHUB_CASES = (
+    "github-connect-refresh", "github-real-ca-refusal", "github-wrong-name", "github-expired",
+    "github-ragged", "github-length", "github-chunk", "github-header-limit", "github-body-limit",
+    "github-chunk-limit", "github-unauthorized", "github-rate", "github-identity", "github-redirect",
+    "github-ambient-fixed", "github-ambient-no-rescue", "github-handshake-deadline",
+    "github-header-deadline", "github-body-deadline", "github-cancel", "github-quit", "github-unknown",
+)
+SHELL_GITHUB_ALL_CASES = SHELL_GITHUB_CASES + SHELL_GITHUB_BOUNDARY_CASES
+SHELL_GITHUB_REAL_CA_CASES = ("github-real-ca-refusal", "github-ambient-no-rescue")
+SHELL_GITHUB_AMBIENT_CASES = ("github-ambient-fixed", "github-ambient-no-rescue")
+# Deliberately absent from the automatic roster/handoff/CI route. A separately
+# reviewed original action is required for the one N /user noncredential GET.
+SHELL_GITHUB_NORMAL_NEGATIVE = "github-normal-negative"
+SHELL_GITHUB_PAYLOADS = {
+    "N": {"manifestSha256": M, "manifestBytes": 85440,
+          "coreSha256": "d6be3fcbcedb68569ef1f4b2e7cae67cfcbdd7d7b53666db428fb664d426c2a2",
+          "caSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
+          "inventorySha256": "40917b867379373e98fdca4205646d8e05ff485e514e161f76b36f2ffe9abdb7"},
+    "D-R": {"manifestSha256": "5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90",
+            "manifestBytes": 106080, "coreSha256": "58e4ba255326742b51f68d962f9b6a1fd84827c56daed10623ff0121a0e2846e",
+            "caSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
+            "inventorySha256": "86bf41454518e3cbbc5ba82e37381a0f0faea91aaf71b270a358f078032057a4"},
+    "D-S": {"manifestSha256": "fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359",
+            "manifestBytes": 106077, "coreSha256": "58e4ba255326742b51f68d962f9b6a1fd84827c56daed10623ff0121a0e2846e",
+            "caSha256": "3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025",
+            "inventorySha256": "f0adf8d31195fa6199e190ee63d84b9dbd32c6fe1cbf3a7903c456be45ab5204"},
+}
+SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256 = "9ebd6922af04aacbef9d7d1db4c2da6185a7fcc42797556c2c0651421b3a03d2"
+SHELL_GITHUB_PEER_PINS = {'github_tls/api-expired.pem': (790, 'd0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f'), 'github_tls/api-valid.pem': (786, '33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2'), 'github_tls/other-root-ca.pem': (778, '69b4eda8770c518de6e83caa5037bcf5d38f9f9ec16ef3c1e7c11023627a018c'), 'github_tls/root-ca.pem': (761, '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025'), 'github_tls/server-key.pem': (241, '33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109'), 'github_tls/wrong-san.pem': (786, '8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108'), 'github_tls_peer.py': (61665, '26628a8d91c4c76169ae579a91a4ad16ee7352ba247b45a3b98cdda0fc177449')}
+SHELL_GITHUB_MATERIAL_LIMIT = 2 << 20
+SHELL_GITHUB_FIXTURE_LIMIT = 8192
+SHELL_GITHUB_PUBLIC_FILE_LIMIT = 135
+SHELL_GITHUB_DIAL_BEFORE = b"                    http.client.HTTPConnection.connect(self)\n"
+SHELL_GITHUB_DIAL_AFTER = (
+    b"                    # TEST ONLY: exact fixed numeric dial; all TLS/HTTP policy is unchanged.\n"
+    b"                    import socket\n"
+    b"                    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+    b"                    self.sock.settimeout(budget.remaining())\n"
+    b'                    self.sock.connect(("127.0.0.1", 18443))\n'
+)
+
+
+def shell_github_selection(profile=SHELL_GITHUB_PROFILE):
+    need(profile in (SHELL_GITHUB_PROFILE, SHELL_GITHUB_BOUNDARY_PROFILE), "Unknown fixed GitHub selection")
+    boundary = profile == SHELL_GITHUB_BOUNDARY_PROFILE
+    selection = {"profile": profile, "cases": list(SHELL_GITHUB_BOUNDARY_CASES if boundary else SHELL_GITHUB_CASES),
+                 "payloads": deepcopy(SHELL_GITHUB_PAYLOADS),
+                 "peerSources": [{"path": "desktop/src-tauri/tests/fixtures/" + path, "size": pin[0], "sha256": pin[1]}
+                                 for path, pin in sorted(SHELL_GITHUB_PEER_PINS.items())],
+                 "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+                 "normalDestinationAction": boundary}
+    if boundary:
+        selection.update(normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                         normalHttpRequests=False, separatelyApprovedNormalNegative=False)
+    return selection
+
+
+def shell_github(value):
+    return type(value.get("shell")) is dict and "githubReadOnly" in value["shell"]
+
+
+def shell_normal_boundaries(value):
+    return shell_github(value) and type(value["shell"]["githubReadOnly"]) is dict \
+        and value["shell"]["githubReadOnly"].get("profile") == SHELL_GITHUB_BOUNDARY_PROFILE
+
+
+def shell_cases(value):
+    if shell_github(value):
+        selection = value["shell"]["githubReadOnly"]
+        need(type(selection) is dict, "Closed GitHub selection is not an object")
+        profile = selection.get("profile")
+        need(canonical(selection) == canonical(shell_github_selection(profile)),
+             "Closed GitHub observation selection differs; no normal HTTP action is granted")
+        return SHELL_GITHUB_BOUNDARY_CASES if profile == SHELL_GITHUB_BOUNDARY_PROFILE else SHELL_GITHUB_CASES
+    return SHELL_CASES
+
+
+def shell_observers(value):
+    return tuple(case for case in shell_cases(value) if case != "normal")
+
+
+def shell_fixture_children(value):
+    return ("github-project",) if shell_github(value) else SHELL_FIXTURE_CHILDREN
+
+
+def shell_public_limit(value):
+    return SHELL_GITHUB_PUBLIC_FILE_LIMIT if shell_github(value) else SHELL_PUBLIC_FILE_LIMIT
+
+
+def shell_github_role(case):
+    need(case in SHELL_GITHUB_ALL_CASES, "Unknown GitHub case or separately gated normal HTTP action")
+    return "N" if case in SHELL_GITHUB_BOUNDARY_CASES else "D-R" if case in SHELL_GITHUB_REAL_CA_CASES else "D-S"
+
+
+
+SHELL_GITHUB_MARKER = b"MRK_INSTALLED_SHELL_GITHUB_READONLY="
+SHELL_GITHUB_DEADLINE_CASES = ("github-handshake-deadline", "github-header-deadline", "github-body-deadline")
+SHELL_GITHUB_ACTIVE_CASES = ("github-cancel", "github-quit", "github-unknown")
+# Exact installed native Case::{script,connections,reason}; not a caller route.
+SHELL_GITHUB_CASE_DATA = {
+    "github-connect-refresh": ("G-connect-refresh", 8, "none"),
+    "github-real-ca-refusal": ("T2-root", 1, "tls-failed"),
+    "github-wrong-name": ("T2-name", 1, "tls-failed"),
+    "github-expired": ("T2-expired", 1, "tls-failed"),
+    "github-ragged": ("T3-ragged", 1, "tls-failed"),
+    "github-length": ("T3-length", 1, "response-invalid"),
+    "github-chunk": ("T3-chunk", 1, "response-invalid"),
+    "github-header-limit": ("T6-header", 1, "response-limit"),
+    "github-body-limit": ("T6-body", 1, "response-limit"),
+    "github-chunk-limit": ("T6-chunk-metadata", 1, "response-limit"),
+    "github-unauthorized": ("T6-unauthorized", 1, "unauthorized"),
+    "github-rate": ("T6-rate-expiry", 1, "response-invalid"),
+    "github-identity": ("T6-target", 4, "target-changed"),
+    "github-redirect": ("T6-redirect", 1, "response-invalid"),
+    "github-ambient-fixed": ("T4-ambient-fixed", 4, "none"),
+    "github-ambient-no-rescue": ("T4-ambient-no-rescue", 1, "tls-failed"),
+    "github-handshake-deadline": ("T5-handshake", 1, "query_timeout"),
+    "github-header-deadline": ("G-header-withhold", 1, "query_timeout"),
+    "github-body-deadline": ("T5-read", 1, "query_timeout"),
+    "github-cancel": ("T5-read", 1, "cancelled"),
+    "github-quit": ("T5-read", 1, "cancelled"),
+    "github-unknown": ("T5-read", 1, "cleanup_unknown"),
+}
+
+
+SHELL_GITHUB_BOUNDARY_CASE_DATA = {
+    "github-dns-deadline": ("G-dns-withhold", 0, "query_timeout"),
+    "github-connect-deadline": (None, 0, "query_timeout"),
+}
+
+
+def shell_github_case_data(case):
+    shell_github_role(case)
+    return (SHELL_GITHUB_BOUNDARY_CASE_DATA if case in SHELL_GITHUB_BOUNDARY_CASES else SHELL_GITHUB_CASE_DATA)[case]
+
+
+def _shell_github_fields(value, keys, label):
+    need(type(value) is dict and set(value) == set(keys), "GitHub closed " + label + " fields differ")
+
+
+def _shell_github_uint(value, maximum, label, minimum=0):
+    need(type(value) is int and minimum <= value <= maximum, "GitHub closed " + label + " integer differs")
+
+
+def _shell_github_pin(raw):
+    need(type(raw) is bytes, "GitHub retained DATA is not bytes")
+    return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def shell_github_peer_receipt(peer, case):
+    """Validate the actual shared retained-owner projection, not another owner."""
+    shell_github_role(case)
+    script, connections, _ = shell_github_case_data(case)
+    true_fields = ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                   "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")
+    false_fields = ("stopAttempted", "stdoutOverflow", "stderrOverflow")
+    _shell_github_fields(peer, (*true_fields, *false_fields, "exitCode", "stdoutBytes", "stderrBytes", "terminal", "control"), "peer")
+    need(all(peer[key] is True for key in true_fields) and all(peer[key] is False for key in false_fields),
+         "GitHub peer lacks actual original wait/EOF/join/endpoint/protocol finality")
+    _shell_github_uint(peer["exitCode"], 0, "peer exit")
+    _shell_github_uint(peer["stdoutBytes"], 8192, "peer stdout", 1)
+    _shell_github_uint(peer["stderrBytes"], 0, "peer stderr")
+    control = peer["control"]
+    controls = ("acquired", "started", "joined", "writeComplete", "shutdownComplete", "productSettled", "withinEndpoint", "released")
+    _shell_github_fields(control, (*controls, "failed"), "peer control")
+    need(all(control[key] is True for key in controls) and control["failed"] is False,
+         "GitHub peer did not retain original S+EOF after actual product settlement")
+    terminal = peer["terminal"]
+    dns = case == "github-dns-deadline"
+    deadline = case in SHELL_GITHUB_DEADLINE_CASES or case in SHELL_GITHUB_ACTIVE_CASES or dns
+    framed = deadline or case in SHELL_GITHUB_AMBIENT_CASES
+    extra = ("sni", "phase", "withheldWireBytes", "bodyBytes", "incompleteBody", "clientStop", "progressCount",
+             "dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies") if framed else ("replyStops",)
+    if dns:
+        extra += ("dnsSource",)
+    _shell_github_fields(terminal, ("schemaVersion", "scope", "case", "installedCase", "ownerTag",
+        "manifestSha256", "peerSha256", "primaryPort", "state", "status", "code", "connections",
+        "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused",
+        "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed", "completion", *extra), "peer terminal")
+    fixed = {"schemaVersion": 1, "scope": "github-installed-tls-peer-v1", "case": script, "installedCase": case,
+             "manifestSha256": SHELL_GITHUB_PAYLOADS[shell_github_role(case)]["manifestSha256"],
+             "peerSha256": SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1], "primaryPort": 18553 if dns else 18443,
+             "state": "finished", "status": "passed", "code": None, "connections": connections, "allSocketsClosed": True}
+    need(canonical({key: terminal[key] for key in fixed}) == canonical(fixed)
+         and type(terminal["ownerTag"]) is str and re.fullmatch(r"[0-9a-f]{16}", terminal["ownerTag"]) is not None,
+         "GitHub peer case/manifest/SOURCE/finality binding differs")
+    if dns:
+        # No TCP listener, application reply, authorization, or forged TLS stop
+        # is a DNS observation. The retained peer's FIRST question is correlated
+        # separately with the original unreaped product Child.
+        for key in ("connections", "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify",
+                    "sni", "withheldWireBytes", "bodyBytes", "dnsReplies"):
+            _shell_github_uint(terminal[key], 0, "DNS peer " + key)
+        need(terminal["tlsRefused"] is False and terminal["incompleteBody"] is False
+             and terminal["clientStop"] is None and terminal["phase"] == "dns"
+             and all(terminal[key] == [] for key in ("wireReadBytes", "wireWriteBytes", "replyBytes")),
+             "Normal DNS peer acquired an unrelated transport or emitted a reply")
+        for key in ("dnsQuestions", "progressCount", "dnsA", "dnsAAAA"):
+            _shell_github_uint(terminal[key], 8, "DNS peer " + key, 1 if key in ("dnsQuestions", "progressCount") else 0)
+        need(terminal["dnsQuestions"] == terminal["progressCount"] == terminal["dnsA"] + terminal["dnsAAAA"],
+             "Normal DNS peer question/progress roster differs")
+        shell_github_dns_source(terminal["dnsSource"])
+        need(canonical(terminal["completion"]) == canonical({
+            "bytes": 1, "eof": True, "closed": True, "primaryEmpty": None, "primaryUnexpected": 0,
+            "primaryClosed": None, "proxy": None, "dnsEmpty": True, "dnsClosed": True}),
+            "Normal DNS original UDP/control finality differs")
+        need(peer["stdoutBytes"] > len(canonical(terminal)), "Normal DNS peer omitted original ready/question frames")
+        return peer
+    # ownerTag is correlation-only; authority remains the source-bound original
+    # Child, exclusive listeners, actual wait and original reader/control joins.
+    refused = case in ("github-real-ca-refusal", "github-wrong-name", "github-expired", "github-ambient-no-rescue")
+    handshake = case == "github-handshake-deadline"
+    requests = 0 if refused or handshake else connections
+    for field in ("handshakes", "requests"):
+        _shell_github_uint(terminal[field], requests, "peer " + field, requests)
+    auth = requests * len(b"Bearer INERT_NOT_A_CREDENTIAL")
+    _shell_github_uint(terminal["authBytes"], auth, "synthetic authorization count", auth)
+    _shell_github_uint(terminal["decryptedBytes"], requests * 8192, "peer decrypted count", requests * 27)
+    _shell_github_uint(terminal["closeNotify"], connections, "peer close notify")
+    need(terminal["tlsRefused"] is refused and (not refused or terminal["closeNotify"] == 0),
+         "GitHub TLS refusal sent application authorization or a close-notify claim")
+    wire_max = 512 * 1024 if case == "github-body-limit" else 128 * 1024
+    for field in ("wireReadBytes", "wireWriteBytes", "replyBytes"):
+        rows = terminal[field]
+        need(type(rows) is list and len(rows) == connections, "GitHub peer wire roster differs")
+        for count in rows:
+            _shell_github_uint(count, wire_max, "peer " + field)
+    completion = terminal["completion"]
+    common = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True, "primaryUnexpected": 0, "primaryClosed": True}
+    if framed:
+        wanted = {**common, "proxy": {"empty": True, "unexpected": 0, "closed": True} if case in SHELL_GITHUB_AMBIENT_CASES else None,
+                  "dnsEmpty": None, "dnsClosed": None}
+        for field in ("dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies"):
+            _shell_github_uint(terminal[field], 0, "unused DNS " + field)
+        _shell_github_uint(terminal["sni"], connections, "peer SNI count")
+        _shell_github_uint(terminal["withheldWireBytes"], wire_max, "withheld wire")
+        _shell_github_uint(terminal["bodyBytes"], 65536, "peer body count")
+        _shell_github_uint(terminal["progressCount"], 24, "peer progress count")
+        need(type(terminal["incompleteBody"]) is bool and type(terminal["phase"]) is str
+             and re.fullmatch(r"[a-z-]{1,32}", terminal["phase"]) is not None
+             and (terminal["clientStop"] is None or type(terminal["clientStop"]) is str
+                  and re.fullmatch(r"[a-z-]{1,40}", terminal["clientStop"]) is not None),
+             "GitHub peer progress field types differ")
+    else:
+        wanted = {**common, "redirect": {"empty": True, "unexpected": 0, "closed": True} if case == "github-redirect" else None}
+        stops = terminal["replyStops"]
+        allowed = {"none", *(stage + ":" + reason for stage in ("notify", "reply")
+                    for reason in ("broken-pipe", "connection-reset", "tls-eof", "tls-close-notify"))}
+        need(type(stops) is list and len(stops) == connections and all(type(stop) is str and stop in allowed for stop in stops),
+             "GitHub peer original reply-stop roster differs")
+        streaming = {
+            "github-header-limit": ((40630,), (32768,)), "github-body-limit": ((262215,), (262215,)),
+            "github-chunk-limit": ((35803,), (33143,)), "github-unauthorized": ((99,), (80,)),
+            "github-rate": ((175,), (156,)), "github-identity": ((95, 222, 102, 222), (95, 222, 102, 222)),
+            "github-redirect": ((136,), (117,)),
+        }.get(case)
+        if streaming is not None:
+            scripted, minima = streaming
+            for index, stop in enumerate(stops):
+                minimum = scripted[index] if stop == "none" or stop.startswith("notify:") else minima[index]
+                need((case != "github-identity" or stop == "none")
+                     and minimum <= terminal["replyBytes"][index] <= scripted[index]
+                     and terminal["wireWriteBytes"][index] >= minimum, "GitHub peer did not reach its fixed response boundary")
+            need(terminal["closeNotify"] == stops.count("none"), "GitHub streaming close-notify count differs")
+        else:
+            notify = 8 if case == "github-connect-refresh" else 1 if case in ("github-length", "github-chunk") else 0
+            need(terminal["closeNotify"] == notify and (refused or all(0 < count <= 65536 for count in terminal["replyBytes"])),
+                 "GitHub framing response/notify count differs")
+    need(canonical(completion) == canonical(wanted), "GitHub peer original listener/control closure differs")
+    if deadline:
+        need(terminal["sni"] == 1 and terminal["clientStop"] in ("tcp-eof", "connection-reset", "tls-close-notify", "broken-pipe"),
+             "GitHub withholding lacks the original observed client stop")
+        if handshake:
+            need(terminal["phase"] == "handshake" and terminal["withheldWireBytes"] > 0
+                 and terminal["wireWriteBytes"] == [0] and terminal["replyBytes"] == [0],
+                 "GitHub handshake-withholding receipt differs")
+        elif case == "github-header-deadline":
+            need(terminal["phase"] == "headers" and terminal["bodyBytes"] == 0 and terminal["replyBytes"] == [0],
+                 "GitHub header-withholding receipt differs")
+        else:
+            need(terminal["phase"] == "read" and terminal["incompleteBody"] is True
+                 and (7 if case == "github-body-deadline" else 1) <= terminal["bodyBytes"] < 14,
+                 "GitHub body-withholding receipt differs")
+        need(terminal["progressCount"] >= 2, "GitHub withholding lost its original progress/stop frames")
+    need(peer["stdoutBytes"] > len(canonical(terminal)), "GitHub peer omitted its original readiness frame")
+    return peer
+
+
+
+def shell_github_maps(expected):
+    _shell_github_fields(expected, SHELL_GITHUB_PAYLOADS, "N/D expected map roles")
+    roles = {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+    private_inodes = set()
+    for profile, pin in SHELL_GITHUB_PAYLOADS.items():
+        _shell_github_fields(expected[profile], roles, "expected six-object map")
+        for role, row in expected[profile].items():
+            _shell_github_fields(row, ("paths", "deviceMajor", "deviceMinor", "inode"), "expected map object")
+            for key in ("deviceMajor", "deviceMinor", "inode"):
+                _shell_github_uint(row[key], (1 << 64) - 1, "expected map " + key, 1 if key == "inode" else 0)
+            if role == "python" or role in PRIVATE_SONAMES:
+                relative = "python/bin/python3" if role == "python" else "python/lib/" + role
+                need(row["paths"] == [str(PREFIX / pin["manifestSha256"] / relative)], "GitHub expected private map root differs")
+                pair = tuple(row[key] for key in ("deviceMajor", "deviceMinor", "inode"))
+                need(pair not in private_inodes, "GitHub N/D native originals alias")
+                private_inodes.add(pair)
+            else:
+                paths = sorted([directory + "/" + role for directory in DEFAULT_LIBRARY_DIRS[:2]]
+                               + (["/lib64/" + role] if role == "ld-linux-x86-64.so.2" else []))
+                need(row["paths"] == paths and canonical(row) == canonical(expected["N"][role]),
+                     "GitHub D route changed an original OS loader map")
+    return expected
+
+
+
+def _github_boundary_ip(value):
+    need(type(value) is str and 0 < len(value) <= 45 and "%" not in value, "Normal boundary IP is not bounded unscoped text")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise Refused("Normal boundary IP is not a literal address") from error
+    need(str(address) == value, "Normal boundary IP is not canonical")
+    return address
+
+
+def shell_github_dns_source(value):
+    _shell_github_fields(value, ("address", "port", "questionId", "questionType"), "original DNS question source")
+    need(type(value["address"]) is str, "DNS source address is not text")
+    address = _github_boundary_ip(value["address"])
+    need(address.version == 4 and address.is_loopback and str(address) == value["address"],
+         "DNS source is not its canonical original loopback address")
+    _shell_github_uint(value["port"], 65535, "original DNS source port", 1)
+    _shell_github_uint(value["questionId"], 65535, "original DNS question id")
+    need(type(value["questionType"]) is int and value["questionType"] in (1, 28), "Unexpected DNS question type")
+    return value
+
+
+def shell_github_boundary_receipt(value, case, peer):
+    need(case in SHELL_GITHUB_BOUNDARY_CASES, "No normal-boundary receipt is granted to another case")
+    _shell_github_fields(value, ("kind", "childPid", "fd", "inode", "uid", "family", "protocol",
+        "localAddress", "localPort", "remoteAddress", "remotePort", "state", "originalFdStable",
+        "observedBeforeDeadline", "peerSource"), "original normal boundary")
+    dns = case == "github-dns-deadline"
+    need(value["kind"] == ("normal-dns" if dns else "normal-connect")
+         and value["originalFdStable"] is True and value["observedBeforeDeadline"] is True,
+         "Normal boundary is not the original stable FD observed before its unchanged endpoint")
+    for key in ("childPid", "uid", "fd"):
+        _shell_github_uint(value[key], (1 << 32) - 1, "original boundary " + key, 0 if key == "fd" else 1)
+    need(type(value["inode"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value["inode"]) is not None
+         and int(value["inode"]) < 1 << 64, "Normal boundary inode is not canonical positive u64 DATA")
+    for key in ("localAddress", "remoteAddress"):
+        need(type(value[key]) is str and len(value[key]) <= 45, "Normal boundary address bound differs")
+    local, remote = (_github_boundary_ip(value[key]) for key in ("localAddress", "remoteAddress"))
+    need(str(local) == value["localAddress"] and str(remote) == value["remoteAddress"]
+         and local.version == remote.version and value["family"] == ("ipv4" if local.version == 4 else "ipv6")
+         and not local.is_unspecified and not local.is_multicast, "Normal boundary original address/family differs")
+    _shell_github_uint(value["localPort"], 65535, "normal boundary local port", 1)
+    _shell_github_uint(value["remotePort"], 65535, "normal boundary remote port")
+    if dns:
+        source = shell_github_dns_source(value["peerSource"])
+        need(type(peer) is dict and type(peer.get("terminal")) is dict
+             and canonical(source) == canonical(peer["terminal"].get("dnsSource"))
+             and value["family"] == "ipv4" and value["protocol"] == "udp"
+             and (value["localAddress"], value["localPort"]) == (source["address"], source["port"])
+             and ((value["remoteAddress"], value["remotePort"], value["state"]) == ("127.0.0.53", 53, "01")
+                  or (value["remoteAddress"], value["remotePort"], value["state"]) == ("0.0.0.0", 0, "07")),
+             "Normal DNS question is not joined to that original Child UDP FD/inode/full endpoint")
+    else:
+        need(peer is None and value["peerSource"] is None and value["protocol"] == "tcp"
+             and value["state"] == "02" and value["remotePort"] == 443 and remote.is_global
+             and not remote.is_multicast and not remote.is_reserved
+             and (remote.version != 6 or remote.ipv4_mapped is None),
+             "Normal connect is not the original public-destination TCP SYN_SENT socket")
+    return value
+
+
+def shell_github_receipt(raw, case, expected):
+    """Closed DATA from the actual native producer; never a success template."""
+    role = shell_github_role(case)
+    need(type(raw) is bytes and 0 < len(raw) <= 32769
+         and type(expected) is dict and set(expected) == set(SHELL_GITHUB_PAYLOADS),
+         "GitHub receipt or independently bound N/D map roles differ")
+    shell_github_maps(expected)
+    receipt = decode(raw, 32769)
+    need(canonical(receipt) == raw, "GitHub native receipt is not canonical closed JSON")
+    _shell_github_fields(receipt, ("schemaVersion", "fixture", "case", "sourceCommit", "normalManifestSha256",
+        "productManifestSha256", "protocolSha256", "peerSha256", "project", "nativeSession", "originals",
+        "peer", "quit", "notProven"), "native receipt")
+    fixed = {"schemaVersion": 1, "fixture": "github-readonly-installed-v1", "case": case,
+             "normalManifestSha256": M, "productManifestSha256": SHELL_GITHUB_PAYLOADS[role]["manifestSha256"],
+             "protocolSha256": Q, "peerSha256": None if case == "github-connect-deadline" else SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1],
+             "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+             "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+             "notProven": (["real-stalled-tcp-connect"] if case == "github-dns-deadline" else
+                            ["normal-resolver-withholding"] if case == "github-connect-deadline" else
+                            ["normal-resolver-withholding", "real-stalled-tcp-connect"])}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed)
+         and type(receipt["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", receipt["sourceCommit"]) is not None,
+         "GitHub actual native SOURCE/profile/project/quit binding differs")
+    active = case in SHELL_GITHUB_ACTIVE_CASES
+    deadline = case in SHELL_GITHUB_DEADLINE_CASES or case in SHELL_GITHUB_BOUNDARY_CASES
+    reads = 2 if case == "github-connect-refresh" else 1
+    reason = shell_github_case_data(case)[2]
+    session = receipt["nativeSession"]
+    _shell_github_fields(session, ("connect", "refresh", "disconnect", "retainedStatus", "runningObserved",
+        "outcomes", "cleared", "unknownRetained", "tokenFieldCleared"), "native session")
+    wanted = {"connect": 1, "refresh": reads - 1, "disconnect": 0 if case in ("github-quit", "github-unknown") else 1,
+              "retainedStatus": not active, "runningObserved": active,
+              "cleared": case not in ("github-quit", "github-unknown"),
+              "unknownRetained": case == "github-unknown", "tokenFieldCleared": True}
+    need(canonical({key: session[key] for key in wanted}) == canonical(wanted)
+         and type(session["outcomes"]) is list and len(session["outcomes"]) == (0 if active else reads),
+         "GitHub original Connect/Refresh/Status/Disconnect/unknown UI interval differs")
+    ui_reason = "network-unavailable" if deadline else "cleanup-unknown" if case == "github-unknown" else reason
+    previous_revision, context = 0, None
+    for index, outcome in enumerate(session["outcomes"]):
+        _shell_github_fields(outcome, ("revision", "sessionId", "projectId", "target", "sessionState", "kind", "phase",
+            "reason", "facts", "accountId", "repositoryId", "workflowRows"), "visible retained outcome")
+        _shell_github_uint(outcome["revision"], (1 << 32) - 2, "visible revision", previous_revision + 1)
+        previous_revision = outcome["revision"]
+        need(type(outcome["sessionId"]) is str and re.fullmatch(r"github-session-[0-9]{1,10}", outcome["sessionId"]) is not None
+             and type(outcome["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", outcome["projectId"]) is not None,
+             "GitHub registered session/project identity is not bounded")
+        current = (outcome["sessionId"], outcome["projectId"])
+        need(context is None or current == context, "GitHub Refresh adopted a replacement native session or project")
+        context = current
+        positive = reason == "none"
+        # TargetChanged retires before accept_facts: the current UI must not
+        # promote the partial account retained inside that native typed outcome.
+        shown = {"target": "owner/app", "sessionState": "connected" if positive else "failed",
+                 "kind": "connect" if index == 0 else "refresh", "phase": "settled", "reason": ui_reason,
+                 "facts": ["observed" if positive else "unavailable"] * 3,
+                 "accountId": "11" if positive else None, "repositoryId": "22" if positive else None,
+                 "workflowRows": 4 if positive else 0}
+        need(canonical({key: outcome[key] for key in shown}) == canonical(shown),
+             "GitHub fixed visible status/fact projection differs")
+    originals = receipt["originals"]
+    need(type(originals) is list and len(originals) == reads, "GitHub original native read roster differs")
+    operation_ids = set()
+    for original in originals:
+        _shell_github_fields(original, ("operationId", "manifestSha256", "receiptKind", "reason", "terminal",
+            "unknownLatched", "firstError", "originalObserverJoined", "nativeSettled", "environmentClear", "maps",
+            "cleanupWithinOriginalEndpoint", "elapsedMs", *(("boundary",) if case in SHELL_GITHUB_BOUNDARY_CASES else ())), "original read")
+        operation = original["operationId"]
+        need(type(operation) is str and re.fullmatch(r"github-read-(0|[1-9][0-9]{0,19})", operation) is not None
+             and int(operation.rsplit("-", 1)[1]) < 1 << 64 and operation not in operation_ids,
+             "GitHub original operation was missing, duplicated or replaced")
+        operation_ids.add(operation)
+        native_error = active or deadline
+        original_fixed = {"manifestSha256": SHELL_GITHUB_PAYLOADS[role]["manifestSha256"],
+                          "receiptKind": "native-error" if native_error else "typed-outcome", "reason": reason,
+                          "terminal": True, "unknownLatched": case == "github-unknown",
+                          "firstError": reason if native_error else None, "originalObserverJoined": True,
+                          "nativeSettled": True, "environmentClear": True, "cleanupWithinOriginalEndpoint": True}
+        need(canonical({key: original[key] for key in original_fixed}) == canonical(original_fixed),
+             "GitHub original first error/wait/settlement/environment/observer receipt differs")
+        _shell_github_uint(original["elapsedMs"], 11999 if deadline else 9999, "original read interval", 10000 if deadline else 0)
+        rows = _shell_original_child_map(canonical(original["maps"]), expected[role])
+        for name, relative in (("python", "python/bin/python3"), ("libssl.so.3", "python/lib/libssl.so.3"),
+                               ("libcrypto.so.3", "python/lib/libcrypto.so.3")):
+            row = next(row for row in rows if row["role"] == name)
+            same_normal = (row["deviceMajor"], row["deviceMinor"], row["inode"]) == tuple(
+                expected["N"][name][key] for key in ("deviceMajor", "deviceMinor", "inode"))
+            need(row["path"] == str(PREFIX / SHELL_GITHUB_PAYLOADS[role]["manifestSha256"] / relative)
+                 and same_normal is (role == "N"), "GitHub original N/D map role was relabelled")
+        if case in SHELL_GITHUB_BOUNDARY_CASES:
+            shell_github_boundary_receipt(original["boundary"], case, receipt["peer"])
+    if case == "github-connect-deadline":
+        need(receipt["peer"] is None, "Normal TCP-connect boundary acquired an unrelated synthetic peer")
+    else:
+        shell_github_peer_receipt(receipt["peer"], case)
+    return receipt
+
+
+def shell_github_result(stdout, stderr, case, code, expected):
+    shell_github_role(case)
+    need(type(code) is int and code == 0 and type(stdout) is bytes and type(stderr) is bytes
+         and len(stdout) + len(stderr) <= LIMIT, "GitHub original capture failed, oversized or incomplete")
+    output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    diagnostics = [line for line in stderr.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    need(len(output) == 5 and output[:3] == [
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+        b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"]
+        and output[3].startswith(SHELL_GITHUB_MARKER) and output[3].endswith(b"\n")
+        and output[4] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
+        and diagnostics == [], "GitHub original bootstrap/contract/receipt/completion order differs")
+    receipt = shell_github_receipt(output[3][len(SHELL_GITHUB_MARKER):], case, expected)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+            "maps": [], "githubReadOnly": receipt}
+
+
+
+def _shell_github_closed_loader(material, final):
+    """Bind D file identities to the same final loader proof; keep N/OS policy."""
+    bindings = final["bindings"]
+    for role in ("D-R", "D-S"):
+        root = PREFIX / SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+        tree = material["payloads"][role]
+        present = ("python/bin/python3", "python/lib/libssl.so.3", "python/lib/libcrypto.so.3")
+        absent = ("python/lib/glibc-hwcaps",
+                  *("python/lib/" + name for name in final["entryObjects"] if name not in PRIVATE_SONAMES),
+                  *(prefix + name for prefix in ("", "python/", "python/bin/")
+                    for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt")))
+        wanted = {str(root / relative) for relative in (*present, *absent)}
+        need({path for path in bindings if path.startswith(str(root) + "/")} == wanted,
+             "GitHub final loader D binding roster differs")
+        for relative in (*present, *absent):
+            path = str(root / relative)
+            row = bindings[path]
+            fields = ("path", "selectedPath", "links", "ancestry", "identity", "size", "sha256") if relative in present else (
+                "path", "selectedPath", "links", "ancestry", "absent", "absentAt")
+            _shell_github_fields(row, fields, "final D loader binding")
+            need(row["path"] == row["selectedPath"] == path and row["links"] == [] and type(row["ancestry"]) is dict,
+                 "GitHub final D native path or link differs")
+            for parent in Path(relative).parents:
+                name = "" if str(parent) == "." else parent.as_posix()
+                need(canonical(row["ancestry"].get(str(root / name))) == canonical(tree[name]["identity"][:5]),
+                     "GitHub final D native ancestry differs from the actual material originals")
+            if relative in present:
+                original = tree[relative]
+                # Loader DATA intentionally omits uid/gid; full9 material retains
+                # and checks both. Never compare the two different row layouts.
+                projected = [original["identity"][index] for index in (0, 1, 2, 5, 6, 7, 8)]
+                need(canonical(row["identity"]) == canonical(projected)
+                     and type(row["size"]) is int and row["size"] == original["size"] and row["sha256"] == original["sha256"],
+                     "GitHub final D native object was not the actually installed original")
+            else:
+                need(row["absent"] is True and row["absentAt"] == path, "GitHub D native/startup override was not absent")
+
+
+# The actual disposable nft/package/kernel/NSS tuple has NOT been admitted.
+# This is deliberately NOT populated from runtime hashes or workflow inputs.
+# A separately reviewed SOURCE update must pin an observed compatible tuple.
+# The read-only material observation below supplies engineering DATA, not a
+# capability token. The established22 profile never consults this gate.
+SHELL_GITHUB_BOUNDARY_HOST_PROFILE = None
+SHELL_GITHUB_BOUNDARY_NFT = "/usr/sbin/nft"
+SHELL_GITHUB_BOUNDARY_LIMIT = 128 << 10
+SHELL_GITHUB_BOUNDARY_PACKAGES = ("nftables", "libnftables1", "libnftnl11", "libmnl0")
+SHELL_GITHUB_BOUNDARY_INPUTS = ("/usr/sbin/nft", "/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf",
+    "/var/lib/dpkg/info/nftables.list", "/var/lib/dpkg/info/nftables.md5sums",
+    "/var/lib/dpkg/info/libnftables1:amd64.list", "/var/lib/dpkg/info/libnftables1:amd64.md5sums",
+    "/var/lib/dpkg/info/libnftnl11:amd64.list", "/var/lib/dpkg/info/libnftnl11:amd64.md5sums",
+    "/var/lib/dpkg/info/libmnl0:amd64.list", "/var/lib/dpkg/info/libmnl0:amd64.md5sums")
+_GITHUB_BOUNDARY_SLOTS = {}
+_GITHUB_BOUNDARY_COMMAND_FINAL = True
+_GITHUB_BOUNDARY_STOP = None
+_GITHUB_BOUNDARY_BODY_ERRORS = []
+
+
+def _github_boundary_material_file(name):
+    """Bounded protected link/file DATA, never execution or resolver editing."""
+    path, links = Path(name), []
+    for _ in range(4):
+        directory(path.parent, protected=True)
+        before = path.lstat()
+        need(before.st_uid == before.st_gid == 0 and before.st_nlink == 1,
+             "Unprotected normal-boundary material")
+        if not stat.S_ISLNK(before.st_mode):
+            need(not before.st_mode & 0o7022, "Mutable/special normal-boundary material")
+            cap = FILE_LIMIT if name == SHELL_GITHUB_BOUNDARY_NFT else 512 << 10 if name.startswith("/boot/config-") else 128 << 10
+            row = protected_record(path, cap)
+            return {"path": name, "selectedPath": str(path), "links": links, "file": row}
+        target = os.readlink(path)
+        need(type(target) is str and 0 < len(target) <= 256 and "\0" not in target
+             and identity(path.lstat()) == identity(before), "Changed normal-boundary material link")
+        selected = Path(os.path.normpath(str(path.parent / target))) if not target.startswith("/") else Path(target)
+        # Only the normal systemd stub link is admitted for these fixed inputs.
+        need(name == "/etc/resolv.conf" and selected == Path("/run/systemd/resolve/stub-resolv.conf")
+             and not links, "Unreviewed normal resolver material link")
+        links.append({"path": str(path), "target": target, "identity": list(identity(before))})
+        path = selected
+    raise Refused("Normal-boundary material link bound exceeded")
+
+
+def _github_boundary_package_stanzas(raw):
+    need(type(raw) is bytes and len(raw) <= 32 << 20 and b"\0" not in raw, "Dpkg material DATA bound differs")
+    result = {}
+    for stanza in raw.decode("utf-8").split("\n\n"):
+        lines = stanza.splitlines()
+        names = [line[9:] for line in lines if line.startswith("Package: ")]
+        if len(names) != 1 or names[0] not in SHELL_GITHUB_BOUNDARY_PACKAGES:
+            continue
+        name = names[0]
+        need(name not in result, "Duplicate normal-boundary package stanza")
+        fields = {}
+        for line in lines:
+            if line.startswith(("Status: ", "Version: ", "Architecture: ", "Source: ")):
+                key, value = line.split(": ", 1)
+                need(key not in fields and 0 < len(value) <= 256, "Normal-boundary package field differs")
+                fields[key] = value
+        need(fields.get("Status") == "install ok installed" and fields.get("Architecture") == "amd64"
+             and type(fields.get("Version")) is str, "Normal-boundary package is not installed amd64")
+        result[name] = fields
+    need(set(result) == set(SHELL_GITHUB_BOUNDARY_PACKAGES), "Normal-boundary package material is missing")
+    return result
+
+
+def _github_boundary_package_data():
+    # Bind this read to the actual protected package database. Only the four
+    # selected stanzas are interval material; unrelated dpkg status changes
+    # are neither adopted as pins nor allowed to make this path mutable.
+    path = Path("/var/lib/dpkg/status")
+    before = protected_record(path, 32 << 20)
+    raw = read(path, 32 << 20)
+    need(hashlib.sha256(raw).hexdigest() == before["sha256"]
+         and protected_record(path, 32 << 20) == before, "Protected selected package DATA changed")
+    return _github_boundary_package_stanzas(raw)
+
+
+def _github_boundary_resolver_shape(nss, hosts, resolver):
+    need(all(type(raw) is bytes and len(raw) <= 128 << 10 and b"\0" not in raw for raw in (nss, hosts, resolver)),
+         "Normal resolver material bound differs")
+    database = []
+    for line in nss.decode("ascii").splitlines():
+        line = line.split("#", 1)[0].strip()
+        name, separator, sources = line.partition(":")
+        if name.strip() == "hosts":
+            need(separator == ":", "Normal NSS hosts database is malformed")
+            database.append(sources.split())
+    need(database == [["files", "dns"]], "Normal NSS is delegated, cached, conditional or unreviewed")
+    for line in hosts.decode("ascii").splitlines():
+        fields = line.split("#", 1)[0].split()
+        need(not fields or all(name.rstrip(".").lower() != "api.github.com" for name in fields[1:]),
+             "Normal hosts input shortcuts the original GitHub DNS question")
+    servers, options, searches = [], {}, []
+    for line in resolver.decode("ascii").splitlines():
+        fields = line.split("#", 1)[0].split(";", 1)[0].split()
+        if not fields:
+            continue
+        if fields[0] == "nameserver":
+            need(len(fields) == 2, "Normal resolver nameserver shape differs")
+            servers.append(fields[1])
+        elif fields[0] in ("search", "domain"):
+            need(not searches and 1 <= len(fields[1:]) <= 6
+                 and all(re.fullmatch(r"[A-Za-z0-9_.-]{1,253}", name) is not None for name in fields[1:]),
+                 "Normal resolver search bound differs")
+            searches = fields[1:]
+        elif fields[0] == "options":
+            for option in fields[1:]:
+                key, separator, value = option.partition(":")
+                need(key not in options and key in ("timeout", "attempts", "ndots", "edns0", "trust-ad"),
+                     "Normal resolver option is unreviewed or duplicated")
+                if key in ("edns0", "trust-ad"):
+                    need(not separator, "Normal resolver flag has an unexpected value")
+                    options[key] = True
+                else:
+                    need(separator == ":" and value.isdecimal() and len(value) <= 2,
+                         "Normal resolver retry option is not bounded")
+                    options[key] = int(value)
+        else:
+            raise Refused("Normal resolver directive is unreviewed")
+    timeout, attempts, ndots = options.get("timeout", 5), options.get("attempts", 2), options.get("ndots", 1)
+    need(servers == ["127.0.0.53"] and 1 <= timeout <= 10 and 1 <= attempts <= 4 and 0 <= ndots <= 1,
+         "Normal resolver is not the one bounded direct IPv4 loopback recipe")
+    # Two possible A/AAAA questions per attempt; no reply reaches a search
+    # suffix before the first exact api.github.com attempt interval finishes.
+    need(timeout * attempts > 12 and 2 * attempts <= 8,
+         "Actual normal unanswered resolver interval does not exceed the original operation endpoint")
+    return {"nameserver": "127.0.0.53", "port": 53, "timeoutSeconds": timeout, "attempts": attempts,
+            "ndots": ndots, "edns0": options.get("edns0", False), "trustAd": options.get("trust-ad", False),
+            "maximumQuestions": 2 * attempts, "searchCount": len(searches),
+            "searchSha256": hashlib.sha256(canonical(searches)).hexdigest()}
+
+
+def shell_github_boundary_host_materials():
+    """Read-only hosted material observation; no nft/query/socket/subprocess."""
+    failures, files, bodies = [], {}, {}
+    def unavailable(label, error):
+        need(len(failures) < 24, "Normal-boundary material failure bound")
+        failures.append({"material": label, "errorType": type(error).__name__})
+    for name in SHELL_GITHUB_BOUNDARY_INPUTS:
+        try:
+            row = _github_boundary_material_file(name)
+            files[name] = row
+            if name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"):
+                bodies[name] = read(Path(row["selectedPath"]), 128 << 10)
+                need(_github_boundary_material_file(name) == row, "Normal resolver material changed during observation")
+        except (OSError, ValueError, UnicodeError) as error:
+            unavailable(name, error)
+    packages, resolver, kernel, legacy, shortcuts = None, None, None, None, None
+    try:
+        packages = _github_boundary_package_data()
+    except (OSError, ValueError, UnicodeError) as error:
+        unavailable("selected-package-stanzas", error)
+    try:
+        resolver = _github_boundary_resolver_shape(*(bodies[name] for name in
+            ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")))
+    except (OSError, ValueError, UnicodeError, KeyError) as error:
+        unavailable("normal-resolver-shape", error)
+    try:
+        release = _kernel("/proc/sys/kernel/osrelease", 256).strip()
+        need(re.fullmatch(r"[A-Za-z0-9.+_-]{1,128}", release) is not None and release == os.uname().release,
+             "Normal-boundary kernel release differs")
+        config = _github_boundary_material_file("/boot/config-" + release)
+        raw = read(Path(config["selectedPath"]), 512 << 10)
+        relevant = ("CONFIG_CGROUPS", "CONFIG_CGROUP_BPF", "CONFIG_SOCK_CGROUP_DATA", "CONFIG_NF_TABLES",
+                    "CONFIG_NF_TABLES_INET", "CONFIG_NFT_SOCKET", "CONFIG_NFT_COUNTER", "CONFIG_NFT_NAT",
+                    "CONFIG_NFT_CHAIN_ROUTE", "CONFIG_IP_NF_IPTABLES", "CONFIG_IP6_NF_IPTABLES")
+        values = {}
+        for line in raw.decode("ascii").splitlines():
+            if "=" in line and line.split("=", 1)[0] in relevant:
+                key, value = line.split("=", 1)
+                need(key not in values and value in ("y", "m", "n"), "Duplicate/unreviewed kernel material option")
+                values[key] = value
+        need(_github_boundary_material_file("/boot/config-" + release) == config, "Kernel material changed")
+        kernel = {"release": release, "version": _kernel("/proc/version", 1024).strip(),
+                  "configuration": config, "features": values}
+        legacy = {name: _kernel(name, 4096).splitlines() for name in
+                  ("/proc/net/ip_tables_names", "/proc/net/ip6_tables_names")}
+        shortcuts = {}
+        for name in ("/run/nscd/socket", "/var/run/nscd/socket"):
+            # /var/run is the conventional /run link; only named absence DATA,
+            # not an open/delegation to a daemon, is retained.
+            try:
+                item = Path(name).lstat()
+                shortcuts[name] = {"present": True, "identity": list(identity(item))}
+            except FileNotFoundError:
+                shortcuts[name] = {"present": False}
+    except (OSError, ValueError, UnicodeError) as error:
+        unavailable("kernel-and-host-packet-path", error)
+    for name, before in list(files.items()):
+        try:
+            need(_github_boundary_material_file(name) == before, "Original normal-boundary material changed")
+        except (OSError, ValueError, UnicodeError) as error:
+            unavailable(name + "-post", error)
+    return {"schema": "installed-github-normal-boundary-host-materials-v1", "qualified": False,
+            "runtimeSelfAdmission": False, "nftExecuted": False, "dnsQueryIssued": False,
+            "files": files, "packages": packages, "kernel": kernel, "resolver": resolver,
+            "legacyTables": legacy, "delegatedSockets": shortcuts, "failures": failures}
+
+
+def _github_boundary_host_projection(observed):
+    _shell_github_fields(observed, ("schema", "qualified", "runtimeSelfAdmission", "nftExecuted", "dnsQueryIssued",
+        "files", "packages", "kernel", "resolver", "legacyTables", "delegatedSockets", "failures"), "host material")
+    need(observed["schema"] == "installed-github-normal-boundary-host-materials-v1"
+         and all(observed[key] is False for key in ("qualified", "runtimeSelfAdmission", "nftExecuted", "dnsQueryIssued"))
+         and observed["failures"] == [] and set(observed["files"]) == set(SHELL_GITHUB_BOUNDARY_INPUTS)
+         and observed["resolver"] is not None and observed["kernel"] is not None
+         and all(rows == [] for rows in observed["legacyTables"].values())
+         and all(row == {"present": False} for row in observed["delegatedSockets"].values()),
+         "Normal-boundary host material is incomplete, delegated or has an unknown legacy packet path")
+    projected = deepcopy(observed)
+    # Static SOURCE pins bind actual bytes and protected link targets; per-host
+    # inode identities are separately held unchanged throughout this original.
+    for row in [*projected["files"].values(), projected["kernel"]["configuration"]]:
+        row["file"].pop("identity")
+        for link in row["links"]:
+            link.pop("identity")
+    return projected
+
+
+def _github_boundary_host_admit(observed):
+    profile = SHELL_GITHUB_BOUNDARY_HOST_PROFILE
+    need(type(profile) is dict and set(profile) == {"materials", "nftMetainfo"},
+         "Normal-boundary host tuple is not yet independently SOURCE-admitted; retain read-only materials")
+    projected = _github_boundary_host_projection(observed)
+    need(canonical(projected) == canonical(profile["materials"]),
+         "Actual protected nft/package/kernel/NSS tuple differs from the reviewed SOURCE pins")
+    need(type(profile["nftMetainfo"]) is dict and profile["nftMetainfo"].get("json_schema_version") == 1,
+         "Reviewed nft JSON dialect is missing")
+    return observed
+
+
+def _github_boundary_tag(value, case):
+    need(case in SHELL_GITHUB_BOUNDARY_CASES and shell_cases(value) == SHELL_GITHUB_BOUNDARY_CASES,
+         "Only the separate fixed normal-boundary pair owns a fault policy")
+    for key in ("runId", "attempt"):
+        need(type(value.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) is not None,
+             "Normal-boundary policy lacks the actual original run/attempt")
+    suffix = "dns" if case == "github-dns-deadline" else "connect"
+    return "mrk_gnb_" + value["runId"] + "_" + value["attempt"] + "_" + suffix
+
+
+def shell_github_boundary_policy(value, case):
+    table = _github_boundary_tag(value, case)
+    uid = value.get("runnerUid")
+    need(type(uid) is int and 0 < uid < 1 << 31, "Normal-boundary policy requires the original nonroot skuid")
+    unit = root_path(value).name + ".service"
+    group = "system.slice/" + unit
+    prefix = "meta skuid " + str(uid) + ' socket cgroupv2 level 2 "' + group + '" '
+    lines = ["create table inet " + table]
+    if case == "github-dns-deadline":
+        lines.append("add counter inet " + table + " dns_queries")
+    lines += ["add counter inet " + table + " https_syns",
+              "add chain inet " + table + " output { type route hook output priority -300; policy accept; }"]
+    if case == "github-dns-deadline":
+        lines.append("add rule inet " + table + " output " + prefix
+            + "meta nfproto ipv4 ip daddr 127.0.0.53 udp dport 53 counter name dns_queries udp dport set 18553")
+    # An inet chain with l4proto tcp covers BOTH IPv4 and IPv6. Mask only
+    # FIN/SYN/RST/ACK so ECN-capable acquisition SYNs cannot escape.
+    lines.append("add rule inet " + table + " output " + prefix
+        + "meta l4proto tcp tcp dport 443 tcp flags & (fin | syn | rst | ack) == syn counter name https_syns drop")
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _github_boundary_expected_objects(value, case):
+    table = _github_boundary_tag(value, case)
+    def match(left, right):
+        return {"match": {"op": "==", "left": left, "right": right}}
+    def payload(protocol, field):
+        return {"payload": {"protocol": protocol, "field": field}}
+    scope = [match({"meta": {"key": "skuid"}}, value["runnerUid"]),
+             match({"socket": {"key": "cgroupv2", "level": 2}}, "system.slice/" + root_path(value).name + ".service")]
+    objects = [{"table": {"family": "inet", "name": table}}]
+    for name in (("dns_queries", "https_syns") if case == "github-dns-deadline" else ("https_syns",)):
+        objects.append({"counter": {"family": "inet", "table": table, "name": name}})
+    objects.append({"chain": {"family": "inet", "table": table, "name": "output",
+                              "type": "route", "hook": "output", "prio": -300, "policy": "accept"}})
+    def rule(expressions):
+        return {"rule": {"family": "inet", "table": table, "chain": "output", "expr": expressions}}
+    if case == "github-dns-deadline":
+        objects.append(rule(deepcopy(scope) + [
+            match({"meta": {"key": "nfproto"}}, "ipv4"), match(payload("ip", "daddr"), "127.0.0.53"),
+            match(payload("udp", "dport"), 53), {"counter": "dns_queries"},
+            {"mangle": {"key": payload("udp", "dport"), "value": 18553}}]))
+    objects.append(rule(deepcopy(scope) + [
+        match({"meta": {"key": "l4proto"}}, "tcp"), match(payload("tcp", "dport"), 443),
+        match({"&": [payload("tcp", "flags"), ["fin", "syn", "rst", "ack"]]}, "syn"),
+        {"counter": "https_syns"}, {"drop": None}]))
+    return objects
+
+
+def _github_boundary_nft_rows(raw, *, echo=False):
+    value = decode(raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+    _shell_github_fields(value, ("nftables",), "nft readback")
+    rows = value["nftables"]
+    need(type(rows) is list and 1 <= len(rows) <= 8 and type(rows[0]) is dict and set(rows[0]) == {"metainfo"},
+         "Normal-boundary nft readback is oversized or lacks its actual dialect")
+    need(type(SHELL_GITHUB_BOUNDARY_HOST_PROFILE) is dict
+         and canonical(rows[0]["metainfo"]) == canonical(SHELL_GITHUB_BOUNDARY_HOST_PROFILE["nftMetainfo"]),
+         "Actual nft readback dialect differs from the independently reviewed material")
+    result = []
+    for original in rows[1:]:
+        _shell_github_fields(original, tuple(original) if type(original) is dict else (), "nft object")
+        need(len(original) == 1, "Ambiguous nft object")
+        key = next(iter(original))
+        if echo and key in ("add", "create"):
+            original = original[key]
+        need(type(original) is dict and len(original) == 1
+             and next(iter(original)) in ("table", "counter", "chain", "rule"), "Unknown/foreign nft object")
+        result.append(deepcopy(original))
+    return result
+
+
+def shell_github_boundary_policy_readback(value, case, raw, *, echo=False):
+    return _github_boundary_policy_objects(value, case, _github_boundary_nft_rows(raw, echo=echo))
+
+
+def _github_boundary_policy_objects(value, case, objects):
+    need(type(objects) is list and all(type(row) is dict and len(row) == 1
+         and next(iter(row)) in ("table", "counter", "chain", "rule") for row in objects),
+         "Normal-boundary policy object shape differs")
+    expected = _github_boundary_expected_objects(value, case)
+    need(len(objects) == len(expected), "Normal-boundary policy has an extra/missing object")
+    stripped, immutable, counters, handles = [], [], {}, []
+    for original in objects:
+        key = next(iter(original))
+        row = original[key]
+        need(type(row) is dict and "handle" in row, "Actual nft object handle is missing")
+        _shell_github_uint(row["handle"], (1 << 64) - 1, "original nft handle", 1)
+        handles.append((key, row["handle"]))
+        stable = deepcopy(original)
+        if key == "counter":
+            name = row.get("name")
+            need(name in ("dns_queries", "https_syns") and name not in counters, "Unknown/duplicate owned counter")
+            _shell_github_uint(row.get("packets"), 64, "owned counter packets")
+            _shell_github_uint(row.get("bytes"), 1 << 20, "owned counter bytes")
+            counters[name] = {"packets": row["packets"], "bytes": row["bytes"]}
+            stable[key].pop("packets")
+            stable[key].pop("bytes")
+        immutable.append(stable)
+        plain = deepcopy(stable)
+        plain[key].pop("handle")
+        stripped.append(plain)
+    # Order of distinct named objects is not policy authority; expression and
+    # same-chain rule order IS, and is checked without dropping any fields.
+    named = lambda rows: sorted((canonical(row) for row in rows if "rule" not in row))
+    need(named(stripped) == named(expected)
+         and [row for row in stripped if "rule" in row] == [row for row in expected if "rule" in row]
+         and len(handles) == len(set(handles)), "Installed nft policy/handles differ from the fixed scoped effect")
+    table = next(row["table"] for row in immutable if "table" in row)
+    immutable = sorted((row for row in immutable if "rule" not in row), key=canonical) + [row for row in immutable if "rule" in row]
+    return {"table": deepcopy(table), "immutable": immutable, "counters": counters}
+
+
+def _github_boundary_policy_evidence(value, case, evidence):
+    """Validate an exported summary with the SAME exact immutable policy parser."""
+    _shell_github_fields(evidence, ("table", "immutable", "counters"), "summarized original nft policy")
+    need(type(evidence["immutable"]) is list and type(evidence["counters"]) is dict,
+         "Summarized policy objects/counters differ")
+    objects = deepcopy(evidence["immutable"])
+    for row in objects:
+        need(type(row) is dict and len(row) == 1, "Summarized policy object is ambiguous")
+        if "counter" in row:
+            counter = row["counter"]
+            need(type(counter) is dict and counter.get("name") in evidence["counters"], "Summarized counter has no original")
+            counts = evidence["counters"][counter["name"]]
+            _shell_github_fields(counts, ("packets", "bytes"), "summarized original counter")
+            counter.update(counts)
+    observed = _github_boundary_policy_objects(value, case, objects)
+    need(canonical(observed) == canonical(evidence), "Summarized policy is not the exact immutable fixed scoped effect")
+    return observed
+
+
+def _github_boundary_counter_interval(before, after, case):
+    need(canonical(before["table"]) == canonical(after["table"])
+         and canonical(before["immutable"]) == canonical(after["immutable"]),
+         "Original installed policy or actual handles changed")
+    wanted = {"dns_queries", "https_syns"} if case == "github-dns-deadline" else {"https_syns"}
+    need(set(before["counters"]) == set(after["counters"]) == wanted
+         and all(row == {"packets": 0, "bytes": 0} for row in before["counters"].values()),
+         "Original exclusive policy did not start with fresh zero counters")
+    for name, row in after["counters"].items():
+        _shell_github_uint(row["packets"], 8 if name == "dns_queries" else 64, "final owned packets")
+        _shell_github_uint(row["bytes"], 1 << 20, "final owned bytes")
+        need((row["packets"] == 0) is (row["bytes"] == 0), "Owned packet/byte counters disagree")
+    if case == "github-dns-deadline":
+        need(after["counters"]["dns_queries"]["packets"] > 0
+             and after["counters"]["https_syns"] == {"packets": 0, "bytes": 0},
+             "Normal DNS withholding did not intercept a question or advanced to HTTPS acquisition")
+    else:
+        need(after["counters"]["https_syns"]["packets"] > 0, "Normal connect has no actual acquisition SYN drop")
+    return after["counters"]
+
+
+def _github_boundary_prefix(case, *, stop=False):
+    need(case in SHELL_GITHUB_BOUNDARY_CASES, "Unknown fixed policy disposition case")
+    return ("stop-" if stop else "") + "github-boundary-" + ("dns" if case == "github-dns-deadline" else "connect")
+
+
+def _github_boundary_slots(case):
+    ordinary = ("before", "create", "installed", "post", "delete", "absence")
+    disposition = ("post", "delete", "absence")
+    names = {_github_boundary_prefix(case, stop=stop) + "-" + action + "." + stream: SHELL_GITHUB_BOUNDARY_LIMIT
+             for stop, actions in ((False, ordinary), (True, disposition))
+             for action in actions for stream in ("stdout", "stderr")}
+    names[_github_boundary_prefix(case) + "-policy.json"] = SHELL_GITHUB_BOUNDARY_LIMIT
+    return names
+
+
+def _github_boundary_reserve(case, *, stop=False):
+    slots = _github_boundary_slots(case)
+    selected = {name: cap for name, cap in slots.items() if not stop or name.startswith("stop-")}
+    need(not set(selected) & set(_GITHUB_BOUNDARY_SLOTS)
+         and not set(selected) & {row["path"] for row in _FILES},
+         "Normal-boundary output slot reused")
+    remaining = sum(row["cap"] for row in _GITHUB_BOUNDARY_SLOTS.values() if not row["retained"])
+    need(_TOTAL + remaining + sum(selected.values()) <= TOTAL_LIMIT, "No finite policy output reservation remains")
+    for name, cap in selected.items():
+        _GITHUB_BOUNDARY_SLOTS[name] = {"cap": cap, "entered": False, "retained": False}
+    return slots
+
+
+def _github_boundary_private_name(case, suffix, *, root=None):
+    need(suffix in ("policy.nft", "intent.json", "owned.json", "retired.json"), "Unknown private policy leaf")
+    return (_ROOT if root is None else root) / "private" / (_github_boundary_prefix(case) + "-" + suffix)
+
+
+def _github_boundary_private_write(case, suffix, raw):
+    need(type(raw) is bytes and len(raw) <= SHELL_GITHUB_BOUNDARY_LIMIT, "Private policy record bound")
+    path = _github_boundary_private_name(case, suffix)
+    _D.write(path, raw, 0o400)  # Exclusive write; a collision never grants ownership.
+    row = protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(stat.S_IMODE(row["identity"][2]) == 0o400 and row["size"] == len(raw)
+         and row["sha256"] == hashlib.sha256(raw).hexdigest(), "Original protected policy record changed")
+    return row
+
+
+def _github_boundary_private_read(case, suffix):
+    path = _github_boundary_private_name(case, suffix)
+    row = protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(stat.S_IMODE(row["identity"][2]) == 0o400, "Policy ownership record is not protected immutable DATA")
+    raw = read(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT) == row
+         and hashlib.sha256(raw).hexdigest() == row["sha256"], "Policy ownership record changed")
+    return row, raw
+
+
+def _github_boundary_public_record(name):
+    path = _ROOT / "public" / name
+    row = protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(stat.S_IMODE(row["identity"][2]) == 0o444, "Policy command capture is not root-protected")
+    raw = read(path, SHELL_GITHUB_BOUNDARY_LIMIT)
+    need(protected_record(path, SHELL_GITHUB_BOUNDARY_LIMIT) == row, "Policy command capture changed")
+    return row, raw
+
+
+def _github_boundary_self():
+    pid = os.getpid()
+    raw = _kernel("/proc/self/stat", 4096)
+    end = raw.rfind(")")
+    need(end > 0 and raw[:raw.find(" ")] == str(pid), "Original disposition self identity differs")
+    fields = raw[end + 2:].split()
+    need(len(fields) >= 20 and fields[19].isdecimal(), "Original disposition start time is missing")
+    return {"pid": pid, "startTicks": int(fields[19])}
+
+
+def _github_boundary_namespaces():
+    # The legacy namespace observation is unchanged. This fault recipe ALSO
+    # owns and compares the real initial net nsfs objects, not a sysctl label.
+    result = _namespaces(True)
+    originals, error, close_error = [], None, None
+    try:
+        for name in ("/proc/self/ns/net", "/proc/1/ns/net"):
+            fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            originals.append((fd, None))
+            item = os.fstat(fd)
+            before = identity(item)
+            originals[-1] = (fd, before)
+            need(stat.S_ISREG(item.st_mode) and item.st_uid == item.st_gid == 0 and item.st_nlink == 1
+                 and fcntl.ioctl(fd, 0xb703) == 0x40000000, "Real initial network namespace type/owner differs")
+        need(originals[0][1][:2] == originals[1][1][:2], "Normal-boundary policy is not in the real initial network namespace")
+        for fd, before in originals:
+            need(identity(os.fstat(fd)) == before, "Original network namespace changed during observation")
+        result["net"] = list(originals[0][1][:2])
+    except BaseException as caught:
+        error = caught
+    finally:
+        for fd, _ in reversed(originals):
+            try:
+                _shell_github_close(fd)
+            except BaseException as caught:
+                if close_error is None:
+                    close_error = caught
+    if error is not None:
+        raise error from close_error
+    if close_error is not None:
+        raise close_error
+    return result
+
+
+def _github_boundary_domain(value, namespaces):
+    complete_namespaces = _github_boundary_namespaces()
+    need(set(namespaces) == {"user", "pid", "mnt"}
+         and {name: complete_namespaces[name] for name in namespaces} == namespaces,
+         "Original policy process changed the established service namespaces")
+    invocation = os.environ.get("INVOCATION_ID", "")
+    unit = root_path(value).name + ".service"
+    group = "/system.slice/" + unit
+    need(re.fullmatch(r"[0-9a-f]{32}", invocation) is not None
+         and _kernel("/proc/self/cgroup") == "0::" + group + "\n", "Original policy service invocation/cgroup differs")
+    path = Path("/sys/fs/cgroup" + group)
+    directory(path, protected=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        need(identity(path.lstat()) == identity(before) and before.st_uid == before.st_gid == 0,
+             "Original policy cgroup open differs")
+        domain = {"sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": value["attempt"],
+                  "runnerUid": value["runnerUid"], "invocationId": invocation, "unit": unit,
+                  "cgroupPath": str(path), "cgroupIdentity": list(identity(before)[:6]), "namespaces": complete_namespaces,
+                  "bootId": _kernel("/proc/sys/kernel/random/boot_id", 128).strip()}
+        need(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", domain["bootId"]) is not None,
+             "Original policy kernel boot identity is missing")
+        state = {"value": value, "domain": domain, "cgroupFd": fd, "self": _github_boundary_self(), "owner": _OWNER,
+                 "endpoint": _END}
+        _github_boundary_domain_check(state, no_workers=True)
+        return state
+    except BaseException as error:
+        try:
+            _shell_github_close(fd)
+        except BaseException as close_error:
+            raise error from close_error
+        raise
+
+
+def _github_boundary_domain_check(state, *, no_workers):
+    _root_ids()
+    need(state["owner"] is _OWNER and state["endpoint"] == _END and time.monotonic() < _END,
+         "Policy disposition changed the original owner or finite endpoint")
+    domain, value = state["domain"], state["value"]
+    unit = root_path(value).name + ".service"
+    group = "/system.slice/" + unit
+    path = Path(domain["cgroupPath"])
+    need(domain["unit"] == unit and domain["runnerUid"] == value["runnerUid"]
+         and domain["invocationId"] == os.environ.get("INVOCATION_ID")
+         and _kernel("/proc/self/cgroup") == "0::" + group + "\n"
+         and str(path) == "/sys/fs/cgroup" + group
+         and list(identity(os.fstat(state["cgroupFd"]))[:6]) == domain["cgroupIdentity"]
+         and list(identity(path.lstat())[:6]) == domain["cgroupIdentity"]
+         and _kernel("/proc/sys/kernel/random/boot_id", 128).strip() == domain["bootId"]
+         and _github_boundary_namespaces() == domain["namespaces"] and _github_boundary_self() == state["self"],
+         "Original service/cgroup/kernel/self/namespace custody changed")
+    need(_kernel(path / "cgroup.type") == "domain\n", "Policy cgroup ceased to be an aggregate domain")
+    children = os.listdir(state["cgroupFd"])
+    need(len(children) <= 256 and all(not stat.S_ISDIR(os.stat(name, dir_fd=state["cgroupFd"],
+             follow_symlinks=False).st_mode) for name in children), "Policy scope gained a child/delegated cgroup")
+    if no_workers:
+        # BEFORE launch and AFTER its original join only THIS retained lifecycle
+        # process may remain. No arbitrary root/UID/process-name exemptions.
+        for leaf in ("cgroup.procs", "cgroup.threads"):
+            rows = _kernel(path / leaf, 4096).splitlines()
+            need(rows == [str(state["self"]["pid"])], "Original cgroup still contains a prior task worker")
+    return domain
+
+
+def _github_boundary_close_after(state):
+    global _FAILED
+    pending = sys.exc_info()[0] is not None
+    try:
+        _github_boundary_close_domain(state)
+    except BaseException as error:
+        _FAILED = True
+        if len(_GITHUB_BOUNDARY_BODY_ERRORS) < 4:
+            _GITHUB_BOUNDARY_BODY_ERRORS.append({"stage": "original-cgroup-close", "errorType": type(error).__name__})
+        if not pending:
+            raise  # Existing first failure remains first when one is pending.
+
+
+def _github_boundary_close_domain(state):
+    fd = state.pop("cgroupFd")
+    _shell_github_close(fd)  # One consuming checked close; never retry an uncertain close.
+
+
+def _github_boundary_host_check(host):
+    _github_boundary_host_admit(host)
+    for name, original in host["files"].items():
+        need(_github_boundary_material_file(name) == original, "Original protected policy material changed")
+    kernel = host["kernel"]
+    need(_kernel("/proc/sys/kernel/osrelease", 256).strip() == kernel["release"]
+         and _kernel("/proc/version", 1024).strip() == kernel["version"]
+         and _github_boundary_material_file("/boot/config-" + kernel["release"]) == kernel["configuration"],
+         "Original admitted policy kernel material changed")
+    need(_github_boundary_package_data() == host["packages"],
+         "Original admitted nft package version changed")
+    for name in host["legacyTables"]:
+        need(_kernel(name, 4096).splitlines() == [], "An unowned legacy packet path appeared")
+    for name in host["delegatedSockets"]:
+        _absent(Path(name))
+
+
+def _github_boundary_argv(state, action):
+    case = state["case"]
+    need(action in ("before", "create", "installed", "post", "delete", "absence"), "Unknown fixed policy command")
+    if action == "create":
+        return [SHELL_GITHUB_BOUNDARY_NFT, "--json", "--numeric", "--handle", "--echo",
+                "--file", str(_github_boundary_private_name(case, "policy.nft", root=root_path(state["value"]))) ]
+    if action == "delete":
+        handle = state["owned"]["installed"]["table"]["handle"]
+        _shell_github_uint(handle, (1 << 64) - 1, "original delete table handle", 1)
+        return [SHELL_GITHUB_BOUNDARY_NFT, "delete", "table", "inet", "handle", str(handle)]
+    return [SHELL_GITHUB_BOUNDARY_NFT, "--json", "--numeric", "--handle", "list", "ruleset"]
+
+
+def _github_boundary_body_command(state, action):
+    _github_boundary_domain_check(state, no_workers=True)
+    _github_boundary_host_check(state["host"])
+    result = command(_github_boundary_prefix(state["case"]) + "-" + action, _github_boundary_argv(state, action), maximum=3)
+    _github_boundary_domain_check(state, no_workers=True)
+    need(result.stderr == b"", "Original policy command emitted diagnostics")
+    return result
+
+
+def _github_boundary_prepare(value, case, start, host):
+    need(shell_normal_boundaries(value) and not _FAILED and _GITHUB_BOUNDARY_COMMAND_FINAL,
+         "Normal-boundary policy cannot follow a failed/unknown original")
+    _github_boundary_host_check(host)
+    state = _github_boundary_domain(value, start["namespaces"])
+    state.update(case=case, host=host)
+    try:
+        slots = _github_boundary_reserve(case)
+        policy_raw = shell_github_boundary_policy(value, case)
+        policy = _github_boundary_private_write(case, "policy.nft", policy_raw)
+        intent = {"schema": "installed-github-normal-boundary-intent-v1", "case": case,
+                  "profile": SHELL_GITHUB_BOUNDARY_PROFILE, "domain": state["domain"], "host": host,
+                  "table": _github_boundary_tag(value, case), "policy": policy, "slots": slots,
+                  "creationIsExclusive": True, "intentIsNotDeleteAuthority": True}
+        # These protected intent/finite slots exist BEFORE the exclusive create.
+        state["intent"] = _github_boundary_private_write(case, "intent.json", canonical(intent))
+        before = _github_boundary_body_command(state, "before")
+        need(_github_boundary_nft_rows(before.stdout) == [], "Preexisting/unknown host nft policy; never edit or adopt it")
+        created = _github_boundary_body_command(state, "create")
+        create_command = deepcopy(_COMMANDS[-1])
+        create = shell_github_boundary_policy_readback(value, case, created.stdout, echo=True)
+        actual = _github_boundary_body_command(state, "installed")
+        installed_command = deepcopy(_COMMANDS[-1])
+        installed = shell_github_boundary_policy_readback(value, case, actual.stdout)
+        need(canonical(create) == canonical(installed)
+             and all(row == {"packets": 0, "bytes": 0} for row in installed["counters"].values()),
+             "Exclusive creation/actual installed handles or initial counters differ")
+        prefix = _github_boundary_prefix(case)
+        captures = {action: {stream: _github_boundary_public_record(prefix + "-" + action + "." + stream)[0]
+                            for stream in ("stdout", "stderr")} for action in ("before", "create", "installed")}
+        owned = {"schema": "installed-github-normal-boundary-owned-v1", "case": case, "intent": state["intent"],
+                 "createCommand": create_command, "installedCommand": installed_command, "captures": captures,
+                 "installed": installed, "creatorReturned": True, "actualHandlesBound": True}
+        state["owned"] = owned
+        state["ownedRecord"] = _github_boundary_private_write(case, "owned.json", canonical(owned))
+        return state
+    except BaseException:
+        # Do NOT delete on uncertain creation/readback. The original manager
+        # tears down this service; StopPost needs the separate ownership record.
+        _github_boundary_close_after(state)
+        raise
+
+
+def _github_boundary_owned_admit(state):
+    case, value = state["case"], state["value"]
+    intent_record, intent_raw = _github_boundary_private_read(case, "intent.json")
+    intent = decode(intent_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+    _shell_github_fields(intent, ("schema", "case", "profile", "domain", "host", "table", "policy", "slots",
+                                  "creationIsExclusive", "intentIsNotDeleteAuthority"), "policy intent")
+    need(intent["schema"] == "installed-github-normal-boundary-intent-v1" and intent["case"] == case
+         and intent["profile"] == SHELL_GITHUB_BOUNDARY_PROFILE and intent["domain"] == state["domain"]
+         and intent["table"] == _github_boundary_tag(value, case) and intent["slots"] == _github_boundary_slots(case)
+         and intent["creationIsExclusive"] is True and intent["intentIsNotDeleteAuthority"] is True,
+         "Original protected intent/cgroup/service scope differs")
+    policy_record, policy_raw = _github_boundary_private_read(case, "policy.nft")
+    need(policy_record == intent["policy"] and policy_raw == shell_github_boundary_policy(value, case),
+         "Original exclusive fixed policy source differs")
+    _github_boundary_host_check(intent["host"])
+    owned_record, owned_raw = _github_boundary_private_read(case, "owned.json")
+    owned = decode(owned_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+    _shell_github_fields(owned, ("schema", "case", "intent", "createCommand", "installedCommand", "captures",
+                                 "installed", "creatorReturned", "actualHandlesBound"), "policy ownership")
+    need(owned["schema"] == "installed-github-normal-boundary-owned-v1" and owned["case"] == case
+         and owned["intent"] == intent_record and owned["creatorReturned"] is True and owned["actualHandlesBound"] is True,
+         "Protected intent alone, uncertain creation or missing handles cannot authorize deletion")
+    state.update(intent=intent_record, ownedRecord=owned_record, owned=owned, host=intent["host"])
+    prefix = _github_boundary_prefix(case)
+    captures = {}
+    need(set(owned["captures"]) == {"before", "create", "installed"}, "Original policy capture roster differs")
+    for action in ("before", "create", "installed"):
+        need(set(owned["captures"][action]) == {"stdout", "stderr"}, "Original policy streams differ")
+        captures[action] = {}
+        for stream in ("stdout", "stderr"):
+            current, raw = _github_boundary_public_record(prefix + "-" + action + "." + stream)
+            need(current == owned["captures"][action][stream], "Original policy capture identity/hash differs")
+            captures[action][stream] = raw
+        need(captures[action]["stderr"] == b"", "Original policy command was not diagnostic-free")
+    need(_github_boundary_nft_rows(captures["before"]["stdout"]) == [], "Original pre-create host was not empty/admitted")
+    create = shell_github_boundary_policy_readback(value, case, captures["create"]["stdout"], echo=True)
+    installed = shell_github_boundary_policy_readback(value, case, captures["installed"]["stdout"])
+    need(canonical(create) == canonical(installed) == canonical(owned["installed"])
+         and all(row == {"packets": 0, "bytes": 0} for row in installed["counters"].values()),
+         "Protected creation receipt does not bind the actual initial immutable policy/handles")
+    for action, key in (("create", "createCommand"), ("installed", "installedCommand")):
+        original = owned[key]
+        _shell_github_fields(original, ("phase", "argv", "exitCode", "timeoutSeconds"), "original policy command")
+        need(original["phase"] == prefix + "-" + action and original["argv"] == _github_boundary_argv(state, action)
+             and type(original["exitCode"]) is int and original["exitCode"] == 0
+             and type(original["timeoutSeconds"]) is int and 0 < original["timeoutSeconds"] <= 3,
+             "Original policy command creation/finality record differs")
+    return owned
+
+
+def _github_boundary_finish(state, observed):
+    value, case = state["value"], state["case"]
+    need(not _FAILED and _GITHUB_BOUNDARY_COMMAND_FINAL and _COMMANDS[-1]["phase"] == "shell-" + case
+         and _COMMANDS[-1]["exitCode"] == 0, "Original product command is not positively final")
+    receipt = observed["githubReadOnly"]
+    need(receipt["case"] == case and all(row["nativeSettled"] is True and row["originalObserverJoined"] is True
+         and row["cleanupWithinOriginalEndpoint"] is True and row["boundary"]["uid"] == value["runnerUid"]
+         for row in receipt["originals"]), "Original native product/boundary settlement is missing")
+    product = deepcopy(_COMMANDS[-1])
+    _github_boundary_owned_admit(state)
+    post_result = _github_boundary_body_command(state, "post")
+    post = shell_github_boundary_policy_readback(value, case, post_result.stdout)
+    counters = _github_boundary_counter_interval(state["owned"]["installed"], post, case)
+    if case == "github-dns-deadline":
+        need(counters["dns_queries"]["packets"] == receipt["peer"]["terminal"]["dnsQuestions"],
+             "Original DNS question receipt and owned stateless packet count differ")
+    removed = _github_boundary_body_command(state, "delete")
+    need(removed.stdout == b"", "Unexpected policy delete output")
+    absent = _github_boundary_body_command(state, "absence")
+    need(_github_boundary_nft_rows(absent.stdout) == [], "Original table absence was not actually observed")
+    proof = {"schema": "installed-github-normal-boundary-policy-v1", "case": case, "profile": SHELL_GITHUB_BOUNDARY_PROFILE,
+             "sourceSha": value["sourceSha"], "domain": state["domain"], "intent": state["intent"],
+             "owned": state["ownedRecord"], "installed": state["owned"]["installed"], "post": post,
+             "productCommand": product, "nativeBoundary": receipt["originals"][0]["boundary"],
+             "state": "removed-and-observed", "productOriginalsFinal": True, "noPriorWorkers": True,
+             "absence": _shell_github_pin(absent.stdout), "policySha256": hashlib.sha256(shell_github_boundary_policy(value, case)).hexdigest(),
+             "faultHeldThroughOriginalFinality": True, "normalHttpRequests": False}
+    name = _github_boundary_prefix(case) + "-policy.json"
+    _retain(name, canonical(proof))
+    public = _github_boundary_public_record(name)[0]
+    _github_boundary_private_write(case, "retired.json", canonical({"schema": "installed-github-normal-boundary-retired-v1",
+        "case": case, "owned": state["ownedRecord"], "proof": public, "originalTableAbsent": True}))
+    return proof
+
+
+def _github_boundary_error(controller, stage, error):
+    global _FAILED
+    _FAILED = True
+    need(len(controller["errors"]) < 16, "Bounded policy disposition errors exhausted")
+    controller["errors"].append({"stage": stage, "errorType": type(error).__name__,
+                                 "reason": str(error).replace("\n", " ")[:192] or type(error).__name__})
+
+
+def _github_boundary_dispose_command(controller, state, action):
+    """PRIVATE finite StopPost route; ONLY the lifecycle _FAILED guard is bypassed."""
+    global _FAILED, _PHASE, _GITHUB_BOUNDARY_COMMAND_FINAL
+    need(controller["owner"] is _OWNER and controller["endpoint"] == _END
+         and not controller["launchesClosed"] and _GITHUB_BOUNDARY_COMMAND_FINAL,
+         "Original policy disposition owner/finality/endpoint is closed")
+    if action == "unit-show":
+        need(state is controller["context"] and controller["next"] == "unit-show",
+             "Wrong fixed original StopPost admission command")
+        label = "stop-unit-show"
+        argv = ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(
+            (*SHOW, "ActiveState", "SubState", "ControlPID", "MainPID")), state["domain"]["unit"]]
+        controller["next"] = None
+    else:
+        need(action in ("post", "delete", "absence") and state.get("next") == action
+             and state.get("ownedRecord") is not None and state["owner"] is _OWNER,
+             "Disposition is not the original owned finite read/delete/absence route")
+        _github_boundary_owned_admit(state)
+        label, argv = _github_boundary_prefix(state["case"], stop=True) + "-" + action, _github_boundary_argv(state, action)
+        state["next"] = None  # Entered once; a failing command never gets a retry.
+    _PHASE = label
+    _github_boundary_domain_check(state, no_workers=True)
+    seconds = min(2, math.floor(_END - time.monotonic()))
+    need(seconds > 0, "Original9s StopPost endpoint exhausted")
+    _GITHUB_BOUNDARY_COMMAND_FINAL = False
+    result = None
+    try:
+        result = _OWNER.run_owned(argv, environ=_environment(), cwd=Path("/"), timeout=seconds, capture=True,
+            text=False, output_limit=SHELL_GITHUB_BOUNDARY_LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
+        need(type(result) is subprocess.CompletedProcess and result.args == argv and type(result.returncode) is int
+             and type(result.stdout) is bytes and type(result.stderr) is bytes
+             and len(result.stdout) + len(result.stderr) <= SHELL_GITHUB_BOUNDARY_LIMIT,
+             "Original disposition command result is incomplete")
+        _GITHUB_BOUNDARY_COMMAND_FINAL = True  # Saved positive original return, not an exception classification.
+    except BaseException as error:
+        controller["launchesClosed"] = True  # Never obtain a fresh underlying owner after unknown custody.
+        _github_boundary_error(controller, label + "-owner", error)
+        return None
+    try:
+        _command_capture(label, argv, result, seconds)
+    except BaseException as error:
+        # A capture/readback error AFTER the saved original CompletedProcess
+        # cannot erase its finality, clear the first failure or skip safe cleanup.
+        _github_boundary_error(controller, label + "-capture", error)
+    try:
+        _github_boundary_domain_check(state, no_workers=True)
+        need(time.monotonic() < _END, "Original policy disposition completed late")
+    except BaseException as error:
+        controller["launchesClosed"] = True
+        _github_boundary_error(controller, label + "-finality", error)
+        return None
+    if result.returncode != 0 or result.stderr != b"":
+        _github_boundary_error(controller, label + "-result", Refused("Original fixed disposition command failed"))
+    return result
+
+
+def _github_boundary_stop(value):
+    """Enter authenticated disposition BEFORE completion/result/denial success gates."""
+    global _GITHUB_BOUNDARY_STOP
+    controller = {"owner": _OWNER, "endpoint": _END, "launchesClosed": False, "next": "unit-show",
+                  "errors": [], "cases": {}, "domain": None, "context": None}
+    report = {"schema": "installed-github-normal-boundary-disposition-v1", "cases": controller["cases"],
+              "errors": controller["errors"], "allOwnedPoliciesAbsent": False, "laterLaunchesClosed": False}
+    _GITHUB_BOUNDARY_STOP = report
+    context = None
+    try:
+        # Actual original manager StopPost identity, not arbitrary root/UID peers.
+        need(os.getppid() == 1, "Policy disposition is not the original manager's direct child")
+        context = _github_boundary_domain(value, _namespaces(True))
+        controller["context"] = context
+        result = _github_boundary_dispose_command(controller, context, "unit-show")
+        need(result is not None and result.returncode == 0 and result.stderr == b"",
+             "Original StopPost service domain could not be admitted")
+        controller["domain"] = _domain_admission(value, result.stdout, stop_boundary=True)
+        for case in SHELL_GITHUB_BOUNDARY_CASES:
+            state = {**context, "case": case}
+            # Missing result/denial counters have NOT been inspected here.
+            try:
+                _github_boundary_private_name(case, "intent.json").lstat()
+            except FileNotFoundError:
+                controller["cases"][case] = {"state": "no-intent-no-delete-authority", "ownedPolicyAbsent": None}
+                continue
+            controller["cases"][case] = {"state": "retained-uncertain", "ownedPolicyAbsent": False}
+            try:
+                _github_boundary_owned_admit(state)
+                try:
+                    retired_record, retired_raw = _github_boundary_private_read(case, "retired.json")
+                except FileNotFoundError:
+                    retired_record = None
+                if retired_record is not None:
+                    retired = decode(retired_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+                    _shell_github_fields(retired, ("schema", "case", "owned", "proof", "originalTableAbsent"), "retired policy")
+                    proof_record, proof_raw = _github_boundary_public_record(_github_boundary_prefix(case) + "-policy.json")
+                    proof = decode(proof_raw, SHELL_GITHUB_BOUNDARY_LIMIT)
+                    need(retired == {"schema": "installed-github-normal-boundary-retired-v1", "case": case,
+                         "owned": state["ownedRecord"], "proof": proof_record, "originalTableAbsent": True}
+                         and proof["state"] == "removed-and-observed" and proof["owned"] == state["ownedRecord"]
+                         and proof["domain"] == state["domain"] and proof["faultHeldThroughOriginalFinality"] is True,
+                         "Original policy retirement record changed")
+                    controller["cases"][case] = {"state": "already-retired", "ownedPolicyAbsent": True,
+                                                  "proof": _shell_github_pin(proof_raw)}
+                    continue
+                _github_boundary_reserve(case, stop=True)
+                state["next"] = "post"
+                observed = _github_boundary_dispose_command(controller, state, "post")
+                need(observed is not None and observed.returncode == 0 and observed.stderr == b"",
+                     "Original owned policy post-observation failed")
+                if _github_boundary_nft_rows(observed.stdout) == []:
+                    controller["cases"][case] = {"state": "observed-original-absent", "ownedPolicyAbsent": True}
+                    continue  # Absence needs no delete and grants no future creation.
+                post = shell_github_boundary_policy_readback(value, case, observed.stdout)
+                need(post["table"] == state["owned"]["installed"]["table"]
+                     and post["immutable"] == state["owned"]["installed"]["immutable"],
+                     "Original owned policy/handles changed; no deletion authority")
+                state["next"] = "delete"
+                deleted = _github_boundary_dispose_command(controller, state, "delete")
+                need(deleted is not None, "Original delete finality unknown; no next command")
+                if deleted.stdout != b"":
+                    _github_boundary_error(controller, "delete-output", Refused("Unexpected original delete output"))
+                # Even a known nonzero deletion keeps first failure, but may
+                # independently observe absence. Unknown finality never does.
+                state["next"] = "absence"
+                absent = _github_boundary_dispose_command(controller, state, "absence")
+                need(absent is not None and absent.returncode == 0 and absent.stderr == b""
+                     and _github_boundary_nft_rows(absent.stdout) == [], "Original table absence is not proved")
+                controller["cases"][case] = {"state": "removed-and-observed-after-manager-teardown",
+                                              "ownedPolicyAbsent": True}
+            except BaseException as error:
+                _github_boundary_error(controller, _github_boundary_prefix(case), error)
+                # A failed authenticated ownership/finality admission cannot be
+                # repaired or retried and cannot advance to another task case.
+                controller["launchesClosed"] = True
+                break
+    except BaseException as error:
+        _github_boundary_error(controller, "stop-domain-admission", error)
+        controller["launchesClosed"] = True
+    finally:
+        if context is not None:
+            try:
+                _github_boundary_close_domain(context)
+            except BaseException as error:
+                _github_boundary_error(controller, "stop-original-cgroup-close", error)
+                controller["launchesClosed"] = True
+        report["allOwnedPoliciesAbsent"] = (set(controller["cases"]) == set(SHELL_GITHUB_BOUNDARY_CASES)
+            and all(row["ownedPolicyAbsent"] is True for row in controller["cases"].values()))
+        report["laterLaunchesClosed"] = controller["launchesClosed"]
+    return controller["domain"], report
+
+
+def _github_boundary_domain_data(value, domain):
+    _shell_github_fields(domain, ("sourceSha", "runId", "attempt", "runnerUid", "invocationId", "unit",
+                                  "cgroupPath", "cgroupIdentity", "namespaces", "bootId"), "closed policy domain")
+    unit = root_path(value).name + ".service"
+    need(all(domain[key] == value[key] for key in ("sourceSha", "runId", "attempt", "runnerUid"))
+         and domain["unit"] == unit and domain["cgroupPath"] == "/sys/fs/cgroup/system.slice/" + unit
+         and type(domain["invocationId"]) is str and re.fullmatch(r"[0-9a-f]{32}", domain["invocationId"]) is not None
+         and type(domain["bootId"]) is str
+         and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", domain["bootId"]) is not None,
+         "Closed original policy UID/service/kernel identity differs")
+    identity_row = domain["cgroupIdentity"]
+    need(type(identity_row) is list and len(identity_row) == 6 and all(type(n) is int and 0 <= n < 1 << 64 for n in identity_row)
+         and identity_row[0] > 0 and identity_row[1] > 0 and stat.S_ISDIR(identity_row[2])
+         and not identity_row[2] & 0o7022 and identity_row[3:5] == [0, 0] and identity_row[5] > 0,
+         "Closed original kernel cgroup identity is missing")
+    need(type(domain["namespaces"]) is dict and set(domain["namespaces"]) == {"user", "pid", "net", "mnt"}
+         and all(type(row) is list and len(row) == 2 and all(type(n) is int and n > 0 for n in row)
+                 for row in domain["namespaces"].values()), "Closed original policy namespace identities differ")
+    return domain
+
+
+def shell_github_boundary_policy_data(value, case, proof, receipt):
+    _shell_github_fields(proof, ("schema", "case", "profile", "sourceSha", "domain", "intent", "owned", "installed", "post",
+        "productCommand", "nativeBoundary", "state", "productOriginalsFinal", "noPriorWorkers", "absence", "policySha256",
+        "faultHeldThroughOriginalFinality", "normalHttpRequests"), "closed normal-boundary policy")
+    need(proof["schema"] == "installed-github-normal-boundary-policy-v1" and proof["case"] == case
+         and proof["profile"] == SHELL_GITHUB_BOUNDARY_PROFILE and proof["sourceSha"] == value["sourceSha"]
+         and proof["state"] == "removed-and-observed"
+         and all(proof[key] is True for key in ("productOriginalsFinal", "noPriorWorkers", "faultHeldThroughOriginalFinality"))
+         and proof["normalHttpRequests"] is False
+         and proof["policySha256"] == hashlib.sha256(shell_github_boundary_policy(value, case)).hexdigest(),
+         "Closed normal-boundary policy is not the actual original removed/final interval")
+    _github_boundary_domain_data(value, proof["domain"])
+    need(type(receipt) is dict and receipt["case"] == case and len(receipt["originals"]) == 1
+         and canonical(proof["nativeBoundary"]) == canonical(receipt["originals"][0]["boundary"])
+         and proof["nativeBoundary"]["uid"] == value["runnerUid"],
+         "Root policy is not correlated to the actual original native Child boundary")
+    for phase in ("installed", "post"):
+        _github_boundary_policy_evidence(value, case, proof[phase])
+    absence = proof["absence"]
+    _shell_github_fields(absence, ("size", "sha256"), "original policy absence capture")
+    need(type(absence["size"]) is int and 0 < absence["size"] <= SHELL_GITHUB_BOUNDARY_LIMIT
+         and type(absence["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", absence["sha256"]) is not None,
+         "Original policy absence capture pin differs")
+    counters = _github_boundary_counter_interval(proof["installed"], proof["post"], case)
+    if case == "github-dns-deadline":
+        need(counters["dns_queries"]["packets"] == receipt["peer"]["terminal"]["dnsQuestions"],
+             "Root stateless DNS counter is not the actual retained peer question count")
+    product = proof["productCommand"]
+    _shell_github_fields(product, ("phase", "argv", "exitCode", "timeoutSeconds"), "closed original boundary command")
+    need(product["phase"] == "shell-" + case and product["argv"] == shell_argv(value, case)
+         and type(product["exitCode"]) is int and product["exitCode"] == 0
+         and type(product["timeoutSeconds"]) is int and 0 < product["timeoutSeconds"] <= 60,
+         "Root boundary policy adopted a different or failed product command")
+    for key, suffix in (("intent", "intent.json"), ("owned", "owned.json")):
+        row = proof[key]
+        _shellmetapath = root_path(value) / "private" / (_github_boundary_prefix(case) + "-" + suffix)
+        _shell_github_fields(row, ("path", "size", "sha256", "identity"), "protected policy " + key)
+        identity_row = row["identity"]
+        need(row["path"] == str(_shellmetapath) and type(row["size"]) is int and 0 < row["size"] <= SHELL_GITHUB_BOUNDARY_LIMIT
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+             and type(identity_row) is list,
+             "Protected policy evidence record differs")
+        # Do not conflate file/full9 with the separate six-field cgroup identity.
+        need(type(identity_row) is list and len(identity_row) == 9
+             and all(type(n) is int and 0 <= n < 1 << 64 for n in identity_row)
+             and identity_row[0] > 0 and identity_row[1] > 0
+             and identity_row[2:7] == [stat.S_IFREG | 0o400, 0, 0, 1, row["size"]],
+             "Protected policy evidence ownership/full9 differs")
+    return proof
+
+
+def shell_github_boundary_closed(value, cases, outcome, raw_files):
+    """Actual root captures plus original native boundary; not inner flags alone."""
+    need(shell_cases(value) == SHELL_GITHUB_BOUNDARY_CASES, "Closed normal-boundary selection differs")
+    before, after = (raw_files["github-boundary-host-" + phase + ".json"] for phase in ("before", "after"))
+    need(before == after, "Original nft/package/kernel/NSS interval changed")
+    _github_boundary_host_admit(decode(before, SHELL_GITHUB_BOUNDARY_LIMIT))
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    start, stop = (decode(raw_files["unit-" + name + ".json"], LIMIT) for name in ("start", "stop"))
+    disposition = stop.get("normalBoundaryDisposition")
+    _shell_github_fields(disposition, ("schema", "cases", "errors", "allOwnedPoliciesAbsent", "laterLaunchesClosed"), "root disposition")
+    need(disposition["schema"] == "installed-github-normal-boundary-disposition-v1" and disposition["errors"] == []
+         and disposition["allOwnedPoliciesAbsent"] is True and disposition["laterLaunchesClosed"] is False
+         and set(disposition["cases"]) == set(SHELL_GITHUB_BOUNDARY_CASES), "Original root policy disposition did not qualify")
+    policies, original_domain = {}, None
+    for case in SHELL_GITHUB_BOUNDARY_CASES:
+        prefix = _github_boundary_prefix(case)
+        raw = raw_files[prefix + "-policy.json"]
+        proof = shell_github_boundary_policy_data(value, case, decode(raw, SHELL_GITHUB_BOUNDARY_LIMIT),
+                                                  cases[case]["githubReadOnly"])
+        need(proof["domain"]["invocationId"] == start["invocationId"]
+             and {name: proof["domain"]["namespaces"][name] for name in ("user", "pid", "mnt")} == start["namespaces"]
+             and proof["domain"]["runnerUid"] == start["runnerUid"]
+             and proof["productCommand"] == commands["shell-" + case],
+             "Original source-bound service/product/policy custody differs")
+        need(original_domain is None or original_domain == proof["domain"], "Two boundary cases adopted a replacement service/cgroup")
+        original_domain = proof["domain"]
+        state = {"case": case, "value": value, "owned": {"installed": proof["installed"]}}
+        captures = {}
+        for action in ("before", "create", "installed", "post", "delete", "absence"):
+            label = prefix + "-" + action
+            command_row = commands[label]
+            _shell_github_fields(command_row, ("phase", "argv", "exitCode", "timeoutSeconds"), "closed policy command")
+            need(command_row["argv"] == _github_boundary_argv(state, action)
+                 and type(command_row["exitCode"]) is int and command_row["exitCode"] == 0
+                 and type(command_row["timeoutSeconds"]) is int and 0 < command_row["timeoutSeconds"] <= 3
+                 and raw_files[label + ".stderr"] == b"", "Actual original policy command/capture differs")
+            captures[action] = raw_files[label + ".stdout"]
+        need(_github_boundary_nft_rows(captures["before"]) == _github_boundary_nft_rows(captures["absence"]) == []
+             and captures["delete"] == b"" and proof["absence"] == _shell_github_pin(captures["absence"]),
+             "Original no-foreign-policy/removed-table absence capture differs")
+        created = shell_github_boundary_policy_readback(value, case, captures["create"], echo=True)
+        installed = shell_github_boundary_policy_readback(value, case, captures["installed"])
+        post = shell_github_boundary_policy_readback(value, case, captures["post"])
+        need(canonical(created) == canonical(installed) == canonical(proof["installed"])
+             and canonical(post) == canonical(proof["post"]), "Policy proof differs from actual creation/installed/post handles")
+        pin = _shell_github_pin(raw)
+        need(disposition["cases"][case] == {"state": "already-retired", "ownedPolicyAbsent": True, "proof": pin},
+             "StopPost did not bind this exact original retirement proof")
+        policies[case] = {"capture": pin, "evidence": proof}
+    return {"host": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)}, "policies": policies,
+            "normalResolverWithholdingObserved": True, "realStalledTcpConnectObserved": True,
+            "rootUidAndCgroupScoped": True, "normalHttpRequests": False}
+
+
+def shell_github_closed_result(value, outcome, raw_files, expected):
+    """Only after the unchanged original service/client/StopPost finality gate."""
+    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub closed route differs")
+    before = raw_files["shell-github-materials-before.json"]
+    after = raw_files["shell-github-materials-after.json"]
+    need(type(before) is bytes and before == after, "GitHub actual N/D/peer/keylog originals changed")
+    maps = shell_github_material_data(value, before, expected)
+    shell_github_maps(maps)
+    material = decode(before, SHELL_GITHUB_MATERIAL_LIMIT)
+    _shell_github_closed_loader(material, decode(raw_files["loader-final.json"], LIMIT))
+    fixture_before = raw_files["shell-github-project-before.json"]
+    fixture_after = raw_files["shell-github-project-after.json"]
+    fixture = shell_github_fixture(value, fixture_before, fixture_after)
+    project = decode(fixture_before, SHELL_GITHUB_FIXTURE_LIMIT)
+    material_pairs = {tuple(row["identity"][:2]) for tree in material["payloads"].values() for row in tree.values()}
+    material_pairs.update(tuple(row["identity"][:2]) for name in ("peer", "ambientKeylogs") for row in material[name].values())
+    project_pairs = {tuple(row["identity"][:2]) for row in project["nodes"].values()} | {tuple(project["namespace"]["identity"][:2])}
+    need(material_pairs.isdisjoint(project_pairs), "GitHub registered fixture aliases an installed material original")
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(type(p0.get("published")) is dict and set(p0["published"]) == {"P0"}
+         and canonical(p0["published"]["P0"]) == canonical(material["payloads"]["N"])
+         and canonical(decode(raw_files["published-before-upgrade.txt"], LIMIT)) == canonical(p0["published"]),
+         "GitHub N material is not the original unchanged P0 publication")
+    cases_raw = raw_files["shell-cases.json"]
+    cases = decode(cases_raw, LIMIT)
+    need(type(cases) is dict and set(cases) == set(shell_cases(value)) and canonical(cases) == cases_raw,
+         "GitHub closed original case roster or canonical capture differs")
+    need(type(outcome["commands"]) is list
+         and tuple(row["phase"] for row in outcome["commands"]) == root_phases(value),
+         "GitHub original command sequence includes a missing, duplicate or unrelated case")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    for case in shell_cases(value):
+        phase = "shell-" + case
+        command = commands[phase]
+        need(command["argv"] == shell_argv(value, case), "GitHub original observer argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "GitHub combined original stdout/stderr/Xvfb capture differs")
+        result = shell_github_result(streams[0], streams[1], case, command["exitCode"], maps)
+        need(result["githubReadOnly"]["sourceCommit"] == value["sourceSha"]
+             and canonical(result) == canonical(cases[case]), "GitHub native receipt is not the original closed SOURCE/capture")
+    github = {"selection": shell_github_selection(value["shell"]["githubReadOnly"]["profile"]), "expectedMaps": maps,
+              "materials": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)},
+              "fixture": {**fixture, "before": _shell_github_pin(fixture_before), "after": _shell_github_pin(fixture_after)},
+              "casesCapture": _shell_github_pin(cases_raw),
+              "normalDestinationAction": False, "normalTransportPositive": False,
+              "remainingCoverage": ["normal-resolver-withholding", "real-stalled-tcp-connect",
+                                    "separately-approved-normal-destination-negative"]}
+    if shell_normal_boundaries(value):
+        github.update(normalDestinationAction=True,
+                      normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                      normalHttpRequests=False,
+                      boundaries=shell_github_boundary_closed(value, cases, outcome, raw_files),
+                      remainingCoverage=["current-twenty-two-synthetic-regressions",
+                                         "separately-approved-normal-destination-negative"])
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "githubReadOnly": github, "packageLifecycleQualified": False, "shellPackageBuilt": False}
+
+
 def shell_handoff(value, original_paths):
     """The fixed connection is neither J's libtest nor a new package source."""
     shell = value["shell"]
     need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
-         "artifactId", "acceptedU", "loaderPolicy"}, "Fixed shell handoff fields differ")
+         "artifactId", "acceptedU", "loaderPolicy"} | ({"githubReadOnly"} if "githubReadOnly" in shell else set()),
+         "Fixed shell handoff fields differ")
     need(all(type(shell[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", shell[key]) is not None
              for key in ("producerAttempt", "artifactId")) and int(shell["producerAttempt"]) <= int(value["attempt"])
          and type(shell["rosterSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", shell["rosterSha256"]) is not None,
          "Original shell producer/roster binding differs")
+    if shell_github(value):
+        need(shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub fixed case binding differs")
     binaries, compiler, accepted = shell["binaries"], shell["compiler"], shell["acceptedU"]
     need(type(binaries) is dict and set(binaries) == {"normal", "observer"}, "Normal/observer shell pair missing")
     paths = list(original_paths)
@@ -2124,6 +3761,8 @@ def _context(*, copying=False):
         os.chmod(root / "public", 0o755)
         os.chmod(root, 0o711)
     _modules(root, owner=True)
+    if copying and shell_github(value):
+        _shell_github_stage_peer(value)
     return value, pins[1]
 
 
@@ -2143,7 +3782,7 @@ def _capacity(value):
     # The original Xvfb logs share the GUI per-file ceiling. Account for
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
-    if "shell" in value:
+    if "shell" in value and not shell_github(value):
         # One write-only failure leaf per observer. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
         required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
@@ -2163,24 +3802,44 @@ def _capacity(value):
         # Settled-failure and version-save are outside both fixture groups:
         # each needs twelve GUI environment nodes in block/inode accounting.
         session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 2)
-    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128)
-    if "shell" in value:
+    inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (shell_public_limit(value) if "shell" in value else 128)
+    if "shell" in value and not shell_github(value):
         inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
+    if shell_github(value):
+        count = len(shell_cases(value))
+        # Two distinct complete D copies, the fixed peer/project, and the
+        # unchanged per-original GUI/log limits. No Tools/JDK fixtures.
+        required += 2 * capacity["runtimeBytes"] + 2 * JSON_LIMIT + 2 * count * SHELL_WORK_FILE_LIMIT
+        required += sum(pin[0] for pin in SHELL_GITHUB_PEER_PINS.values()) + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
+        github_nodes = 2 * 8192 + 16 + 13 * count
+        inodes += github_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
-    if "shell" in value:
+    if "shell" in value and not shell_github(value):
         required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+    if shell_github(value):
+        required += github_nodes * space.f_frsize
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
 
 
 def _retain(name, raw):
     global _TOTAL
+    slot = _GITHUB_BOUNDARY_SLOTS.get(name)
+    remaining = sum(row["cap"] for row in _GITHUB_BOUNDARY_SLOTS.values() if not row["retained"])
+    need(slot is None or not slot["entered"] and type(raw) is bytes and len(raw) <= slot["cap"],
+         "Original reserved policy output slot reused or exceeded")
     need(_ROOT is not None and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,100}", name) is not None
-         and type(raw) is bytes and len(raw) <= LIMIT and _TOTAL + len(raw) <= TOTAL_LIMIT, "Fixed capture bound differs")
+         and type(raw) is bytes and len(raw) <= LIMIT
+         and _TOTAL + len(raw) + remaining - (slot["cap"] if slot is not None else 0) <= TOTAL_LIMIT,
+         "Fixed capture/reserved policy output bound differs")
+    if slot is not None:
+        slot["entered"] = True  # Before the write; uncertain output cannot reuse its slot.
     row = _D.write(_ROOT / "public" / name, raw, 0o444)
     _TOTAL += len(raw)
     _FILES.append({**row, "path": name})
+    if slot is not None:
+        slot["retained"] = True
 
 
 def _environment():
@@ -2197,13 +3856,13 @@ def _command_capture(label, argv, result, seconds):
 
 
 def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, shell_log=None):
-    global _FAILED, _PHASE
+    global _FAILED, _PHASE, _GITHUB_BOUNDARY_COMMAND_FINAL
     _PHASE = label
     need(not _FAILED and _OWNER is not None, "Prior root command failed or owner missing")
     _root_ids()
     if shell_log is not None:
         need(type(shell_log) is tuple and len(shell_log) == 3
-             and shell_log[1] in SHELL_CASES[1:] and label == "shell-" + shell_log[1]
+             and shell_log[1] in shell_observers(shell_log[0]) and label == "shell-" + shell_log[1]
              and argv == shell_argv(shell_log[0], shell_log[1]), "Different fixed shell log route")
     settled_failure = label == "shell-settled-failure"
     need(not settled_failure or shell_log is not None and codes == (0,),
@@ -2221,8 +3880,13 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
         need(seconds > 0, "Original root command endpoint exhausted")
         call = _shell_call_started(seconds) if shell_log is not None else None
         try:
+            _GITHUB_BOUNDARY_COMMAND_FINAL = False
             result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
                 capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
+            # Record typed positive finality for the private boundary route.
+            # Legacy commands retain their existing result/capture contract.
+            _GITHUB_BOUNDARY_COMMAND_FINAL = (type(result) is subprocess.CompletedProcess and result.args == argv
+                and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes)
         except BaseException as error:
             if shell_log is not None:
                 try:
@@ -2321,9 +3985,25 @@ def seconds_value(value):
 def _domain(value, label):
     unit = root_path(value).name + ".service"
     result = command(label + "-unit-show", ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(SHOW), unit], maximum=3)
-    rows = result.stdout.decode("ascii").splitlines()
+    observation = _domain_events(_domain_admission(value, result.stdout))
+    _no_denials(observation)
+    return observation
+
+
+def _domain_admission(value, raw, *, stop_boundary=False):
+    """Ownership/domain admission is not the later zero-denial success verdict."""
+    unit = root_path(value).name + ".service"
+    rows = raw.decode("ascii").splitlines()
     props = dict(line.split("=", 1) for line in rows)
-    need(len(props) == len(rows) and set(props) == set(SHOW) and props["Id"] == unit and props["Type"] == "exec", "Original service properties incomplete")
+    extra = ("ActiveState", "SubState", "ControlPID", "MainPID") if stop_boundary else ()
+    need(len(props) == len(rows) and set(props) == set(SHOW) | set(extra)
+         and props["Id"] == unit and props["Type"] == "exec", "Original service properties incomplete")
+    if stop_boundary:
+        need(props["ActiveState"] == "deactivating" and props["SubState"] == "stop-post"
+             and props["ControlPID"] == str(os.getpid()) and props["MainPID"] == "0",
+             "Not the actual original manager's StopPost after main-worker teardown")
+        for key in extra:
+            props.pop(key)
     for key in ("User", "Group", "WorkingDirectory", "UMask", "ExitType", "Restart", "KillMode", "SendSIGKILL", "OOMPolicy", "Delegate", "NoNewPrivileges"):
         need(props[key] == PROPERTIES[key], "Effective service ownership policy differs")
     need(all(props[key] == "no" for key in ("PrivateMounts", "PrivateTmp", "PrivateUsers", "PrivateNetwork", "ProtectControlGroups")),
@@ -2345,12 +4025,14 @@ def _domain(value, label):
          and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
     quota, period = effective["cpu.max"].split()
     need(quota.isdecimal() and period.isdecimal() and int(period) > 0 and int(quota) == 2 * int(period), "Effective CPU ceiling differs")
+    return {"sourceSha": value["sourceSha"], "unit": props, "invocationId": invocation, "effective": effective}
+
+
+def _domain_events(observation):
+    cgroup = Path("/sys/fs/cgroup" + observation["unit"]["ControlGroup"])
     events = {name: {key: int(number) for key, number in (line.split() for line in _kernel(cgroup / name).splitlines())}
               for name in ("memory.events", "pids.events")}
-    need({"max", "oom", "oom_kill"} <= set(events["memory.events"]) and "max" in events["pids.events"], "Aggregate denial counters missing")
-    need(all(number == 0 for key, number in events["memory.events"].items() if key != "low")
-         and all(number == 0 for number in events["pids.events"].values()), "Original aggregate resource denial")
-    return {"sourceSha": value["sourceSha"], "unit": props, "invocationId": invocation, "effective": effective, "events": events}
+    return {**observation, "events": events}
 
 
 def config_options(raw):
@@ -2629,10 +4311,15 @@ def _xattrs(path, is_directory):
             raise Refused(refusal(name, "present"))
 
 
-def _tree(root, manifest, *, published):
+def _tree(root, manifest, *, published, github=False):
     directory(root, protected=True)
     raw = read(root / "manifest.json")
-    need(hashlib.sha256(raw).hexdigest() == manifest and len(raw) == (85440 if manifest == M else 85441), "Published manifest bytes differ")
+    sizes = {M: 85440, F1: 85441}
+    if github:
+        derivatives = {row["manifestSha256"]: row["manifestBytes"] for role, row in SHELL_GITHUB_PAYLOADS.items() if role != "N"}
+        need(manifest in derivatives and root == PREFIX / manifest, "GitHub derivative tree root/role differs")
+        sizes = derivatives
+    need(manifest in sizes and hashlib.sha256(raw).hexdigest() == manifest and len(raw) == sizes[manifest], "Published manifest bytes differ")
     data = _D.decode(raw, JSON_LIMIT)
     need(data["target"] == TARGET and data["protocolSha256"] == Q and data["protocol"] == data["schemaVersion"] == 1, "Runtime DATA profile differs")
     files = _D.records(data["files"])
@@ -2646,7 +4333,8 @@ def _tree(root, manifest, *, published):
         item = path.lstat()
         need(item.st_uid == item.st_gid == 0, "Runtime owner differs")
         is_directory = stat.S_ISDIR(item.st_mode)
-        mode = (0o555 if published else 0o755) if is_directory else (0o555 if relative == "python/bin/python3" else 0o444)
+        mode = ((0o700 if github and not published and path == root else 0o555 if published or github else 0o755)
+                if is_directory else (0o555 if relative == "python/bin/python3" else 0o444))
         need(stat.S_IMODE(item.st_mode) == mode and (is_directory or stat.S_ISREG(item.st_mode)), "Runtime object type/mode differs")
         _xattrs(path, is_directory)
         if is_directory:
@@ -2836,8 +4524,17 @@ ROOT_PHASES = ("start-unit-show", "native-root", "native-user", "state-initial",
 
 def root_phases(value):
     if "shell" in value:
+        if shell_normal_boundaries(value):
+            phases = []
+            for case in shell_cases(value):
+                prefix = _github_boundary_prefix(case)
+                phases.extend(prefix + "-" + action for action in ("before", "create", "installed"))
+                phases.append("shell-" + case)
+                phases.extend(prefix + "-" + action for action in ("post", "delete", "absence"))
+            return (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
+                    *phases, "state-shell-finished")
         return (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
-                *("shell-" + case for case in SHELL_CASES), "state-shell-finished")
+                *("shell-" + case for case in shell_cases(value)), "state-shell-finished")
     if "installed" not in value:
         return ROOT_PHASES
     case = value["installed"]["case"]
@@ -2849,6 +4546,8 @@ def root_phases(value):
 
 
 def result_state(value):
+    if shell_github(value):
+        return "installed-github-normal-boundaries-observed" if shell_normal_boundaries(value) else "installed-github-readonly-synthetic-observed"
     if "shell" in value:
         return "normal-shell-installed-runtime-connection-observed"
     if "installed" not in value:
@@ -2859,6 +4558,16 @@ def result_state(value):
 def public_files(value):
     fixed = {phase + "." + suffix for phase in (*root_phases(value), "stop-unit-show") for suffix in ("stdout", "stderr")}
     fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "scripts-unpacked.json", "binaries-unpacked.json"}
+    if shell_github(value):
+        if shell_normal_boundaries(value):
+            fixed |= {"github-boundary-host-before.json", "github-boundary-host-after.json"} \
+                | {_github_boundary_prefix(case) + "-policy.json" for case in SHELL_GITHUB_BOUNDARY_CASES}
+        return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
+                        "published-before-upgrade.txt", "mutation-denials.txt",
+                        "shell-github-project-before.json", "shell-github-project-after.json",
+                        "shell-github-materials-before.json", "shell-github-materials-after.json"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in shell_cases(value)} \
+            | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     if "shell" in value:
         return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
                         "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
@@ -3976,9 +5685,9 @@ def _installed_overlap(value, policy, proof, expected):
 
 
 def shell_environment(value, case):
-    need(case in SHELL_CASES, "Unknown fixed shell case")
+    need(case in shell_cases(value), "Unknown fixed shell case")
     home = root_path(value) / ("gui-" + case)
-    return {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+    environment = {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
             "HOME": str(home / "home"), "TMPDIR": str(home / "tmp"), "XDG_RUNTIME_DIR": str(home / "runtime"),
             "XDG_CONFIG_HOME": str(home / "config"), "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
             "XDG_CONFIG_DIRS": str(home / "empty-config"), "XDG_DATA_DIRS": "/usr/share",
@@ -3987,6 +5696,14 @@ def shell_environment(value, case):
             "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=" + str(home / "runtime/absent-system-bus"),
             "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_SHA": value["sourceSha"],
             **({"MRK_DESKTOP_HOSTED_CHECKS": "installed-shell-connection-v1"} if case != "normal" else {})}
+    if case in SHELL_GITHUB_AMBIENT_CASES:
+        need(shell_github(value), "Ambient decoys require the fixed GitHub route")
+        environment.update({key: "http://127.0.0.1:18888" for key in
+                            ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")})
+        environment.update({key: str(root_path(value) / "github-peer/github_tls/root-ca.pem") for key in
+                            ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")})
+        environment["SSLKEYLOGFILE"] = str(root_path(value) / ("shell-" + case + "-keylog.log"))
+    return environment
 
 
 def shell_argv(value, case):
@@ -4004,7 +5721,7 @@ def shell_argv(value, case):
 
 def _shell_labels_prepare(value, case):
     """One root-owned leaf and its original read FD; never an app-writable namespace."""
-    need(case in SHELL_CASES[1:] and _ROOT == root_path(value), "Different fixed shell label route")
+    need(case in shell_observers(value) and _ROOT == root_path(value), "Different fixed shell label route")
     directory(_ROOT, protected=True)
     root = identity(_ROOT.lstat())
     need(root[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Different protected shell label parent")
@@ -4283,7 +6000,7 @@ def _shell_labels_read(original, *, with_raw=False):
 
 def _shell_log_prepare(value, case):
     """One original write-only-for-test-group log, never a writable namespace."""
-    need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
+    need(case in shell_cases(value) and _ROOT == root_path(value), "Different original shell log root/case")
     bounds = resource.getrlimit(resource.RLIMIT_FSIZE)
     need(type(bounds) is tuple and len(bounds) == 2
          and all(type(bound) is int and (bound == resource.RLIM_INFINITY or bound >= SHELL_WORK_FILE_LIMIT) for bound in bounds),
@@ -4307,7 +6024,7 @@ def _shell_log_prepare(value, case):
 
 def _shell_log_capture(value, case, original, result):
     """Caller owns a genuine settled return; normal additionally joins its worker."""
-    need(case in SHELL_CASES and _ROOT == root_path(value)
+    need(case in shell_cases(value) and _ROOT == root_path(value)
          and type(original) is tuple and len(original) == 6
          and all(type(number) is int for number in original)
          and original[2:] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1),
@@ -4643,6 +6360,512 @@ def shell_tools_offline_fixture(value, case, before_raw, after_raw):
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
+
+def _shell_github_close(fd):
+    os.close(fd)
+    try:
+        os.fstat(fd)
+    except OSError as error:
+        need(error.errno == errno.EBADF, "GitHub original descriptor close was not established")
+        return
+    raise Refused("GitHub original descriptor remains open")
+
+
+def _shell_github_sync(path):
+    before = identity(path.lstat())
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        need(identity(os.fstat(fd)) == before, "GitHub original directory changed before sync")
+        os.fsync(fd)
+        need(identity(os.fstat(fd)) == before == identity(path.lstat()), "GitHub original directory changed during sync")
+    finally:
+        _shell_github_close(fd)
+
+
+def _shell_github_stage_peer(value):
+    """Fixed SOURCE copies only; the native retained owner alone starts a peer."""
+    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "Different GitHub peer staging route")
+    root = root_path(value) / "github-peer"
+    root.mkdir(mode=0o700)
+    original = identity(root.lstat())
+    (root / "github_tls").mkdir(mode=0o700)
+    source = absolute(value["source"]) / "desktop/src-tauri/tests/fixtures"
+    for relative, (size, digest) in sorted(SHELL_GITHUB_PEER_PINS.items()):
+        path = source / relative
+        before = identity(path.lstat())
+        need(before[3:5] == (value["runnerUid"], value["runnerGid"]), "GitHub peer SOURCE owner differs")
+        copy_pinned(path, root / relative, {"path": str(path), "size": size, "sha256": digest}, 0o444)
+        need(identity(path.lstat()) == before, "GitHub peer SOURCE changed during protected copy")
+    need(identity(root.lstat())[:5] == original[:5], "GitHub peer staging root changed")
+    os.chmod(root / "github_tls", 0o555)
+    _shell_github_sync(root / "github_tls")
+    os.chmod(root, 0o555)
+    _shell_github_sync(root)
+    _shell_github_peer_snapshot(value)
+    for case in SHELL_GITHUB_AMBIENT_CASES:
+        path = root_path(value) / ("shell-" + case + "-keylog.log")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.fchown(fd, 0, value["runnerGid"])
+            os.fchmod(fd, 0o620)
+            os.fsync(fd)
+            original = identity(os.fstat(fd))
+            need(original == identity(path.lstat()) and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0),
+                 "GitHub fresh ambient keylog control differs")
+        finally:
+            _shell_github_close(fd)
+    _shell_github_keylog_snapshot(value)
+
+
+def _shell_github_keylog_snapshot(value):
+    result = {}
+    for case in SHELL_GITHUB_AMBIENT_CASES:
+        path = root_path(value) / ("shell-" + case + "-keylog.log")
+        before = identity(path.lstat())
+        need(before[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0),
+             "GitHub ambient keylog was created/replaced/written")
+        row = record(path, 0)
+        _xattrs(path, False)
+        need(identity(path.lstat()) == before and row["size"] == 0
+             and row["sha256"] == hashlib.sha256(b"").hexdigest(), "GitHub ambient keylog changed")
+        row.pop("path")
+        result[case] = {**row, "identity": list(before)}
+    return result
+
+
+def _shell_github_peer_snapshot(value):
+    root = root_path(value) / "github-peer"
+    need(sorted(path.name for path in root.iterdir()) == ["github_tls", "github_tls_peer.py"]
+         and sorted(path.name for path in (root / "github_tls").iterdir())
+             == sorted(Path(path).name for path in SHELL_GITHUB_PEER_PINS if path.startswith("github_tls/")),
+         "GitHub peer SOURCE roster differs")
+    result = {}
+    for relative in (".", "github_tls"):
+        path = root if relative == "." else root / relative
+        before = identity(path.lstat())
+        need(before[2:5] == (stat.S_IFDIR | 0o555, 0, 0), "GitHub peer directory protection differs")
+        _xattrs(path, True)
+        need(identity(path.lstat()) == before, "GitHub peer directory changed")
+        result[relative] = {"identity": list(before)}
+    for relative, (size, digest) in sorted(SHELL_GITHUB_PEER_PINS.items()):
+        path = root / relative
+        item = protected_record(path, size)
+        need(item["size"] == size and item["sha256"] == digest
+             and item["identity"][2:6] == [stat.S_IFREG | 0o444, 0, 0, 1],
+             "GitHub peer SOURCE bytes or installed permissions differ")
+        _xattrs(path, False)
+        item.pop("path")
+        result[relative] = item
+    for relative in (".", "github_tls"):
+        path = root if relative == "." else root / relative
+        need(list(identity(path.lstat())) == result[relative]["identity"], "GitHub peer directory POST differs")
+    return result
+
+
+def shell_github_dial_core(raw):
+    """One exact, inventoried ZIP DATA transform; never import its members."""
+    import io
+    import zipfile
+    need(type(raw) is bytes and len(raw) == 706266
+         and hashlib.sha256(raw).hexdigest() == SHELL_GITHUB_PAYLOADS["N"]["coreSha256"],
+         "GitHub normal core ZIP differs")
+    output = io.BytesIO()
+    originals = {}
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as source:
+        infos = source.infolist()
+        need(len(infos) == 106 and len({info.filename for info in infos}) == 106
+             and sum(info.file_size for info in infos) <= 16 << 20,
+             "GitHub normal inner core roster differs")
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as target:
+            for info in infos:
+                need(not info.is_dir() and not info.flag_bits & 1
+                     and info.compress_type == zipfile.ZIP_DEFLATED and 0 < info.file_size <= 2 << 20
+                     and not info.filename.startswith("/") and all(part not in ("", ".", "..") for part in info.filename.split("/")),
+                     "GitHub core ZIP member is not fixed SOURCE")
+                body = source.read(info)
+                need(len(body) == info.file_size, "GitHub core ZIP member size differs")
+                original_body = body
+                if info.filename == "mobile_release/_github_connection_transport.py":
+                    need(len(body) == 40759 and hashlib.sha256(body).hexdigest()
+                         == "f5e0b3e750b4ed0ff7753d2f8e9de9ba940e9db7eecbf314a1b9fe7ae8990e0a"
+                         and body.count(SHELL_GITHUB_DIAL_BEFORE) == 1, "GitHub exact TCP dial source differs")
+                    body = body.replace(SHELL_GITHUB_DIAL_BEFORE, SHELL_GITHUB_DIAL_AFTER, 1)
+                    need(len(body) == 41028 and hashlib.sha256(body).hexdigest()
+                         == "faa4988237ab0ef4faee21484d641a23eed9060ec786a22a2a63c0c73630b2f1",
+                         "GitHub exact TCP dial delta differs")
+                originals[info.filename] = (body, original_body, info.date_time, info.external_attr, info.create_system, info.compress_type)
+                target.writestr(deepcopy(info), body, compress_type=info.compress_type, compresslevel=9)
+    result = output.getvalue()
+    output.close()
+    need(len(result) == 701534 and hashlib.sha256(result).hexdigest() == SHELL_GITHUB_PAYLOADS["D-R"]["coreSha256"],
+         "GitHub derivative ZIP reproduction differs; no alternative compressor is permitted")
+    with zipfile.ZipFile(io.BytesIO(result), "r") as check:
+        infos = check.infolist()
+        need([info.filename for info in infos] == list(originals), "GitHub derivative ZIP order differs")
+        for info in infos:
+            body, _, date_time, external_attr, create_system, compress_type = originals[info.filename]
+            need(check.read(info) == body and (info.date_time, info.external_attr, info.create_system, info.compress_type)
+                 == (date_time, external_attr, create_system, compress_type), "GitHub derivative ZIP SOURCE or metadata differs")
+    need(sum(body != before for body, before, *_ in originals.values()) == 1,
+         "GitHub derivative changed another inner SOURCE")
+    return result
+
+
+def shell_github_manifest(normal_raw, role):
+    need(role in SHELL_GITHUB_PAYLOADS and type(normal_raw) is bytes and len(normal_raw) == 85440
+         and hashlib.sha256(normal_raw).hexdigest() == M, "GitHub N manifest binding differs")
+    normal = decode(normal_raw)
+    need(canonical(normal) == normal_raw and set(normal) == {"coreSha256", "coreVersion", "files", "inventorySha256",
+         "protocol", "protocolSha256", "schemaVersion", "target"} and normal["coreVersion"] == "0.3.0"
+         and normal["coreSha256"] == SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]
+         and normal["inventorySha256"] == SHELL_GITHUB_PAYLOADS["N"]["inventorySha256"]
+         and normal["target"] == TARGET and normal["protocolSha256"] == Q
+         and type(normal["protocol"]) is int and normal["protocol"] == 1
+         and type(normal["schemaVersion"]) is int and normal["schemaVersion"] == 1
+         and type(normal["files"]) is list and len(normal["files"]) == 606,
+         "GitHub N manifest schema/profile differs")
+    rows = _D.records(normal["files"])
+    need(len(rows) == 606 and normal["files"] == sorted(normal["files"], key=lambda row: row["path"])
+         and rows["core.zip"] == {"path": "core.zip", "size": 706266, "sha256": SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]}
+         and rows["github-ca.pem"] == {"path": "github-ca.pem", "size": 240216, "sha256": SHELL_GITHUB_PAYLOADS["N"]["caSha256"]}
+         and hashlib.sha256(canonical(normal["files"])[:-1]).hexdigest() == normal["inventorySha256"],
+         "GitHub N complete inventory differs")
+    if role == "N":
+        return normal_raw
+    changed = deepcopy(normal)
+    replacements = {"core.zip": {"path": "core.zip", "size": 701534, "sha256": SHELL_GITHUB_PAYLOADS[role]["coreSha256"]}}
+    if role == "D-S":
+        replacements["github-ca.pem"] = {"path": "github-ca.pem", "size": 761, "sha256": SHELL_GITHUB_PAYLOADS[role]["caSha256"]}
+    changed["files"] = [replacements.get(row["path"], row) for row in changed["files"]]
+    changed["coreSha256"] = SHELL_GITHUB_PAYLOADS[role]["coreSha256"]
+    changed["inventorySha256"] = hashlib.sha256(canonical(changed["files"])[:-1]).hexdigest()
+    raw = (json.dumps(changed, sort_keys=True, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
+    pin = SHELL_GITHUB_PAYLOADS[role]
+    need(len(raw) == pin["manifestBytes"] and hashlib.sha256(raw).hexdigest() == pin["manifestSha256"]
+         and changed["inventorySha256"] == pin["inventorySha256"],
+         "GitHub derivative manifest reproduction differs")
+    return raw
+
+
+def _shell_github_publish_payload(value, role, normal, core, normal_raw):
+    """Exclusive, nonsearchable construction; publish only this fresh root."""
+    need(shell_github(value) and role in ("D-R", "D-S") and _ROOT == root_path(value),
+         "Different GitHub derivative construction route")
+    pin = SHELL_GITHUB_PAYLOADS[role]
+    manifest_raw = shell_github_manifest(normal_raw, role)
+    data = decode(manifest_raw)
+    files = _D.records(data["files"])
+    directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    directory(PREFIX, protected=True)
+    parent = os.open(PREFIX, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = None
+    try:
+        parent_id = identity(os.fstat(parent))
+        need(parent_id == identity(PREFIX.lstat()), "GitHub derivative parent differs")
+        # mkdir is exclusive, not check-then-replace. An occupied leaf refuses.
+        os.mkdir(pin["manifestSha256"], mode=0o700, dir_fd=parent)
+        root = PREFIX / pin["manifestSha256"]
+        fd = os.open(pin["manifestSha256"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        original = identity(os.fstat(fd))
+        need(original == identity(root.lstat()) and original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+             and original[0] == parent_id[0], "GitHub fresh derivative root protection differs")
+        for relative in sorted(directories - {""}, key=lambda name: (len(Path(name).parts), name)):
+            (root / relative).mkdir(mode=0o700)
+        for relative, row in sorted(files.items()):
+            target = root / relative
+            if relative == "core.zip":
+                need(len(core) == row["size"] and hashlib.sha256(core).hexdigest() == row["sha256"],
+                     "GitHub derivative core differs before copy")
+                _D.write(target, core, 0o444)
+            elif relative == "github-ca.pem" and role == "D-S":
+                source = root_path(value) / "github-peer/github_tls/root-ca.pem"
+                copy_pinned(source, target, {**row, "path": str(source)}, 0o444)
+            else:
+                source = PREFIX / M / relative
+                need(all(normal[relative][key] == row[key] for key in ("size", "sha256")),
+                     "GitHub derivative changed an unallowlisted payload row")
+                copy_pinned(source, target, {**row, "path": str(source)}, 0o555 if relative == "python/bin/python3" else 0o444)
+            need(identity(root.lstat())[:5] == original[:5] == identity(os.fstat(fd))[:5],
+                 "GitHub fresh derivative root changed during construction")
+        _D.write(root / "manifest.json", manifest_raw, 0o444)
+        for relative in sorted(directories - {""}, key=lambda name: (len(Path(name).parts), name), reverse=True):
+            os.chmod(root / relative, 0o555)
+            _shell_github_sync(root / relative)
+        staged = _tree(root, pin["manifestSha256"], published=False, github=True)
+        need(staged == _tree(root, pin["manifestSha256"], published=False, github=True),
+             "GitHub staged derivative readbacks differ")
+        os.fchmod(fd, 0o555)
+        os.fsync(fd)
+        os.fsync(parent)
+        published = _tree(root, pin["manifestSha256"], published=True, github=True)
+        need(published == _tree(root, pin["manifestSha256"], published=True, github=True)
+             and {name: row for name, row in published.items() if name}
+                 == {name: row for name, row in staged.items() if name}
+             and published[""]["identity"] == list(identity(os.fstat(fd))) == list(identity(root.lstat()))
+             and identity(os.fstat(parent))[:5] == parent_id[:5] == identity(PREFIX.lstat())[:5],
+             "GitHub original derivative publication/readback differs")
+        need({tuple(row["identity"][:2]) for row in published.values()}.isdisjoint(
+             {tuple(row["identity"][:2]) for row in normal.values()}), "GitHub derivative aliases N originals")
+        return published
+    finally:
+        try:
+            if fd is not None:
+                _shell_github_close(fd)
+        finally:
+            _shell_github_close(parent)
+
+
+def _shell_github_materials_snapshot(value):
+    normal_raw = read(PREFIX / M / "manifest.json", 85440)
+    shell_github_manifest(normal_raw, "N")
+    return {"schema": "installed-github-readonly-materials-v1", "sourceSha": value["sourceSha"],
+            "runId": value["runId"], "attempt": value["attempt"], "profile": value["shell"]["githubReadOnly"]["profile"],
+            "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+            "normalManifest": decode(normal_raw),
+            "payloads": {role: _tree(PREFIX / pin["manifestSha256"], pin["manifestSha256"], published=True, github=role != "N")
+                         for role, pin in SHELL_GITHUB_PAYLOADS.items()},
+            "peer": _shell_github_peer_snapshot(value), "ambientKeylogs": _shell_github_keylog_snapshot(value)}
+
+
+def _shell_github_materials_prepare(value, proof, normal, normal_maps):
+    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES)
+         and _tree(PREFIX / M, M, published=True) == normal, "GitHub N original changed before derivative construction")
+    normal_raw = read(PREFIX / M / "manifest.json", 85440)
+    core = shell_github_dial_core(read(PREFIX / M / "core.zip", 706266))
+    for role in ("D-R", "D-S"):
+        _shell_github_publish_payload(value, role, normal, core, normal_raw)
+        need(_tree(PREFIX / M, M, published=True) == normal, "GitHub derivative construction changed N")
+    observed = _shell_github_materials_snapshot(value)
+    raw = canonical(observed)
+    maps = shell_github_material_data(value, raw, normal_maps)
+    for role in ("D-R", "D-S"):
+        root = PREFIX / SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+        for relative in ("python/bin/python3", "python/lib/libssl.so.3", "python/lib/libcrypto.so.3"):
+            path = root / relative
+            binding = _loader_binding(path, proof["scope"])
+            original = observed["payloads"][role][relative]["identity"]
+            need(binding["identity"] == [original[index] for index in (0, 1, 2, 5, 6, 7, 8)],
+                 "GitHub derivative native original differs from the admitted payload")
+            proof["bindings"][str(path)] = binding
+        for relative in ("python/lib/glibc-hwcaps", *("python/lib/" + name for name in proof["entryObjects"] if name not in PRIVATE_SONAMES),
+                         *(prefix + name for prefix in ("", "python/", "python/bin/") for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt"))):
+            path = root / relative
+            binding = _loader_binding(path, proof["scope"], absent=True)
+            need(binding.get("absent") is True, "GitHub derivative startup/native override exists")
+            proof["bindings"][str(path)] = binding
+    _installed_loader_check(proof)
+    _retain("shell-github-materials-before.json", raw)
+    return maps
+
+
+def shell_github_material_data(value, raw, normal_maps):
+    """Reconcile actual full9 N/D/peer DATA; no constant success projection."""
+    need(shell_github(value) and type(raw) is bytes, "GitHub material DATA requires its fixed handoff and bytes")
+    data = decode(raw, SHELL_GITHUB_MATERIAL_LIMIT)
+    need(canonical(data) == raw, "GitHub material DATA is not canonical")
+    need(type(data) is dict and set(data) == {"schema", "sourceSha", "runId", "attempt", "profile",
+         "derivativeRecipeSha256", "normalManifest", "payloads", "peer", "ambientKeylogs"}
+         and data["schema"] == "installed-github-readonly-materials-v1"
+         and all(data[key] == value[key] for key in ("sourceSha", "runId", "attempt"))
+         and data["profile"] == value["shell"]["githubReadOnly"]["profile"]
+         and data["derivativeRecipeSha256"] == SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256
+         and type(data["payloads"]) is dict and set(data["payloads"]) == set(SHELL_GITHUB_PAYLOADS),
+         "GitHub original material DATA identity or role roster differs")
+    normal_raw = canonical(data["normalManifest"])
+    all_inodes = set()
+    maps = {}
+    for role, pin in SHELL_GITHUB_PAYLOADS.items():
+        manifest_raw = shell_github_manifest(normal_raw, role)
+        files = _D.records(decode(manifest_raw)["files"])
+        files["manifest.json"] = {"path": "manifest.json", "size": len(manifest_raw), "sha256": pin["manifestSha256"]}
+        directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+        tree = data["payloads"][role]
+        need(type(tree) is dict and set(tree) == set(files) | directories, "GitHub complete installed payload membership differs")
+        for relative, row in tree.items():
+            is_directory = relative in directories
+            need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
+                 "GitHub payload full9 row fields differ")
+            original = row["identity"]
+            mode = stat.S_IFDIR | 0o555 if is_directory else stat.S_IFREG | (0o555 if relative == "python/bin/python3" else 0o444)
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2:5] == [mode, 0, 0]
+                 and original[5] > 0 and original[6] <= FILE_LIMIT, "GitHub installed payload identity/mode differs")
+            if not is_directory:
+                expected = files[relative]
+                need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == expected["size"]
+                     and row["sha256"] == expected["sha256"], "GitHub installed payload byte/size binding differs")
+            pair = tuple(original[:2])
+            need(pair not in all_inodes, "GitHub N/D tree aliases another original")
+            all_inodes.add(pair)
+        need(type(normal_maps) is dict and set(normal_maps) == {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"},
+             "GitHub original six-object N loader map binding differs")
+        selected = deepcopy(normal_maps)
+        for relative, name in (("python/bin/python3", "python"), ("python/lib/libssl.so.3", "libssl.so.3"), ("python/lib/libcrypto.so.3", "libcrypto.so.3")):
+            original = tree[relative]["identity"]
+            selected[name] = {"paths": [str(PREFIX / pin["manifestSha256"] / relative)], "deviceMajor": os.major(original[0]),
+                              "deviceMinor": os.minor(original[0]), "inode": original[1]}
+        if role == "N":
+            need(canonical(selected) == canonical(normal_maps), "GitHub N material differs from the original loader proof")
+        maps[role] = selected
+    peer = data["peer"]
+    need(type(peer) is dict and set(peer) == {".", "github_tls", *SHELL_GITHUB_PEER_PINS}, "GitHub peer material roster differs")
+    for relative, row in peer.items():
+        is_directory = relative in (".", "github_tls")
+        need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
+             "GitHub peer material fields differ")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0
+             and original[2:5] == [stat.S_IFDIR | 0o555 if is_directory else stat.S_IFREG | 0o444, 0, 0]
+             and original[5] > 0 and original[6] <= JSON_LIMIT, "GitHub peer material identity/mode differs")
+        if not is_directory:
+            size, digest = SHELL_GITHUB_PEER_PINS[relative]
+            need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == size and row["sha256"] == digest,
+                 "GitHub peer SOURCE byte/hash binding differs")
+        pair = tuple(original[:2])
+        need(pair not in all_inodes, "GitHub peer aliases another admitted material original")
+        all_inodes.add(pair)
+    keylogs = data["ambientKeylogs"]
+    need(type(keylogs) is dict and set(keylogs) == set(SHELL_GITHUB_AMBIENT_CASES), "GitHub ambient keylog roster differs")
+    for case, row in keylogs.items():
+        need(type(row) is dict and set(row) == {"identity", "size", "sha256"}, "GitHub ambient keylog fields differ")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] > 0 and original[1] > 0
+             and original[2:7] == [stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0]
+             and type(row["size"]) is int and row["size"] == 0 and row["sha256"] == hashlib.sha256(b"").hexdigest(),
+             "GitHub ambient keylog identity/mode/content differs")
+        pair = tuple(original[:2])
+        need(pair not in all_inodes, "GitHub ambient keylog aliases another original")
+        all_inodes.add(pair)
+    need(len({pair[0] for pair in all_inodes}) == 1, "GitHub admitted materials cross the original root filesystem")
+    return maps
+
+
+
+def _shell_github_roster(value):
+    owners = (value["runnerUid"], value["runnerGid"])
+    return ((".", stat.S_IFDIR | 0o700, owners, None),
+            ("app", stat.S_IFDIR | 0o555, (0, 0), None),
+            ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+            ("version.properties", stat.S_IFREG | 0o600, owners, SHELL_PROJECT_VERSION))
+
+
+def _shell_github_fixtures_prepare(value):
+    """One registered project, not the unrelated nineteen legacy fixture trees."""
+    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "Different GitHub fixture route")
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0)
+         and original[0] == ancestry["control"]["identity"][0]
+         and all(original[:2] != tuple(row["identity"][:2]) for row in [ancestry["control"], *ancestry["ancestors"]]),
+         "GitHub fresh fixture namespace differs")
+    _xattrs(root, True)
+    project = root / "github-project"
+    nodes = [(project if relative == "." else project / relative, mode, owners, body)
+             for relative, mode, owners, body in _shell_github_roster(value)]
+    for path, mode, owners, body in nodes:
+        if stat.S_ISDIR(mode):
+            path.mkdir(mode=0o700)
+        else:
+            _D.write(path, body, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+    for path, mode, owners, _ in reversed(nodes):
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode))
+            os.chown(path, *owners)
+        _xattrs(path, stat.S_ISDIR(mode))
+    _shell_namespace_roster(root, shell_fixture_children(value))
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "GitHub original namespace changed before publication")
+    os.chmod(root, 0o755)
+    _shell_github_sync(root)
+    published = identity(root.lstat())
+    need(published[:2] == original[:2] and published[2:5] == (stat.S_IFDIR | 0o755, 0, 0),
+         "GitHub original fixture namespace publication differs")
+    binding = canonical({"root": str(root), "identity": list(published),
+                         "children": list(shell_fixture_children(value)), **ancestry})
+    _shell_namespace_check(value, binding)
+    return binding
+
+
+def _shell_github_inventory(value, namespace):
+    admitted = _shell_namespace_check(value, namespace)
+    project = shell_fixture_root(value) / "github-project"
+    roster = _shell_github_roster(value)
+    nodes, identities = {}, set()
+    # Admit both finite directory rosters before any leaf SOURCE read.
+    for relative, mode, owners, _ in roster:
+        path = project if relative == "." else project / relative
+        before = identity(path.lstat())
+        need(before[2:5] == (mode, *owners) and before[0] == admitted["identity"][0]
+             and before[:2] not in identities and (stat.S_ISDIR(mode) or before[5] == 1),
+             "GitHub registered project original type/owner/link differs")
+        identities.add(before[:2])
+        _xattrs(path, stat.S_ISDIR(mode))
+        need(identity(path.lstat()) == before, "GitHub fixture identity changed")
+        if stat.S_ISDIR(mode):
+            wanted = ["app", "version.properties"] if relative == "." else ["build.gradle.kts"]
+            need(sorted(child.name for child in path.iterdir()) == wanted,
+                 "GitHub read-only fixture gained release/config/other entries")
+        nodes[relative] = {"identity": list(before)}
+    for relative, mode, _, body in roster:
+        if stat.S_ISDIR(mode):
+            continue
+        path = project / relative
+        row = record(path, len(body))
+        need(row["size"] == len(body) and row["sha256"] == hashlib.sha256(body).hexdigest()
+             and list(identity(path.lstat())) == nodes[relative]["identity"], "GitHub read-only fixture SOURCE differs")
+        row.pop("path")
+        nodes[relative].update(row)
+    for relative, _, _, _ in roster:
+        path = project if relative == "." else project / relative
+        need(list(identity(path.lstat())) == nodes[relative]["identity"], "GitHub fixture original POST changed")
+    _shell_namespace_check(value, namespace)
+    return {"schema": "installed-github-project-v1", "sourceSha": value["sourceSha"],
+            "runId": value["runId"], "attempt": value["attempt"], "project": str(project),
+            "namespace": admitted, "nodes": nodes}
+
+
+def shell_github_fixture(value, before_raw, after_raw):
+    need(shell_github(value) and type(before_raw) is bytes and type(after_raw) is bytes
+         and before_raw == after_raw, "GitHub read-only observation changed its original registered project")
+    before = decode(before_raw, SHELL_GITHUB_FIXTURE_LIMIT)
+    need(canonical(before) == before_raw and type(before) is dict
+         and set(before) == {"schema", "sourceSha", "runId", "attempt", "project", "namespace", "nodes"}
+         and before["schema"] == "installed-github-project-v1"
+         and all(before[key] == value[key] for key in ("sourceSha", "runId", "attempt"))
+         and before["project"] == str(shell_fixture_root(value) / "github-project"),
+         "GitHub read-only fixture identity differs")
+    namespace = _shell_namespace_data(value, before["namespace"])
+    nodes = before["nodes"]
+    roster = _shell_github_roster(value)
+    need(type(nodes) is dict and set(nodes) == {row[0] for row in roster}, "GitHub exact fixture node roster differs")
+    identities = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+    for relative, mode, owners, body in roster:
+        row = nodes[relative]
+        is_directory = stat.S_ISDIR(mode)
+        need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
+             "GitHub fixture row fields differ")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] == namespace["identity"][0] and original[1] > 0
+             and original[2:5] == [mode, *owners] and original[5] > 0 and original[6] <= SHELL_GITHUB_FIXTURE_LIMIT,
+             "GitHub fixture original identity/mode differs")
+        pair = tuple(original[:2])
+        need(pair not in identities, "GitHub fixture aliases another original")
+        identities.add(pair)
+        if not is_directory:
+            need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == len(body)
+                 and row["sha256"] == hashlib.sha256(body).hexdigest(), "GitHub fixture SOURCE changed or relabelled")
+    return {"project": before["project"], "namespace": namespace, "unchanged": True,
+            "sourceSha256": hashlib.sha256(SHELL_PROJECT_SOURCE).hexdigest(),
+            "versionSha256": hashlib.sha256(SHELL_PROJECT_VERSION).hexdigest(),
+            "releaseConfigCreated": False, "sourceSha": value["sourceSha"]}
+
+
 def _shell_fixture_ancestry(value):
     """Metadata only; the search-only control root and private contents stay put."""
     need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
@@ -4668,7 +6891,7 @@ def _shell_fixture_ancestry(value):
 def _shell_namespace_data(value, namespace):
     """Closed inert DATA; it is not permission to inspect a live/failed tree."""
     need(type(namespace) is dict and set(namespace) == {"root", "identity", "children", "control", "ancestors"}
-         and namespace["root"] == str(shell_fixture_root(value)) and namespace["children"] == list(SHELL_FIXTURE_CHILDREN),
+         and namespace["root"] == str(shell_fixture_root(value)) and namespace["children"] == list(shell_fixture_children(value)),
          "Shell fixture namespace shape/root differs")
     need(type(namespace["control"]) is dict and set(namespace["control"]) == {"path", "identity"}
          and namespace["control"]["path"] == str(root_path(value)) and type(namespace["ancestors"]) is list
@@ -4688,7 +6911,7 @@ def _shell_namespace_data(value, namespace):
              and (original[2] == mode if mode is not None else original[2] & 0o005 == 0o005),
              "Shell fixture namespace identity/mode differs")
         if length == 9:
-            need(0 < original[5] <= len(SHELL_FIXTURE_CHILDREN) + 2 and original[6] <= 1 << 20,
+            need(0 < original[5] <= len(shell_fixture_children(value)) + 2 and original[6] <= 1 << 20,
                  "Shell fixture namespace directory bound differs")
         identities.append(tuple(original[:2]))
     need(len(set(identities)) == 5 and len({pair[0] for pair in identities}) == 1
@@ -4697,13 +6920,13 @@ def _shell_namespace_data(value, namespace):
     return namespace
 
 
-def _shell_namespace_roster(root):
+def _shell_namespace_roster(root, children=SHELL_FIXTURE_CHILDREN):
     found = []
     with os.scandir(root) as entries:
         for entry in entries:
-            need(len(found) < len(SHELL_FIXTURE_CHILDREN) and entry.name in SHELL_FIXTURE_CHILDREN, "Unexpected shell fixture namespace entry")
+            need(len(found) < len(children) and entry.name in children, "Unexpected shell fixture namespace entry")
             found.append(entry.name)
-    need(sorted(found) == list(SHELL_FIXTURE_CHILDREN), "Shell fixture namespace roster differs")
+    need(sorted(found) == list(children), "Shell fixture namespace roster differs")
 
 
 def _shell_namespace_check(value, binding):
@@ -4715,7 +6938,11 @@ def _shell_namespace_check(value, binding):
     root = shell_fixture_root(value)
     need(list(identity(root.lstat())) == namespace["identity"], "Original shell fixture namespace changed")
     _xattrs(root, True)
-    _shell_namespace_roster(root)  # Admit names before any fixture descendant read.
+    # Admit the selected names before any fixture descendant read.
+    if shell_github(value):
+        _shell_namespace_roster(root, shell_fixture_children(value))
+    else:
+        _shell_namespace_roster(root)
     need(list(identity(root.lstat())) == namespace["identity"] and _shell_fixture_ancestry(value) == ancestry,
          "Original shell fixture namespace changed during observation")
     return namespace
@@ -4727,6 +6954,8 @@ def _shell_fixtures_prepare(value):
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
     """
+    if shell_github(value):
+        return _shell_github_fixtures_prepare(value)
     ancestry = _shell_fixture_ancestry(value)
     root = shell_fixture_root(value)
     root.mkdir(mode=0o700)  # Exclusive. Do not inspect/adopt an occupied name.
@@ -5766,6 +7995,15 @@ def _shell_fixtures_final(value, namespace):
     # Every original case, including the eight Tools/Offline cases, returned through the
     # same shell_result gate. Check every earlier original family and the
     # saved metadata/version together, never by following a failed/possibly-live case.
+    if shell_github(value):
+        after = canonical(_shell_github_inventory(value, namespace))
+        shell_github_fixture(value, read(_ROOT / "public/shell-github-project-before.json", SHELL_GITHUB_FIXTURE_LIMIT), after)
+        _retain("shell-github-project-after.json", after)
+        material = canonical(_shell_github_materials_snapshot(value))
+        need(material == read(_ROOT / "public/shell-github-materials-before.json", SHELL_GITHUB_MATERIAL_LIMIT),
+             "GitHub N/D/peer originals changed during observations")
+        _retain("shell-github-materials-after.json", material)
+        return
     need(canonical(_shell_project_inventory(value, namespace, saved=True))
          == read(_ROOT / "public/shell-positive-project-after.json", 8192)
          and canonical(_shell_candidate_inventory(value, namespace))
@@ -5829,6 +8067,9 @@ def _shell_settled_failure_result(stdout, stderr, case, code, labels):
 
 def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
     """Original bounded captures, not wrapper zero or an observation delay."""
+    if case in SHELL_GITHUB_ALL_CASES:
+        need(failure_labels is None, "GitHub success requires its actual receipt, not legacy failure labels")
+        return shell_github_result(stdout, stderr, case, code, expected)
     if case == "settled-failure":
         return _shell_settled_failure_result(stdout, stderr, case, code, failure_labels)
     need(failure_labels is None, "A success-requiring case supplied a failure-label export")
@@ -6574,7 +8815,7 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
                  "lifecycleComplete": installed["case"] == "positive", "fixturePublished": installed["case"] == "positive"}
     elif "shell" in value:
         shell = value["shell"]
-        need(set(cases) == set(SHELL_CASES), "Original fixed shell case roster incomplete")
+        need(set(cases) == set(shell_cases(value)), "Original fixed shell case roster incomplete")
         _shell_data_check(loader)
         _installed_loader_check(loader)
         _retain("loader-final.json", canonical(loader))
@@ -6678,64 +8919,93 @@ def unit_start():
     if "shell" in value:
         original = observations["p0"]["published"]["P0"]
         expected = _installed_payload(value, loader, original)
+        github_expected = _shell_github_materials_prepare(value, loader, original, expected) if shell_github(value) else None
         namespace = _shell_fixtures_prepare(value)
-        for case in SHELL_CASES:
-            environment, log_binding = _shell_prepare(value, case, namespace)
-            if case == "normal":
-                cases[case] = _shell_normal(value, environment, expected, log_binding)
-            else:
-                result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
-                                 shell_log=(value, case, log_binding))
-                # Only the immutable public copy is reread after command closed
-                # the single original label FD; never reopen the private leaf.
-                failure_labels = read(_ROOT / "public/shell-settled-failure-failure.labels", SHELL_FAILURE_LABEL_LIMIT) \
-                    if case == "settled-failure" else None
-                cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected,
-                                          failure_labels=failure_labels)
-                if case == "positive":
-                    after = canonical(_shell_project_inventory(value, namespace, saved=True))
-                    _retain("shell-positive-project-after.json", after)
-                    shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
-                    candidate_after = canonical(_shell_candidate_inventory(value, namespace))
-                    _retain("shell-positive-candidate-after.json", candidate_after)
-                    shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
-                if case == "project-paths":
-                    paths_after = canonical(_shell_paths_inventory(value, namespace, changed=True))
-                    _retain("shell-project-paths-after.json", paths_after)
-                    shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
-                if case == "workflow-apply":
-                    workflow_after = canonical(_shell_workflow_inventory(value, namespace, installed=True))
-                    _retain("shell-workflow-apply-after.json", workflow_after)
-                    shell_workflow_fixture(value, read(_ROOT / "public/shell-workflow-apply-before.json", 8192), workflow_after)
-                    # Same fixed earlier fixture originals, after this actual
-                    # workflow exit; never inspect a failed/possibly-live case.
-                    need(canonical(_shell_project_inventory(value, namespace, saved=True))
-                         == read(_ROOT / "public/shell-positive-project-after.json", 8192)
-                         and canonical(_shell_candidate_inventory(value, namespace))
-                         == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
-                         and canonical(_shell_paths_inventory(value, namespace, changed=True))
-                         == read(_ROOT / "public/shell-project-paths-after.json", 8192),
-                         "Workflow case changed another original fixture family")
-                if case in SHELL_SESSION_CASES:
-                    session_after = canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
-                    _retain("shell-" + case + "-after.json", session_after)
-                    shell_session_fixture(value, case,
-                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_SESSION_INVENTORY_LIMIT), session_after)
-                if case == "metadata-save":
-                    metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
-                    _retain("shell-metadata-save-after.json", metadata_after)
-                    shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
-                if case == "version-save":
-                    version_after = canonical(_shell_version_inventory(value, namespace, saved=True))
-                    _retain("shell-version-save-after.json", version_after)
-                    shell_version_fixture(value, read(_ROOT / "public/shell-version-save-before.json", 8192), version_after)
-                if case in SHELL_TOOLS_OFFLINE_CASES:
-                    tools_offline_after = canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
-                    _retain("shell-" + case + "-after.json", tools_offline_after)
-                    shell_tools_offline_fixture(value, case,
-                        read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT), tools_offline_after)
-            _shell_namespace_check(value, namespace)
+        boundary_host = None
+        if shell_normal_boundaries(value):
+            boundary_host = shell_github_boundary_host_materials()
+            _retain("github-boundary-host-before.json", canonical(boundary_host))
+            _github_boundary_host_admit(boundary_host)
+        if shell_github(value):
+            _retain("shell-github-project-before.json", canonical(_shell_github_inventory(value, namespace)))
+        for case in shell_cases(value):
+            boundary = None
+            try:
+                if case in SHELL_GITHUB_BOUNDARY_CASES:
+                    boundary = _github_boundary_prepare(value, case, start, boundary_host)
+                environment, log_binding = _shell_prepare(value, case, namespace)
+                if case == "normal":
+                    cases[case] = _shell_normal(value, environment, expected, log_binding)
+                else:
+                    result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
+                                     shell_log=(value, case, log_binding))
+                    # Only the immutable public copy is reread after command closed
+                    # the single original label FD; never reopen the private leaf.
+                    failure_labels = read(_ROOT / "public/shell-settled-failure-failure.labels", SHELL_FAILURE_LABEL_LIMIT) \
+                        if case == "settled-failure" else None
+                    cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode,
+                                              github_expected if shell_github(value) else expected, failure_labels=failure_labels)
+                    if shell_github(value):
+                        need(canonical(_shell_github_inventory(value, namespace))
+                             == read(_ROOT / "public/shell-github-project-before.json", SHELL_GITHUB_FIXTURE_LIMIT),
+                             "A returned GitHub original changed the read-only registered fixture")
+                        if case in SHELL_GITHUB_AMBIENT_CASES:
+                            material = decode(read(_ROOT / "public/shell-github-materials-before.json", SHELL_GITHUB_MATERIAL_LIMIT), SHELL_GITHUB_MATERIAL_LIMIT)
+                            need(canonical(_shell_github_keylog_snapshot(value)) == canonical(material["ambientKeylogs"]),
+                                 "A returned ambient GitHub original changed an empty original keylog")
+                    if case == "positive":
+                        after = canonical(_shell_project_inventory(value, namespace, saved=True))
+                        _retain("shell-positive-project-after.json", after)
+                        shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
+                        candidate_after = canonical(_shell_candidate_inventory(value, namespace))
+                        _retain("shell-positive-candidate-after.json", candidate_after)
+                        shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
+                    if case == "project-paths":
+                        paths_after = canonical(_shell_paths_inventory(value, namespace, changed=True))
+                        _retain("shell-project-paths-after.json", paths_after)
+                        shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
+                    if case == "workflow-apply":
+                        workflow_after = canonical(_shell_workflow_inventory(value, namespace, installed=True))
+                        _retain("shell-workflow-apply-after.json", workflow_after)
+                        shell_workflow_fixture(value, read(_ROOT / "public/shell-workflow-apply-before.json", 8192), workflow_after)
+                        # Same fixed earlier fixture originals, after this actual
+                        # workflow exit; never inspect a failed/possibly-live case.
+                        need(canonical(_shell_project_inventory(value, namespace, saved=True))
+                             == read(_ROOT / "public/shell-positive-project-after.json", 8192)
+                             and canonical(_shell_candidate_inventory(value, namespace))
+                             == read(_ROOT / "public/shell-positive-candidate-after.json", 8192)
+                             and canonical(_shell_paths_inventory(value, namespace, changed=True))
+                             == read(_ROOT / "public/shell-project-paths-after.json", 8192),
+                             "Workflow case changed another original fixture family")
+                    if case in SHELL_SESSION_CASES:
+                        session_after = canonical(_shell_session_inventory(value, namespace, case, changed=case == "session-refusals"))
+                        _retain("shell-" + case + "-after.json", session_after)
+                        shell_session_fixture(value, case,
+                            read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_SESSION_INVENTORY_LIMIT), session_after)
+                    if case == "metadata-save":
+                        metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))
+                        _retain("shell-metadata-save-after.json", metadata_after)
+                        shell_metadata_fixture(value, read(_ROOT / "public/shell-metadata-save-before.json", 8192), metadata_after)
+                    if case == "version-save":
+                        version_after = canonical(_shell_version_inventory(value, namespace, saved=True))
+                        _retain("shell-version-save-after.json", version_after)
+                        shell_version_fixture(value, read(_ROOT / "public/shell-version-save-before.json", 8192), version_after)
+                    if case in SHELL_TOOLS_OFFLINE_CASES:
+                        tools_offline_after = canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
+                        _retain("shell-" + case + "-after.json", tools_offline_after)
+                        shell_tools_offline_fixture(value, case,
+                            read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT), tools_offline_after)
+                _shell_namespace_check(value, namespace)
+                if boundary is not None:
+                    _github_boundary_finish(boundary, cases[case])
+            finally:
+                if boundary is not None:
+                    _github_boundary_close_after(boundary)
         _shell_fixtures_final(value, namespace)
+        if boundary_host is not None:
+            after_host = shell_github_boundary_host_materials()
+            need(canonical(after_host) == canonical(boundary_host), "Original normal-boundary host material changed")
+            _retain("github-boundary-host-after.json", canonical(after_host))
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -6820,15 +9090,28 @@ def unit_stop():
     _root_ids()
     value, request_sha = _context()
     _END = stop_end
+    admitted_domain, disposition = _github_boundary_stop(value) if shell_normal_boundaries(value) else (None, None)
+    # Completion, optional body/result files and resource-success verdicts are
+    # intentionally AFTER authenticated disposition. None grants delete rights.
     completion = {name: os.environ.get(name) for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
     need(all(type(item) is str and 0 < len(item) <= 128 for item in completion.values()), "Original systemd completion variables missing")
     start = decode(read(_ROOT / "public/unit-start.json"))
     outcome = record(_ROOT / "public/unit-result.json", JSON_LIMIT)
-    stop = {**_domain(value, "stop"), "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"],
+    if disposition is not None:
+        need(admitted_domain is not None, "Original StopPost domain admission failed; policy disposition remains unproved")
+    domain = _domain_events(admitted_domain) if disposition is not None else _domain(value, "stop")
+    stop = {**domain, "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"],
             "handoffSha256": request_sha, "deadline": value["deadline"], "namespaces": _namespaces(True),
             "completion": completion, "result": {**outcome, "path": "unit-result.json"},
             "commands": list(_COMMANDS), "files": list(_FILES)}
+    if disposition is not None:
+        stop["normalBoundaryDisposition"] = disposition
     _retain("unit-stop.json", canonical(stop))
+    if disposition is not None:
+        need(not _FAILED and disposition["errors"] == [] and disposition["allOwnedPoliciesAbsent"] is True
+             and disposition["laterLaunchesClosed"] is False
+             and all(row["state"] == "already-retired" for row in disposition["cases"].values()),
+             "Policy disposal after failure cannot qualify as a successful normal-boundary run")
     verify_finality(start, stop, 0)  # Actual original client zero is independently required by the nonroot collector.
     need(time.monotonic() < stop_end, "Original StopPost metadata close/readback was late")
     print("Root lifecycle StopPost completed.", flush=True)
@@ -6990,6 +9273,8 @@ def shell_closed_result(value, outcome, raw_files):
     need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("packageLifecycleQualified") is False
          and outcome.get("shellPackageBuilt") is False, "Connection was relabelled as a shell package qualification")
     expected = shell_closed_loader(value, raw_files)
+    if shell_github(value):
+        return shell_github_closed_result(value, outcome, raw_files, expected)
     cases = decode(raw_files["shell-cases.json"])
     need(type(cases) is dict and set(cases) == set(SHELL_CASES), "Closed original shell case roster differs")
     commands = {row["phase"]: row for row in outcome["commands"]}
@@ -7102,7 +9387,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
         pin = record(root / "public" / name, JSON_LIMIT)
         rows.append({**pin, "path": name})
     fixed = public_files(value)
-    need(len(rows) <= (SHELL_PUBLIC_FILE_LIMIT if "shell" in value else 128) and len({row["path"] for row in rows}) == len(rows)
+    need(len(rows) <= (shell_public_limit(value) if "shell" in value else 128) and len({row["path"] for row in rows}) == len(rows)
          and {path.name for path in (root / "public").iterdir()} == {row["path"] for row in rows} == fixed,
          "Original fixed public evidence roster differs")
     total, raw_files = 0, {}
@@ -7169,6 +9454,7 @@ def main():
             try:
                 _retain(role + "-error.json", canonical({"phase": phase, "reason": reason, "errorType": type(error).__name__,
                     "commands": list(_COMMANDS), "files": list(_FILES), "laterLaunchesClosed": True, "cleanupProven": False,
+                    "normalBoundaryDisposition": _GITHUB_BOUNDARY_STOP, "normalBoundaryCleanupErrors": list(_GITHUB_BOUNDARY_BODY_ERRORS),
                     "completion": {name: os.environ.get(name, "")[:128] for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
                                   if role == "unit-stop" else None}))
             except BaseException:

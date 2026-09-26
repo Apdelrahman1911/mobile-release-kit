@@ -3,7 +3,9 @@
 import { GITHUB_WORKFLOWS } from './githubSetupProtocol.ts';
 import type { GitHubConnectionError, GitHubConnectionHelp, GitHubConnectionReason, GitHubConnectionStatus } from './githubConnectionTypes.ts';
 
-export const GITHUB_CONNECTION_ENTRY_AVAILABLE = false;
+// UI implementation is present; this is never native/platform/TLS authority.
+// Entry still requires current help, project context and native capability.
+export const GITHUB_CONNECTION_ENTRY_AVAILABLE = true;
 export const GITHUB_CONNECTION_EVENT = 'github-connection-status';
 export const GITHUB_CONNECTION_REASONS = ['none', 'unqualified', 'runtime-unavailable', 'publisher-unconfigured',
   'not-connected', 'invalid-input', 'busy', 'unauthorized', 'forbidden', 'not-found-or-inaccessible', 'target-changed',
