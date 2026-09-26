@@ -1,6 +1,6 @@
-"""The one held-input lifecycle for two fixed saved-command domains.
+"""The one held-input lifecycle for fixed saved-command domains.
 
-Only the exact OfflinePreflight/AndroidBuild entry types may bind. This is not
+Only the exact declared entry types may bind. This is not
 a command descriptor, extensible cancellation source or caller callback API.
 The child-local endpoints can only tighten the original native T/W/H.
 """
@@ -18,12 +18,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ._desktop_android_build_protocol import AndroidBuildRequest
     from ._desktop_preflight_protocol import PreflightRequest
+    from ._desktop_project_recovery_protocol import ProjectRecoveryRequest
     from .cancellation import DefaultCancellation
 
 
 class SavedCommandDomain(Enum):
     OfflinePreflight = "offline-preflight"
     AndroidBuild = "android-build"
+    ProjectRecovery = "project-recovery"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -34,6 +36,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.AndroidBuild:
         from . import _desktop_android_build_protocol
         return _desktop_android_build_protocol
+    if domain is SavedCommandDomain.ProjectRecovery:
+        from . import _desktop_project_recovery_protocol
+        return _desktop_project_recovery_protocol
     raise ValueError("Invalid saved-command domain")
 
 
@@ -45,6 +50,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_android_build_control import AndroidBuildInput
     if type(source) is AndroidBuildInput and source.domain is SavedCommandDomain.AndroidBuild:
         return SavedCommandDomain.AndroidBuild
+    from ._desktop_project_recovery_control import ProjectRecoveryInput
+    if type(source) is ProjectRecoveryInput and source.domain is SavedCommandDomain.ProjectRecovery:
+        return SavedCommandDomain.ProjectRecovery
     raise ValueError("Invalid original saved-command input")
 
 
@@ -105,13 +113,16 @@ class _SavedCommandInput:
 
     def remaining_timeout(self, timeout: int) -> int:
         self._owner()
+        self._require(self.domain is not SavedCommandDomain.ProjectRecovery)
         self._require(self.guard is not None and type(timeout) is int and timeout > 0)
         self.guard.check()
         if self.domain is SavedCommandDomain.OfflinePreflight:
             if self.budget is not None:
                 self.budget.checkpoint()
-        else:
+        elif self.domain is SavedCommandDomain.AndroidBuild:
             self.require_operation().checkpoint()
+        else:
+            self._require(False)
         remaining = int(self.work_end - time.monotonic())
         if remaining < 1:
             self.stop("timed-out")
@@ -120,6 +131,7 @@ class _SavedCommandInput:
 
     def command_limits(self, timeout: int, capture: bool, output_limit: int) -> tuple[int, int]:
         """Clamp only an original domain; no change to C/A/W command ownership."""
+        self._require(self.domain is not SavedCommandDomain.ProjectRecovery)
         timeout = self.remaining_timeout(timeout)
         if self.domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_budget import budget_for
@@ -129,7 +141,8 @@ class _SavedCommandInput:
             if capture:
                 output_limit = budget.capture(output_limit)
             return timeout, output_limit
-        self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
+        self._require(self.domain is SavedCommandDomain.AndroidBuild
+                      and type(capture) is bool and type(output_limit) is int and output_limit > 0)
         operation = self.require_operation()
         # Independent Android-only affirmation of the four fixed roles. This
         # is not a larger generic capture budget, nor an OfflinePreflight change.
@@ -170,8 +183,9 @@ class _SavedCommandInput:
             value = os.fstat(self.fd)
             if (value.st_dev, value.st_ino, value.st_mode) != self.identity:
                 self.custody_unknown = True
-                message = ("Original preflight input changed" if self.domain is SavedCommandDomain.OfflinePreflight
-                           else "Original Android build input changed")
+                message = {SavedCommandDomain.OfflinePreflight: "Original preflight input changed",
+                           SavedCommandDomain.AndroidBuild: "Original Android build input changed",
+                           SavedCommandDomain.ProjectRecovery: "Original project recovery input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
             limit = 1 if self.active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
             self._require(limit > 0)
@@ -191,7 +205,7 @@ class _SavedCommandInput:
             self.stop()
             guard._abort(error)
 
-    def request(self) -> PreflightRequest | AndroidBuildRequest:
+    def request(self) -> PreflightRequest | AndroidBuildRequest | ProjectRecoveryRequest:
         self._owner()
         self._require(self.guard is not None and not self.active and not self.request_returned)
         while True:

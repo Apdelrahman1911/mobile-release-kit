@@ -366,6 +366,32 @@ impl ReleaseVersionInstalledProfile {
     }
 }
 
+// Project recovery binds exactly the admitted current core/bootstrap payload. Old A
+// and another domain's positive evidence MUST NOT select it. Only the normal
+// installed version selector below mints this fixed DATA profile.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct ProjectRecoveryInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl ProjectRecoveryInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    // Source/runtime/native review must bind the composed payload before enablement.
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("project_recovery_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 // Fixed A selection DATA, not another owner's execution permission. The two
 // command owners retain their independent, domain-local qualification gates.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1012,6 +1038,25 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
     }
+    pub(crate) fn project_recovery_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.project_recovery_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn project_recovery_installed_profile(&self) -> Result<ProjectRecoveryInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if ProjectRecoveryInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(ProjectRecoveryInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The project recovery installed-runtime selection is unavailable."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_project_recovery_installed(&self, originals: &mut crate::installed_runtime::ProjectRecoveryRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.project_recovery_installed_profile()?, end, stop)
+    }
     /// Fixed diagnostics bootstrap, never the passive engine or edit protocol.
     /// These source/metadata checks do not qualify the neutral cwd, installed
     /// runtime custody, external tool policy or actual native document owner.
@@ -1058,6 +1103,25 @@ impl RuntimeConfig {
         {
             let _ = end;
             Err(BridgeError::unavailable("Saved offline checks remain disabled until their original native owner, runtime custody and neutral cwd are qualified."))
+        }
+    }
+    /// Separate fixed project-recovery bootstrap. The owner has its own closed
+    /// native/runtime qualification flags; another domain's permit is unusable.
+    pub(crate) fn resolve_project_recovery(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("project_recovery_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../project_recovery_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Project recovery remains disabled until its original native owner, runtime custody and neutral cwd are qualified."))
         }
     }
     /// Android has its own fixed entry and owner qualification; an offline

@@ -29,10 +29,13 @@ import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
 import { ANDROID_BUILD_EVENT, encodeAndroidBuildRequest, androidBuildError, parseAndroidBuildStatus } from './androidBuildProtocol.ts';
 import type { AndroidBuildCommand } from './androidBuildProtocol.ts';
 import type { AndroidBuildStatus } from './androidBuildTypes.ts';
+import { PROJECT_RECOVERY_EVENT, encodeProjectRecoveryRequest, projectRecoveryError, parseProjectRecoveryStatus } from './projectRecoveryProtocol.ts';
+import type { ProjectRecoveryCommand } from './projectRecoveryProtocol.ts';
+import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -56,6 +59,17 @@ export function apiError(error: unknown): ApiError {
 }
 
 export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke, listen?: NativeEditListen): DesktopApi {
+  const recoveryCall = async (command: ProjectRecoveryCommand, value: unknown): Promise<ProjectRecoveryStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'project_recovery_unavailable' };
+      const body = encodeProjectRecoveryRequest(command, value);
+      if (!body) throw { code: 'project_recovery_invalid' };
+      // Raw IPC keeps duplicate-aware admission in the native command parser.
+      const status = parseProjectRecoveryStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'project_recovery_protocol' };
+      return status;
+    } catch (error) { throw projectRecoveryError(error); }
+  };
   const androidCall = async (command: AndroidBuildCommand, value: unknown): Promise<AndroidBuildStatus> => {
     try {
       if (mode !== 'native') throw { code: 'android_build_unavailable' };
@@ -224,6 +238,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'protocol_error' };
         return result;
       } catch (error) { throw environmentError(error); }
+    },
+    prepareProjectRecovery: (request) => recoveryCall('prepare_project_recovery', request),
+    startProjectRecovery: (request) => recoveryCall('start_project_recovery', request),
+    projectRecoveryStatus: () => recoveryCall('project_recovery_status', {}),
+    cancelProjectRecovery: (operationId, ownerGeneration) => recoveryCall('cancel_project_recovery', { operationId, ownerGeneration }),
+    subscribeProjectRecovery: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'project_recovery_unavailable' };
+        return await listen(PROJECT_RECOVERY_EVENT, (value) => onStatus(parseProjectRecoveryStatus(value)));
+      } catch (error) { throw projectRecoveryError(error); }
     },
     prepareAndroidBuild: (request) => androidCall('prepare_android_build', request),
     startAndroidBuild: (request) => androidCall('start_android_build', request),

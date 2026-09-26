@@ -157,6 +157,7 @@ fn main() {
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
+            "prepare_project_recovery", "start_project_recovery", "project_recovery_status", "cancel_project_recovery",
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",
             "open_config_edit", "prepare_config_edit", "apply_config_edit",
             "close_config_edit", "config_edit_status",

@@ -62,6 +62,9 @@ NOTICES = {
 }
 BOOTSTRAPS = {"engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
               "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py"}
+# Accepted historical supplier bytes keep their original entry roster. Newly
+# composed payloads include the additive domain without rewriting those anchors.
+CURRENT_BOOTSTRAPS = BOOTSTRAPS | {"project_recovery_bootstrap.py"}
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
 CURRENT_CORE_BYTES = 32 * 1024 * 1024
@@ -494,7 +497,7 @@ def current_source():
     need(core and all(Path(name).suffix in {".py", ".json", ".pem"} for name in core), "current-core-inputs")
     need({"__init__.py", "_desktop_engine.py"} <= set(core), "current-core-required-inputs")
     captured = {"src/mobile_release/" + name: value for name, value in core.items()}
-    fixed = {"desktop/" + name: 64 * 1024 for name in BOOTSTRAPS}
+    fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS}
     fixed[CURRENT_CA_SOURCE] = 512 * 1024
     fixed[CURRENT_HELPER_SOURCE] = 64 * 1024
     for name, limit in sorted(fixed.items()):
@@ -615,7 +618,7 @@ def current_core_matches(body, projection):
 
 def current_runtime_files(runtime, projection, supplier):
     files = tree(runtime, current_root_mode=0o700)
-    required = set(supplier) | BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
+    required = set(supplier) | CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
     need(set(files) == required, "current-runtime-complete-roster")
     for name, value in supplier.items():
         need(files[name] == value, "current-supplier-changed")
@@ -627,7 +630,7 @@ def current_runtime_files(runtime, projection, supplier):
     for name, row in rows.items():
         need(row["size"] == len(files[name][0]) and row["sha256"] == digest(files[name][0]),
              "current-runtime-manifest-correspondence")
-    for name in BOOTSTRAPS | {"github-ca.pem"}:
+    for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"}:
         need(files[name][0] == projection["desktop/" + name][0], "current-entrypoint-byte-correspondence")
     current_core_matches(files["core.zip"][0], projection)
     return files, manifest
@@ -657,7 +660,7 @@ def current_runtime_command(args):
         write_tree(runtime, supplier, root_mode=0o700, current_owned=True)
         old_mask = os.umask(0o077)
         try:
-            prepared = preparer.prepare(source, runtime, "aarch64-apple-darwin")
+            prepared = preparer.prepare_current(source, runtime, "aarch64-apple-darwin")
         finally:
             os.umask(old_mask)
         files, manifest = current_runtime_files(runtime, projection, supplier)

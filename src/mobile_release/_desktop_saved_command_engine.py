@@ -1,4 +1,4 @@
-"""One original held-input/output engine for two fixed saved-command domains.
+"""One original held-input/output engine for fixed saved-command domains.
 
 Native admission still owns original T/W/H, document lifetime, held request
 STOP and every original wait/IO/task join. A terminal is provisional core DATA.
@@ -21,8 +21,10 @@ from .owned_process import ProcessCleanupError
 if TYPE_CHECKING:
     from ._desktop_android_build_protocol import AndroidBuildRequest
     from ._desktop_preflight_protocol import PreflightRequest
+    from ._desktop_project_recovery_protocol import ProjectRecoveryRequest
     from .desktop_android_build import AndroidBuildRun
     from .desktop_preflight import OfflinePreflightRun
+    from .desktop_project_recovery import ProjectRecoveryRun
 
 _RETAINED: list[_SavedCommandEngine] = []
 
@@ -38,21 +40,27 @@ class _Output:
 
 class _SavedCommandEngine:
     def __init__(self, started: float, *, domain: SavedCommandDomain) -> None:
-        _protocol(domain)  # Reject a third domain before constructing owners.
+        _protocol(domain)  # Reject undeclared domains before constructing owners.
         self._domain = domain
         self.started = started
-        message = ("Saved offline preflight custody did not settle"
-                   if domain is SavedCommandDomain.OfflinePreflight else "Saved Android build custody did not settle")
+        message = {SavedCommandDomain.OfflinePreflight: "Saved offline preflight custody did not settle",
+                   SavedCommandDomain.AndroidBuild: "Saved Android build custody did not settle",
+                   SavedCommandDomain.ProjectRecovery: "Project recovery custody did not settle"}[domain]
         self.guard = DefaultCancellation(ProcessCleanupError, message)
         if domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_control import PreflightInput
             self.input = PreflightInput(started)
-        else:
+        elif domain is SavedCommandDomain.AndroidBuild:
             from ._desktop_android_build_control import AndroidBuildInput
             self.input = AndroidBuildInput(started)
+        elif domain is SavedCommandDomain.ProjectRecovery:
+            from ._desktop_project_recovery_control import ProjectRecoveryInput
+            self.input = ProjectRecoveryInput(started)
+        else:
+            raise ValueError("Invalid saved-command domain")
         self.output, self.error_output = _Output(1), _Output(2)
-        self.request: PreflightRequest | AndroidBuildRequest | None = None
-        self.service: OfflinePreflightRun | AndroidBuildRun | None = None
+        self.request: PreflightRequest | AndroidBuildRequest | ProjectRecoveryRequest | None = None
+        self.service: OfflinePreflightRun | AndroidBuildRun | ProjectRecoveryRun | None = None
         self.primary: BaseException | None = None
         self.frames = self.output_bytes = 0
         self.terminal_claimed = False
@@ -117,12 +125,14 @@ class _SavedCommandEngine:
         wire = _protocol(self.domain)
         self._require(type(raw) is bytes and not self.terminal_claimed
                       and self.output_bytes + len(raw) <= wire.RESPONSE_LIMIT)
-        if self.domain is SavedCommandDomain.OfflinePreflight:
+        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery):
             self._require(self.frames == (1 if terminal else 0))
-        else:
+        elif self.domain is SavedCommandDomain.AndroidBuild:
             # Preserve a slot for the one terminal. The original Android DATA
             # encoder separately enforces accepted/stage/terminal sequencing.
             self._require(1 <= self.frames < wire.MAX_FRAMES if terminal else self.frames < wire.MAX_FRAMES - 1)
+        else:
+            self._require(False)
         self.terminal_claimed = terminal
         self.frames += 1
         self.output_bytes += len(raw)
@@ -146,9 +156,10 @@ class _SavedCommandEngine:
 
     def _response(self, kind: str, payload: dict) -> bytes:
         wire = _protocol(self.domain)
-        if self.domain is SavedCommandDomain.OfflinePreflight:
+        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery):
             return wire.response(self.request, kind, payload)
-        self._require(type(self._android_frames) is wire.AndroidBuildFrames)
+        self._require(self.domain is SavedCommandDomain.AndroidBuild
+                      and type(self._android_frames) is wire.AndroidBuildFrames)
         return self._android_frames.response(kind, payload)
 
     def _progress(self, source, stage: str) -> None:
@@ -167,8 +178,12 @@ class _SavedCommandEngine:
         self.input.acquire()
         if self.domain is SavedCommandDomain.OfflinePreflight:
             self.guard._install_preflight_source(self.input)
-        else:
+        elif self.domain is SavedCommandDomain.AndroidBuild:
             self.guard._install_android_build_source(self.input)
+        elif self.domain is SavedCommandDomain.ProjectRecovery:
+            self.guard._install_project_recovery_source(self.input)
+        else:
+            self._require(False)
         self._acquire_output(self.output)
         self._acquire_output(self.error_output)
         self.guard.activate()
@@ -176,12 +191,17 @@ class _SavedCommandEngine:
         if self.domain is SavedCommandDomain.OfflinePreflight:
             from .desktop_preflight import OfflinePreflightRun
             self.service = OfflinePreflightRun(self.request, self.guard, self.input)
-        else:
+        elif self.domain is SavedCommandDomain.AndroidBuild:
             from ._desktop_android_build_protocol import AndroidBuildFrames
             from .desktop_android_build import AndroidBuildRun
             self._require(self._android_frames is None)
             self._android_frames = AndroidBuildFrames(self.request)
             self.service = AndroidBuildRun(self.request, self.guard, self.input)
+        elif self.domain is SavedCommandDomain.ProjectRecovery:
+            from .desktop_project_recovery import ProjectRecoveryRun
+            self.service = ProjectRecoveryRun(self.request, self.guard, self.input)
+        else:
+            self._require(False)
         self.write(self._response("accepted", {"schemaVersion": 1, "context": dict(self.request.context)}))
         self.service.run()
 
@@ -212,6 +232,9 @@ class _SavedCommandEngine:
     def _service_resources_closed(self) -> bool:
         if self.domain is SavedCommandDomain.OfflinePreflight:
             return self.service is None or self.service.budget.closed
+        if self.domain is SavedCommandDomain.ProjectRecovery:
+            return self.input.resources_closed()
+        self._require(self.domain is SavedCommandDomain.AndroidBuild)
         if self.service is None and self.input.operation is None:
             # A constructor's lost handoff must not discard an already-bound
             # original operation, even though no terminal can then be emitted.
@@ -239,6 +262,8 @@ def run_engine(engine: _SavedCommandEngine) -> int:
         from ._desktop_preflight_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.AndroidBuild:
         from ._desktop_android_build_engine import _Engine as ExpectedEngine
+    elif engine.domain is SavedCommandDomain.ProjectRecovery:
+        from ._desktop_project_recovery_engine import _Engine as ExpectedEngine
     else:
         raise ValueError("Invalid original saved-command engine")
     if type(engine) is not ExpectedEngine:

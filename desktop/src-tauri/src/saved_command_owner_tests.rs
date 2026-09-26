@@ -13,6 +13,7 @@ fn application(domain: SavedCommandDomain) -> SavedCommandOwner {
 fn context(domain: SavedCommandDomain) -> Context { match domain {
     SavedCommandDomain::OfflinePreflight => Context::OfflinePreflight(wire::tests::context()),
     SavedCommandDomain::AndroidBuild => Context::AndroidBuild(android_wire::tests::context()),
+    SavedCommandDomain::ProjectRecovery => Context::ProjectRecovery(recovery_wire::tests::context()),
 } }
 fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection {
     operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context: context(domain),
@@ -30,9 +31,10 @@ fn active_in(application: SavedCommandOwner) -> (SavedCommandOwner, Arc<Session>
     let clocks = Clocks::new(domain, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let profile = match domain { SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
-        SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64) };
+        SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
+        SavedCommandDomain::ProjectRecovery => Profile::ProjectRecovery(recovery_wire::Profile::LinuxX64) };
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
-        profile, clocks, registration: 1, project: project(), request: AsyncMutex::new(None),
+        profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
@@ -66,18 +68,20 @@ fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_se
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration_callback() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
+            SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
         };
         original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
-            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project() });
+            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None });
         assert_eq!(original.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && original.inner.runtime.offline_preflight_installed_profile_available());
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::Busy);
+        assert_eq!(document.project_recovery_status().unwrap().availability, recovery_wire::Availability::Busy);
         assert_eq!(document.environment_diagnostics_status().unwrap().capability.reason,
             crate::environment_diagnostics_protocol::Availability::Busy);
         assert!(document.open_session().err().unwrap().reason == crate::asset_commands::Reason::Busy);
@@ -107,11 +111,12 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_and_cancel() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
+            SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
         };
         let (application, owner) = active_in(original.clone());
         assert!(Arc::ptr_eq(&application.inner, &original.inner));
@@ -124,6 +129,7 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
         assert!(watchdog.is_none());
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::Busy);
+        assert_eq!(document.project_recovery_status().unwrap().availability, recovery_wire::Availability::Busy);
         assert_eq!(document.environment_diagnostics_status().unwrap().capability.reason,
             crate::environment_diagnostics_protocol::Availability::Busy);
         assert!(document.open_session().err().unwrap().reason == crate::asset_commands::Reason::Busy);
@@ -143,6 +149,7 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
         assert!(!application.can_exit() && application.disabled());
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::CleanupUnknown);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+        assert_eq!(document.project_recovery_status().unwrap().availability, recovery_wire::Availability::CleanupUnknown);
         assert_eq!(document.passive_query(&bridge, crate::protocol::Method::Catalog, json!({})).err().unwrap().code, "cleanup_unknown");
         assert!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).is_err());
         assert!(!entered.get());
@@ -155,6 +162,10 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
             SavedCommandDomain::AndroidBuild => {
                 let status = document.cancel_android_build(android_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
                 assert_eq!(status.operation.unwrap().phase, android_wire::Phase::Unknown);
+            },
+            SavedCommandDomain::ProjectRecovery => {
+                let status = document.cancel_project_recovery(recovery_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
+                assert_eq!(status.operation.unwrap().phase, recovery_wire::Phase::Unknown);
             },
         }
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
@@ -175,13 +186,15 @@ fn android_terminal(value: &Value) -> android_wire::Terminal {
     android_wire::terminal(value, &android_wire::tests::context()).unwrap()
 }
 fn frame(domain: SavedCommandDomain, sequence: u32, kind: &str, payload: Value) -> Vec<u8> {
-    let protocol = match domain { SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL };
+    let protocol = match domain { SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL,
+        SavedCommandDomain::ProjectRecovery => recovery_wire::PROTOCOL };
     let mut bytes = serde_json::to_vec(&json!({"protocol":protocol,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),
         "sequence":sequence,"kind":kind,"payload":payload})).unwrap(); bytes.push(b'\n'); bytes
 }
 fn accepted(domain: SavedCommandDomain) -> Vec<u8> {
     let context = match context(domain) { Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
-        Context::AndroidBuild(c) => serde_json::to_value(c).unwrap() };
+        Context::AndroidBuild(c) => serde_json::to_value(c).unwrap(),
+        Context::ProjectRecovery(c) => serde_json::to_value(c).unwrap() };
     frame(domain, 0, "accepted", json!({"schemaVersion":1,"context":context}))
 }
 fn complete_stream(domain: SavedCommandDomain, progress: bool) -> Vec<Vec<u8>> {
@@ -197,17 +210,19 @@ fn complete_stream(domain: SavedCommandDomain, progress: bool) -> Vec<Vec<u8>> {
             } }
             frames.push(frame(domain, frames.len() as u32, "terminal", android_wire::tests::complete_with_failed_inspection()));
         }
+        SavedCommandDomain::ProjectRecovery => frames.push(frame(domain, 1, "terminal", recovery_wire::tests::terminal_value(&recovery_wire::tests::context()))),
     }
     frames
 }
 
 #[test]
-fn two_domains_have_fixed_nonrenewable_clocks_and_distinct_limits() {
+fn declared_domains_have_fixed_nonrenewable_clocks_and_distinct_limits() {
     let admitted = Instant::now();
     assert_eq!(INTENT, Duration::from_secs(300));
-    for (domain, work, hard, request, frames) in [
-        (SavedCommandDomain::OfflinePreflight, 1800, 1810, 16384, 2),
-        (SavedCommandDomain::AndroidBuild, 3000, 3010, 32768, 8),
+    for (domain, work, hard, request, response, frames) in [
+        (SavedCommandDomain::OfflinePreflight, 1800, 1810, 16384, 65536, 2),
+        (SavedCommandDomain::AndroidBuild, 3000, 3010, 32768, 65536, 8),
+        (SavedCommandDomain::ProjectRecovery, 120, 130, 16384, 32768, 2),
     ] {
         let c = Clocks::new(domain, admitted);
         assert_eq!(c.work, admitted + Duration::from_secs(work));
@@ -215,7 +230,7 @@ fn two_domains_have_fixed_nonrenewable_clocks_and_distinct_limits() {
         assert_eq!(c.settlement(None), c.finality);
         assert_eq!(c.settlement(Some(admitted + Duration::from_secs(2))), admitted + Duration::from_secs(12));
         assert_eq!(c.settlement(Some(c.finality)), c.finality);
-        assert_eq!((domain.request_limit(), domain.response_limit(), domain.frame_limit()), (request, 65536, frames));
+        assert_eq!((domain.request_limit(), domain.response_limit(), domain.frame_limit()), (request, response, frames));
     }
 }
 
@@ -240,7 +255,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
         prepared.context = Context::AndroidBuild(context.clone());
         owner.inner.lock().prepared = Some(Prepared { projection: prepared,
-            expires: Instant::now() + INTENT, registration: 1, project: project() });
+            expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None });
         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
         assert!(owner.inner.lock().prepared.is_some());
         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
@@ -250,10 +265,64 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
         assert_eq!((p.phase, p.outcome), (android_wire::Phase::Terminal, Some(android_wire::Outcome::Refused)));
         assert_eq!(p.context, context); // Retirement preserves the original saved mode/fingerprint unchanged.
         assert!(p.result.is_none() && p.activity.is_none() && p.disposition.is_none() && p.stage.is_none());
-        assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+        { let r = owner.inner.lock(); assert!(r.prepared.is_none() && r.active.is_none()); }
         assert!(owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((1, project())),
             android_wire::Availability::Available).is_err());
     }
+}
+
+#[test]
+fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runtime() {
+    let owner = application(SavedCommandDomain::ProjectRecovery);
+    assert!(!owner.inner.qualified());
+    assert!(!owner.inner.recovery_installed_selected());
+    let foreign = wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
+        "savedConfig":{"bytes":123,"sha256":"d".repeat(64)}})).unwrap();
+    assert!(owner.prepare_offline(foreign, 1, project(), wire::Availability::Available).is_err());
+    let request = recovery_wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,
+        "baselineGeneration":3,"action":"recover"})).unwrap();
+    assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
+    { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
+    owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::ProjectRecovery),
+        expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None });
+    let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
+    // The unqualified runtime refuses this comparison-only intent before any
+    // acquisition. A supplied Available DTO is not a native qualification.
+    let status = owner.start_recovery(recovery_wire::start(&input).unwrap(), Instant::now(), Some((1, project())),
+        recovery_wire::Availability::Available).unwrap().release();
+    let operation = status.operation.unwrap();
+    assert_eq!(operation.phase, recovery_wire::Phase::Terminal);
+    assert_eq!(operation.outcome, Some(recovery_wire::Outcome::Refused));
+    assert!(operation.result.is_none() && operation.effect.is_none());
+    { let r = owner.inner.lock(); assert!(r.prepared.is_none() && r.active.is_none()); }
+    assert!(owner.start_recovery(recovery_wire::start(&input).unwrap(), Instant::now(), Some((1, project())),
+        recovery_wire::Availability::Available).is_err());
+    for reason in [Reason::ReviewStale, Reason::ManualRequired, Reason::ProjectChanged, Reason::RecoveryIncomplete] {
+        assert!(reason.offline().is_err() && reason.android().is_err() && reason.recovery().is_ok());
+    }
+}
+
+#[test]
+fn recovery_core_terminal_is_provisional_and_never_mints_a_review_before_original_joins() {
+    let (application, owner) = active(SavedCommandDomain::ProjectRecovery);
+    let t = owner.clocks.admitted;
+    application.inner.accept_at(&owner, Frame::ProjectRecovery(recovery_wire::Frame::Accepted), t);
+    application.inner.accept_at(&owner, Frame::ProjectRecovery(recovery_wire::tests::terminal_frame(&recovery_wire::tests::context())), t);
+    let mut r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+    assert!(active.accepted && active.terminal && !active.final_join_seen && active.projection.result.is_some());
+    assert!(active.projection.public().recovery().unwrap().result.is_none());
+    assert!(recovery_review_after_finality(active, &owner, t).is_none() && r.recovery_review.is_none());
+    // Renderer projection-only DATA: inspect the private-field redaction, not
+    // a native success path. No positive handle or original receipt is filled.
+    let mut projection = active.projection.clone(); projection.phase = Phase::Terminal;
+    let public = serde_json::to_value(projection.public().recovery().unwrap()).unwrap();
+    assert!(public.get("reviewStamp").is_none());
+    assert!(public["result"].get("reviewStamp").is_none());
+    assert!(!public.to_string().contains(&"d".repeat(64)));
+    application.inner.advance_locked(&mut r, &owner, t + RECOVERY_HARD);
+    let active = r.active.as_ref().unwrap();
+    assert!(active.unknown && recovery_review_after_finality(active, &owner, t + RECOVERY_HARD).is_none());
+    assert!(active.projection.public().recovery().unwrap().result.is_none());
 }
 
 #[test]
@@ -435,7 +504,7 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
 
 #[tokio::test]
 async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_never_renews() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let (application, owner) = active(domain);
         assert_eq!(application.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && application.inner.runtime.offline_preflight_installed_profile_available());
@@ -482,10 +551,10 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
 
 #[test]
 fn foreign_domain_frames_fail_closed_without_converting_any_result() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let (application, owner) = active(domain);
         let foreign = match domain { SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
-            SavedCommandDomain::AndroidBuild => Frame::OfflinePreflight(wire::Frame::Accepted) };
+            SavedCommandDomain::AndroidBuild | SavedCommandDomain::ProjectRecovery => Frame::OfflinePreflight(wire::Frame::Accepted) };
         application.inner.accept_at(&owner, foreign, owner.clocks.admitted);
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
         assert!(a.unknown && r.disabled && !a.accepted && !a.terminal);
@@ -541,7 +610,7 @@ fn known_retained_work_preserves_failed_outcome_and_original_stop_reason() {
         let mut projection = a.projection.clone(); projection.phase = Phase::Terminal;
         let p = projection.public().android().unwrap();
         assert_eq!(p.outcome, Some(android_wire::Outcome::Failed));
-        assert_eq!(p.reason, reason.android());
+        assert_eq!(p.reason, reason.android().unwrap());
         assert_eq!(p.disposition.as_ref().unwrap().work, android_wire::WorkDisposition::RetainedWork);
         let status = android_wire::Status { schema_version: 1, status_revision: 1,
             availability: android_wire::Availability::RuntimeUnqualified, operation: Some(p) };
@@ -556,7 +625,7 @@ fn known_retained_work_preserves_failed_outcome_and_original_stop_reason() {
 
 #[test]
 fn stdout_decoder_cannot_reopen_a_finished_domain_stream() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let (_application, owner) = active(domain);
         let mut decoder = OutputDecoder::new(&owner).unwrap();
         for bytes in complete_stream(domain, true) { assert!(decoder.push(&bytes, &owner).is_ok()); }
@@ -611,12 +680,13 @@ async fn seven_android_frames_backpressure_two_slots_without_creating_native_fin
     let p = application.status_android(android_wire::Availability::Available).unwrap().operation.unwrap();
     assert_eq!(p.phase, android_wire::Phase::Unknown);
     assert!(p.result.is_none() && p.activity.is_none() && p.disposition.is_none());
-    assert!(application.inner.lock().active.is_some() && !application.can_exit());
+    assert!(application.inner.lock().active.is_some());
+    assert!(!application.can_exit());
 }
 
 #[tokio::test]
-async fn both_domains_drain_rejected_bytes_charge_stderr_and_never_retry_a_close() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+async fn declared_domains_drain_rejected_bytes_charge_stderr_and_never_retry_a_close() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         for fail_close in [false, true] {
             let (application, owner) = active(domain); owner.pipes.send_replace(Pipes::Available);
             let (error, error_control) = memory(vec![b'e'; 33000], false);
@@ -638,8 +708,8 @@ async fn both_domains_drain_rejected_bytes_charge_stderr_and_never_retry_a_close
 }
 
 #[tokio::test]
-async fn accepted_only_eof_is_not_a_settled_decoder_in_either_domain() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+async fn accepted_only_eof_is_not_a_settled_decoder_in_any_domain() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery] {
         let (application, owner) = active(domain); owner.pipes.send_replace(Pipes::Available);
         let (output, control) = memory(accepted(domain), false);
         let end = read_output(application.inner.clone(), owner.clone(), output, false, Guard::new(&application.inner, &owner)).await;

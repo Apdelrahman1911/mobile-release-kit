@@ -13,7 +13,7 @@ fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project() });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
@@ -22,7 +22,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
-        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), request: AsyncMutex::new(None),
+        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
@@ -42,7 +42,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
 }
 
 fn offline_context(owner: &Session) -> &wire::Context {
-    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) => panic!("offline test context") }
+    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) => panic!("offline test context") }
 }
 
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {

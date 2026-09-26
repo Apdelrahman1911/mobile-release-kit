@@ -68,6 +68,24 @@ class BuildInputError(CredentialError, ValidationError):
     """Bounded local admission/conflict diagnostic, without private values."""
 
 
+class BuildInputBusy(BuildInputError):
+    """The original nonblocking project lock positively refused admission."""
+
+
+class BuildInputRootChanged(BuildInputError):
+    """The acquired original project differs from its native registration."""
+
+
+class _DesktopRecoveryRefused(BuildInputError):
+    """Fixed private adapter reason; never raw control or filesystem text."""
+
+    def __init__(self, reason: str) -> None:
+        if reason not in {"project-changed", "review-stale", "manual-required"}:
+            raise ValueError("Invalid project recovery refusal")
+        self.reason = reason
+        super().__init__("build inputs: reviewed recovery was refused")
+
+
 class _PrivatePublicationError(ProcessError):
     """Generated recovery locations, never arbitrary private exception text."""
 
@@ -290,6 +308,12 @@ class _FD:
         self.guard, self.pid, self.number = guard, os.getpid(), None
         self.thread = threading.current_thread()
         self.open_state, self.close_state = "NEW", "NOT_ATTEMPTED"
+        source = guard._project_recovery_source
+        if source is not None:
+            # The existing original descriptor remains its only close owner.
+            # Recovery retains the actual object before acquisition so a lost
+            # scope/constructor return cannot become a fabricated close fact.
+            source.register_descriptor(self)
         _FORK_RESOURCES.add(self)
 
     def open(self, name: str | Path, flags: int, mode: int = 0o600,
@@ -1892,8 +1916,10 @@ def invocation_custody(root: Path, *, mode: Literal["build", "online", "store"],
 
 
 class _Project:
-    def __init__(self, root: Path, guard: DefaultCancellation, *, recovery: bool) -> None:
+    def __init__(self, root: Path, guard: DefaultCancellation, *, recovery: bool,
+                 expected_root: tuple[int, int, int, int, int] | None = None) -> None:
         self.root, self.guard, self.recovery = root, guard, recovery
+        self.expected_root = expected_root
         self.directory = _Directory(root, guard)
         self.meta = _FD(guard)
         self.meta_identity: dict[str, int] | None = None
@@ -1920,12 +1946,24 @@ class _Project:
     def acquire(self) -> None:
         import fcntl
         self.directory.acquire()
+        # A Desktop registration must bind this actual held directory before
+        # opening or enumerating any project-private/reserved namespace. A
+        # pathname stat before acquisition is not the original root identity.
+        if self.expected_root is not None:
+            expected = self.expected_root
+            _need(type(expected) is tuple and len(expected) == 5
+                  and all(type(item) is int and item >= 0 for item in expected)
+                  and expected[1] > 0 and stat.S_ISDIR(expected[2]),
+                  "invalid registered project identity")
+            observed = os.fstat(self.fd)
+            if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid) != expected:
+                raise BuildInputRootChanged("build inputs: registered project identity changed")
         self.rename = _rename_function()
         try:
             with self.guard.deferred(check_on_exit=False):
                 fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise BuildInputError("build inputs: another owner holds this project") from None
+            raise BuildInputBusy("build inputs: another owner holds this project") from None
         self.check()
         names = _init_pending_names_locked(self.fd, cancellation=self.guard)
         if _PRIVATE in names:
@@ -2615,10 +2653,11 @@ def _pending_inspection(project: _Project) -> Iterator[BuildInputs]:
 
 
 @contextmanager
-def _inspection(root: Path, cancellation: DefaultCancellation | None) -> Iterator[_Project]:
+def _inspection(root: Path, cancellation: DefaultCancellation | None, *,
+                expected_root: tuple[int, int, int, int, int] | None = None) -> Iterator[_Project]:
     guard, owns = cancellation_owner(cancellation, ProcessCleanupError,
                                      "build-input recovery ownership did not settle")
-    project = _Project(root, guard, recovery=True)
+    project = _Project(root, guard, recovery=True, expected_root=expected_root)
     with _scope(project, guard, owns):
         yield project
 
@@ -2648,30 +2687,114 @@ def recover_build_inputs(root: Path, *, session: str, confirm: str, manual: bool
     _need(type(session) is str and bool(_TOKEN.fullmatch(session)) and confirm == _CONFIRM
           and type(manual) is bool, "recovery requires the exact session and confirmation")
     with _inspection(root, cancellation) as project:
-        terminal = _terminal_control(project)
-        if terminal is not None:
-            _need(terminal[0]["session"] == session, "another terminal session is present")
-            _retire_terminal(project, *terminal)
-            return {"status": "recovered", "session": session}
-        if project.meta.number is None or _stat(project.meta.number, _PENDING) is None:
-            return {"status": "absent", "session": session}
-        with _pending_inspection(project) as owner:
-            _need(owner.token == session, "another pending session is present")
-            if owner.quiescence == "none":
-                _need(manual, "original consumer finality is missing; explicit manual quiescence is required")
-                incoming, outgoing = input_stream or sys.stdin, output_stream or sys.stdout
-                _need(incoming.isatty() and outgoing.isatty(), "manual recovery requires an interactive terminal")
-                outgoing.write("Establish that this session's exact original workers are idle.\n")
-                for row in owner.records:
-                    outgoing.write(f"{row['role']}: {row['relative']}\n")
-                outgoing.write(f"Type recheck {session} original-workers-are-idle: ")
-                outgoing.flush()
-                _need(incoming.readline(256).rstrip("\n") == f"recheck {session} original-workers-are-idle",
-                      "manual recheck did not confirm exact-worker quiescence")
-                project.guard.check()
-                owner.quiescence = "operator"  # New explicit fact, never repaired historical containment.
-                owner._checkpoint()
+        return _recover_project_locked(project, session=session, confirm=confirm, manual=manual,
+                                       input_stream=input_stream, output_stream=output_stream)
+
+
+@dataclass(frozen=True)
+class _DesktopRecoveryInspection:
+    """Private core/native DTO. review_stamp must never enter renderer DATA."""
+    status: Literal["idle", "busy", "conflict", "pending", "cleanup-only"]
+    session: str | None = None
+    roles: tuple[str, ...] = ()
+    quiescence: Literal["none", "original", "operator"] = "none"
+    review_stamp: str | None = None
+
+
+def _recovery_stamp(project: _Project, *, terminal=None, owner: BuildInputs | None = None) -> str:
+    project.guard.check()
+    project.check()
+    _need((terminal is None) != (owner is None), "invalid recovery review scope")
+    # Existing validated original bindings include header/intent/checkpoint
+    # bytes and identities. The digest is comparison DATA, not a cleanup grant.
+    value: dict[str, Any] = {"schemaVersion": 1, "root": project.identity, "private": project.meta_identity}
+    if owner is not None:
+        _need(owner.project is project, "review belongs to another project")
+        value.update(kind="pending", session=owner.token, pending=owner.identity,
+                     controls=owner.controls, sequence=owner.seq, previous=owner.previous,
+                     quiescence=owner.quiescence)
+    else:
+        value.update(kind="cleanup-only", terminal=terminal[0], binding=terminal[1])
+    return hashlib.sha256(_json(value)).hexdigest()
+
+
+def _desktop_inspect_build_inputs(root: Path, *, expected_root: tuple[int, int, int, int, int],
+                                  cancellation: DefaultCancellation) -> _DesktopRecoveryInspection:
+    """Inspect recorded facts without claiming worker finality or retrying cleanup."""
+    try:
+        with _inspection(root, cancellation, expected_root=expected_root) as project:
+            terminal = _terminal_control(project)
+            if terminal is not None:
+                return _DesktopRecoveryInspection("cleanup-only", terminal[0]["session"], (),
+                    terminal[0]["quiescence"], _recovery_stamp(project, terminal=terminal))
+            if project.meta.number is None or _stat(project.meta.number, _PENDING) is None:
+                return _DesktopRecoveryInspection("idle")
+            with _pending_inspection(project) as owner:
+                return _DesktopRecoveryInspection("pending", owner.token,
+                    tuple(sorted(row["role"] for row in owner.records)), owner.quiescence,
+                    _recovery_stamp(project, owner=owner))
+    except (ProcessError, BuildInputRootChanged, _DesktopRecoveryRefused):
+        raise  # Cleanup ambiguity and wrong registered roots are not status observations.
+    except BuildInputBusy:
+        return _DesktopRecoveryInspection("busy")
+    except BuildInputError:
+        return _DesktopRecoveryInspection("conflict")
+
+
+def _desktop_recover_build_inputs(root: Path, *, session: str, review_stamp: str,
+                                  expected_root: tuple[int, int, int, int, int],
+                                  cancellation: DefaultCancellation) -> dict[str, Any]:
+    """Fixed reviewed application entry; never manual/TTY/force or renderer confirmation."""
+    _need(type(session) is str and bool(_TOKEN.fullmatch(session))
+          and type(review_stamp) is str and bool(_DIGEST.fullmatch(review_stamp)),
+          "reviewed recovery requires the exact session and review")
+    with _inspection(root, cancellation, expected_root=expected_root) as project:
+        # _CONFIRM is the existing core intent, not a renderer-selected string.
+        return _recover_project_locked(project, session=session, confirm=_CONFIRM,
+                                       manual=False, review_stamp=review_stamp)
+
+
+def _recover_project_locked(project: _Project, *, session: str, confirm: str, manual: bool,
+                            input_stream: Any = None, output_stream: Any = None,
+                            review_stamp: str | None = None) -> dict[str, Any]:
+    """The single recovery body, under the original acquired project lock."""
+    _need(confirm == _CONFIRM and type(manual) is bool, "invalid recovery confirmation")
+    terminal = _terminal_control(project)
+    if terminal is not None:
+        if review_stamp is not None and (terminal[0]["session"] != session
+                or _recovery_stamp(project, terminal=terminal) != review_stamp):
+            raise _DesktopRecoveryRefused("review-stale")
+        _need(terminal[0]["session"] == session, "another terminal session is present")
+        _retire_terminal(project, *terminal)
+        return {"status": "recovered", "session": session}
+    if project.meta.number is None or _stat(project.meta.number, _PENDING) is None:
+        if review_stamp is not None:
+            # Losing the reviewed namespace is changed state, not proof that
+            # this reviewed operation completed its original cleanup.
+            raise _DesktopRecoveryRefused("review-stale")
+        return {"status": "absent", "session": session}
+    with _pending_inspection(project) as owner:
+        if review_stamp is not None and (owner.token != session
+                or _recovery_stamp(project, owner=owner) != review_stamp):
+            raise _DesktopRecoveryRefused("review-stale")
+        _need(owner.token == session, "another pending session is present")
+        if owner.quiescence == "none":
+            if review_stamp is not None:
+                raise _DesktopRecoveryRefused("manual-required")
+            _need(manual, "original consumer finality is missing; explicit manual quiescence is required")
+            incoming, outgoing = input_stream or sys.stdin, output_stream or sys.stdout
+            _need(incoming.isatty() and outgoing.isatty(), "manual recovery requires an interactive terminal")
+            outgoing.write("Establish that this session's exact original workers are idle.\n")
             for row in owner.records:
-                row["conflict"] = False  # Fresh explicit observation attempt, not an implicit in-context retry.
-            owner._finish()
-            return {"status": "recovered", "session": session}
+                outgoing.write(f"{row['role']}: {row['relative']}\n")
+            outgoing.write(f"Type recheck {session} original-workers-are-idle: ")
+            outgoing.flush()
+            _need(incoming.readline(256).rstrip("\n") == f"recheck {session} original-workers-are-idle",
+                  "manual recheck did not confirm exact-worker quiescence")
+            project.guard.check()
+            owner.quiescence = "operator"  # New explicit fact, never repaired historical containment.
+            owner._checkpoint()
+        for row in owner.records:
+            row["conflict"] = False  # Fresh explicit observation attempt, not an implicit in-context retry.
+        owner._finish()
+        return {"status": "recovered", "session": session}

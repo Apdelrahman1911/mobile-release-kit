@@ -1,4 +1,4 @@
-//! Finite original-resource owner for exactly two saved-command domains.
+//! Finite original-resource owner for the declared saved-command domains.
 //! Source extraction only: Android native/runtime/tool custody is NOT qualified.
 //! The ordinary core retains C/A/W custody; native retains every original
 //! startup, child, pipe, decoder, wait, driver, manager and final-join record.
@@ -10,17 +10,21 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, Child
 #[cfg(any(all(unix, debug_assertions, feature = "development-runtime"),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use {std::process::Stdio, tokio::process::Command};
-use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire,
+use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire,
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::{android_toolchain::AndroidToolchainCustody,
-    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody, OfflinePreflightRuntimeSlots}};
+    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody, OfflinePreflightRuntimeSlots, ProjectRecoveryRuntimeSlots}};
 
 // Qualification is domain-local. No environment/GitHub/offline permit, parsed
 // tool binding, hash, mode or host profile can qualify Android build custody.
 const ANDROID_NATIVE_QUALIFIED: bool = false;
 const ANDROID_RUNTIME_QUALIFIED: bool = false;
 const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;
+const RECOVERY_NATIVE_QUALIFIED: bool = false;
+const RECOVERY_RUNTIME_QUALIFIED: bool = false;
+const RECOVERY_WORK: Duration = Duration::from_secs(120);
+const RECOVERY_HARD: Duration = Duration::from_secs(130);
 const INTENT: Duration = Duration::from_secs(300);
 const OFFLINE_WORK: Duration = Duration::from_secs(1800);
 const OFFLINE_HARD: Duration = Duration::from_secs(1810);
@@ -30,44 +34,48 @@ const SETTLEMENT: Duration = Duration::from_secs(10);
 // This private closed sum is not a runner API. No operation descriptors,
 // callbacks, extension traits, caller argv or caller deadlines enter the owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SavedCommandDomain { OfflinePreflight, AndroidBuild }
+enum SavedCommandDomain { OfflinePreflight, AndroidBuild, ProjectRecovery }
 impl SavedCommandDomain {
     fn unavailable(self) -> BridgeError { match self {
         Self::OfflinePreflight => BridgeError::new("offline_preflight_unavailable", "Saved offline checks are unavailable for this original document, host and runtime."),
         Self::AndroidBuild => BridgeError::new("android_build_unavailable", "Saved Android builds are unavailable for this original document, host, runtime and tool custody."),
+        Self::ProjectRecovery => BridgeError::new("project_recovery_unavailable", "Project recovery is unavailable for this original document, platform and runtime."),
     } }
     fn busy(self) -> BridgeError { match self {
         Self::OfflinePreflight => BridgeError::new("offline_preflight_busy", "Finish or cancel the original operation before reviewing saved offline checks."),
         Self::AndroidBuild => BridgeError::new("android_build_busy", "Finish or cancel the original operation before reviewing a saved Android build."),
+        Self::ProjectRecovery => BridgeError::new("project_recovery_busy", "Finish or cancel the original operation before reviewing project recovery."),
     } }
     fn invalid_owner(self) -> BridgeError { match self {
         Self::OfflinePreflight => BridgeError::new("offline_preflight_owner", "This request does not identify an unused original saved offline-check intent."),
         Self::AndroidBuild => BridgeError::new("android_build_owner", "This request does not identify an unused original saved Android-build intent."),
+        Self::ProjectRecovery => BridgeError::new("project_recovery_owner", "This request does not identify an unused original project-recovery intent."),
     } }
     fn request_limit(self) -> usize { match self {
-        Self::OfflinePreflight => wire::REQUEST_LIMIT, Self::AndroidBuild => android_wire::REQUEST_LIMIT,
+        Self::OfflinePreflight => wire::REQUEST_LIMIT, Self::AndroidBuild => android_wire::REQUEST_LIMIT, Self::ProjectRecovery => recovery_wire::REQUEST_LIMIT,
     } }
     fn response_limit(self) -> usize { match self {
-        Self::OfflinePreflight => wire::RESPONSE_LIMIT, Self::AndroidBuild => android_wire::RESPONSE_LIMIT,
+        Self::OfflinePreflight => wire::RESPONSE_LIMIT, Self::AndroidBuild => android_wire::RESPONSE_LIMIT, Self::ProjectRecovery => recovery_wire::RESPONSE_LIMIT,
     } }
-    fn frame_limit(self) -> usize { match self { Self::OfflinePreflight => 2, Self::AndroidBuild => 8 } }
+    fn frame_limit(self) -> usize { match self { Self::OfflinePreflight => 2, Self::AndroidBuild => 8, Self::ProjectRecovery => 2 } }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Context { OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context) }
+enum Context { OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context) }
 impl Context {
     fn domain(&self) -> SavedCommandDomain { match self {
-        Self::OfflinePreflight(_) => SavedCommandDomain::OfflinePreflight, Self::AndroidBuild(_) => SavedCommandDomain::AndroidBuild,
+        Self::OfflinePreflight(_) => SavedCommandDomain::OfflinePreflight, Self::AndroidBuild(_) => SavedCommandDomain::AndroidBuild, Self::ProjectRecovery(_) => SavedCommandDomain::ProjectRecovery,
     } }
     fn project_id(&self) -> &str { match self {
-        Self::OfflinePreflight(c) => &c.project_id, Self::AndroidBuild(c) => &c.project_id,
+        Self::OfflinePreflight(c) => &c.project_id, Self::AndroidBuild(c) => &c.project_id, Self::ProjectRecovery(c) => &c.project_id,
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Profile { OfflinePreflight(wire::Profile), AndroidBuild(android_wire::Profile) }
+enum Profile { OfflinePreflight(wire::Profile), AndroidBuild(android_wire::Profile), ProjectRecovery(recovery_wire::Profile) }
 impl Profile {
     fn current(domain: SavedCommandDomain) -> Option<Self> { match domain {
         SavedCommandDomain::OfflinePreflight => wire::Profile::current().map(Self::OfflinePreflight),
         SavedCommandDomain::AndroidBuild => android_wire::Profile::current().map(Self::AndroidBuild),
+        SavedCommandDomain::ProjectRecovery => recovery_wire::Profile::current().map(Self::ProjectRecovery),
     } }
 }
 // Internal phase/outcome/reason vocabulary is DATA, not an Offline DTO reused
@@ -75,6 +83,14 @@ impl Profile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { AwaitingConsent, Starting, Running, Stopping, Terminal, Unknown }
 impl Phase {
+    fn recovery(self) -> recovery_wire::Phase { match self {
+        Self::AwaitingConsent => recovery_wire::Phase::AwaitingConsent,
+        Self::Starting => recovery_wire::Phase::Starting,
+        Self::Running => recovery_wire::Phase::Running,
+        Self::Stopping => recovery_wire::Phase::Stopping,
+        Self::Terminal => recovery_wire::Phase::Terminal,
+        Self::Unknown => recovery_wire::Phase::Unknown,
+    } }
     fn offline(self) -> wire::Phase { match self {
             Self::AwaitingConsent => wire::Phase::AwaitingConsent, Self::Starting => wire::Phase::Starting, Self::Running => wire::Phase::Running,
             Self::Stopping => wire::Phase::Stopping, Self::Terminal => wire::Phase::Terminal, Self::Unknown => wire::Phase::Unknown,
@@ -87,6 +103,22 @@ impl Phase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome { Complete, Refused, Cancelled, TimedOut, Failed, Unknown }
 impl Outcome {
+    fn recovery(self) -> recovery_wire::Outcome { match self {
+        Self::Complete => recovery_wire::Outcome::Complete,
+        Self::Refused => recovery_wire::Outcome::Refused,
+        Self::Cancelled => recovery_wire::Outcome::Cancelled,
+        Self::TimedOut => recovery_wire::Outcome::TimedOut,
+        Self::Failed => recovery_wire::Outcome::Failed,
+        Self::Unknown => recovery_wire::Outcome::Unknown,
+    } }
+    fn from_recovery(value: recovery_wire::Outcome) -> Self { match value {
+        recovery_wire::Outcome::Complete => Self::Complete,
+        recovery_wire::Outcome::Refused => Self::Refused,
+        recovery_wire::Outcome::Cancelled => Self::Cancelled,
+        recovery_wire::Outcome::TimedOut => Self::TimedOut,
+        recovery_wire::Outcome::Failed => Self::Failed,
+        recovery_wire::Outcome::Unknown => Self::Unknown,
+    } }
     fn from_offline(value: wire::Outcome) -> Self { match value {
             wire::Outcome::Complete => Self::Complete, wire::Outcome::Refused => Self::Refused, wire::Outcome::Cancelled => Self::Cancelled,
             wire::Outcome::TimedOut => Self::TimedOut, wire::Outcome::Failed => Self::Failed, wire::Outcome::Unknown => Self::Unknown,
@@ -113,9 +145,52 @@ enum Reason {
     SavedVersionUnsafe, SavedVersionTooLarge, PlatformDisabled, ModuleRequired, ToolchainUnavailable,
     ToolchainMismatch, ProjectAdmissionRefused, CommandFailed, CommandIncomplete, ArtifactMissing,
     ArtifactAmbiguous, ArtifactUnsafe, ArtifactChanged, InputLimit, ResultLimit,
-    WorkRetained, CleanupUnknown,
+    WorkRetained, CleanupUnknown, ProjectChanged, ReviewStale, ManualRequired, ProjectBusy, ProjectConflict, RecoveryIncomplete,
 }
 impl Reason {
+    fn recovery(self) -> Result<recovery_wire::Reason, BridgeError> { Ok(match self {
+        Self::None => recovery_wire::Reason::None,
+        Self::Cancelled => recovery_wire::Reason::Cancelled,
+        Self::ContextChanged => recovery_wire::Reason::ContextChanged,
+        Self::DocumentLost => recovery_wire::Reason::DocumentLost,
+        Self::Shutdown => recovery_wire::Reason::Shutdown,
+        Self::TimedOut => recovery_wire::Reason::TimedOut,
+        Self::ProtocolError => recovery_wire::Reason::ProtocolError,
+        Self::RuntimeUnavailable => recovery_wire::Reason::RuntimeUnavailable,
+        Self::IntentExpired => recovery_wire::Reason::IntentExpired,
+        Self::StaleIntent => recovery_wire::Reason::StaleIntent,
+        Self::ProjectChanged => recovery_wire::Reason::ProjectChanged,
+        Self::ReviewStale => recovery_wire::Reason::ReviewStale,
+        Self::ManualRequired => recovery_wire::Reason::ManualRequired,
+        Self::ProjectBusy => recovery_wire::Reason::ProjectBusy,
+        Self::ProjectConflict => recovery_wire::Reason::ProjectConflict,
+        Self::RecoveryIncomplete => recovery_wire::Reason::RecoveryIncomplete,
+        Self::InputLimit => recovery_wire::Reason::InputLimit,
+        Self::ResultLimit => recovery_wire::Reason::ResultLimit,
+        Self::CleanupUnknown => recovery_wire::Reason::CleanupUnknown,
+        _ => return Err(BridgeError::protocol()),
+    }) }
+    fn from_recovery(value: recovery_wire::Reason) -> Self { match value {
+        recovery_wire::Reason::None => Self::None,
+        recovery_wire::Reason::Cancelled => Self::Cancelled,
+        recovery_wire::Reason::ContextChanged => Self::ContextChanged,
+        recovery_wire::Reason::DocumentLost => Self::DocumentLost,
+        recovery_wire::Reason::Shutdown => Self::Shutdown,
+        recovery_wire::Reason::TimedOut => Self::TimedOut,
+        recovery_wire::Reason::ProtocolError => Self::ProtocolError,
+        recovery_wire::Reason::RuntimeUnavailable => Self::RuntimeUnavailable,
+        recovery_wire::Reason::IntentExpired => Self::IntentExpired,
+        recovery_wire::Reason::StaleIntent => Self::StaleIntent,
+        recovery_wire::Reason::ProjectChanged => Self::ProjectChanged,
+        recovery_wire::Reason::ReviewStale => Self::ReviewStale,
+        recovery_wire::Reason::ManualRequired => Self::ManualRequired,
+        recovery_wire::Reason::ProjectBusy => Self::ProjectBusy,
+        recovery_wire::Reason::ProjectConflict => Self::ProjectConflict,
+        recovery_wire::Reason::RecoveryIncomplete => Self::RecoveryIncomplete,
+        recovery_wire::Reason::InputLimit => Self::InputLimit,
+        recovery_wire::Reason::ResultLimit => Self::ResultLimit,
+        recovery_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
+    } }
     fn from_offline(value: wire::Reason) -> Self { match value {
             wire::Reason::None => Self::None, wire::Reason::Cancelled => Self::Cancelled, wire::Reason::ContextChanged => Self::ContextChanged,
             wire::Reason::DocumentLost => Self::DocumentLost, wire::Reason::Shutdown => Self::Shutdown, wire::Reason::TimedOut => Self::TimedOut,
@@ -154,10 +229,10 @@ impl Reason {
             Self::SavedVersionMissing | Self::SavedVersionInvalid | Self::SavedVersionChanged | Self::SavedVersionSensitive |
             Self::SavedVersionUnsafe | Self::SavedVersionTooLarge | Self::ModuleRequired | Self::ToolchainUnavailable |
             Self::ToolchainMismatch | Self::CommandFailed | Self::ArtifactMissing | Self::ArtifactAmbiguous |
-            Self::ArtifactUnsafe | Self::ArtifactChanged | Self::WorkRetained => return Err(BridgeError::protocol()),
+            Self::ArtifactUnsafe | Self::ArtifactChanged | Self::WorkRetained | Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete => return Err(BridgeError::protocol()),
         })
     }
-    fn android(self) -> android_wire::Reason { match self {
+    fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
             Self::None => android_wire::Reason::None, Self::Cancelled => android_wire::Reason::Cancelled, Self::ContextChanged => android_wire::Reason::ContextChanged,
             Self::DocumentLost => android_wire::Reason::DocumentLost, Self::Shutdown => android_wire::Reason::Shutdown, Self::TimedOut => android_wire::Reason::TimedOut,
             Self::ProtocolError => android_wire::Reason::ProtocolError, Self::RuntimeUnavailable => android_wire::Reason::RuntimeUnavailable, Self::IntentExpired => android_wire::Reason::IntentExpired,
@@ -171,11 +246,31 @@ impl Reason {
             Self::ArtifactAmbiguous => android_wire::Reason::ArtifactAmbiguous, Self::ArtifactUnsafe => android_wire::Reason::ArtifactUnsafe, Self::ArtifactChanged => android_wire::Reason::ArtifactChanged,
             Self::InputLimit => android_wire::Reason::InputLimit, Self::ResultLimit => android_wire::Reason::ResultLimit, Self::WorkRetained => android_wire::Reason::WorkRetained,
             Self::CleanupUnknown => android_wire::Reason::CleanupUnknown,
-    } }
+        Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete => return Err(BridgeError::protocol()),
+    }) }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Availability { Available, Busy, Shutdown, CleanupUnknown, DocumentLost, UnsupportedPlatform, RuntimeUnqualified, ToolchainUnqualified }
 impl Availability {
+    fn recovery(self) -> Result<recovery_wire::Availability, BridgeError> { Ok(match self {
+        Self::Available => recovery_wire::Availability::Available,
+        Self::Busy => recovery_wire::Availability::Busy,
+        Self::Shutdown => recovery_wire::Availability::Shutdown,
+        Self::CleanupUnknown => recovery_wire::Availability::CleanupUnknown,
+        Self::DocumentLost => recovery_wire::Availability::DocumentLost,
+        Self::UnsupportedPlatform => recovery_wire::Availability::UnsupportedPlatform,
+        Self::RuntimeUnqualified => recovery_wire::Availability::RuntimeUnqualified,
+        _ => return Err(BridgeError::protocol()),
+    }) }
+    fn from_recovery(value: recovery_wire::Availability) -> Self { match value {
+        recovery_wire::Availability::Available => Self::Available,
+        recovery_wire::Availability::Busy => Self::Busy,
+        recovery_wire::Availability::Shutdown => Self::Shutdown,
+        recovery_wire::Availability::CleanupUnknown => Self::CleanupUnknown,
+        recovery_wire::Availability::DocumentLost => Self::DocumentLost,
+        recovery_wire::Availability::UnsupportedPlatform => Self::UnsupportedPlatform,
+        recovery_wire::Availability::RuntimeUnqualified => Self::RuntimeUnqualified,
+    } }
     fn from_offline(value: wire::Availability) -> Self { match value {
             wire::Availability::Available => Self::Available, wire::Availability::Busy => Self::Busy, wire::Availability::Shutdown => Self::Shutdown,
             wire::Availability::CleanupUnknown => Self::CleanupUnknown, wire::Availability::DocumentLost => Self::DocumentLost, wire::Availability::UnsupportedPlatform => Self::UnsupportedPlatform,
@@ -201,27 +296,33 @@ impl Availability {
     } }
 }
 #[derive(Clone)]
-enum Terminal { OfflinePreflight(wire::Terminal), AndroidBuild(android_wire::Terminal) }
+enum Terminal { OfflinePreflight(wire::Terminal), AndroidBuild(android_wire::Terminal), ProjectRecovery(recovery_wire::Terminal) }
 impl Terminal {
     fn outcome(&self) -> Outcome { match self {
         Self::OfflinePreflight(t) => Outcome::from_offline(t.outcome), Self::AndroidBuild(t) => Outcome::from_android(t.outcome),
+        Self::ProjectRecovery(t) => Outcome::from_recovery(t.outcome),
     } }
     fn reason(&self) -> Reason { match self {
         Self::OfflinePreflight(t) => Reason::from_offline(t.reason), Self::AndroidBuild(t) => Reason::from_android(t.reason),
+        Self::ProjectRecovery(t) => Reason::from_recovery(t.reason),
     } }
     fn settled(&self) -> bool { match self {
         Self::OfflinePreflight(t) => t.lifetime.settled(), Self::AndroidBuild(t) => t.settled(),
+        Self::ProjectRecovery(t) => t.settled(),
     } }
 }
-enum Frame { OfflinePreflight(wire::Frame), AndroidBuild(android_wire::Frame) }
+enum Frame { OfflinePreflight(wire::Frame), AndroidBuild(android_wire::Frame), ProjectRecovery(recovery_wire::Frame) }
 struct Start { operation_id: String, owner_generation: String }
-enum Status { OfflinePreflight(wire::Status), AndroidBuild(android_wire::Status) }
+enum Status { OfflinePreflight(wire::Status), AndroidBuild(android_wire::Status), ProjectRecovery(recovery_wire::Status) }
 impl Status {
+    fn recovery(self) -> Result<recovery_wire::Status, BridgeError> { match self {
+        Self::ProjectRecovery(status) => Ok(status), _ => Err(BridgeError::protocol()),
+    } }
     fn offline(self) -> Result<wire::Status, BridgeError> { match self {
-        Self::OfflinePreflight(status) => Ok(status), Self::AndroidBuild(_) => Err(BridgeError::protocol()),
+        Self::OfflinePreflight(status) => Ok(status), Self::AndroidBuild(_) | Self::ProjectRecovery(_) => Err(BridgeError::protocol()),
     } }
     fn android(self) -> Result<android_wire::Status, BridgeError> { match self {
-        Self::AndroidBuild(status) => Ok(status), Self::OfflinePreflight(_) => Err(BridgeError::protocol()),
+        Self::AndroidBuild(status) => Ok(status), Self::OfflinePreflight(_) | Self::ProjectRecovery(_) => Err(BridgeError::protocol()),
     } }
 }
 
@@ -230,7 +331,7 @@ struct Clocks { admitted: Instant, work: Instant, finality: Instant }
 impl Clocks {
     fn new(domain: SavedCommandDomain, admitted: Instant) -> Self {
         let (work, hard) = match domain { SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
-            SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD) };
+            SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD), SavedCommandDomain::ProjectRecovery => (RECOVERY_WORK, RECOVERY_HARD) };
         Self { admitted, work: admitted + work, finality: admitted + hard }
     }
     fn settlement(self, first_stop: Option<Instant>) -> Instant {
@@ -253,9 +354,10 @@ struct Inner {
 }
 struct Registry {
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
-    capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>,
+    capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
 }
-struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot }
+struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String> }
+struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
 struct Active {
     owner: Arc<Session>, projection: RunProjection, first_stop: Option<Instant>, work_expired: bool,
     accepted: bool, terminal: bool, unknown: bool, final_join_seen: bool,
@@ -266,6 +368,17 @@ struct RunProjection {
     outcome: Option<Outcome>, reason: Reason, result: Option<Terminal>, stage: Option<android_wire::Stage>,
 }
 impl RunProjection {
+    fn recovery(self) -> Result<recovery_wire::Projection, BridgeError> {
+        let Context::ProjectRecovery(context) = self.context else { return Err(BridgeError::protocol()); };
+        if self.stage.is_some() { return Err(BridgeError::protocol()); }
+        let (result, effect) = match self.result {
+            Some(Terminal::ProjectRecovery(t)) => (t.result, Some(t.effect)), None => (None, None),
+            _ => return Err(BridgeError::protocol()),
+        };
+        Ok(recovery_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation,
+            context, phase: self.phase.recovery(), intent_usable: self.intent_usable,
+            outcome: self.outcome.map(Outcome::recovery), reason: self.reason.recovery()?, result, effect })
+    }
     // Copy only public DATA. A core terminal is not a native receipt, and even
     // known retained-work facts stay hidden until the original final Ready join.
     fn public(&self) -> Self {
@@ -281,6 +394,8 @@ impl RunProjection {
                 Some(Terminal::AndroidBuild(t)) if t.outcome != android_wire::Outcome::Complete
                     && t.outcome != android_wire::Outcome::Unknown && t.settled()
                     && t.disposition.artifacts != android_wire::ArtifactDisposition::RetainedLocalResult => self.result.clone(),
+                Some(Terminal::ProjectRecovery(t)) if t.outcome != recovery_wire::Outcome::Complete
+                    && t.outcome != recovery_wire::Outcome::Unknown && t.settled() => self.result.clone(),
                 _ => None,
             }
         } else { None };
@@ -291,7 +406,7 @@ impl RunProjection {
         if self.stage.is_some() { return Err(BridgeError::protocol()); }
         let result = match self.result {
             Some(Terminal::OfflinePreflight(t)) => t.result,
-            None => None, Some(Terminal::AndroidBuild(_)) => return Err(BridgeError::protocol()),
+            None => None, Some(Terminal::AndroidBuild(_) | Terminal::ProjectRecovery(_)) => return Err(BridgeError::protocol()),
         };
         Ok(wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.offline(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::offline),
@@ -301,16 +416,16 @@ impl RunProjection {
         let Context::AndroidBuild(context) = self.context else { return Err(BridgeError::protocol()); };
         let (result, activity, disposition) = match self.result {
             Some(Terminal::AndroidBuild(t)) => (t.result, Some(t.activity), Some(t.disposition)),
-            None => (None, None, None), Some(Terminal::OfflinePreflight(_)) => return Err(BridgeError::protocol()),
+            None => (None, None, None), Some(Terminal::OfflinePreflight(_) | Terminal::ProjectRecovery(_)) => return Err(BridgeError::protocol()),
         };
         Ok(android_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.android(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::android),
-            reason: self.reason.android(), stage: self.stage, result, activity, disposition })
+            reason: self.reason.android()?, stage: self.stage, result, activity, disposition })
     }
 }
 struct Session {
     domain: SavedCommandDomain, id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
-    registration: u32, project: RegisteredRoot, request: AsyncMutex<Option<Vec<u8>>>,
+    registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>, request: AsyncMutex<Option<Vec<u8>>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
     native_audit_cutoff: watch::Sender<Instant>,
     output_bytes: AtomicUsize, resource_unknown: AtomicBool,
@@ -348,6 +463,14 @@ struct Resources {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     offline_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
     offline_started: bool, offline_joined: bool, offline_failed: bool,
+    recovery_selected: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    recovery_installed: Option<Arc<Mutex<ProjectRecoveryRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    recovery_settlement: Option<JoinHandle<CloseOutcome>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    recovery_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
+    recovery_started: bool, recovery_joined: bool, recovery_failed: bool,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     native: Option<Arc<Mutex<AndroidNativeBooks>>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -449,6 +572,13 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
         }
         return;
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if owner.domain == SavedCommandDomain::ProjectRecovery {
+        if let Some(native) = &book.recovery_installed {
+            match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
+        }
+        return;
+    }
     if owner.domain != SavedCommandDomain::AndroidBuild { return; }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(native) = &book.native {
@@ -458,6 +588,7 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
 }
 fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
     if domain == SavedCommandDomain::OfflinePreflight { return offline_installed_final(book); }
+    if domain == SavedCommandDomain::ProjectRecovery { return recovery_installed_final(book); }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
         book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
@@ -497,6 +628,7 @@ fn retire(mut projection: RunProjection, reason: Reason) -> RunProjection {
 }
 
 impl SavedCommandOwner {
+    pub(crate) fn project_recovery(runtime: RuntimeConfig) -> Self { Self::new(runtime, SavedCommandDomain::ProjectRecovery) }
     pub(crate) fn offline_preflight(runtime: RuntimeConfig) -> Self { Self::new(runtime, SavedCommandDomain::OfflinePreflight) }
     pub(crate) fn android_build(runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>) -> Self {
         Self::new_selected(runtime, SavedCommandDomain::AndroidBuild, toolchain)
@@ -544,6 +676,26 @@ impl SavedCommandOwner {
         self.require_domain(SavedCommandDomain::AndroidBuild)?;
         self.cancel(operation, generation, Availability::from_android(gate))?.android()
     }
+    pub(crate) fn prepare_recovery(&self, input: recovery_wire::Prepare, registration: u32, project: RegisteredRoot,
+        gate: recovery_wire::Availability) -> Result<recovery_wire::Status, BridgeError> {
+        self.require_domain(SavedCommandDomain::ProjectRecovery)?;
+        self.prepare(Context::ProjectRecovery(input.context()), registration, project, Availability::from_recovery(gate))?.recovery()
+    }
+    pub(crate) fn start_recovery(&self, input: recovery_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
+        gate: recovery_wire::Availability) -> Result<crate::project_recovery_owner::Admitted, BridgeError> {
+        self.require_domain(SavedCommandDomain::ProjectRecovery)?;
+        let admitted = self.start(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
+            admitted_at, registered, Availability::from_recovery(gate))?;
+        Ok(crate::project_recovery_owner::Admitted::new(admitted.status.recovery()?, admitted.release))
+    }
+    pub(crate) fn status_recovery(&self, gate: recovery_wire::Availability) -> Result<recovery_wire::Status, BridgeError> {
+        self.require_domain(SavedCommandDomain::ProjectRecovery)?;
+        self.status(Availability::from_recovery(gate))?.recovery()
+    }
+    pub(crate) fn cancel_recovery(&self, operation: &str, generation: &str, gate: recovery_wire::Availability) -> Result<recovery_wire::Status, BridgeError> {
+        self.require_domain(SavedCommandDomain::ProjectRecovery)?;
+        self.cancel(operation, generation, Availability::from_recovery(gate))?.recovery()
+    }
 }
 
 impl SavedCommandOwner {
@@ -557,7 +709,7 @@ impl SavedCommandOwner {
             observation_identity: Arc::new(()),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
-            prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            prepared: None, active: None, last: None, recovery_review: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
             fixture: Mutex::new(None),
@@ -579,7 +731,7 @@ impl SavedCommandOwner {
     }
     /// DATA only under the actual DocumentBinding mutex and native registration
     /// lookup. No filesystem/tool/runtime inspection, child or cleanup task.
-    fn prepare(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
+    fn prepare(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
         if context.domain() != self.inner.domain { return Err(self.inner.domain.invalid_owner()); }
         self.reconcile(); let mut r = self.inner.lock();
@@ -590,13 +742,29 @@ impl SavedCommandOwner {
             observation.control.claim(match self.inner.domain {
                 SavedCommandDomain::OfflinePreflight => crate::shell::installed_observation::commands::Domain::Offline,
                 SavedCommandDomain::AndroidBuild => crate::shell::installed_observation::commands::Domain::Android,
+                SavedCommandDomain::ProjectRecovery => return Err(self.inner.domain.unavailable()),
             })?;
+        }
+        let mut recovery_stamp = None;
+        let mut expires = prepared_at + INTENT;
+        if let Context::ProjectRecovery(selected) = &mut context {
+            if selected.action == recovery_wire::Action::Recover {
+                let reviewed = r.recovery_review.as_ref().filter(|reviewed|
+                    reviewed.registration == registration && reviewed.project == project && prepared_at < reviewed.expires
+                    && reviewed.context.project_id == selected.project_id && reviewed.context.draft_revision == selected.draft_revision
+                    && reviewed.context.baseline_generation == selected.baseline_generation && reviewed.observation.eligible())
+                    .ok_or_else(|| self.inner.domain.invalid_owner())?;
+                selected.review = Some(reviewed.observation.clone());
+                recovery_stamp = Some(reviewed.stamp.clone()); expires = expires.min(reviewed.expires);
+            }
+            if !selected.valid() { return Err(self.inner.domain.invalid_owner()); }
         }
         let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
-        r.prepared = Some(Prepared { projection, expires: prepared_at + INTENT, registration, project });
+        if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
+        r.prepared = Some(Prepared { projection, expires, registration, project, recovery_stamp });
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.
@@ -639,12 +807,15 @@ impl SavedCommandOwner {
         let projection = RunProjection { operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         let owner = Arc::new(Session { domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
-            registration: prepared.registration, project: prepared.project, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff,
+            registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff,
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
             resources: AsyncMutex::new(Resources { frames: Some(receiver),
                 offline_selected: self.inner.offline_installed_selected(),
+                recovery_selected: self.inner.recovery_installed_selected(),
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                recovery_installed: self.inner.recovery_installed_selected().then(|| Arc::new(Mutex::new(ProjectRecoveryRuntimeSlots::new()))),
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 offline_installed: self.inner.offline_installed_selected().then(|| Arc::new(Mutex::new(OfflinePreflightRuntimeSlots::new()))),
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -714,21 +885,22 @@ impl SavedCommandOwner {
         self.inner.registry.try_lock().ok().map(|registry| registry.document_lost)
     }
     pub(crate) fn document_lost(&self) {
-        let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true;
+        let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
         self.inner.retire_prepared(&mut r, Reason::DocumentLost);
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::DocumentLost, Instant::now()); }
         self.inner.bump(&mut r);
     }
     pub(crate) fn context_changed(&self) {
-        let mut r = self.inner.lock(); self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+        let mut r = self.inner.lock(); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, Instant::now()); }
     }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool {
         let r = self.inner.lock(); r.active.as_ref().is_none_or(|a| a.owner.registration == registration)
             && r.prepared.as_ref().is_none_or(|p| p.registration == registration)
+            && r.recovery_review.as_ref().is_none_or(|reviewed| reviewed.registration == registration)
     }
     pub(crate) fn request_shutdown(&self) {
-        let mut r = self.inner.lock(); r.stopping = true; self.inner.retire_prepared(&mut r, Reason::Shutdown);
+        let mut r = self.inner.lock(); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::Shutdown, Instant::now()); }
         self.inner.bump(&mut r);
     }
@@ -781,6 +953,9 @@ impl SavedCommandOwner {
                         };
                     }
                 }
+                if owner.domain == SavedCommandDomain::ProjectRecovery {
+                    r.recovery_review = recovery_review_after_finality(&active, &owner, Instant::now());
+                }
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
         } else {
@@ -788,6 +963,20 @@ impl SavedCommandOwner {
             owner.resource_unknown.store(true, Ordering::SeqCst); self.inner.unknown_locked(&mut r, &owner);
         }
     }
+}
+fn recovery_review_after_finality(active: &Active, owner: &Session, now: Instant) -> Option<RecoveryReview> {
+    let Context::ProjectRecovery(context) = &owner.context else { return None; };
+    let Terminal::ProjectRecovery(terminal) = active.projection.result.as_ref()? else { return None; };
+    let expires = owner.clocks.admitted + INTENT;
+    if active.projection.phase != Phase::Terminal || active.projection.outcome != Some(Outcome::Complete)
+        || active.first_stop.is_some() || active.unknown || !active.final_join_seen || !active.accepted || !active.terminal
+        || *owner.stop.borrow() || context.action != recovery_wire::Action::Inspect || now >= expires
+        || terminal.outcome != recovery_wire::Outcome::Complete || !terminal.settled()
+        || !owner.watchdog_joined.load(Ordering::SeqCst) || owner.resource_unknown.load(Ordering::SeqCst) { return None; }
+    let observation = terminal.result.as_ref()?.observation.as_ref()?.clone();
+    if !observation.eligible() { return None; }
+    Some(RecoveryReview { context: context.clone(), observation, stamp: terminal.review_stamp.as_ref()?.clone(),
+        expires, registration: owner.registration, project: owner.project.clone() })
 }
 struct FinalWake(std::sync::Weak<Inner>);
 impl Wake for FinalWake {
@@ -800,7 +989,7 @@ fn record_join<T>(slot: &Mutex<Option<Result<T, tokio::task::JoinError>>>, resul
 fn set_failure_outcome(p: &mut RunProjection) {
     if p.reason == Reason::None {
         p.reason = match p.context.domain() { SavedCommandDomain::OfflinePreflight => Reason::CommandIncomplete,
-            SavedCommandDomain::AndroidBuild => Reason::ProtocolError };
+            SavedCommandDomain::AndroidBuild => Reason::ProtocolError, SavedCommandDomain::ProjectRecovery => Reason::RecoveryIncomplete };
     }
     // Known retained work is not successful cancellation/disposal. Keep the
     // original first reason, but preserve the core's Failed disposition outcome.
@@ -816,6 +1005,10 @@ fn set_failure_outcome(p: &mut RunProjection) {
     });
 }
 impl Inner {
+    fn recovery_installed_selected(&self) -> bool {
+        self.domain == SavedCommandDomain::ProjectRecovery && cfg!(feature = "custom-protocol")
+            && self.runtime.project_recovery_installed_profile_available()
+    }
     fn offline_installed_selected(&self) -> bool {
         self.domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && self.runtime.offline_preflight_installed_profile_available()
@@ -832,6 +1025,7 @@ impl Inner {
         match self.domain {
             SavedCommandDomain::OfflinePreflight => self.offline_installed_selected(),
             SavedCommandDomain::AndroidBuild => ANDROID_NATIVE_QUALIFIED && ANDROID_RUNTIME_QUALIFIED && ANDROID_TOOLCHAIN_QUALIFIED && self.toolchain.is_some(),
+            SavedCommandDomain::ProjectRecovery => RECOVERY_NATIVE_QUALIFIED && RECOVERY_RUNTIME_QUALIFIED && self.recovery_installed_selected(),
         }
     }
     fn lock(&self) -> MutexGuard<'_, Registry> {
@@ -872,6 +1066,7 @@ impl Inner {
                 SavedCommandDomain::OfflinePreflight => Availability::RuntimeUnqualified,
                 SavedCommandDomain::AndroidBuild if !ANDROID_NATIVE_QUALIFIED || !ANDROID_RUNTIME_QUALIFIED => Availability::RuntimeUnqualified,
                 SavedCommandDomain::AndroidBuild => Availability::ToolchainUnqualified,
+                SavedCommandDomain::ProjectRecovery => Availability::RuntimeUnqualified,
             }
         } else { gate }
     }
@@ -894,6 +1089,11 @@ impl Inner {
                 let status = android_wire::Status { schema_version: 1, status_revision: r.revision, availability: reason.android(),
                     operation: operation.map(RunProjection::android).transpose()? };
                 android_wire::status_bytes(&status)?; Ok(Status::AndroidBuild(status))
+            }
+            SavedCommandDomain::ProjectRecovery => {
+                let status = recovery_wire::Status { schema_version: 1, status_revision: r.revision, availability: reason.recovery()?,
+                    operation: operation.map(RunProjection::recovery).transpose()? };
+                crate::edit_protocol::bounded(&status, recovery_wire::STATUS_LIMIT)?; Ok(Status::ProjectRecovery(status))
             }
         }
     }
@@ -951,7 +1151,9 @@ impl Inner {
             (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Accepted)) => Incoming::Accepted(Some(android_wire::Stage::Accepted)),
             (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Progress(stage))) => Incoming::Progress(stage),
             (SavedCommandDomain::AndroidBuild, Frame::AndroidBuild(android_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::AndroidBuild(t)),
-            (SavedCommandDomain::OfflinePreflight, Frame::AndroidBuild(_)) | (SavedCommandDomain::AndroidBuild, Frame::OfflinePreflight(_)) => {
+            (SavedCommandDomain::ProjectRecovery, Frame::ProjectRecovery(recovery_wire::Frame::Accepted)) => Incoming::Accepted(None),
+            (SavedCommandDomain::ProjectRecovery, Frame::ProjectRecovery(recovery_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::ProjectRecovery(t)),
+            _ => {
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); return;
             }
@@ -1061,11 +1263,13 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
 enum OutputDecoder {
     OfflinePreflight { frames: usize, failed: bool },
     AndroidBuild(android_wire::FrameDecoder),
+    ProjectRecovery { frames: usize, failed: bool },
 }
 impl OutputDecoder {
     fn new(owner: &Session) -> Result<Self, BridgeError> {
         match (owner.domain, &owner.context) {
             (SavedCommandDomain::OfflinePreflight, Context::OfflinePreflight(_)) => Ok(Self::OfflinePreflight { frames: 0, failed: false }),
+            (SavedCommandDomain::ProjectRecovery, Context::ProjectRecovery(_)) => Ok(Self::ProjectRecovery { frames: 0, failed: false }),
             (SavedCommandDomain::AndroidBuild, Context::AndroidBuild(context)) =>
                 android_wire::FrameDecoder::new(&owner.id, &owner.generation, context).map(Self::AndroidBuild),
             _ => Err(BridgeError::protocol()),
@@ -1089,18 +1293,34 @@ impl OutputDecoder {
                     Err(error) => { *failed = true; Err(error) },
                 }
             }
+            Self::ProjectRecovery { frames, failed } => {
+                let result = match &owner.context {
+                    Context::ProjectRecovery(context) if owner.domain == SavedCommandDomain::ProjectRecovery && !*failed && *frames < 2 =>
+                        recovery_wire::decode(bytes, &owner.id, &owner.generation, context),
+                    _ => Err(BridgeError::protocol()),
+                };
+                let result = result.and_then(|frame| {
+                    if (*frames == 0 && matches!(&frame, recovery_wire::Frame::Accepted))
+                        || (*frames == 1 && matches!(&frame, recovery_wire::Frame::Terminal(_))) { Ok(frame) }
+                    else { Err(BridgeError::protocol()) }
+                });
+                match result {
+                    Ok(frame) => { *frames += 1; Ok(Frame::ProjectRecovery(frame)) },
+                    Err(error) => { *failed = true; Err(error) },
+                }
+            }
             Self::AndroidBuild(decoder) => decoder.push(bytes).map(Frame::AndroidBuild),
         }
     }
     fn finish(&mut self) -> bool { match self {
-        Self::OfflinePreflight { frames, failed } => { if *frames != 2 { *failed = true; } !*failed },
+        Self::OfflinePreflight { frames, failed } | Self::ProjectRecovery { frames, failed } => { if *frames != 2 { *failed = true; } !*failed },
         Self::AndroidBuild(decoder) => decoder.finish().is_ok() && decoder.settled(),
     } }
 }
 async fn enqueue_frame(inner: &Inner, owner: &Session, frame: Frame) -> bool {
     match owner.domain {
         // Preserve the original two-frame Offline transport behavior exactly.
-        SavedCommandDomain::OfflinePreflight => owner.frames.try_send(frame).is_ok(),
+        SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery => owner.frames.try_send(frame).is_ok(),
         SavedCommandDomain::AndroidBuild => {
             // A valid seven-frame activity stream must not overflow a two-slot
             // queue just because multiple frames arrived in the same read. The
@@ -1348,6 +1568,147 @@ async fn settle_offline_installed(book: &mut Resources, inner: &Arc<Inner>, owne
     }
 }
 
+fn recovery_installed_final(book: &Resources) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        if !book.recovery_selected {
+            return book.recovery_installed.is_none() && !book.recovery_started && !book.recovery_joined && !book.recovery_failed
+                && book.recovery_settlement.is_none() && book.recovery_return.is_none();
+        }
+        book.recovery_started && book.recovery_joined && !book.recovery_failed && book.recovery_settlement.is_none()
+            && matches!(book.recovery_return.as_ref(), Some(Ok(CloseOutcome::Settled)))
+            && book.recovery_installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { !book.recovery_selected && !book.recovery_started && !book.recovery_joined && !book.recovery_failed }
+}
+fn recovery_worker_returned(started: bool, joined: bool, failed: bool, handle: bool, error: bool) -> bool {
+    if !started { !joined && !failed && !handle && !error }
+    else if failed { !joined && handle && error }
+    else { joined && !handle && !error }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn recovery_consumers_returned(book: &Resources, startup: &Startup, no_child_effect: bool) -> bool {
+    if !recovery_worker_returned(book.inspection_started, book.inspection_joined, book.inspection_failed,
+            book.inspection.is_some(), book.inspection_error.is_some())
+        || !recovery_worker_returned(book.acquisition_started, book.acquisition_joined, book.acquisition_failed,
+            book.acquisition.is_some(), book.acquisition_error.is_some()) { return false; }
+    let io_returned = book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
+        && !book.write_failed && !book.out_failed && !book.err_failed
+        && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some();
+    if !io_returned || startup.child.is_some() { return false; }
+    if !startup.attempted {
+        return no_child_effect && !startup.returned && !startup.failed && book.child.is_none() && book.waited.is_none() && !book.wait_failed;
+    }
+    startup.returned && !startup.failed && book.inspection_joined && !book.inspection_failed
+        && book.acquisition_joined && !book.acquisition_failed && book.child.is_some() && !book.wait_failed
+        && book.waited.as_ref().is_some_and(ExitStatus::success)
+        && book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
+        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.decoder_settled && e.frames == 2)
+        && book.err_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 0)
+}
+fn recovery_installed_closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_returned: bool) -> bool {
+    direct_returned && owner.domain == SavedCommandDomain::ProjectRecovery && original_session(r, owner)
+        && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
+            && matches!(a.projection.result.as_ref(), Some(Terminal::ProjectRecovery(t)) if t.lifetime.settled())))
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn recovery_installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
+    owner.domain == SavedCommandDomain::ProjectRecovery && inner.recovery_installed_selected() && inner.qualified()
+        && final_clock_clear(r, owner, now) && !inner.poisoned.load(Ordering::SeqCst)
+        && !r.stopping && !r.document_lost && !*owner.stop.borrow() && now < owner.clocks.work
+        && Profile::current(owner.domain) == Some(owner.profile)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn transfer_recovery_installed(book: &Resources, inner: &Inner, owner: &Session) -> Result<(), BridgeError> {
+    if !book.recovery_selected || !book.inspection_started || !book.inspection_joined || book.inspection_failed
+        || book.inspection.is_some() || book.inspection_error.is_some() || book.acquisition_started
+        || book.acquisition_joined || book.acquisition_failed || book.acquisition.is_some() || book.acquisition_error.is_some() {
+        return Err(BridgeError::cleanup_unknown());
+    }
+    let native = book.recovery_installed.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+    let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
+    if !recovery_installed_claim_clear(inner, &r, owner, now) { return Err(owner.domain.unavailable()); }
+    slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn acquire_recovery_installed(inner: &Inner, owner: &Session, native: &Arc<Mutex<ProjectRecoveryRuntimeSlots>>) {
+    if owner.domain != SavedCommandDomain::ProjectRecovery || !inner.recovery_installed_selected() {
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
+    let mut slots = match native.lock() { Ok(slots) => slots, Err(_) => { inner.unknown(owner); return; } };
+    let capability = match slots.capability() { Ok(capability) => capability, Err(_) => { inner.unknown(owner); return; } };
+    let stop = owner.stop.subscribe();
+    let selected = match capability.prepare_once(owner.clocks.work, &stop) {
+        Ok(selected) => selected, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+    };
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
+    let mut r = inner.lock(); let now = Instant::now(); inner.advance_locked(&mut r, owner, now);
+    if !recovery_installed_claim_clear(inner, &r, owner, now) { return; }
+    if startup.attempted || startup.returned || startup.failed || startup.child.is_some() || capability.claim_once().is_err() {
+        owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown_locked(&mut r, owner); return;
+    }
+    startup.attempted = true;
+    drop(r);
+    match command.spawn() {
+        Ok(child) => { startup.child = Some(child); startup.returned = true; },
+        Err(_) => { startup.failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); drop(startup);
+            inner.stop(owner, Reason::RuntimeUnavailable); inner.unknown(owner); },
+    }
+}
+async fn settle_recovery_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+    if owner.domain != SavedCommandDomain::ProjectRecovery { return; }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = (book, inner, owner); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        let Some(native) = book.recovery_installed.clone() else {
+            if book.recovery_selected { inner.unknown(owner); }
+            return;
+        };
+        if !book.recovery_started {
+            let returned = (|| {
+                let slots = match native.try_lock() {
+                    Ok(slots) => slots, Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let startup = match owner.startup.try_lock() {
+                    Ok(startup) => startup, Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let r = inner.lock();
+                recovery_installed_closure_ready(&r, owner, startup.attempted,
+                    recovery_consumers_returned(book, &startup, slots.no_child_effect()))
+            })();
+            if !book.recovery_selected || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
+            let (release, enter) = oneshot::channel();
+            book.recovery_started = true;
+            book.recovery_settlement = Some(tokio::task::spawn_blocking(move || {
+                if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                match native.lock() {
+                    Ok(mut slots) => slots.settle_originals(),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+                }
+            }));
+            let _ = release.send(());
+        }
+        if !book.recovery_joined && !book.recovery_failed {
+            if book.recovery_settlement.is_none() { inner.unknown(owner); return; }
+            let result = join_with_clock(&mut book.recovery_settlement, inner, owner).await;
+            let joined = result.is_ok();
+            if book.recovery_return.is_some() { book.recovery_failed = true; }
+            else { book.recovery_return = Some(result); book.recovery_joined = joined; book.recovery_failed = !joined; }
+            if joined { book.recovery_settlement.take(); } else { native_worker_lost(book, owner); }
+        }
+        if !recovery_installed_final(book) { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); }
+    }
+}
+
 fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
     if owner.domain == SavedCommandDomain::AndroidBuild {
         inner.stop(owner, Reason::ToolchainUnavailable); return;
@@ -1490,6 +1851,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let native = book.native.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let offline_installed = book.offline_installed.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let recovery_installed = book.recovery_installed.clone();
     let stop = owner.stop.subscribe();
     let (inspect_start, inspect_enter) = oneshot::channel();
     book.inspection_started = true;
@@ -1503,6 +1866,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     return runtime.resolve_offline_preflight_installed(&mut slots, end, &stop);
                 }
                 runtime.resolve_offline_preflight(end)
+            },
+            SavedCommandDomain::ProjectRecovery => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(native) = recovery_installed {
+                    let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return runtime.resolve_project_recovery_installed(&mut slots, end, &stop);
+                }
+                runtime.resolve_project_recovery(end)
             },
             SavedCommandDomain::AndroidBuild => {
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1532,6 +1903,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     let bytes = match (&owner.context, owner.profile) {
         (Context::OfflinePreflight(context), Profile::OfflinePreflight(profile)) =>
             wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd),
+        (Context::ProjectRecovery(context), Profile::ProjectRecovery(profile)) =>
+            recovery_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, owner.recovery_stamp.as_deref()),
         (Context::AndroidBuild(context), Profile::AndroidBuild(profile)) => {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             {
@@ -1552,7 +1925,13 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let offline_installed = book.offline_installed.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let recovery_installed = book.recovery_installed.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if offline_installed.is_some() && transfer_offline_installed(&book, inner, owner).is_err() {
+        inner.stop(owner, Reason::RuntimeUnavailable); return;
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if recovery_installed.is_some() && transfer_recovery_installed(&book, inner, owner).is_err() {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
     let (acquire_start, acquire_enter) = oneshot::channel();
@@ -1565,6 +1944,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     if let Some(native) = offline_installed {
                         drop(runtime);
                         acquire_offline_installed(&acquisition_inner, &acquisition_owner, &native); return;
+                    }
+                    spawn_original(&acquisition_inner, &acquisition_owner, runtime);
+                },
+                SavedCommandDomain::ProjectRecovery => {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(native) = recovery_installed {
+                        drop(runtime);
+                        acquire_recovery_installed(&acquisition_inner, &acquisition_owner, &native); return;
                     }
                     spawn_original(&acquisition_inner, &acquisition_owner, runtime);
                 },
@@ -1689,6 +2076,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if owner.domain == SavedCommandDomain::AndroidBuild { settle_native(&mut book, inner, owner).await; }
     settle_offline_installed(&mut book, inner, owner).await;
+    settle_recovery_installed(&mut book, inner, owner).await;
     // No broad signal or PID discovery. EOF is cooperative STOP; an unreturned
     // original child stays retained at H, even if its terminal was once positive.
 }
@@ -1760,7 +2148,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
             r.active.as_ref().is_some_and(|a| a.owner.id == owner.id && a.accepted && a.terminal
                 && a.projection.result.as_ref().is_some_and(Terminal::settled))
                 && book.out_end.as_ref().is_some_and(|r| r.decoder_settled && !r.failed && match owner.domain {
-                    SavedCommandDomain::OfflinePreflight => r.frames == 2,
+                    SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery => r.frames == 2,
                     SavedCommandDomain::AndroidBuild => (2..=8).contains(&r.frames),
                 })
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
