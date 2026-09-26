@@ -1882,7 +1882,7 @@ pub fn mutate_normal_ui_fixture(end: Instant) -> Result<()> {
     need(require_normal_ui_qualification()? == UiRole::ProjectDraft)?;
     deadline(Some(end))?;
     need(!UI_FIXTURE_MUTATION_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst))?;
-    let path = normal_ui_project()?.join("release/mobile-release.json");
+    let path = normal_ui_project()?.join("release").join("mobile-release.json");
     let account = unhex(&std::env::var("MRK_WINDOWS_ORDINARY_SID").map_err(|_| Error::State)?)?;
     let parent = unhex(&std::env::var("MRK_WINDOWS_PARENT_SID").map_err(|_| Error::State)?)?;
     need(account.len() == 28 && parent.len() == 28 && account != parent)?;

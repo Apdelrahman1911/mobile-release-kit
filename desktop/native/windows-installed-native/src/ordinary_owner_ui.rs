@@ -737,13 +737,14 @@ impl Fixture {
             acl(files, index, label, mask, parent, account, clock, trace, transitions)?;
         }
         let mut original_files = Vec::with_capacity(4);
-        for (name, bytes) in [("app/build.gradle.kts", UI_FIXTURE_SOURCE), ("version.properties", UI_FIXTURE_VERSION),
-            ("keep.txt", UI_FIXTURE_KEEP)] {
-            original_files.push(create_fixture_file(files, &path.join(name), bytes, parent, account, clock, trace, transitions)?);
+        // Exact handle-name readback requires native separators in these fixed paths.
+        for (file_path, bytes) in [(path.join("app").join("build.gradle.kts"), UI_FIXTURE_SOURCE),
+            (path.join("version.properties"), UI_FIXTURE_VERSION), (path.join("keep.txt"), UI_FIXTURE_KEEP)] {
+            original_files.push(create_fixture_file(files, &file_path, bytes, parent, account, clock, trace, transitions)?);
         }
         let initial_config = role != UiRole::ProjectDraft;
         if initial_config {
-            original_files.push(create_fixture_file(files, &path.join("release/mobile-release.json"), UI_FIXTURE_CONFIG,
+            original_files.push(create_fixture_file(files, &path.join("release").join("mobile-release.json"), UI_FIXTURE_CONFIG,
                 parent, account, clock, trace, transitions)?);
         }
         Ok(Self { project, app, release, original_files,
@@ -827,7 +828,7 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                 let original = &fixture.original_files[3]; need(files[original.index].stamp()? == original.stamp)?; original.index
             } else {
                 need(role == UiRole::ProjectDraft)?;
-                let index = input(files, &project_path.join("release/mobile-release.json"), false, FS::FILE_GENERIC_READ, clock, trace)?;
+                let index = input(files, &project_path.join("release").join("mobile-release.json"), false, FS::FILE_GENERIC_READ, clock, trace)?;
                 need(files[index].read(LIMIT)? == UI_FIXTURE_CONFIG_AFTER)?; index
             };
             let stamp = files[config].stamp()?;
@@ -4542,6 +4543,25 @@ mod contract_tests {
             assert_eq!(publisher.matches(operation).count(), 1, "{operation}");
             remaining = remaining.split_once(operation)
                 .unwrap_or_else(|| panic!("publisher operation missing or out of order: {operation}")).1;
+        }
+        // Path equality can hide separator differences; NameExact compares text.
+        let root = Path::new(r"C:\fixture\project");
+        assert_eq!(root.join("app").join("build.gradle.kts").to_str(), Some(r"C:\fixture\project\app\build.gradle.kts"));
+        assert_eq!(root.join("release").join("mobile-release.json").to_str(), Some(r"C:\fixture\project\release\mobile-release.json"));
+        let create = source.split_once("impl Fixture {").unwrap().1
+            .split_once("// Independent post-exit full output inventory.").unwrap().0;
+        assert!(create.contains("(path.join(\"app\").join(\"build.gradle.kts\"), UI_FIXTURE_SOURCE)"));
+        assert!(create.contains("&path.join(\"release\").join(\"mobile-release.json\"), UI_FIXTURE_CONFIG"));
+        let post = source.split_once("fn output_poststate(").unwrap().1
+            .split_once("fn ").unwrap().0;
+        assert!(post.contains("&project_path.join(\"release\").join(\"mobile-release.json\"), false, FS::FILE_GENERIC_READ"));
+        let result_source = include_str!("qualification_result.rs");
+        let mutation = result_source.split_once("pub fn mutate_normal_ui_fixture(").unwrap().1
+            .split_once("pub fn verify_normal_ui_fixture(").unwrap().0;
+        assert!(mutation.contains("normal_ui_project()?.join(\"release\").join(\"mobile-release.json\")"));
+        for body in [create, post, mutation] {
+            assert!(!body.contains(".join(\"app/build.gradle.kts\")"));
+            assert!(!body.contains(".join(\"release/mobile-release.json\")"));
         }
     }
 

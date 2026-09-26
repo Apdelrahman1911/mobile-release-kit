@@ -14675,9 +14675,21 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         with self.assertRaises(helper.CheckFailure): self.accept_case(data)
         source=(SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src/ordinary_owner_ui.rs").read_text()
         fixture=source.split("fn create_fixture_file(",1)[1].split("impl Fixture",1)[0]
-        self.assertIn("let writer = files.len(); files.push(",fixture)
-        self.assertLess(fixture.index("files[writer].close()?"),fixture.index("let index = input(files,"))
+        self.assertLess(fixture.index("let writer = files.len();"),fixture.index("trace.at(InputRole::Output, Some(writer as u8));"))
+        self.assertLess(fixture.index("trace.at(InputRole::Output, Some(writer as u8));"),fixture.index("files.push("))
+        self.assertLess(fixture.index("files[writer].close_traced(trace)?"),fixture.index("let index = input(files,"))
         self.assertNotIn("files.pop(",fixture)
+        create=source.split("impl Fixture {",1)[1].split("// Independent post-exit full output inventory.",1)[0]
+        self.assertIn('(path.join("app").join("build.gradle.kts"), UI_FIXTURE_SOURCE)',create)
+        self.assertIn('&path.join("release").join("mobile-release.json"), UI_FIXTURE_CONFIG',create)
+        post=source.split("fn output_poststate(",1)[1].split("fn ",1)[0]
+        self.assertIn('&project_path.join("release").join("mobile-release.json"), false, FS::FILE_GENERIC_READ',post)
+        result_source=(SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src/qualification_result.rs").read_text()
+        mutation=result_source.split("pub fn mutate_normal_ui_fixture(",1)[1].split("pub fn verify_normal_ui_fixture(",1)[0]
+        self.assertIn('normal_ui_project()?.join("release").join("mobile-release.json")',mutation)
+        for body in (create,post,mutation):
+            self.assertNotIn('.join("app/build.gradle.kts")',body)
+            self.assertNotIn('.join("release/mobile-release.json")',body)
         self.assertIn("original.process_close, original.thread_close, files.len(), files.len(), profile.delete_return",source)
 
     def test_auxiliary_recheck_is_full_original_epoch_not_normal_launch_authority(self):
