@@ -20,6 +20,9 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/android_build_protocol.rs"] mod android_build_protocol;
 #[path = "../src/android_build_owner.rs"] mod android_build_owner;
 #[path = "../src/android_toolchain.rs"] mod android_toolchain;
+#[path = "../src/ios_archive_protocol.rs"] mod ios_archive_protocol;
+#[path = "../src/ios_archive_owner.rs"] mod ios_archive_owner;
+#[path = "../src/ios_toolchain.rs"] mod ios_toolchain;
 #[path = "../src/saved_command_owner.rs"] mod saved_command_owner;
 #[path = "../src/runtime.rs"] mod runtime;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

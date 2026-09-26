@@ -95,6 +95,16 @@ pub(crate) struct PassiveInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) struct ConfigurationInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct IOSArchiveInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl IOSArchiveInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("ios_archive_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl PassiveInstalledProfile {
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
         if !macos_bindings() { return Err(unavailable()); }
@@ -445,7 +455,7 @@ fn unavailable() -> BridgeError { BridgeError::unavailable("The packaged runtime
 // separate: selecting a real project must not inherit Linux C/P2 services.
 fn macos_installed_passive_method(name: &str) -> bool {
     matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"
-        | "environment.requirements" | "github.setup.propose")
+        | "environment.requirements" | "github.setup.propose" | "release.version.observe")
 }
 fn linux_installed_passive_method(name: &str) -> bool {
     macos_installed_passive_method(name) || matches!(name,
@@ -1012,6 +1022,19 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
     }
+    /// Fixed installed full-Xcode domain. No development/ambient runtime fallback.
+    pub(crate) fn ios_archive_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn resolve_ios_archive_installed(&self, originals: &mut crate::installed_runtime::IOSArchiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        originals.inspect_once(IOSArchiveInstalledProfile { _private: () }, end, stop)
+    }
     /// Fixed diagnostics bootstrap, never the passive engine or edit protocol.
     /// These source/metadata checks do not qualify the neutral cwd, installed
     /// runtime custody, external tool policy or actual native document owner.
@@ -1365,13 +1388,13 @@ mod tests {
         }
     }
     #[test]
-    fn macos_installed_allowlist_is_only_the_eight_passive_draft_methods() {
+    fn macos_installed_allowlist_adds_only_saved_version_observation() {
         for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-            "environment.requirements", "github.setup.propose"] {
+            "environment.requirements", "github.setup.propose", "release.version.observe"] {
             assert!(macos_installed_passive_method(name));
         }
         for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "credentials.assess",
-            "release.version.observe", "metadata.text.observe", "metadata.text.validate", "metadata.text.prepare",
+            "release.version.edit", "Release.Version.Observe", "release.version.observe ", "metadata.text.observe", "metadata.text.validate", "metadata.text.prepare",
             "metadata.text.apply", "artifacts.candidate.observe", "release.evidence.observe", "environment.diagnostics", "github.connection.refresh",
             "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose"] {
             assert!(!macos_installed_passive_method(name));

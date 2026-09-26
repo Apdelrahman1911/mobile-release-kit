@@ -12,6 +12,7 @@ import stat
 import struct
 import uuid
 from bisect import bisect_right
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -355,14 +356,29 @@ def _thin(reader: _Reader, *, dsym: bool) -> MachOSlice:
     return MachOSlice(cpu, subtype, uuids[0], file_type, digest.hexdigest())
 
 
+@contextmanager
+def _macho_descriptor(path: Path, deadline: InspectionDeadline):
+    if type(deadline) is not InspectionDeadline:
+        from .ios_archive_operation import _IOSInspectionDeadline
+        if type(deadline) is _IOSInspectionDeadline:
+            with deadline.descriptor(path) as number:
+                yield number
+            return
+    # Ordinary/Store callers retain their unchanged standalone read semantics.
+    number = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        yield number
+    finally:
+        os.close(number)
+
+
 def inspect_macho(path: Path, *, dsym: bool = False,
                   deadline: InspectionDeadline | None = None) -> tuple[MachOSlice, ...]:
     """Inspect private immutable snapshot bytes without loading executable code."""
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        try:
+        with _macho_descriptor(path, deadline) as fd:
             attributes = os.fstat(fd)
             _require(stat.S_ISREG(attributes.st_mode) and 0 < attributes.st_size <= MAX_BINARY_SIZE, "input is not a bounded regular file")
             reader = _Reader(fd, 0, attributes.st_size, deadline)
@@ -395,7 +411,5 @@ def inspect_macho(path: Path, *, dsym: bool = False,
                 cursor = offset + size
             reader.zero(cursor, reader.size)
             return tuple(sorted(result, key=lambda item: (item.cpu, item.subtype)))
-        finally:
-            os.close(fd)
     except (OSError, struct.error, OverflowError) as error:
         raise ValidationError("Mach-O input could not be inspected safely") from error

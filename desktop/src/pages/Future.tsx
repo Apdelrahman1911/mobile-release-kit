@@ -5,12 +5,13 @@ import { futureReason } from '../certainty.ts';
 import { DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
-export function Releases({ info, offlineChecks, androidBuild, evidence }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode; evidence: ReactNode }) {
+export function Releases({ info, offlineChecks, androidBuild, iosArchive, evidence }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode }) {
   return <>
-    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, then review local checks and Android build inputs separately. Protected workflow dispatch is not available here." />
+    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, then review local checks, Android builds and unsigned iOS archives separately. Protected workflow dispatch is not available here." />
     {evidence}
     {offlineChecks}
     {androidBuild}
+    {iosArchive}
     <section className="card"><EmptyState icon="rocket" title="Authenticated release history is not loaded" description="A selected local folder is not authenticated or global history. Missing desktop records do not mean the project has never released."><DisabledAction label="Create release candidate" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Protected GitHub dispatch and authenticated release history are not implemented.')} /></EmptyState></section>
   </>;
 }

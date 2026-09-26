@@ -31,6 +31,7 @@ from .tooling import private_build_directory
 
 if TYPE_CHECKING:
     from .local_signing import SigningSession
+    from .ios_archive_operation import IOSArchiveOperation
 
 MAX_ENTRY_SIZE = 1024 * 1024 * 1024
 MAX_TOTAL_SIZE = 4 * 1024 * 1024 * 1024
@@ -1067,6 +1068,7 @@ def validate_xcarchive(
     symbols_policy: str,
     require_tools: bool = False,
     cancellation=None,
+    operation: IOSArchiveOperation | None = None,
 ) -> list[Finding]:
     """Validate a private archive snapshot; a signed candidate also needs pairing.
 
@@ -1076,15 +1078,27 @@ def validate_xcarchive(
     """
     from .ios_artifacts import _require_symbols_policy, inspect_archive_symbols, snapshot_ios_artifacts
 
+    if operation is not None:
+        from .ios_archive_operation import IOSArchiveOperation
+        from ._desktop_ios_archive_protocol import require
+        require(type(operation) is IOSArchiveOperation)
+        operation.require(operation.inputs.config, cancellation)
+        selected = operation.inputs.saved.configuration
+        require(archive == operation.artifact().path and expected_bundle_id == selected.bundle_id
+                and release is operation.inputs.saved.release and symbols_policy == selected.symbols_policy)
+
     try:
         _require_symbols_policy(symbols_policy)
-        with snapshot_ios_artifacts({"ios-archive": archive}, cancellation=cancellation) as snapshot:
+        with snapshot_ios_artifacts({"ios-archive": archive}, cancellation=cancellation, desktop_operation=operation) as snapshot:
             symbols = inspect_archive_symbols(
                 snapshot.unpack("ios-archive"), expected_bundle_id=expected_bundle_id,
                 release=release, symbols_policy=symbols_policy,
                 deadline=snapshot.deadline,
             )
             snapshot.assert_unchanged()
+            if operation is not None:
+                operation.inspection_observed(snapshot)
+                operation.advance("disposing-snapshot")
     except (ValidationError, OSError) as error:
         fatal = fatal_lifetime_error(error, "archive resource cleanup is unconfirmed; end this invocation")
         if fatal is not None:
@@ -1129,8 +1143,49 @@ def _run_checked(
         raise ValidationError(f"command failed with exit {result.returncode}: {argv[0]}")
 
 
+def _archive_command(container: tuple[str, str], container_path: Path, scheme: str,
+                     configuration: str, archive: Path, release: ReleaseVersion, *,
+                     program: str = "xcodebuild", derived_data: Path | None = None) -> list[str]:
+    """One shared unsigned/signed archive command policy, not an execution API."""
+    return [program, "-workspace" if container[0] == "workspace" else "-project", str(container_path),
+            "-scheme", scheme, "-configuration", configuration, "-destination", "generic/platform=iOS",
+            "-archivePath", str(archive), *(["-derivedDataPath", str(derived_data)] if derived_data is not None else []),
+            "archive", f"MARKETING_VERSION={release.name}",
+            f"CURRENT_PROJECT_VERSION={release.build}"]
+
+
 def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: SigningSession | None = None,
-                  execution_source=None, cancellation: DefaultCancellation | None = None) -> dict[str, Path]:
+                  execution_source=None, cancellation: DefaultCancellation | None = None,
+                  operation: IOSArchiveOperation | None = None) -> dict[str, Path]:
+    if operation is not None:
+        from .ios_archive_operation import IOSArchiveOperation
+        from ._desktop_ios_archive_protocol import require
+        require(type(operation) is IOSArchiveOperation and signed is False
+                and signing_session is None and execution_source is None)
+        operation.require(config, cancellation)
+        if sys.platform != "darwin":
+            raise ValidationError("iOS archive requires a macOS host")
+        selected = operation.inputs.saved.configuration
+        operation.advance("checking-xcode")
+        operation.check_xcode()
+        if selected.prepare:
+            operation.advance("preparing")
+            operation.run_preparation()
+        # Explicit saved selection only, checked after any configured prepare.
+        # No repository rediscovery and no reset of a previous build directory.
+        container_path = operation.files.configured_container()
+        archive = operation.files.namespace.path / "archive.xcarchive"
+        command = _archive_command(selected.container, container_path, selected.scheme, selected.configuration,
+            archive, operation.inputs.saved.release,
+            program=operation.request.native["toolchain"]["developerDir"] + "/usr/bin/xcodebuild",
+            derived_data=operation.files.work_path("DerivedData"))
+        command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
+        operation.advance("archiving")
+        operation.run_archive(command)
+        artifact = operation.capture_after()
+        # Diagnostic compatibility value only. Desktop consumes the original
+        # operation.artifact(), and the validator owns its one finite snapshot.
+        return {"ios-archive": artifact.path}
     if sys.platform != "darwin":
         raise ValidationError("iOS archive/export requires a macOS host")
     if signed and signing_session is None:
@@ -1166,23 +1221,8 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
         build_root = build_directory.path
         cancellation = build_directory.cancellation
         archive = build_root / "archive.xcarchive"
-        container_flag = "-workspace" if container[0] == "workspace" else "-project"
-        command = [
-            "xcodebuild",
-            container_flag,
-            str(container_path),
-            "-scheme",
-            scheme,
-            "-configuration",
-            ios.get("archiveConfiguration", "Release"),
-            "-destination",
-            "generic/platform=iOS",
-            "-archivePath",
-            str(archive),
-            "archive",
-            f"MARKETING_VERSION={release.name}",
-            f"CURRENT_PROJECT_VERSION={release.build}",
-        ]
+        command = _archive_command(container, container_path, scheme,
+            ios.get("archiveConfiguration", "Release"), archive, release)
         if signed:
             profile = os.environ.get("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER")
             if not profile:
