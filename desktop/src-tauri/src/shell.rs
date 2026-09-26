@@ -1577,7 +1577,14 @@ mod owned_gtk {
         let Some((id,dialog)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
         let Some(path) = q.path_target(index) else { q.path_failed(R::GtkTarget); return Err(()); };
         q.path_selection(id,index)?;
-        if !dialog.set_filename(path) { q.path_failed(R::GtkSelectionSetter); return Err(()); }
+        // Navigate into directory targets, as for the original folder picker.
+        // A setter return still cannot replace the activation's exact GFile check.
+        let selected = match dialog.property::<gtk::FileChooserAction>("action") {
+            gtk::FileChooserAction::SelectFolder => dialog.set_current_folder(path),
+            gtk::FileChooserAction::Open => dialog.set_filename(path),
+            _ => { q.path_failed(R::GtkDialogProperties); return Err(()); },
+        };
+        if !selected { q.path_failed(R::GtkSelectionSetter); return Err(()); }
         Ok(true)
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

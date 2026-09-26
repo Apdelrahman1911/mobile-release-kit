@@ -3827,6 +3827,11 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     self.assertIn("return Ok(false)", other_wait)
                     self.assertLess(activating.index("q.session_file_target(index)"), activating.index(readiness))
                 else:
+                    self.assertIn('match dialog.property::<gtk::FileChooserAction>("action")', selecting)
+                    self.assertIn("gtk::FileChooserAction::SelectFolder => dialog.set_current_folder(path)", selecting)
+                    self.assertIn("gtk::FileChooserAction::Open => dialog.set_filename(path)", selecting)
+                    self.assertEqual(selecting.count("dialog.set_current_folder(path)"), 1)
+                    self.assertNotIn("set_current_folder", activating)
                     different = "if !file.equal(&gtk::gio::File::for_path(&path))"
                     self.assertEqual(activating.count("file.equal("), 1)
                     self.assertIn("W::SelectionAbsent", wait)
