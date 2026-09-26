@@ -73,6 +73,7 @@ class SavedAndroidConfiguration:
     module: str
     variant: str
     application_id: str
+    upload_certificate_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +114,30 @@ def select_saved_android_configuration(
         raw=raw, source=spec["source"], name_key=spec["nameKey"], build_key=spec["buildKey"],
         ios_enabled=data["ios"].get("enabled") is True, module=module,
         variant=android.get("variant", "release"), application_id=android["applicationId"],
+        upload_certificate_sha256=android.get("uploadCertificateSha256"),
     )
+
+
+def bind_saved_android_validation(selected: SavedAndroidConfiguration, expected: object) -> bool:
+    """The displayed certificate is comparison DATA, never an override.
+
+    parse_config_text already owns the unchanged 64-hex/nonplaceholder policy.
+    Do not normalize transport text before comparing it to those saved bytes.
+    """
+    from ._desktop_android_build_protocol import ProtocolError, artifact_validation
+    if type(selected) is not SavedAndroidConfiguration:
+        _refuse("protocol-error")
+    try:
+        compared = artifact_validation(expected)
+    except ProtocolError:
+        _refuse("protocol-error")
+    if compared["mode"] == "structure-and-version":
+        return False
+    if selected.upload_certificate_sha256 is None:
+        _refuse("saved-config-invalid")
+    if compared["uploadCertificateSha256"] != selected.upload_certificate_sha256:
+        _refuse("saved-config-changed")
+    return True
 
 
 def bind_saved_android_version(

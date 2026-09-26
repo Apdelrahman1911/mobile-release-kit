@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { AndroidBuildController, androidBuildOwnerReason, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp } from '../src/androidBuild.ts';
+import { AndroidBuildController, androidBuildOwnerReason, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp } from '../src/androidBuild.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
@@ -23,10 +23,10 @@ const assurance = { basis: 'static-text', projectCodeExecuted: false, toolsProbe
   gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' };
 const info = { runtime: { state: 'available', mode: 'development', reason: null },
   capabilities: { methods: [{ method: 'release.version.observe', available: true, reason: '' }] } };
-function snapshot({ config = CONFIG, module = ':app', applicationId = 'org.example.app', source = 'release/version.properties', variant = 'release' } = {}) {
+function snapshot({ config = CONFIG, module = ':app', applicationId = 'org.example.app', source = 'release/version.properties', variant = 'release', uploadCertificateSha256 } = {}) {
   return { root: '/inert/never-opened', observedAt: '', observationScope: 'single-request-non-atomic',
     config: { path: 'release/mobile-release.json', state: 'format-valid', content: clone(config), issues: [],
-      data: { android: { enabled: true, module, applicationId, variant }, version: { source, nameKey: 'NAME', buildKey: 'BUILD' } } },
+      data: { android: { enabled: true, module, applicationId, variant, ...(uploadCertificateSha256 === undefined ? {} : { uploadCertificateSha256 }) }, version: { source, nameKey: 'NAME', buildKey: 'BUILD' } } },
     discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
     assurance: clone(assurance), issues: [] };
 }
@@ -49,12 +49,14 @@ function completed(op, selection = { module: ':app', variant: 'release', applica
   const findings = [{ ordinal: 0, check: 'aab-structure', status: 'FAIL' }];
   const summary = { total: 1, shown: 1, omitted: 0, counts: Object.fromEntries(ANDROID_BUILD_CORE_STATUSES.map((key) => [key, key === 'FAIL' ? 1 : 0])) };
   const command = { outcome: 'exited', exitCode: 0 };
-  const result = { schemaVersion: 1, scope: ANDROID_BUILD_SCOPE, usedConfig: clone(op.context.savedConfig), usedVersion: clone(op.context.savedVersion),
+  const result = { schemaVersion: 1, scope: ANDROID_BUILD_SCOPE, usedConfig: clone(op.context.savedConfig), usedVersion: clone(op.context.savedVersion), artifactValidation: clone(op.context.artifactValidation),
     selection: clone(selection), toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE, command: clone(command), findings: clone(findings), summary: clone(summary),
     artifacts: [{ logicalName: 'android-aab', platform: 'android', kind: 'aab', fileName: 'app-release.aab', size: 1024, sha256: '0'.repeat(64),
       architectures: ['arm64-v8a'], unknownAbi: false, freshness: 'not-established' }],
-    assurances: { structure: 'failed', nativeManifest: 'not-checked', applicationVersion: 'not-established', signer: 'not-inspected',
-      toolkitSigning: 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed' }, limitations: [...ANDROID_BUILD_LIMITATIONS] };
+    assurances: { structure: 'failed', nativeManifest: 'not-checked', applicationVersion: 'not-established',
+      signature: op.context.artifactValidation.mode === 'upload-signature' ? 'not-checked' : 'not-inspected',
+      signer: op.context.artifactValidation.mode === 'upload-signature' ? 'not-checked' : 'not-inspected',
+      toolkitSigning: 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed' }, limitations: ANDROID_BUILD_LIMITATIONS.map((item) => item === 'artifact-signer-not-inspected' && op.context.artifactValidation.mode === 'upload-signature' ? 'upload-signature-check-not-store-enrollment' : item) };
   return { ...terminal(op, 'complete', 'none'), stage: 'disposing-work', activity: { stage: 'disposing-work', selection, command, findings, summary },
     disposition: { work: 'removed', artifacts: 'retained-local-result' }, result };
 }
@@ -129,7 +131,7 @@ test('current completed snapshot wins over dirty draft and retained old baseline
   const op = await reviewed(h), consent = h.state.consent;
   assert.deepEqual(h.calls[0].input.savedConfig, NEW_CONFIG);
   assert.deepEqual(h.calls[0].input.savedVersion, { ...VERSION, source: 'release/current-version.env', name: '4.5.6-rc+7', build: 84 });
-  assert.deepEqual(Object.keys(h.calls[0].input).sort(), ['baselineGeneration', 'draftRevision', 'projectId', 'savedConfig', 'savedVersion']);
+  assert.deepEqual(Object.keys(h.calls[0].input).sort(), ['artifactValidation', 'baselineGeneration', 'draftRevision', 'projectId', 'savedConfig', 'savedVersion']);
   assert.deepEqual(consent.binding.selection, { module: ':current', variant: 'production', applicationId: 'org.current.app' });
   assert.equal(consent.binding.observationGeneration, h.project.observationGeneration);
   assert.equal(consent.binding.versionObservation.readEpoch, h.versionState.readEpoch);
@@ -329,7 +331,8 @@ test('actual native bridge sends four raw copied Android bodies, rejects bad cal
     return clone(reply);
   }, async (name, receive) => { event = name; callback = receive; return () => {}; });
   const input = { projectId: 'p1', draftRevision: 1, baselineGeneration: 1, savedConfig: clone(CONFIG),
-    savedVersion: { ...VERSION, source: 'release/version.properties', name: '1.2.3', build: 42 } };
+    savedVersion: { ...VERSION, source: 'release/version.properties', name: '1.2.3', build: 42 },
+    artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } };
   const before = clone(input), prepare = api.prepareAndroidBuild(input); input.savedVersion.build++; input.savedConfig.sha256 = '0'.repeat(64);
   gate.resolve(); await prepare;
   await api.startAndroidBuild({ operationId: OP, ownerGeneration: OWNER, consentVersion: ANDROID_BUILD_CONSENT });
@@ -362,9 +365,79 @@ test('component shares native-terminal-only output with Artifacts and provides r
   assert.match(source, /controller\.versionIntent\(\); onReadVersion\(\)/);
   assert.match(source, /post-run bytes may be reused\/stale/); assert.match(source, /signer is not inspected/);
   assert.doesNotMatch(source, /(?:window\.open|href=|download=|controller\.dispose\()/);
-  for (const help of [androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp]) {
+  for (const help of [androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp]) {
     for (const key of ['label', 'what', 'why', 'where', 'format', 'failure', 'requiredWhen']) assert.ok(help[key].length > 12, `${help.label}.${key}`);
   }
   assert.match(androidBuildInputHelp.what, /observe-v2/); assert.match(androidBuildOutputHelp.failure, /Complete may contain FAIL/);
   assert.match(androidBuildCancelHelp.failure, /Unknown cleanup is sticky/);
+});
+
+
+test('upload signature starts off, requires a saved public certificate and binds its literal completed observation', async (t) => {
+  const h = harness(t); await h.ready;
+  assert.equal(h.state.verifyUploadSignature, false);
+  h.controller.setVerifyUploadSignature(true);
+  assert.match(h.controller.prepareReason(), /uploadCertificateSha256/);
+  await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  h.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 2 });
+  h.dispatch({ type: 'snapshot-done', projectId: 'p1', requestId: 2,
+    snapshot: snapshot({ config: NEW_CONFIG, uploadCertificateSha256: 'aB'.repeat(32) }), observedAt: 2 });
+  await h.readVersion();
+  const op = await reviewed(h);
+  assert.deepEqual(h.calls[0].input.artifactValidation, { mode: 'upload-signature', uploadCertificateSha256: 'aB'.repeat(32) });
+  const sent = start(h, op), done = completed(op);
+  const findings = [['aab-structure', 'PASS'], ['aab-manifest', 'PASS'], ['signature', 'PASS'], ['signer', 'PASS']]
+    .map(([check, status], ordinal) => ({ ordinal, check, status }));
+  const summary = { total: 4, shown: 4, omitted: 0, counts: Object.fromEntries(ANDROID_BUILD_CORE_STATUSES.map((key) => [key, key === 'PASS' ? 4 : 0])) };
+  Object.assign(done.activity, { findings: clone(findings), summary: clone(summary) });
+  Object.assign(done.result, { findings, summary });
+  Object.assign(done.result.assurances, { structure: 'passed', nativeManifest: 'passed', applicationVersion: 'native-checked',
+    signature: 'passed', signer: 'matches-saved-upload-certificate' });
+  h.reply(sent.call, status(2, done)); await sent.done;
+  assert.equal(h.state.status.operation.result.assurances.signer, 'matches-saved-upload-certificate');
+  assert.equal(h.state.historical, false);
+  await h.controller.start(OP, OWNER); assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+});
+
+test('changing inspection mode retires an unstarted review once; switching back or Status cannot renew consent', async (t) => {
+  const h = harness(t), op = await reviewed(h);
+  assert.deepEqual(op.context.artifactValidation, { mode: 'structure-and-version', uploadCertificateSha256: null });
+  h.controller.setAcknowledged(OP, OWNER, true);
+  h.controller.setVerifyUploadSignature(true);
+  assert.equal(h.state.consent, null); assert.equal(h.calls.at(-1).kind, 'cancel');
+  h.controller.setVerifyUploadSignature(false); h.emit(status(2, op));
+  h.controller.setAcknowledged(OP, OWNER, true); await h.controller.start(OP, OWNER);
+  assert.equal(h.calls.filter((call) => call.kind === 'start').length, 0);
+  assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1);
+  assert.deepEqual(clone(h.state.status.operation.context.artifactValidation), op.context.artifactValidation);
+});
+
+test('late Prepare after mode change is only an original to cancel, and changed saved certificate retires review', async (t) => {
+  const h = harness(t); await h.ready;
+  const pending = h.controller.prepare(), call = h.calls[0], op = operation(call.input);
+  h.controller.setVerifyUploadSignature(true);
+  h.reply(call, status(1, op)); await pending;
+  assert.equal(h.state.consent, null); assert.equal(h.calls.at(-1).kind, 'cancel');
+  const g = harness(t); await g.ready;
+  g.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 2 });
+  g.dispatch({ type: 'snapshot-done', projectId: 'p1', requestId: 2,
+    snapshot: snapshot({ config: NEW_CONFIG, uploadCertificateSha256: 'ab'.repeat(32) }), observedAt: 2 });
+  await g.readVersion(); g.controller.setVerifyUploadSignature(true); const original = await reviewed(g);
+  const changed = clone(g.project); changed.snapshot.config.data.android.uploadCertificateSha256 = 'cd'.repeat(32);
+  g.replace(changed); // Even repeated digest/counter DATA cannot conceal a changed displayed field.
+  assert.equal(g.state.consent, null); assert.equal(g.calls.at(-1).kind, 'cancel');
+  g.emit(status(2, original)); await g.controller.start(OP, OWNER);
+  assert.equal(g.calls.filter((item) => item.kind === 'start').length, 0);
+  assert.equal(g.state.status.operation.context.artifactValidation.uploadCertificateSha256, 'ab'.repeat(32));
+});
+
+test('signature help distinguishes upload and Play signing certificates without credential import or signing', () => {
+  assert.match(androidBuildSignatureHelp.where, /Upload key certificate/);
+  assert.match(androidBuildSignatureHelp.where, /App signing key certificate/);
+  assert.match(androidBuildSignatureHelp.format, /64 hexadecimal characters without colons/);
+  assert.match(androidBuildSignatureHelp.what, /does not sign or upload/);
+  const source = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
+  assert.match(source, /Also verify upload signature/);
+  assert.match(source, /Signature integrity:/); assert.match(source, /Saved upload certificate:/);
+  assert.match(source, /controller.setVerifyUploadSignature/);
 });

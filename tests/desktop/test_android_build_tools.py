@@ -36,8 +36,8 @@ def file_data(path, *, mode=0o644, size=7, digest="a" * 64):
     return {"path": path, "size": size, "sha256": digest, "mode": mode}
 
 
-def manifest_data():
-    return {
+def manifest_data(*, signature=False):
+    data = {
         "schemaVersion": 1, "profile": subject.PROFILE, "target": subject.TARGET,
         "instance": "inert-data", "launchContract": subject.LAUNCH_CONTRACT,
         "versions": {"jdkVendor": "inert-data", "jdkVersion": "0.0-inert", "gradleVersion": "0.0-inert",
@@ -48,7 +48,8 @@ def manifest_data():
         "bundletool": {"version": subject.BUNDLETOOL_VERSION, "sha256": subject.BUNDLETOOL_SHA256},
         "roles": dict(subject.TOOL_ROLES),
         "files": [file_data("bundletool/bundletool.jar", digest=subject.BUNDLETOOL_SHA256),
-                  file_data("gradle/bin/gradle", mode=0o755), file_data("jdk/bin/java", mode=0o755),
+                  file_data("gradle/bin/gradle", mode=0o755), file_data(subject.AAPT2_PATH, mode=0o555),
+                  file_data("jdk/bin/java", mode=0o755),
                   file_data("jdk/bin/javac", mode=0o755), file_data("sdk/licenses/inert-license-data")],
         "osProfile": {"id": "inert-os-data-only", "inventorySha256": "c" * 64,
                       "shell": subject.OS_SHELL, "executableDirectory": subject.OS_EXECUTABLE_DIRECTORY,
@@ -56,6 +57,11 @@ def manifest_data():
                       "files": [file_data("/usr/bin/" + name, mode=0o755)
                                 for name in ("dash", "sed", "uname", "xargs")]},
     }
+    if signature:
+        data["files"].extend(file_data(path, mode=0o555) for path in
+                             (subject.JARSIGNER_PATH, subject.KEYTOOL_PATH))
+        data["files"].sort(key=lambda item: item["path"])
+    return data
 
 
 def encoded(document=None):
@@ -119,7 +125,7 @@ class Guard:
             self.depth -= 1
 
 
-def inert_operation():
+def inert_operation(*, signature=False, document=None):
     # Actual operation type, deliberately fabricated fields: constructor/owner
     # predicates only. There is no input descriptor, invocation or native owner.
     operation = object.__new__(AndroidBuildOperation)
@@ -128,8 +134,9 @@ def inert_operation():
     operation.source = types.SimpleNamespace(operation=operation, guard=operation.guard, active=True,
         request_returned=True, close_claimed=False, failure_observed=Mock())
     operation.guard._android_build_source = operation.source
-    operation.request = types.SimpleNamespace(native={"toolchain": encoded()[1]})
-    operation.inputs = types.SimpleNamespace(release=ReleaseVersion("1.2.3", 7), task=":app:bundleRelease",
+    document = manifest_data(signature=signature) if document is None else document
+    operation.request = types.SimpleNamespace(native={"toolchain": encoded(document)[1]})
+    operation.inputs = types.SimpleNamespace(release=ReleaseVersion("1.2.3", 7), task=":app:bundleRelease", check_signer=signature,
         saved=types.SimpleNamespace(configuration=types.SimpleNamespace(module=":app")))
     operation.files = object.__new__(AndroidBuildFiles)
     operation.files.operation = operation
@@ -150,14 +157,19 @@ def inert_operation():
     return operation
 
 
-def inert_tools(*, selected=True):
-    operation = inert_operation()
+def inert_tools(*, selected=True, signature=False, document=None):
+    document = manifest_data(signature=signature) if document is None else document
+    operation = inert_operation(signature=signature, document=document)
     tools = subject.AndroidValidationTools(operation, operation.request.native["toolchain"])
     operation.tools = tools
-    tools.profile, tools._acquired = profile_data(), True
+    tools.profile, tools._acquired = profile_data(document), True
     if selected:
-        tools._project_claimed = True
-        tools._project_data = subject._selection_data(selection_data(), tools.profile, root_module=False)
+        # Admission remains fabricated DATA; only the pure selection and fixed
+        # inventory predicates run. There are no live metadata observations.
+        with patch.object(tools, "check"):
+            if signature:
+                tools.require_signature_tools()
+            tools.check_project_inputs(selection_data())
     return tools
 
 
@@ -270,6 +282,17 @@ class ManifestDataTests(unittest.TestCase):
         with self.assertRaises(subject.AndroidToolError):
             subject._parse_manifest(b" " * (subject.MAX_MANIFEST_BYTES + 1), subject._binding(encoded()[1]))
 
+    def test_fixed_aapt2_leaf_is_required_before_any_dispatch(self):
+        for change in ("missing", "empty", "not-executable"):
+            data = manifest_data()
+            leaf = next(row for row in data["files"] if row["path"] == subject.AAPT2_PATH)
+            if change == "missing":
+                data["files"].remove(leaf)
+            else:
+                leaf["size" if change == "empty" else "mode"] = 0 if change == "empty" else 0o444
+            with self.subTest(change=change), self.assertRaises(subject.AndroidToolError):
+                profile_data(data)
+
     def test_malformed_json_is_fixed_refusal(self):
         for raw in (b'{"schemaVersion":1,"schemaVersion":1}', b'{"n":1.2}', b'{"n":NaN}', b'{"n":true}',
                     b'{"n":null}', b'{"n":9007199254740992}', b'{"n":"\\ud800"}', b'\xef\xbb\xbf{}', b'\xff'):
@@ -339,6 +362,17 @@ class SelectionDataTests(unittest.TestCase):
         result = subject._selection_data(data, profile_data(), root_module=True)
         self.assertEqual(dict(result)["module_gradle_properties"], b"x=y")
 
+    def test_aapt2_and_jna_project_selection_cannot_override_fixed_launches(self):
+        conflicts = ("android.aapt2FromMavenOverride", "android.aapt2Version", "android.aapt2Platform",
+                     "jna.nosys", "jna.boot.library.path", "jna.boot.library.name", "jna.tmpdir",
+                     "jna.nounpack", "jnidispatch.path")
+        for field in ("local_properties", "root_gradle_properties", "module_gradle_properties"):
+            for key in conflicts:
+                for selection in (key, key.upper(), "systemProp." + key, "SYSTEMPROP." + key.upper()):
+                    data = selection_data(); data[field] = (selection + "=conflicting").encode("ascii")
+                    with self.subTest(field=field, key=selection), self.assertRaises(subject.AndroidToolError):
+                        subject._selection_data(data, profile_data(), root_module=False)
+
     def test_once_only_selection_retains_immutable_bytes_and_cannot_retry_failure(self):
         tools, data = inert_tools(selected=False), selection_data()
         with patch.object(tools, "check") as checked:
@@ -358,6 +392,97 @@ class SelectionDataTests(unittest.TestCase):
                 tools.check_project_inputs(selection_data())
         self.assertTrue(tools._project_claimed)
         self.assertIsNone(tools._project_data)
+
+
+class SignatureToolAdmissionDataTests(unittest.TestCase):
+    def test_extra_signature_files_do_not_change_five_manifest_roles_or_basic_mode(self):
+        for present in (False, True):
+            data = manifest_data(signature=present)
+            self.assertEqual(set(data["roles"]), {"java", "javac", "gradle", "bundletool", "sdk"})
+            profile = profile_data(data)
+            self.assertEqual(subject.JARSIGNER_PATH in {item.path for item in profile.files}, present)
+            tools = inert_tools(selected=False, document=data)
+            with patch.object(tools, "check") as checked:
+                with self.assertRaises(subject.AndroidToolError):
+                    tools.require_signature_tools()
+                checked.assert_not_called()
+                tools.check_project_inputs(selection_data())
+            self.assertFalse(tools._signature_claimed or tools._signature_ready)
+        data = manifest_data(signature=True)
+        data["roles"]["jarsigner"] = subject.JARSIGNER_PATH
+        with self.assertRaises(subject.AndroidToolError):
+            profile_data(data)
+
+    def test_missing_empty_nonexecutable_or_other_jdk_leaves_refuse_before_selection(self):
+        for path in (subject.JARSIGNER_PATH, subject.KEYTOOL_PATH):
+            for change in ("missing", "empty", "not-executable", "other-jdk"):
+                data = manifest_data(signature=True)
+                leaf = next(item for item in data["files"] if item["path"] == path)
+                if change == "missing":
+                    data["files"].remove(leaf)
+                elif change == "other-jdk":
+                    leaf["path"] = "jdk/other/bin/" + path.rsplit("/", 1)[1]
+                    data["files"].sort(key=lambda item: item["path"])
+                else:
+                    leaf["size" if change == "empty" else "mode"] = 0 if change == "empty" else 0o444
+                tools = inert_tools(selected=False, signature=True, document=data)
+                with self.subTest(path=path, change=change), patch.object(tools, "check") as checked, \
+                     patch.object(subject.os, "open") as opened, patch("mobile_release.android.run_owned") as dispatched:
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.require_signature_tools()
+                    self.assertEqual(tools._first_error.reason, "toolchain-mismatch")
+                    self.assertTrue(tools._signature_claimed)
+                    self.assertFalse(tools._signature_ready)
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.require_signature_tools()
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.check_project_inputs(selection_data())
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.gradle_command(tools.task, WORK)
+                    checked.assert_called_once_with()
+                    opened.assert_not_called(); dispatched.assert_not_called()
+                    self.assertFalse(tools._project_claimed)
+                    self.assertIsNone(tools._project_data)
+
+    def test_upload_admission_is_once_and_precedes_project_selection(self):
+        tools = inert_tools(selected=False, signature=True)
+        with patch.object(tools, "check") as checked:
+            with self.assertRaises(subject.AndroidToolError):
+                tools.check_project_inputs(selection_data())
+            checked.assert_not_called()
+            self.assertFalse(tools._project_claimed)
+            tools.require_signature_tools()
+            self.assertTrue(tools._signature_claimed and tools._signature_ready)
+            with self.assertRaises(subject.AndroidToolError):
+                tools.require_signature_tools()
+            checked.assert_called_once_with()
+            tools.check_project_inputs(selection_data())
+            self.assertEqual(checked.call_count, 3)
+        self.assertIsNotNone(tools._project_data)
+        for mutate in (lambda t: setattr(t, "_acquired", False), lambda t: setattr(t, "_close_claimed", True),
+                       lambda t: setattr(t, "_project_claimed", True), lambda t: setattr(t, "_project_data", ()),
+                       lambda t: setattr(t.operation, "tools", object()), lambda t: setattr(t.source, "active", False)):
+            tools = inert_tools(selected=False, signature=True)
+            mutate(tools)
+            with patch.object(tools, "check") as checked, self.assertRaises(subject.AndroidToolError):
+                tools.require_signature_tools()
+            checked.assert_not_called()
+            self.assertFalse(tools._signature_claimed or tools._signature_ready)
+
+    def test_failed_preflight_preserves_failure_and_never_becomes_ready_or_retries(self):
+        for error in (subject.AndroidToolError(), ProcessCleanupError("inert lifetime"), KeyboardInterrupt()):
+            tools = inert_tools(selected=False, signature=True)
+            with self.subTest(error=type(error).__name__), patch.object(tools, "check", side_effect=error) as checked:
+                with self.assertRaises(type(error)):
+                    tools.require_signature_tools()
+                with self.assertRaises(subject.AndroidToolError):
+                    tools.require_signature_tools()
+                checked.assert_called_once_with()
+            self.assertIs(tools._first_error, error)
+            self.assertIn(error, tools.guard.lifetime_ledger.errors)
+            self.assertTrue(tools._signature_claimed)
+            self.assertFalse(tools._signature_ready)
+            self.assertEqual(tools._unknown_seen, isinstance(error, ProcessCleanupError))
 
 
 class OwnerAndCommandDataTests(unittest.TestCase):
@@ -396,6 +521,10 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             self.assertEqual(env["PATH"], ROOT + "/jdk/bin:/usr/bin")
             self.assertEqual(env["ANDROID_SDK_ROOT"], ROOT + "/sdk")
             self.assertEqual(shlex.split(env["JAVA_OPTS"]), list(subject._jvm_arguments(WORK)))
+            for option in ("-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+                           f"-Djna.tmpdir={WORK}"):
+                self.assertIn(option, shlex.split(env["JAVA_OPTS"]))
+            self.assertNotIn("-Djna.nounpack=true", shlex.split(env["JAVA_OPTS"]))
             self.assertFalse(set(poison).difference({"JAVA_OPTS", "MOBILE_RELEASE_BUILD_NUMBER"}).intersection(env))
             self.assertFalse(set(poison.values()).intersection(env.values()))
             env["HOME"] = "changed"
@@ -423,6 +552,7 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             self.assertEqual(shlex.split(jvm), list(subject._jvm_arguments(WORK)))
             for key, value in subject._fixed_properties(ROOT):
                 self.assertIn(f"-D{key}={value}", argv); self.assertIn(f"-P{key}={value}", argv)
+            self.assertIn(f"-Pandroid.aapt2FromMavenOverride={ROOT}/gradle/native/aapt2/aapt2", argv)
             self.assertNotIn("gradlew", argv); self.assertNotIn("/usr/bin/env", argv)
             with self.assertRaises(subject.AndroidToolError):
                 tools.gradle_command(":other:bundleRelease", WORK)
@@ -455,6 +585,84 @@ class OwnerAndCommandDataTests(unittest.TestCase):
             with self.assertRaises(subject.AndroidToolError):
                 tools.bundletool_command(snapshot)
         dispatched.assert_not_called()
+
+    def test_signature_argv_uses_same_jdk_original_path_and_every_inspector_jvm_control(self):
+        tools, snapshot = inert_tools(signature=True), WORK.parent / "artifacts/app-release.aab"
+        artifact = object.__new__(OriginalAndroidArtifact)
+        artifact.files, artifact._native, artifact._reader, artifact.check = tools.files, True, None, Mock()
+        tools.files.artifact = tools.files._original_artifact = tools.operation._artifact = artifact
+        options = ("-J-Xms64m", "-J-Xmx1024m", "-J-XX:MaxMetaspaceSize=512m", "-J-Dfile.encoding=UTF-8",
+                   f"-J-Duser.home={WORK}", f"-J-Djava.io.tmpdir={WORK}", "-J-Djna.nosys=true",
+                   "-J-Djna.boot.library.path=", "-J-Djna.boot.library.name=jnidispatch", f"-J-Djna.tmpdir={WORK}")
+        with patch.object(tools, "check") as checked, \
+             patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+             patch.object(OriginalAndroidArtifact, "path", new_callable=PropertyMock, return_value=snapshot), \
+             patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
+            self.assertEqual(tools.jarsigner_command(snapshot),
+                             (ROOT + "/jdk/bin/jarsigner", *options, "-verify", "-strict", str(snapshot)))
+            self.assertEqual(tools.keytool_command(snapshot),
+                             (ROOT + "/jdk/bin/keytool", *options, "-printcert", "-jarfile", str(snapshot)))
+            self.assertEqual(checked.call_count, 2)
+            self.assertEqual(artifact.check.call_count, 2)
+        dispatched.assert_not_called(); opened.assert_not_called()
+
+    def test_signature_builders_require_upload_preflight_before_any_artifact_access(self):
+        for signature in (False, True):
+            tools = inert_tools(selected=False, signature=signature)
+            with patch.object(tools, "_inspection_input") as original_input:
+                for name in ("jarsigner_command", "keytool_command"):
+                    with self.subTest(signature=signature, builder=name), self.assertRaises(subject.AndroidToolError):
+                        getattr(tools, name)(Path("/inert/no-artifact.aab"))
+            original_input.assert_not_called()
+
+    def test_signature_builders_refuse_wrong_original_borrow_path_owner_or_failed_checks(self):
+        for name in ("jarsigner_command", "keytool_command"):
+            for change in ("foreign-path", "string-path", "no-native", "python-reader", "foreign-artifact",
+                           "foreign-files", "replaced-artifact", "replaced-original", "replaced-tools",
+                           "retired-source", "closed", "unselected", "tool-check", "artifact-check", "stop"):
+                tools, snapshot = inert_tools(signature=True), WORK.parent / "artifacts/app-release.aab"
+                artifact = object.__new__(OriginalAndroidArtifact)
+                artifact.files, artifact._native, artifact._reader, artifact.check = tools.files, True, None, Mock()
+                tools.files.artifact = tools.files._original_artifact = tools.operation._artifact = artifact
+                expected_error, path = subject.AndroidToolError, snapshot
+                if change == "foreign-path":
+                    path = Path("/inert/other.aab")
+                elif change == "string-path":
+                    path = str(snapshot)
+                elif change == "no-native":
+                    artifact._native = False
+                elif change == "python-reader":
+                    artifact._reader = object()
+                elif change == "foreign-artifact":
+                    tools.operation._artifact = object()
+                elif change == "foreign-files":
+                    artifact.files = object()
+                elif change == "replaced-artifact":
+                    tools.files.artifact = object()
+                elif change == "replaced-original":
+                    tools.files._original_artifact = object()
+                elif change == "replaced-tools":
+                    tools.operation.tools = object()
+                elif change == "retired-source":
+                    tools.source.active = False
+                elif change == "closed":
+                    tools._close_claimed = True
+                elif change == "unselected":
+                    tools._project_data = None
+                elif change == "artifact-check":
+                    artifact.check.side_effect = subject.AndroidToolError()
+                elif change == "stop":
+                    expected_error = KeyboardInterrupt
+                    tools.operation.checkpoint.side_effect = KeyboardInterrupt()
+                with self.subTest(builder=name, change=change), patch.object(tools, "check") as checked, \
+                     patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+                     patch.object(OriginalAndroidArtifact, "path", new_callable=PropertyMock, return_value=snapshot), \
+                     patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
+                    if change == "tool-check":
+                        checked.side_effect = subject.AndroidToolError()
+                    with self.assertRaises(expected_error):
+                        getattr(tools, name)(path)
+                dispatched.assert_not_called(); opened.assert_not_called()
 
     def test_builders_refuse_before_selection_and_checks_do_not_rehash(self):
         tools = inert_tools(selected=False)

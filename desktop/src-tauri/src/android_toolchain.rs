@@ -169,6 +169,9 @@ fn parse_manifest(raw: &[u8], profile: &AndroidToolchainProfile) -> Option<Inven
         if f.size == 0 || role != &d.roles.bundletool && f.mode & 0o111 == 0 { return None; }
         if role == &d.roles.bundletool && (f.sha256 != BUNDLETOOL_SHA256 || f.size > BUNDLETOOL_MAX_BYTES) { return None; }
     }
+    // AGP's local override must name the inventoried native member. An old
+    // profile cannot fall back to project/cache-selected Maven extraction.
+    if !d.files.iter().any(|f| f.path == "gradle/native/aapt2/aapt2" && f.size > 0 && f.mode & 0o111 != 0) { return None; }
     let os = &d.os_profile;
     if !d.files.iter().any(|f| f.path.starts_with("sdk/")) || os.id != profile.os.id || os.inventory_sha256 != profile.os.sha256
         || os.files != profile.os.files || !files_valid(&os.files, true) || os.shell != "/usr/bin/dash" || os.executable_directory != "/usr/bin"
@@ -316,7 +319,7 @@ mod pure_tests {
     }
     fn manifest_data() -> Value {
         let os = os_data(); let os_hash = digest(&serde_json::to_vec(&os).unwrap());
-        let files = ["bundletool/bundletool.jar","gradle/bin/gradle","jdk/bin/java","jdk/bin/javac","sdk/licenses/inert"]
+        let files = ["bundletool/bundletool.jar","gradle/bin/gradle","gradle/native/aapt2/aapt2","jdk/bin/java","jdk/bin/javac","sdk/licenses/inert"]
             .map(|path| json!({"path":path,"size":1,"mode":493,
                 "sha256":if path == "bundletool/bundletool.jar" { BUNDLETOOL_SHA256.to_owned() } else { "a".repeat(64) }}));
         json!({"schemaVersion":1,"profile":PROFILE,"target":TARGET,"instance":"inert-data-only",
@@ -347,7 +350,7 @@ mod pure_tests {
         assert!(OS_CONTRACT_BYTES.is_none() && AndroidToolchainProfile::compiled().is_none());
         let raw = serde_json::to_vec(&manifest_data()).unwrap(); let profile = profile(&raw);
         let parsed = parse_manifest(&raw, &profile).unwrap();
-        assert_eq!(parsed.data.files.len(), 5);
+        assert_eq!(parsed.data.files.len(), 6);
         assert_eq!(profile.root, PathBuf::from("/opt/mobile-release-kit/android/inert-data-only"));
         let mut changed = raw.clone(); changed.push(b' ');
         assert!(parse_manifest(&changed, &profile).is_none()); // Equal JSON is not equal anchored bytes.
@@ -363,7 +366,7 @@ mod pure_tests {
             let mut value = manifest_data(); value["roles"].as_object_mut().unwrap().remove(role);
             assert!(!manifest_valid(&value), "missing role {role}");
         }
-        for file in ["jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle", "bundletool/bundletool.jar", "sdk/licenses/inert"] {
+        for file in ["jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle", "gradle/native/aapt2/aapt2", "bundletool/bundletool.jar", "sdk/licenses/inert"] {
             let mut value = manifest_data(); value["files"].as_array_mut().unwrap().retain(|f| f["path"] != file);
             assert!(!manifest_valid(&value), "missing file {file}");
         }

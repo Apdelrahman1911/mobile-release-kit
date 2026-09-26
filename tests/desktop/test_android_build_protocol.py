@@ -27,7 +27,8 @@ def request_data():
                         "savedConfig": {"bytes": 512, "sha256": "c" * 64},
                         "savedVersion": {"source": "release/version.properties", "bytes": 41,
                                          "sha256": "d" * 64, "name": "1.2.3", "build": 42},
-                        "platform": "android", "operation": "android-build-inspect"},
+                        "platform": "android", "operation": "android-build-inspect",
+                        "artifactValidation": {"mode": "structure-and-version", "uploadCertificateSha256": None}},
             "native": {"profile": "linux-gnu-x86_64", "projectRoot": "/PRIVATE_PROJECT", "cwd": "/PRIVATE_CWD",
                        "rootIdentity": dict(identity), "toolchain": {"schemaVersion": 1,
                        "profile": wire.TOOLCHAIN_PROFILE, "root": "/PRIVATE_TOOLCHAIN", "rootIdentity": dict(identity),
@@ -58,7 +59,8 @@ def complete(request, findings=None):
     activity = wire.project_activity(report() if findings is None else findings, stage="disposing-work",
                                      selection=selection(), command={"outcome": "exited", "exitCode": 0})
     result = wire.project_result(activity, artifact(), used_config=request.context["savedConfig"],
-                                 used_version=request.context["savedVersion"], toolchain_profile=wire.TOOLCHAIN_PROFILE)
+                                 used_version=request.context["savedVersion"], toolchain_profile=wire.TOOLCHAIN_PROFILE,
+                                 validation=request.context["artifactValidation"])
     return {"schemaVersion": 1, "context": copy.deepcopy(request.context), "outcome": "complete", "reason": "none",
             "activity": activity, "disposition": {"work": "removed", "artifacts": "retained-local-result"}, "result": result,
             "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": True,
@@ -77,9 +79,111 @@ def command_failure(request, code=7):
     return value
 
 
+def upload_complete(*, signature=Status.PASS, signer=Status.PASS, manifest=Status.PASS):
+    data = request_data()
+    data["context"]["artifactValidation"] = {"mode": "upload-signature", "uploadCertificateSha256": "aB" * 32}
+    request = wire.parse_request(encoded(data))
+    rows = [("android.aab.structure", Status.PASS), ("android.aab.manifest", manifest),
+            ("android.aab.signature", signature)]
+    if signer is not None:
+        rows.append(("android.aab.signer", signer))
+    value = complete(request, report(rows))
+    value["lifetime"]["commands"] = 3 if signer is None else 4
+    return request, value
+
+
 class AndroidBuildProtocolTests(unittest.TestCase):
     def setUp(self):
         self.request = wire.parse_request(encoded(request_data()))
+
+    def test_v2_choice_is_required_closed_transport_and_not_a_fingerprint_override(self):
+        self.assertEqual((wire.PROTOCOL, wire.CONSENT), ("mrk-android-build/2", "saved-android-build-inspect-v2"))
+        for comparison in ({"mode": "structure-and-version", "uploadCertificateSha256": None},
+                           {"mode": "upload-signature", "uploadCertificateSha256": "aB" * 32},
+                           {"mode": "upload-signature", "uploadCertificateSha256": ":".join(["aB"] * 32)}):
+            data = request_data()
+            data["context"]["artifactValidation"] = comparison
+            self.assertEqual(wire.parse_request(encoded(data)).context["artifactValidation"], comparison)
+        for comparison in (None, {}, {"mode": "upload-signature"},
+                           {"mode": "upload-signature", "uploadCertificateSha256": None},
+                           {"mode": "structure-and-version", "uploadCertificateSha256": "a" * 64},
+                           {"mode": "sign", "uploadCertificateSha256": "a" * 64},
+                           {"mode": "upload-signature", "uploadCertificateSha256": "a" * 96},
+                           {"mode": "upload-signature", "uploadCertificateSha256": "a" * 64 + "\n"}):
+            data = request_data()
+            data["context"]["artifactValidation"] = comparison
+            with self.subTest(comparison=comparison), self.assertRaises(wire.ProtocolError):
+                wire.parse_request(encoded(data))
+        data = request_data()
+        del data["context"]["artifactValidation"]
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(encoded(data))
+        with self.assertRaises(wire.ProtocolError):
+            wire.parse_request(encoded({**request_data(), "protocol": "mrk-android-build/1"}))
+
+    def test_upload_assurances_require_both_actual_signature_and_signer_pass(self):
+        for signature, signer, expected_signature, expected_signer, commands in (
+            (Status.PASS, Status.PASS, "passed", "matches-saved-upload-certificate", 4),
+            (Status.PASS, Status.FAIL, "passed", "failed", 4),
+            (Status.FAIL, None, "failed", "not-checked", 3),
+        ):
+            request, value = upload_complete(signature=signature, signer=signer)
+            wire.validate_terminal(value, request)
+            self.assertEqual(value["result"]["assurances"]["signature"], expected_signature)
+            self.assertEqual(value["result"]["assurances"]["signer"], expected_signer)
+            self.assertNotIn("artifact-signer-not-inspected", value["result"]["limitations"])
+            for count in range(6):
+                changed = copy.deepcopy(value)
+                changed["lifetime"]["commands"] = count
+                if count == commands:
+                    wire.validate_terminal(changed, request)
+                else:
+                    with self.subTest(signature=signature, signer=signer, count=count), self.assertRaises(wire.ProtocolError):
+                        wire.validate_terminal(changed, request)
+        request, value = upload_complete(manifest=Status.FAIL)
+        wire.validate_terminal(value, request)
+        self.assertEqual(value["result"]["assurances"]["applicationVersion"], "not-established")
+        self.assertEqual(value["result"]["assurances"]["signer"], "matches-saved-upload-certificate")
+        # Valid content comparison does not upgrade independent manifest policy.
+        invalid = complete(request, report([("android.aab.structure", Status.FAIL)]))
+        invalid["lifetime"]["commands"] = 1
+        wire.validate_terminal(invalid, request)
+        self.assertEqual(invalid["result"]["assurances"]["signature"], "not-checked")
+
+    def test_basic_mode_or_wrong_bound_certificate_cannot_import_signature_success(self):
+        request, value = upload_complete()
+        for field, replacement in (("mode", "structure-and-version"), ("uploadCertificateSha256", "cd" * 32)):
+            changed = copy.deepcopy(value)
+            changed["result"]["artifactValidation"][field] = replacement
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+        basic = complete(self.request)
+        basic["activity"] = copy.deepcopy(value["activity"])
+        basic["result"] = copy.deepcopy(value["result"])
+        with self.assertRaises(wire.ProtocolError):
+            wire.validate_terminal(basic, self.request)
+        for rows in ([('android.aab.signer', Status.PASS)],
+                     [('android.aab.signature', Status.FAIL), ('android.aab.signer', Status.PASS)],
+                     [('android.aab.signature', Status.PASS)],
+                     [('android.aab.signature', Status.PASS), ('android.aab.signature', Status.FAIL), ('android.aab.signer', Status.PASS)]):
+            with self.subTest(rows=rows), self.assertRaises(wire.ProtocolError):
+                complete(request, report([('android.aab.structure', Status.PASS), ('android.aab.manifest', Status.PASS), *rows]))
+
+    def test_upload_result_still_requires_original_closes_and_cannot_renew_context(self):
+        request, value = upload_complete()
+        for field in ("inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"):
+            changed = copy.deepcopy(value)
+            changed["lifetime"][field] = False
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+            changed.update(outcome="unknown", reason="cleanup-unknown", result=None)
+            changed["disposition"]["artifacts"] = "retained-incomplete"
+            wire.validate_terminal(changed, request)
+        stream = wire.AndroidBuildFrames(request)
+        stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+        request.context["artifactValidation"]["uploadCertificateSha256"] = "cd" * 32
+        with self.assertRaises(wire.ProtocolError):
+            stream.response("progress", {"schemaVersion": 1, "stage": "inputs-bound"})
 
     def test_closed_request_domains_cannot_authorize_offline_argv_or_signing(self):
         data = request_data()
@@ -310,7 +414,7 @@ class AndroidBuildProtocolTests(unittest.TestCase):
         for suffix in ([("android.aab.manifest", Status.SKIP)],
                        [("android.aab.manifest", Status.PASS), ("android.aab.package", Status.FAIL)],
                        [("android.aab.manifest", Status.PASS), ("android.aab.manifest", Status.PASS)]):
-            value = complete(self.request, report([("android.aab.structure", Status.PASS), *suffix]))
+            value = complete(self.request, report([("android.aab.structure", Status.PASS), *suffix, ("android.aab.signer", Status.SKIP)]))
             wire.validate_terminal(value, self.request)
             self.assertEqual(value["result"]["assurances"]["applicationVersion"], "not-established")
         findings = report([("android.aab.structure", Status.PASS), ("android.build.process-lifetime", Status.FAIL)])

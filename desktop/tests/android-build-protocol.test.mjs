@@ -10,7 +10,7 @@ import { ANDROID_BUILD_ABIS, ANDROID_BUILD_CHECK_IDS, ANDROID_BUILD_CONSENT, AND
   ANDROID_BUILD_SIGNER_MESSAGE, ANDROID_BUILD_STAGES, ANDROID_BUILD_STATUS_LIMIT, ANDROID_BUILD_TOOLCHAIN_PROFILE,
   androidBuildAvailabilityText, androidBuildCounter, androidBuildError, androidBuildFindingText, androidBuildLimitationText,
   androidBuildOperationProgress, androidBuildReasonText, copyAndroidBuildRequest, encodeAndroidBuildRequest,
-  parseAndroidBuildResult, parseAndroidBuildSavedConfig, parseAndroidBuildSavedVersion, parseAndroidBuildStatus,
+  parseAndroidBuildArtifactValidation, parseAndroidBuildResult, parseAndroidBuildSavedConfig, parseAndroidBuildSavedVersion, parseAndroidBuildStatus,
   sameAndroidBuildData, sameAndroidBuildIdentity, sameAndroidBuildSavedPair } from '../src/androidBuildProtocol.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
@@ -19,7 +19,8 @@ const VERSION = { source: 'release/version.properties', bytes: 41, sha256: 'e'.r
 const ROWS = [['aab-structure', 'PASS'], ['aab-manifest', 'PASS'], ['signer', 'SKIP']];
 const clone = (value) => structuredClone(value);
 const decode = (value) => JSON.parse(new TextDecoder().decode(value));
-const request = () => ({ projectId: 'inert-android', draftRevision: 2, baselineGeneration: 3, savedConfig: clone(CONFIG), savedVersion: clone(VERSION) });
+const request = () => ({ projectId: 'inert-android', draftRevision: 2, baselineGeneration: 3, savedConfig: clone(CONFIG), savedVersion: clone(VERSION),
+  artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } });
 const context = () => ({ ...request(), platform: 'android', operation: 'android-build-inspect' });
 const selection = () => ({ module: ':app', variant: 'release', applicationId: 'org.example.app', task: ':app:bundleRelease' });
 function inspection(rows = ROWS) {
@@ -28,11 +29,11 @@ function inspection(rows = ROWS) {
   return { findings, summary: { total: findings.length, shown: findings.length, omitted: 0, counts } };
 }
 function report(rows = ROWS, assurancePatch = {}) {
-  return { schemaVersion: 1, scope: ANDROID_BUILD_SCOPE, usedConfig: clone(CONFIG), usedVersion: clone(VERSION),
+  return { schemaVersion: 1, scope: ANDROID_BUILD_SCOPE, usedConfig: clone(CONFIG), usedVersion: clone(VERSION), artifactValidation: clone(request().artifactValidation),
     selection: selection(), toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE, command: { outcome: 'exited', exitCode: 0 },
     ...inspection(rows), artifacts: [{ logicalName: 'android-aab', platform: 'android', kind: 'aab', fileName: 'app-release.aab',
       size: 1024, sha256: 'f'.repeat(64), architectures: ['arm64-v8a'], unknownAbi: false, freshness: 'not-established' }],
-    assurances: { structure: 'passed', nativeManifest: 'passed', applicationVersion: 'native-checked', signer: 'not-inspected',
+    assurances: { structure: 'passed', nativeManifest: 'passed', applicationVersion: 'native-checked', signature: 'not-inspected', signer: 'not-inspected',
       toolkitSigning: 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed', ...assurancePatch },
     limitations: [...ANDROID_BUILD_LIMITATIONS] };
 }
@@ -156,24 +157,23 @@ test('saved-pair comparison includes both hashes/byte counts plus source, effect
 });
 
 test('result copies preserve all nine statuses and fixed redaction without inventing a release decision', () => {
-  const rows = [['aab-structure', 'PASS'], ...ANDROID_BUILD_CORE_STATUSES.map((value) => ['other-core-finding', value])];
+  const rows = [...ROWS, ...ANDROID_BUILD_CORE_STATUSES.map((value) => ['other-core-finding', value])];
   const raw = report(rows, { nativeManifest: 'not-checked', applicationVersion: 'not-established' });
   const parsed = parseAndroidBuildResult(raw); assert.ok(parsed); assert.deepEqual(clone(parsed), raw); assert.notEqual(parsed, raw);
-  assert.deepEqual(parsed.findings.slice(1).map((row) => row.status), [...ANDROID_BUILD_CORE_STATUSES]);
+  assert.deepEqual(parsed.findings.slice(3).map((row) => row.status), [...ANDROID_BUILD_CORE_STATUSES]);
   raw.artifacts[0].sha256 = 'a'.repeat(64); raw.usedVersion.build++;
   assert.equal(parsed.artifacts[0].sha256, 'f'.repeat(64)); assert.equal(parsed.usedVersion.build, VERSION.build);
   assert.equal(parsed.assurances.signer, 'not-inspected'); assert.equal(parsed.assurances.toolkitSigning, 'not-requested');
   assert.equal(parsed.assurances.sourceBinding, 'not-established'); assert.equal(parsed.assurances.releaseReadiness, 'not-assessed');
-  for (const check of ANDROID_BUILD_CHECK_IDS.filter((key) => !['signer', 'core-lifecycle'].includes(key))) {
-    const single = report([['aab-structure', 'PASS'], [check, 'FAIL']], { structure: check === 'aab-structure' ? 'failed' : 'passed',
-      nativeManifest: ['aab-manifest', 'application-id', 'build-number', 'version-name', 'release-flags'].includes(check) ? 'failed' : 'not-checked',
-      applicationVersion: 'not-established' });
+  for (const check of ANDROID_BUILD_CHECK_IDS.filter((key) => !['aab-structure', 'signature', 'signer', 'core-lifecycle'].includes(key))) {
+    const rows = check === 'other-core-finding' ? [...ROWS, [check, 'FAIL']] : [['aab-structure', 'PASS'], [check, 'FAIL'], ['signer', 'SKIP']];
+    const single = report(rows, { nativeManifest: check === 'other-core-finding' ? 'not-checked' : 'failed', applicationVersion: 'not-established' });
     assert.ok(parseAndroidBuildResult(single), check);
   }
 });
 
 test('exact finding counts/ordinals and 128-row bound cannot silently truncate negative findings', () => {
-  const rows = [['aab-structure', 'PASS'], ...Array.from({ length: ANDROID_BUILD_MAX_FINDINGS - 1 }, () => ['other-core-finding', 'FAIL'])];
+  const rows = [...ROWS, ...Array.from({ length: ANDROID_BUILD_MAX_FINDINGS - ROWS.length }, () => ['other-core-finding', 'FAIL'])];
   const full = report(rows, { nativeManifest: 'not-checked', applicationVersion: 'not-established' });
   assert.equal(parseAndroidBuildResult(full).summary.shown, 128);
   assert.equal(parseAndroidBuildResult(report([...rows, ['application-id', 'FAIL']], { nativeManifest: 'failed', applicationVersion: 'not-established' })), null);
@@ -196,15 +196,13 @@ test('assurances are derived from exact supported findings, not accepted as opti
   const cases = [
     [[['aab-structure', 'PASS'], ['aab-manifest', 'PASS']], 'passed', 'passed', 'native-checked'],
     [[['aab-structure', 'FAIL']], 'failed', 'not-checked', 'not-established'],
-    [[['aab-structure', 'BLOCKED'], ['aab-manifest', 'PASS']], 'failed', 'not-checked', 'not-established'],
-    [[['aab-structure', 'PASS'], ['aab-structure', 'PASS']], 'not-checked', 'not-checked', 'not-established'],
     [[['aab-structure', 'PASS'], ['aab-manifest', 'INVALID']], 'passed', 'failed', 'not-established'],
     [[['aab-structure', 'PASS'], ['aab-manifest', 'SKIP']], 'passed', 'not-checked', 'not-established'],
     [[['aab-structure', 'PASS'], ['aab-manifest', 'PASS'], ['application-id', 'PASS']], 'passed', 'not-checked', 'not-established'],
     [[['aab-structure', 'PASS'], ['aab-manifest', 'PASS'], ['other-core-finding', 'PASS']], 'passed', 'not-checked', 'not-established'],
   ];
   for (const [rows, structure, nativeManifest, applicationVersion] of cases) {
-    const value = report(rows, { structure, nativeManifest, applicationVersion }); assert.ok(parseAndroidBuildResult(value));
+    const value = report(structure === 'failed' ? rows : [...rows, ['signer', 'SKIP']], { structure, nativeManifest, applicationVersion }); assert.ok(parseAndroidBuildResult(value));
     for (const key of ['structure', 'nativeManifest', 'applicationVersion']) {
       const forged = clone(value), current = forged.assurances[key];
       forged.assurances[key] = key === 'applicationVersion' ? (current === 'native-checked' ? 'not-established' : 'native-checked') :
@@ -212,7 +210,7 @@ test('assurances are derived from exact supported findings, not accepted as opti
       assert.equal(parseAndroidBuildResult(forged), null, key);
     }
   }
-  for (const [key, value] of [['signer', 'approved'], ['toolkitSigning', 'unsigned'], ['storeOperation', 'impossible'],
+  for (const [key, value] of [['signature', 'passed'], ['signer', 'approved'], ['toolkitSigning', 'unsigned'], ['storeOperation', 'impossible'],
     ['sourceBinding', 'verified'], ['releaseReadiness', 'ready'], ['nativeFinality', true]]) {
     const forged = report(); forged.assurances[key] = value; assert.equal(parseAndroidBuildResult(forged), null, key);
   }
@@ -437,7 +435,7 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
     'input-limit', 'result-limit', 'work-retained', 'cleanup-unknown'];
   assert.deepEqual(Object.keys(androidBuildReasonText).sort(), reasons.sort());
   assert.deepEqual(Object.keys(androidBuildFindingText).sort(), [...ANDROID_BUILD_CHECK_IDS].sort());
-  assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS].sort());
+  assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS, 'upload-signature-check-not-store-enrollment'].sort());
   assert.match(androidBuildReasonText['command-failed'], /Possible causes/); assert.match(androidBuildReasonText['command-incomplete'], /no exit code/);
   assert.match(androidBuildReasonText['cleanup-unknown'], /further execution stays blocked/); assert.match(androidBuildReasonText.none, /not release approval/);
   assert.equal(ANDROID_BUILD_SIGNER_MESSAGE, 'Toolkit signing was not requested; artifact signer was not inspected. Project code may have signed this file.');
@@ -448,4 +446,64 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
   assert.equal(androidBuildError({ get code() { reads++; return 'android_build_owner'; } }).code, 'android_build_protocol');
   assert.equal(androidBuildError({ code: 'PRIVATE_COMPILER_DIAGNOSIS', message: 'PRIVATE' }).code, 'android_build_protocol');
   assert.equal(reads, 0);
+});
+
+
+test('v2 inspection choice is required, default-off-shaped and preserves exact saved comparison text', () => {
+  assert.equal(ANDROID_BUILD_CONSENT, 'saved-android-build-inspect-v2');
+  for (const fingerprint of ['Ab'.repeat(32), Array(32).fill('Ab').join(':')]) {
+    const choice = { mode: 'upload-signature', uploadCertificateSha256: fingerprint };
+    assert.deepEqual(clone(parseAndroidBuildArtifactValidation(choice)), choice);
+    assert.deepEqual(decode(encodeAndroidBuildRequest('prepare_android_build', { ...request(), artifactValidation: choice })).artifactValidation, choice);
+  }
+  for (const choice of [undefined, null, {}, { mode: 'upload-signature' }, { mode: 'upload-signature', uploadCertificateSha256: null },
+    { mode: 'structure-and-version', uploadCertificateSha256: 'ab'.repeat(32) }, { mode: 'sign', uploadCertificateSha256: 'ab'.repeat(32) },
+    { mode: 'upload-signature', uploadCertificateSha256: 'a'.repeat(96) }, { mode: 'upload-signature', uploadCertificateSha256: 'a'.repeat(64) + '\n' }]) {
+    assert.equal(encodeAndroidBuildRequest('prepare_android_build', { ...request(), artifactValidation: choice }), null);
+  }
+  const missing = request(); delete missing.artifactValidation;
+  assert.equal(encodeAndroidBuildRequest('prepare_android_build', missing), null);
+  assert.equal(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER, consentVersion: 'saved-android-build-inspect-v1' }), null);
+});
+
+function uploadReport(signature = 'PASS', signer = 'PASS') {
+  const rows = [['aab-structure', 'PASS'], ['aab-manifest', 'PASS'], ['signature', signature], ...(signer === null ? [] : [['signer', signer]])];
+  const value = report(rows, { signature: signature === 'PASS' ? 'passed' : 'failed',
+    signer: signer === null ? 'not-checked' : signer === 'PASS' ? 'matches-saved-upload-certificate' : 'failed' });
+  value.artifactValidation = { mode: 'upload-signature', uploadCertificateSha256: 'Ab'.repeat(32) };
+  value.limitations = value.limitations.map((item) => item === 'artifact-signer-not-inspected' ? 'upload-signature-check-not-store-enrollment' : item);
+  return value;
+}
+
+test('native-finalized upload signature integrity and saved-certificate match remain separate from completed build', () => {
+  for (const [signature, signer, expected] of [['PASS', 'PASS', 'matches-saved-upload-certificate'], ['PASS', 'FAIL', 'failed'], ['FAIL', null, 'not-checked']]) {
+    const value = uploadReport(signature, signer), parsed = parseAndroidBuildResult(value);
+    assert.ok(parsed); assert.equal(parsed.assurances.signer, expected);
+    const op = completed(value); op.context.artifactValidation = clone(value.artifactValidation);
+    assert.equal(checkedOperation(op).outcome, 'complete');
+    assert.equal(checkedOperation(op).result.summary.counts.FAIL, signature === 'FAIL' || signer === 'FAIL' ? 1 : 0);
+    for (const phase of ['starting', 'running', 'stopping', 'unknown']) {
+      const provisional = clone(op); provisional.phase = phase;
+      assert.equal(parseAndroidBuildStatus(status(provisional)), null);
+    }
+    const wrongContext = clone(op); wrongContext.context.artifactValidation.uploadCertificateSha256 = 'cd'.repeat(32);
+    assert.equal(parseAndroidBuildStatus(status(wrongContext)), null);
+    assert.equal(parseAndroidBuildStatus(status(completed(value))), null); // Basic context cannot import upload inspection.
+  }
+});
+
+test('missing skipped contradictory or foreign-mode findings cannot imply a saved upload-certificate match', () => {
+  const prefix = [['aab-structure', 'PASS'], ['aab-manifest', 'PASS']];
+  for (const suffix of [[['signer', 'PASS']], [['signature', 'PASS']], [['signature', 'SKIP'], ['signer', 'PASS']],
+    [['signature', 'FAIL'], ['signer', 'PASS']], [['signature', 'PASS'], ['signature', 'FAIL'], ['signer', 'PASS']],
+    [['signature', 'PASS'], ['signer', 'PASS'], ['signer', 'FAIL']]]) {
+    const value = uploadReport(); Object.assign(value, inspection([...prefix, ...suffix]));
+    assert.equal(parseAndroidBuildResult(value), null);
+  }
+  const unknown = uploadReport(); Object.assign(unknown, inspection([...prefix, ['signature', 'PASS'], ['signer', 'PASS'], ['other-core-finding', 'PASS']]));
+  assert.equal(parseAndroidBuildResult(unknown), null);
+  Object.assign(unknown.assurances, { nativeManifest: 'not-checked', applicationVersion: 'not-established', signature: 'not-checked', signer: 'not-checked' });
+  assert.ok(parseAndroidBuildResult(unknown)); // Exact statuses retained, no optimistic assurance from an unrecognized row.
+  const basic = report(); Object.assign(basic, inspection([...prefix, ['signature', 'PASS'], ['signer', 'PASS']]));
+  assert.equal(parseAndroidBuildResult(basic), null);
 });

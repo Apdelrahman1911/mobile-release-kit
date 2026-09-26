@@ -62,6 +62,7 @@ def request_data(android=False):
     native = {"profile": "linux-gnu-x86_64", "projectRoot": "/inert/project", "cwd": "/inert/runtime",
               "rootIdentity": root}
     if android:
+        context["artifactValidation"] = {"mode": "structure-and-version", "uploadCertificateSha256": None}
         context["savedVersion"] = {"source": "release/version.properties", "bytes": 1,
                                    "sha256": "d" * 64, "name": "1.2.3", "build": 7}
         native["toolchain"] = {"schemaVersion": 1, "profile": android_wire.TOOLCHAIN_PROFILE,
@@ -81,6 +82,7 @@ def inert_operation(source):
     from mobile_release.android_build_operation import AndroidBuildOperation
     operation = object.__new__(AndroidBuildOperation)
     operation.source, operation.guard = source, source.guard
+    operation._pending = "bundletool"
     source.bind_operation(operation)
     return operation
 
@@ -504,6 +506,27 @@ class SavedCommandDispatchTests(unittest.TestCase):
                 with self.assertRaises(android_wire.ProtocolError):
                     owned_process.run_owned(["inert"], timeout=2700, output_limit=4 * 1024 * 1024, cancellation=guard)
                 command.assert_not_called()
+
+    def test_android_signature_caps_remain_role_specific_and_tighten_to_original_endpoint(self):
+        for role, ceiling in (("gradle", 2700), ("bundletool", 60), ("jarsigner", 120), ("keytool", 30)):
+            for remaining in (7, 2000):
+                guard, source = bound_source(AndroidBuildInput)
+                operation = inert_operation(source)
+                operation._pending = role
+                expected = min(ceiling, remaining)
+                with self.subTest(role=role, remaining=remaining), patch.object(source, "poll"), \
+                        patch.object(operation, "checkpoint"), patch.object(operation, "command_limits", return_value=(expected, 1)), \
+                        patch.object(control.time, "monotonic", return_value=source.work_end - remaining):
+                    self.assertEqual(source.command_limits(2700, role != "gradle", 1), (expected, 1))
+        # A jarsigner allowance cannot be borrowed by bundletool or keytool.
+        for role in ("bundletool", "keytool"):
+            guard, source = bound_source(AndroidBuildInput)
+            operation = inert_operation(source)
+            operation._pending = role
+            with self.subTest(role=role), patch.object(source, "poll"), patch.object(operation, "checkpoint"), \
+                    patch.object(operation, "command_limits", return_value=(120, 1)), \
+                    patch.object(control.time, "monotonic", return_value=110), self.assertRaises(android_wire.ProtocolError):
+                source.command_limits(120, True, 1)
 
     def test_no_saved_command_source_leaves_cli_edit_environment_arguments_unchanged(self):
         for kind in (None, EditInput, EnvironmentInput):

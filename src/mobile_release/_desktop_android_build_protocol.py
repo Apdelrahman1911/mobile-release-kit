@@ -15,8 +15,8 @@ from typing import Any
 
 from .config import ANDROID_ID_RE, MAX_CONFIG_BYTES, MAX_VERSION_BYTES
 
-PROTOCOL = "mrk-android-build/1"
-CONSENT = "saved-android-build-inspect-v1"
+PROTOCOL = "mrk-android-build/2"
+CONSENT = "saved-android-build-inspect-v2"
 SCOPE = "local-post-build-artifact-observation"
 TOOLCHAIN_PROFILE = "android-local-linux-gnu-x86_64-v1"
 # A closed source contract, NOT a runtime/native qualification flag.
@@ -28,7 +28,7 @@ MAX_AAB_BYTES = 1024 * 1024 * 1024
 STAGES = ("inputs-bound", "building", "capturing", "inspecting", "disposing-work")
 STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
 CHECKS = ("aab-structure", "aab-manifest", "application-id", "build-number", "version-name",
-          "release-flags", "signer", "core-lifecycle", "other-core-finding")
+          "release-flags", "signature", "signer", "core-lifecycle", "other-core-finding")
 ABIS = ("arm64-v8a", "armeabi", "armeabi-v7a", "mips", "mips64", "x86", "x86_64")
 LIMITATIONS = ("saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
                "post-run-bytes-may-be-incremental-reused-or-stale", "source-binding-not-established",
@@ -54,7 +54,7 @@ _VERSION_TEXT = re.compile(r"[0-9A-Za-z.+-]{1,64}\Z")
 _MODULE_TEXT = re.compile(r":[0-9A-Za-z_.:-]{0,511}\Z")
 _VARIANT_TEXT = re.compile(r"[0-9A-Za-z_-]{1,128}\Z")
 _TASK_TEXT = re.compile(r":[0-9A-Za-z_.:-]{1,647}\Z")
-_PREPARE_FIELDS = {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion"}
+_PREPARE_FIELDS = {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion", "artifactValidation"}
 _FAILURES = frozenset(("FAIL", "MISSING", "BLOCKED", "INVALID"))
 _MANIFEST_CHECKS = frozenset(("aab-manifest", "application-id", "build-number", "version-name", "release-flags"))
 _CLOSE_FIELDS = ("inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed")
@@ -165,11 +165,28 @@ def saved_version(value: object) -> dict:
     return {"source": value["source"], **compared, "name": value["name"], "build": value["build"]}
 
 
+def artifact_validation(value: object) -> dict:
+    value = _keys(value, {"mode", "uploadCertificateSha256"})
+    require(_enum(value["mode"], ("structure-and-version", "upload-signature")))
+    fingerprint = value["uploadCertificateSha256"]
+    # Public comparison transport only. Exact saved config policy/normalization
+    # remains in core, and equality is checked before Gradle/tool acquisition.
+    require(fingerprint is None if value["mode"] == "structure-and-version" else
+            type(fingerprint) is str and re.fullmatch(r"[0-9A-Fa-f:]{1,95}", fingerprint) is not None)
+    return dict(value)
+
+
+def _limitations(validation: dict) -> list[str]:
+    return ["upload-signature-check-not-store-enrollment" if item == "artifact-signer-not-inspected"
+            and validation["mode"] == "upload-signature" else item for item in LIMITATIONS]
+
+
 def prepare(value: object) -> dict:
     value = _keys(value, _PREPARE_FIELDS)
     require(_text(value["projectId"], _PROJECT) and integer(value["draftRevision"], 2**32 - 2)
             and integer(value["baselineGeneration"], 2**32 - 2))
-    result = {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"])}
+    result = {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"]),
+              "artifactValidation": artifact_validation(value["artifactValidation"])}
     require(len(_encode(result)) <= RENDERER_REQUEST_LIMIT)
     return result
 
@@ -259,7 +276,7 @@ def project_finding(code: str) -> str:
     return {"android.aab.structure": "aab-structure", "android.aab.manifest": "aab-manifest",
             "android.aab.package": "application-id", "android.aab.versionCode": "build-number",
             "android.aab.versionName": "version-name", "android.aab.release-flags": "release-flags",
-            "android.aab.signer": "signer", "android.build.process-lifetime": "core-lifecycle",
+            "android.aab.signature": "signature", "android.aab.signer": "signer", "android.build.process-lifetime": "core-lifecycle",
             "android.build.input-ownership": "core-lifecycle"}.get(code, "other-core-finding")
 
 
@@ -276,8 +293,7 @@ def _inspection(value: object) -> dict:
     for ordinal, row in enumerate(value["findings"]):
         row = _keys(row, {"ordinal", "check", "status"})
         require(type(row["ordinal"]) is int and row["ordinal"] == ordinal
-                and _enum(row["check"], CHECKS) and _enum(row["status"], STATUSES)
-                and (row["check"] != "signer" or row["status"] == "SKIP"))
+                and _enum(row["check"], CHECKS) and _enum(row["status"], STATUSES))
         rows.append(dict(row))
         observed[row["status"]] += 1
     require(observed == counts)
@@ -310,10 +326,8 @@ def project_activity(report, *, stage: str, selection: dict | None, command: dic
     rows, counts = [], {status: 0 for status in STATUSES}
     if report is not None:
         for ordinal, finding in enumerate(report.findings):
-            require(type(finding) is Finding and type(finding.code) is str and len(finding.code) <= 256 and type(finding.status) is Status
-                    and finding.code != "android.aab.signature")
+            require(type(finding) is Finding and type(finding.code) is str and len(finding.code) <= 256 and type(finding.status) is Status)
             check = project_finding(finding.code)
-            require(check != "signer" or finding.status is Status.SKIP)
             rows.append({"ordinal": ordinal, "check": check, "status": finding.status.value})
             counts[finding.status.value] += 1
     return _activity({"stage": stage, "selection": selection, "command": command, "findings": rows,
@@ -336,7 +350,7 @@ def project_artifact(record: object, *, unknown_abi: bool) -> dict:
     return _artifact({**record, "unknownAbi": unknown_abi, "freshness": "not-established"})
 
 
-def _assurances(rows: list[dict]) -> dict:
+def _assurances(rows: list[dict], validation: dict) -> dict:
     structures = [row["status"] for row in rows if row["check"] == "aab-structure"]
     structure = ("passed" if structures == ["PASS"] else "failed" if any(item in _FAILURES for item in structures)
                  else "not-checked")
@@ -345,22 +359,68 @@ def _assurances(rows: list[dict]) -> dict:
     native = ("passed" if structure == "passed" and not unsupported and len(manifest) == 1
               and manifest[0]["check"] == "aab-manifest" and manifest[0]["status"] == "PASS"
               else "failed" if any(row["status"] in _FAILURES for row in manifest) else "not-checked")
+    signatures = [row["status"] for row in rows if row["check"] == "signature"]
+    signers = [row["status"] for row in rows if row["check"] == "signer"]
+    signature = signer = "not-inspected"
+    if validation["mode"] == "upload-signature":
+        signature = ("passed" if structure == "passed" and not unsupported and signatures == ["PASS"] else
+                     "failed" if any(item in _FAILURES for item in signatures) else "not-checked")
+        signer = ("matches-saved-upload-certificate" if signature == "passed" and signers == ["PASS"] else
+                  "failed" if any(item in _FAILURES for item in signers) else "not-checked")
     return {"structure": structure, "nativeManifest": native,
             "applicationVersion": "native-checked" if native == "passed" else "not-established",
-            "signer": "not-inspected", "toolkitSigning": "not-requested", "storeOperation": "not-requested",
+            "signature": signature, "signer": signer, "toolkitSigning": "not-requested", "storeOperation": "not-requested",
             "sourceBinding": "not-established", "releaseReadiness": "not-assessed"}
 
 
+def _inspection_mode(rows: list[dict], validation: dict) -> None:
+    signatures = [row["status"] for row in rows if row["check"] == "signature"]
+    signers = [row["status"] for row in rows if row["check"] == "signer"]
+    if validation["mode"] == "structure-and-version":
+        require(not signatures and all(status == "SKIP" for status in signers))
+    else:
+        require(signatures in ([], ["PASS"], ["FAIL"]))
+        require(not signers or signatures == ["PASS"] and
+                (signers == ["PASS"] or all(status == "FAIL" for status in signers)))
+
+
+def _inspection_commands(rows: list[dict], validation: dict) -> int:
+    """Exact reachable completed inspection prefixes, not an open call budget.
+
+    One: structure rejection. Two: basic manifest. Three: signature rejection.
+    Four: accepted signature followed by leaf inspection (which may fail).
+    Manifest failures are nonfatal policy DATA and do not skip signature work.
+    """
+    _inspection_mode(rows, validation)
+    structures = [row["status"] for row in rows if row["check"] == "aab-structure"]
+    manifest = [row for row in rows if row["check"] in _MANIFEST_CHECKS]
+    signatures = [row["status"] for row in rows if row["check"] == "signature"]
+    signers = [row["status"] for row in rows if row["check"] == "signer"]
+    if structures == ["FAIL"]:
+        require(not manifest and not signatures and not signers)
+        return 1
+    require(structures == ["PASS"] and bool(manifest))
+    if validation["mode"] == "structure-and-version":
+        require(signers == ["SKIP"])
+        return 2
+    if signatures == ["FAIL"]:
+        require(not signers)
+        return 3
+    require(signatures == ["PASS"] and bool(signers))
+    return 4
+
+
 def project_result(activity: object, artifact: object, *, used_config: object,
-                   used_version: object, toolchain_profile: str) -> dict:
+                   used_version: object, toolchain_profile: str, validation: object) -> dict:
     observed = _activity(activity)
+    validation = artifact_validation(validation)
     require(observed["stage"] == "disposing-work")
     result = {"schemaVersion": 1, "scope": SCOPE, "usedConfig": content(used_config),
-              "usedVersion": saved_version(used_version), "selection": observed["selection"],
+              "usedVersion": saved_version(used_version), "artifactValidation": validation, "selection": observed["selection"],
               "toolchainProfile": toolchain_profile, "command": observed["command"],
               "findings": observed["findings"], "summary": observed["summary"],
-              "artifacts": [_artifact(artifact)], "assurances": _assurances(observed["findings"]),
-              "limitations": list(LIMITATIONS)}
+              "artifacts": [_artifact(artifact)], "assurances": _assurances(observed["findings"], validation),
+              "limitations": _limitations(validation)}
     validate_result(result)
     return result
 
@@ -368,10 +428,10 @@ def project_result(activity: object, artifact: object, *, used_config: object,
 def validate_result(value: object) -> None:
     _structure(value)
     value = _keys(value, {"schemaVersion", "scope", "usedConfig", "usedVersion", "selection", "toolchainProfile",
-                          "command", "findings", "summary", "artifacts", "assurances", "limitations"})
+                          "command", "findings", "summary", "artifacts", "assurances", "limitations", "artifactValidation"})
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == SCOPE
             and value["toolchainProfile"] == TOOLCHAIN_PROFILE and type(value["limitations"]) is list
-            and value["limitations"] == list(LIMITATIONS))
+            and value["limitations"] == _limitations(artifact_validation(value["artifactValidation"])))
     content(value["usedConfig"])
     saved_version(value["usedVersion"])
     _selection(value["selection"])
@@ -381,8 +441,10 @@ def validate_result(value: object) -> None:
             and all(row["check"] != "core-lifecycle" for row in inspection["findings"]))
     require(type(value["artifacts"]) is list and len(value["artifacts"]) == MAX_ARTIFACTS)
     _artifact(value["artifacts"][0])
-    assurance = _keys(value["assurances"], set(_assurances(inspection["findings"])))
-    require(assurance == _assurances(inspection["findings"]) and len(_encode(value)) <= RESPONSE_LIMIT)
+    validation = artifact_validation(value["artifactValidation"])
+    _inspection_commands(inspection["findings"], validation)
+    assurance = _keys(value["assurances"], set(_assurances(inspection["findings"], validation)))
+    require(assurance == _assurances(inspection["findings"], validation) and len(_encode(value)) <= RESPONSE_LIMIT)
 
 
 def _disposition(value: object) -> dict:
@@ -396,7 +458,7 @@ def _lifetime(value: object) -> dict:
     value = _keys(value, {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved", *_CLOSE_FIELDS})
     require(all(type(value[key]) is bool for key in ("complete", "fatal", "contained", *_CLOSE_FIELDS))
             and (value["commandDispatched"] is None or type(value["commandDispatched"]) is bool)
-            and integer(value["commands"], 2) and type(value["profileCalls"]) is int and value["profileCalls"] == 0
+            and integer(value["commands"], 4) and type(value["profileCalls"]) is int and value["profileCalls"] == 0
             and _enum(value["stopObserved"], ("none", "cancelled", "timed-out")))
     return dict(value)
 
@@ -409,6 +471,15 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
             and context(value["context"]) == request.context and _enum(value["outcome"], OUTCOMES)
             and _enum(value["reason"], REASONS))
     activity, disposition, life = _activity(value["activity"]), _disposition(value["disposition"]), _lifetime(value["lifetime"])
+    validation = request.context["artifactValidation"]
+    _inspection_mode(activity["findings"], validation)
+    require(life["commands"] <= (4 if validation["mode"] == "upload-signature" else 2))
+    if activity["command"] != {"outcome": "exited", "exitCode": 0}:
+        require(life["commands"] <= 1)
+    if life["commands"] > 1:
+        require(activity["stage"] in {"inspecting", "disposing-work"})
+    if any(row["check"] not in {"core-lifecycle", "other-core-finding"} for row in activity["findings"]):
+        require(life["commands"] == _inspection_commands(activity["findings"], validation))
     settled = (life["complete"] and not life["fatal"] and life["contained"] and all(life[key] for key in _CLOSE_FIELDS)
                and life["commandDispatched"] is not None and "unknown" not in disposition.values())
     if activity["command"]["outcome"] == "not-dispatched":
@@ -422,10 +493,10 @@ def validate_terminal(value: object, request: AndroidBuildRequest) -> None:
         validate_result(value["result"])
         result = value["result"]
         require(result["usedConfig"] == request.context["savedConfig"] and result["usedVersion"] == request.context["savedVersion"]
+                and result["artifactValidation"] == validation
                 and result["toolchainProfile"] == request.native["toolchain"]["profile"]
                 and all(result[key] == activity[key] for key in ("selection", "command", "findings", "summary")))
-        if result["assurances"]["nativeManifest"] == "passed":
-            require(life["commands"] == 2)
+        require(life["commands"] == _inspection_commands(result["findings"], validation))
     else:
         require(value["result"] is None and value["reason"] != "none" and disposition["artifacts"] != "retained-local-result")
         require(settled or value["outcome"] == "unknown")

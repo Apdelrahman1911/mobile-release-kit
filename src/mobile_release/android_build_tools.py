@@ -48,6 +48,8 @@ MAX_CHECKPOINTS = 2_000_000
 WORKERS = 2
 TOOL_ROLES = {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
               "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}
+AAPT2_PATH = "gradle/native/aapt2/aapt2"
+JARSIGNER_PATH, KEYTOOL_PATH = "jdk/bin/jarsigner", "jdk/bin/keytool"
 SELECTION_FIELDS = ("wrapper_properties", "local_properties", "root_gradle_properties",
                     "module_gradle_properties", "daemon_jvm_properties")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -241,6 +243,10 @@ def _parse_manifest(raw: bytes, binding: _Binding) -> _Profile:
         _need(TOOL_ROLES[role] in by_name)
         item = by_name[TOOL_ROLES[role]]
         _need(item.size > 0 and (role == "bundletool" or bool(item.mode & 0o111)))
+    # AGP uses this exact protected member, not a runtime extraction whose
+    # loader search origins depend on an arbitrary project/cache spelling.
+    _need(AAPT2_PATH in by_name and by_name[AAPT2_PATH].size > 0
+          and bool(by_name[AAPT2_PATH].mode & 0o111))
     jar = by_name[TOOL_ROLES["bundletool"]]
     _need(jar.sha256 == BUNDLETOOL_SHA256 and jar.size <= BUNDLETOOL_MAX_BYTES
           and any(item.path.startswith("sdk/") for item in files))
@@ -324,6 +330,7 @@ def _fixed_properties(root: str) -> tuple[tuple[str, str], ...]:
             ("org.gradle.java.installations.auto-detect", "false"),
             ("org.gradle.java.installations.auto-download", "false"),
             ("android.builder.sdkDownload", "false"),
+            ("android.aapt2FromMavenOverride", f"{root}/{AAPT2_PATH}"),
             ("kotlin.compiler.execution.strategy", "in-process"),
             ("kotlin.daemon.enabled", "false"))
 
@@ -343,6 +350,9 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
           and wrapper.get("distributionSha256Sum") == profile.distribution_sha256)
     local = {} if data["local_properties"] is None else _properties(data["local_properties"])
     for key, value in local.items():
+        target = key.casefold().removeprefix("systemprop.")
+        _need(target not in {"android.aapt2frommavenoverride", "android.aapt2version", "android.aapt2platform"}
+              and not target.startswith(("jna.", "jnidispatch.")))
         if key == "sdk.dir":
             _need(value == f"{profile.binding.root}/sdk")
         else:
@@ -353,7 +363,8 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
                   "org.gradle.parallel": "false", "org.gradle.workers.max": str(WORKERS)})
     forbidden = {"org.gradle.jvmargs", "gradle.user.home", "org.gradle.user.home", "kotlin.daemon.jvmargs",
                  "kotlin.daemon.jvm.options", "java.home", "java.io.tmpdir", "user.home", "java.library.path",
-                 "sdk.dir", "ndk.dir", "cmake.dir", "android.sdk.path", "android.sdkDownload"}
+                 "sdk.dir", "ndk.dir", "cmake.dir", "android.sdk.path", "android.sdkDownload",
+                 "android.aapt2Version", "android.aapt2Platform"}
     for field in ("root_gradle_properties", "module_gradle_properties"):
         properties = {} if data[field] is None else _properties(data[field])
         for key, value in properties.items():
@@ -362,18 +373,21 @@ def _selection_data(data: object, profile: _Profile, *, root_module: bool) -> tu
             else:
                 lower = key.casefold()
                 _need(lower not in {name.casefold() for name in (*fixed, *forbidden)}
-                      and not lower.startswith(("org.gradle.java.", "org.gradle.jvm", "kotlin.daemon.jvm")))
+                      and not lower.startswith(("org.gradle.java.", "org.gradle.jvm", "kotlin.daemon.jvm",
+                                                "jna.", "jnidispatch.")))
                 if lower.startswith("systemprop."):
                     target = lower[len("systemprop."):]
                     _need(target not in {name.casefold() for name in (*fixed, *forbidden)}
                           and not target.startswith(("java.", "javax.", "jdk.", "sun.", "org.gradle.java.",
-                                                    "org.gradle.jvm", "android.builder.sdk")))
+                                                    "org.gradle.jvm", "android.builder.sdk", "jna.", "jnidispatch.")))
     return tuple((field, data[field]) for field in SELECTION_FIELDS)
 
 
 def _jvm_arguments(work: Path, *, bundletool: bool = False) -> tuple[str, ...]:
     return ("-Xms64m", "-Xmx1024m" if bundletool else "-Xmx2048m", "-XX:MaxMetaspaceSize=512m",
-            "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}")
+            "-Dfile.encoding=UTF-8", f"-Duser.home={work}", f"-Djava.io.tmpdir={work}",
+            "-Djna.nosys=true", "-Djna.boot.library.path=", "-Djna.boot.library.name=jnidispatch",
+            f"-Djna.tmpdir={work}")
 
 
 def _identity(observed: os.stat_result, *, directory: bool = False, stable_contents: bool = True) -> tuple[int, ...]:
@@ -487,6 +501,7 @@ class AndroidValidationTools:
         self._credentials: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
         self._project_data: tuple[tuple[str, bytes | None], ...] | None = None
         self._acquire_claimed = self._acquired = self._project_claimed = False
+        self._signature_claimed = self._signature_ready = False
         self._close_claimed = self._close_complete = self._cleanup_mode = self._unknown_seen = False
         self._final_hash_claimed = False
         self._first_error: BaseException | None = None
@@ -763,7 +778,8 @@ class AndroidValidationTools:
 
     def check_project_inputs(self, data: object) -> None:
         self._owner()
-        _need(self._acquired and not self._project_claimed and not self._close_claimed, "toolchain-unavailable")
+        _need(self._acquired and not self._project_claimed and not self._close_claimed
+              and (self.inputs.check_signer is False or self._signature_ready), "toolchain-unavailable")
         self._project_claimed = True  # A failed supply cannot be replaced/retried.
         try:
             self.check()
@@ -773,9 +789,32 @@ class AndroidValidationTools:
         except BaseException as error:
             self._raise(error)
 
+    def require_signature_tools(self) -> None:
+        """Once-only upload-mode admission, before project selection or Gradle.
+
+        These are extra files of the same acquired JDK, not new manifest roles,
+        PATH searches or another tool owner. Acquisition already retained and
+        hashed every inventoried file; final closure rechecks those originals.
+        """
+        self._owner()
+        _need(self._acquired and self.inputs.check_signer is True and not self._close_claimed
+              and not self._signature_claimed and not self._project_claimed
+              and self._project_data is None, "toolchain-unavailable")
+        self._signature_claimed = True
+        try:
+            self.check()
+            _need(self.profile is not None)
+            files = {item.path: item for item in self.profile.files}
+            _need(all(path in files and files[path].size > 0 and bool(files[path].mode & 0o111)
+                      for path in (JARSIGNER_PATH, KEYTOOL_PATH)))
+            self._signature_ready = True
+        except BaseException as error:
+            self._raise(error)
+
     def _work(self, work_path: Path) -> Path:
         self._owner()
-        _need(self._acquired and self._project_data is not None and not self._close_claimed, "toolchain-unavailable")
+        _need(self._acquired and self._project_data is not None and not self._close_claimed
+              and (self.inputs.check_signer is False or self._signature_ready), "toolchain-unavailable")
         self.operation.checkpoint()
         from ._desktop_android_build_files import AndroidBuildFiles
         _need(type(self.files) is AndroidBuildFiles and self.files.operation is self.operation)
@@ -809,7 +848,7 @@ class AndroidValidationTools:
                 "MOBILE_RELEASE_VERSION_NAME": bound_release.name, "MOBILE_RELEASE_BUILD_NUMBER": str(bound_release.build),
                 "MOBILE_RELEASE_REQUIRE_SIGNING": "false"}
 
-    def bundletool_command(self, snapshot_path: Path) -> tuple[str, ...]:
+    def _inspection_input(self, snapshot_path: Path) -> tuple[Path, Path]:
         self._owner()
         _need(self._project_data is not None and not self._close_claimed, "toolchain-unavailable")
         from ._desktop_android_build_files import OriginalAndroidArtifact
@@ -821,8 +860,30 @@ class AndroidValidationTools:
         expected = artifact.path
         _need(type(snapshot_path) is type(expected) and snapshot_path == expected)
         work = self._work(self.files.work_path)
+        return work, expected
+
+    def bundletool_command(self, snapshot_path: Path) -> tuple[str, ...]:
+        work, expected = self._inspection_input(snapshot_path)
         return (f"{self.binding.root}/{TOOL_ROLES['java']}", *_jvm_arguments(work, bundletool=True), "-jar",
                 f"{self.binding.root}/{TOOL_ROLES['bundletool']}", "dump", "manifest", f"--bundle={expected}", "--module=base")
+
+    def jarsigner_command(self, snapshot_path: Path) -> tuple[str, ...]:
+        self._owner()
+        _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,
+              "toolchain-unavailable")
+        work, expected = self._inspection_input(snapshot_path)
+        return (f"{self.binding.root}/{JARSIGNER_PATH}",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-verify", "-strict", str(expected))
+
+    def keytool_command(self, snapshot_path: Path) -> tuple[str, ...]:
+        self._owner()
+        _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,
+              "toolchain-unavailable")
+        work, expected = self._inspection_input(snapshot_path)
+        return (f"{self.binding.root}/{KEYTOOL_PATH}",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-printcert", "-jarfile", str(expected))
 
     def close(self) -> None:
         self._owner(active=False)

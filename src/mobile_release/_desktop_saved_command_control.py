@@ -130,9 +130,15 @@ class _SavedCommandInput:
                 output_limit = budget.capture(output_limit)
             return timeout, output_limit
         self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
-        selected = self.require_operation().command_limits(timeout, capture, output_limit)
+        operation = self.require_operation()
+        # Independent Android-only affirmation of the four fixed roles. This
+        # is not a larger generic capture budget, nor an OfflinePreflight change.
+        role = operation._pending
+        maxima = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}
+        self._require(role in maxima and capture is (role != "gradle"))
+        selected = operation.command_limits(timeout, capture, output_limit)
         self._require(type(selected) is tuple and len(selected) == 2
-                      and type(selected[0]) is int and 0 < selected[0] <= min(timeout, 60 if capture else 2700)
+                      and type(selected[0]) is int and 0 < selected[0] <= min(timeout, maxima[role])
                       and type(selected[1]) is int and 0 < selected[1] <= output_limit
                       and (not capture or selected[1] <= 2 * 1024 * 1024))
         return selected

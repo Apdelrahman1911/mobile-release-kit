@@ -23,6 +23,24 @@ running the CLI or parsing console output.
   is required. An installed Java executable or a successful environment check
   alone does not qualify it. The first profile targets Linux GNU x86_64; macOS
   and Windows require their own implementation and native verification.
+- **Optional upload-signature inspection:** **Also verify upload signature** is
+  off by default. Turn it on before reviewing saved inputs to check signature
+  integrity and compare the captured bundle's signer with the saved upload
+  certificate SHA-256 fingerprint. The same protected JDK must also supply
+  `jarsigner` and `keytool`; their presence alone does not qualify this mode.
+
+## Which certificate fingerprint to save
+
+For a Play-managed app, open **Play Console → App integrity → Upload key
+certificate** and copy its SHA-256 fingerprint. This is the **upload** certificate,
+not the **App signing key certificate** used by Play for distributed apps. Save
+the public fingerprint in Android's upload-certificate field as exactly 64 hex
+characters, without colons. Do not enter a keystore, private key or password.
+
+The review displays that saved value, not an editable override. Changing the
+inspection choice or saved inputs retires the previous review; acknowledge the
+new review before starting. An already started build retains its original
+choice and Status/Cancel controls.
 
 ## Review before starting
 
@@ -32,8 +50,9 @@ and make network requests. A private working directory is **not a sandbox**.
 
 The toolkit does not request signing, read signing credentials, contact a Store,
 or publish a release in this action. Project code may nevertheless sign the
-bundle itself; its signer is explicitly **not inspected** here. Offline checks
-remain a separate build-free action and never implicitly start this build.
+bundle itself. Without the optional checkbox, its signature and signer are
+explicitly **not inspected**. Offline checks remain a separate build-free action
+and never implicitly start this build.
 
 ## Reading a result
 
@@ -41,6 +60,15 @@ Task completion, bundle structure, native application/version checks and release
 readiness are different facts. Inspection may complete and report an invalid
 bundle. Missing or unsuccessful native inspection cannot become a verified
 application/version result.
+
+With upload-signature inspection selected, the result separates **signature
+integrity** from **matches saved upload certificate**. A match requires both
+checks to pass on the same captured bytes. An unsigned, tampered or wrong-signer
+bundle is a negative validation result even if the build and inspection finish.
+Failed signature verification skips the signer comparison; it is not a match.
+These checks do not establish that the saved upload certificate is enrolled in
+Play or that the bundle is ready for Store submission. Results are shown only
+after the original native operation and cleanup have settled.
 
 The captured bundle may be incremental, reused or stale output. A zero-exit
 Gradle task and a matching version do not establish that the bytes were produced

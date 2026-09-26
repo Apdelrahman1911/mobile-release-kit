@@ -28,15 +28,17 @@ def directory(inode):
 
 
 @contextmanager
-def original():
+def original(*, signature=False):
     binding = {"device": "1", "inode": "50", "mode": stat.S_IFDIR | 0o700, "uid": 123, "gid": 123}
     request = parse_request(json.dumps({
-        "protocol": "mrk-android-build/1", "operationId": "a" * 32, "ownerGeneration": "b" * 32,
+        "protocol": "mrk-android-build/2", "operationId": "a" * 32, "ownerGeneration": "b" * 32,
         "context": {"projectId": "inert", "draftRevision": 1, "baselineGeneration": 1,
                     "savedConfig": {"bytes": 1, "sha256": "c" * 64}, "platform": "android",
                     "operation": "android-build-inspect", "savedVersion": {
                         "source": "gradle.properties", "bytes": 1, "sha256": "d" * 64,
-                        "name": "1.2.3", "build": 7}},
+                        "name": "1.2.3", "build": 7},
+                    "artifactValidation": {"mode": "upload-signature" if signature else "structure-and-version",
+                                           "uploadCertificateSha256": "a" * 64 if signature else None}},
         "native": {"profile": "linux-gnu-x86_64", "projectRoot": "/inert/project", "cwd": "/inert/runtime",
                    "rootIdentity": binding, "toolchain": {"schemaVersion": 1, "profile": TOOLCHAIN_PROFILE,
                         "root": "/inert/tools", "rootIdentity": {**binding, "inode": "51"},
@@ -225,6 +227,96 @@ class AndroidOperationTests(unittest.TestCase):
             operation.command_error("gradle", OSError("private error must not be an exit code"))
             self.assertEqual(operation.command_outcome(), {"outcome": "not-dispatched", "exitCode": None})
             self.assertEqual(operation.source.first_failure, 100)
+
+    def test_upload_tool_preflight_precedes_project_reads_namespace_and_gradle(self):
+        for signature, missing in ((False, False), (True, False), (True, True)):
+            with self.subTest(signature=signature, missing=missing), original(signature=signature) as operation:
+                operation.inputs = types.SimpleNamespace(check_signer=signature)
+                events, tool_inputs = [], {"inert": b"DATA"}
+
+                def preflight():
+                    events.append("signature-preflight")
+                    if missing:
+                        raise subject.AndroidBuildError("toolchain-mismatch")
+
+                tools = types.SimpleNamespace(acquire=Mock(side_effect=lambda: events.append("acquire")),
+                    require_signature_tools=Mock(side_effect=preflight),
+                    check_project_inputs=Mock(side_effect=lambda data: events.append("project-selection")),
+                    check=Mock(side_effect=lambda: events.append("tools-check")))
+
+                def read_project():
+                    events.append("project-reads")
+                    return tool_inputs
+
+                with patch("mobile_release.android_build_tools.AndroidValidationTools", return_value=tools) as constructed, \
+                     patch.object(operation, "checkpoint"), patch.object(operation, "check_inputs"), \
+                     patch.object(operation, "_project_tool_inputs", side_effect=read_project) as project_reads, \
+                     patch.object(operation.files, "prepare_namespace", side_effect=lambda: events.append("namespace")) as namespace, \
+                     patch("mobile_release.android.run_owned") as dispatched:
+                    if missing:
+                        with self.assertRaises(subject.AndroidBuildError):
+                            operation.prepare()
+                        self.assertEqual(events, ["acquire", "signature-preflight"])
+                        self.assertFalse(operation.prepared)
+                        project_reads.assert_not_called(); namespace.assert_not_called()
+                    else:
+                        operation.prepare()
+                        self.assertTrue(operation.prepared)
+                        self.assertEqual(events, ["acquire", *(["signature-preflight"] if signature else []),
+                                                  "project-reads", "project-selection", "namespace", "tools-check"])
+                        tools.check_project_inputs.assert_called_once_with(tool_inputs)
+                    constructed.assert_called_once_with(operation, operation.request.native["toolchain"])
+                    dispatched.assert_not_called()
+                self.assertIs(operation.tools, tools)
+                self.assertEqual(tools.require_signature_tools.call_count, int(signature))
+
+    def test_signature_roles_are_one_ordered_attempt_each_with_exact_capture_limits(self):
+        with original(signature=True) as operation, patch.object(subject.AndroidBuildOperation, "checkpoint"):
+            operation.inputs = types.SimpleNamespace(check_signer=True)
+            operation._artifact = object()  # Predicate DATA; no artifact read occurs here.
+            facts = types.SimpleNamespace(cleanup_complete=True, contained=True, fatal=False,
+                                           command_dispatched=False, commands=0, profile_calls=0)
+            with patch.object(operation.guard.lifetime_ledger, "verdict", return_value=facts):
+                for role, cap in (("gradle", 2700), ("bundletool", 60), ("jarsigner", 120), ("keytool", 30)):
+                    for later in tuple(operation._roles)[facts.commands + 1:]:
+                        with self.assertRaises(ProtocolError):
+                            operation._arm(later)
+                    if role == "keytool":
+                        with self.assertRaises(ProtocolError):
+                            operation._arm(role)  # Actual return alone is not common signature-policy acceptance.
+                        operation._signature_passed = True
+                    operation._arm(role)
+                    self.assertEqual(operation.command_limits(9999, role != "gradle", 9 * 1024 * 1024),
+                                     (cap, 2 * 1024 * 1024))
+                    with self.assertRaises(ProtocolError):
+                        operation.command_limits(cap, role != "gradle", 1)
+                    facts.commands += 1
+                    facts.command_dispatched = True
+                    operation.returned(role, 4 if role == "jarsigner" else 0)
+                    with self.assertRaises(ProtocolError):
+                        operation._arm(role)
+                self.assertEqual(facts.commands, 4)
+                self.assertEqual(operation.command_outcome(), {"outcome": "exited", "exitCode": 0})
+        with original() as operation, patch.object(subject.AndroidBuildOperation, "checkpoint"):
+            for role in ("jarsigner", "keytool", "ambient-java"):
+                with self.assertRaises(ProtocolError):
+                    operation._arm(role)
+
+    def test_unknown_or_lost_signature_return_cannot_arm_keytool(self):
+        for fatal in (False, True):
+            with self.subTest(fatal=fatal), original(signature=True) as operation, \
+                    patch.object(subject.AndroidBuildOperation, "checkpoint"):
+                operation.inputs = types.SimpleNamespace(check_signer=True)
+                operation._artifact = object()
+                operation._roles.update(gradle="returned", bundletool="returned", jarsigner="attempted")
+                operation._returned.update(gradle=0, bundletool=0)
+                operation._pending = "jarsigner"
+                operation.guard.lifetime_ledger._commands = 3
+                operation.guard.lifetime_ledger._command_dispatched = True
+                operation.command_error("jarsigner", ProcessCleanupError("inert") if fatal else OSError("inert lost return"))
+                with self.assertRaises(ProtocolError):
+                    operation._arm("keytool")
+                self.assertNotIn("jarsigner", operation._returned)
 
     def test_close_attempts_independent_owners_and_never_retries_failed_work(self):
         with original() as operation:
