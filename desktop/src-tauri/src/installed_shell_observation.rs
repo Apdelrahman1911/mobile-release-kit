@@ -8240,8 +8240,8 @@ fn metadata_script(step: MetadataStep) -> Option<String> {
             if (heading!=='Review text changes') return {state:'wait',reason:'heading-not-review',heading:heading===''?'empty':
                 heading==='Text status could not be verified'?'protocol-unverified':heading==='Checking the saved locale…'?'opening':
                 heading==='Preparing text changes…'?'preparing':'other'};
-            const rows=p.querySelectorAll('.metadata-file-review');if (rows.length!==3 || document.querySelector('dialog')) throw 0;
-            for (const row of rows) {const summary=row.querySelector(':scope > summary');show(summary);if (!row.open) summary.click();}
+            const details=p.querySelectorAll('.metadata-file-review');if (details.length!==3 || document.querySelector('dialog')) throw 0;
+            for (const row of details) {const summary=row.querySelector(':scope > summary');show(summary);if (!row.open) summary.click();}
             return {state:'ready'};"#,
         MetadataStep::ReadReview(_) => r#"const m=controls(),p=panel();if (text(p.querySelector('.section-heading h2'))!=='Review text changes') return {state:'wait'};
             if (document.querySelector('dialog')) throw 0;return {state:'ready',review:review(),draft:rows(m).map(row=>({id:row.id,text:row.input.value}))};"#,

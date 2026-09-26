@@ -1,8 +1,10 @@
-// Inert DATA, DTO/reducer/controller promise tests only. No DOM, native owner,
+// Inert DATA, source syntax and DTO/reducer/controller promise tests. No DOM, native owner,
 // project filesystem, worker, subprocess, network, Store, or finality evidence.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { Script } from 'node:vm';
 import guideResource from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
 import { createNativeApi } from '../src/bridge.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
@@ -12,6 +14,32 @@ import { MetadataTextEditController, currentMetadataApplyBinding, metadataOwnerR
 import { metadataProjectionProgress, metadataTextError, metadataTextRequestFits, normalMetadataTextResult,
   parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from '../src/metadataTextProtocol.ts';
 import { previewApi } from '../src/preview.ts';
+
+test('installed metadata observer scripts compile without evaluating a DOM or native operation', () => {
+  const source = readFileSync(new URL('../src-tauri/src/installed_shell_observation.rs', import.meta.url), 'utf8');
+  assert.ok(source.length <= 1 << 20);
+  const selected = source.split('fn metadata_script(step: MetadataStep) -> Option<String> {')[1]?.split('\nfn workflow_script(')[0];
+  assert.ok(selected?.endsWith('\n}\n'));
+  assert.ok(selected.includes('"#,body,r#"'));
+  assert.ok(selected.includes('"#].concat())'));
+  assert.ok(!selected.includes('format!('));
+  // These are Rust raw literals, not decoded/copied approximations of the
+  // script. The final two are the unchanged common prefix and suffix.
+  const literals = [...selected.matchAll(/r#"([\s\S]*?)"#/g)].map((match) => match[1]);
+  const prefix = literals.at(-2), suffix = literals.at(-1), bodies = literals.slice(0, -2);
+  assert.ok(prefix.startsWith('(() => { try {'));
+  assert.equal(suffix, " } catch { return {state:'error'}; } })()");
+  assert.equal(bodies.length, 20);
+  for (const [index, body] of bodies.entries()) {
+    new Script(prefix + body + suffix, { filename: `installed-metadata-step-${index}` });
+  }
+  const openText = bodies.filter((body) => body.includes("reason:'review-missing'"));
+  assert.equal(openText.length, 1);
+  // Prove this check refuses the actual former same-block lexical collision.
+  assert.equal((openText[0].match(/\bdetails\b/g) ?? []).length, 3);
+  const former = openText[0].replaceAll(/\bdetails\b/g, 'rows');
+  assert.throws(() => new Script(prefix + former + suffix), SyntaxError);
+});
 
 const ID = { window: 'a'.repeat(32), session: 'b'.repeat(32), revision: 'c'.repeat(32), plan: 'd'.repeat(32), other: 'e'.repeat(32) };
 const BASE = { schemaVersion: 1, metadata: { root: 'release/store', androidLocales: ['en-US', 'fr-FR'], iosLocales: ['en-US'] }, android: { enabled: true }, ios: { enabled: true } };
