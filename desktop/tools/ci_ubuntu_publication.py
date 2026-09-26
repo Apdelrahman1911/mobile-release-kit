@@ -40,6 +40,7 @@ REF = "refs/heads/verify/desktop-ubuntu-publication"
 INSTALLED_REF = "refs/heads/verify/desktop-installed-passive"
 INSTALLED_CASES = {"positive", "refuse-writable", "refuse-pth"}
 SHELL_REF = "refs/heads/verify/desktop-installed-shell"
+SHELL_METADATA_REF = "refs/heads/verify/desktop-shell-host-metadata"
 SHELL_GITHUB_REF = "refs/heads/verify/desktop-installed-github-readonly"
 SHELL_GITHUB_BOUNDARY_REF = "refs/heads/verify/desktop-installed-github-normal-boundaries"
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
@@ -3738,9 +3739,17 @@ def _shell_version_save_observation(case, combined, files, lifecycle):
 
 def shell_tools_input_root():
     """Only the fixed disposable job; this DATA helper owns no process runner."""
-    D.need(os.environ.get("GITHUB_REF") == SHELL_REF and os.environ.get("GITHUB_ACTIONS") == "true"
+    ref = os.environ.get("GITHUB_REF")
+    D.need((ref == SHELL_REF or (ref == SHELL_METADATA_REF
+            and os.environ.get("MRK_INSTALLED_SHELL_CASE") == "host-metadata-only"
+            and os.environ.get("GITHUB_JOB") == "compile" and os.environ.get("GITHUB_RUN_ATTEMPT") == "1"))
+           and os.environ.get("GITHUB_ACTIONS") == "true"
            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and os.geteuid() != 0,
            "Tools input preparation is restricted to the nonroot disposable hosted job")
+    if ref == SHELL_METADATA_REF:
+        # Metadata collection does not acquire a shell/compiler route. Bind its
+        # complete source/event identity before even addressing its output root.
+        local("observe_hosted_python").context(os.environ)
     C.conventional_host(D)
     run, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
     D.need(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run, attempt)), "Tools input original run identity differs")

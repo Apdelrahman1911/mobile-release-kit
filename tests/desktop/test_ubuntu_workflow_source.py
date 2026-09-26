@@ -20,9 +20,13 @@ class HostedWorkflowSource(unittest.TestCase):
         heading = "Prepare the fixed JDK17 pair only on this disposable shell runner"
         selected = [section for section in sections if section.splitlines()[0] == heading]
         self.assertEqual(len(selected), 1); step = selected[0]
-        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell'\n", step)
+        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'\n", step)
         self.assertIn("        timeout-minutes: 8\n", step)
-        self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted && "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell ]]', step)
+        self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]', step)
+        self.assertIn('refs/heads/verify/desktop-installed-shell:compile) ;;', step)
+        self.assertIn('refs/heads/verify/desktop-shell-host-metadata:host-metadata-only) [[ "$GITHUB_RUN_ATTEMPT" == 1 ]] ;;', step)
+        self.assertIn('("refs/heads/verify/desktop-shell-host-metadata", "host-metadata-only")', step)
+        self.assertIn('case != "host-metadata-only" or env.get("GITHUB_RUN_ATTEMPT") == "1"', step)
         self.assertIn('root="$RUNNER_TEMP/mrk-desktop-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', step)
         self.assertIn('mkdir -m 700 -- "$root"', step)
         self.assertIn("          umask 077\n", step)

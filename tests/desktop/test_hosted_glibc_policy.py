@@ -121,6 +121,9 @@ class HostedGlibcPolicyContracts(unittest.TestCase):
                            {"RUNNER_ENVIRONMENT": "self-hosted"}, {"GITHUB_RUN_ATTEMPT": "0"}):
                 with self.subTest(change=change), self.assertRaises(S.Refused):
                     S.context({**env, **change})
+            if case == "host-metadata-only":
+                with self.assertRaises(S.Refused):
+                    S.context({**env, "GITHUB_RUN_ATTEMPT": "2"})
 
     def test_workflow_requires_simulation_returned_apt_and_postconditions_before_compilation(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
