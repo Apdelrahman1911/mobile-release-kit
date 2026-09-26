@@ -2429,6 +2429,18 @@ const PREREQUISITE_FAULT_PREFIX: &str = "MRK_WINDOWS_UI_PREREQUISITE_FAULT_V1=";
 const PREREQUISITE_FAULT_FRAME_MAX_BYTES: usize = 664;
 const PREREQUISITE_FAULT_BUFFER_BYTES: usize = 2048;
 const PREREQUISITE_OWNER: &str = "ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract";
+const NORMAL_SMOKE_FAULT_PREFIX: &str = "MRK_WINDOWS_UI_NORMAL_SMOKE_FAULT_V1=";
+const NORMAL_SMOKE_OWNER: &str = "ordinary_owner::hosted_normal_ui_smoke_original_handle_contract";
+#[derive(Clone, Copy)]
+enum ReturnedFaultRole { Prerequisite, NormalSmoke }
+impl ReturnedFaultRole {
+    fn labels(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Prerequisite => (PREREQUISITE_FAULT_PREFIX, PREREQUISITE_OWNER, "prerequisite-only"),
+            Self::NormalSmoke => (NORMAL_SMOKE_FAULT_PREFIX, NORMAL_SMOKE_OWNER, "normal-smoke"),
+        }
+    }
+}
 #[derive(Clone, Copy)]
 struct PrerequisiteBindings<'a> { source: &'a str, tree: &'a str, run: &'a str }
 impl<'a> PrerequisiteBindings<'a> {
@@ -2456,6 +2468,10 @@ fn prerequisite_error_label(error: Error) -> &'static str {
         Error::Bounds => "Bounds", Error::State => "State", Error::Unknown => "Unknown" }
 }
 fn prerequisite_fault_frame(record: PrerequisiteRecord, returned: Error, binding: PrerequisiteBindings<'_>, output: &mut [u8]) -> Option<usize> {
+    returned_fault_frame(ReturnedFaultRole::Prerequisite, record, returned, binding, output)
+}
+fn returned_fault_frame(role: ReturnedFaultRole, record: PrerequisiteRecord, returned: Error,
+    binding: PrerequisiteBindings<'_>, output: &mut [u8]) -> Option<usize> {
     use std::fmt::Write as _;
     let first = record.first?;
     if !binding.valid() || first.native.is_some_and(|value| !value.valid()) { return None; }
@@ -2465,8 +2481,9 @@ fn prerequisite_fault_frame(record: PrerequisiteRecord, returned: Error, binding
     let (detail_prefix, detail) = first.detail.map(PrerequisiteDetail::labels).unwrap_or(("", "none"));
     if detail_prefix.len() + detail.len() > 64 || !detail_prefix.is_ascii() || !detail.is_ascii() { return None; }
     let native = first.native;
+    let (prefix, owner, mode) = role.labels();
     let mut frame = PrerequisiteFrame { bytes: output, used: 0 };
-    write!(&mut frame, "\n{PREREQUISITE_FAULT_PREFIX}source={};tree={};run={};attempt=1;owner={PREREQUISITE_OWNER};mode=prerequisite-only;stage={};check={};detail={detail_prefix}{detail};first={};returned={};api={};selector={};kind={};value=",
+    write!(&mut frame, "\n{prefix}source={};tree={};run={};attempt=1;owner={owner};mode={mode};stage={};check={};detail={detail_prefix}{detail};first={};returned={};api={};selector={};kind={};value=",
         binding.source, binding.tree, binding.run, first.stage.label(), first.check.label(),
         prerequisite_error_label(first.error), prerequisite_error_label(returned),
         native.map(|value| value.api.label()).unwrap_or("none"),
@@ -2520,23 +2537,32 @@ fn prerequisite_sink(output: &mut impl Write, frame: &[u8]) -> PrerequisiteDeliv
 }
 fn prerequisite_returned(role: UiRole, original: Result<()>, trace: &mut InputTrace,
     binding: PrerequisiteBindings<'_>, output: &mut impl Write) -> (Result<()>, PrerequisiteDelivery) {
+    if role != UiRole::Prerequisite { return (original, PrerequisiteDelivery::NotNeeded); }
+    returned_fault(ReturnedFaultRole::Prerequisite, original, trace, binding, output)
+}
+fn normal_smoke_returned(role: UiRole, original: Result<()>, trace: &mut InputTrace,
+    binding: PrerequisiteBindings<'_>, output: &mut impl Write) -> (Result<()>, PrerequisiteDelivery) {
+    if role != UiRole::NormalSmoke { return (original, PrerequisiteDelivery::NotNeeded); }
+    returned_fault(ReturnedFaultRole::NormalSmoke, original, trace, binding, output)
+}
+fn returned_fault(role: ReturnedFaultRole, original: Result<()>, trace: &mut InputTrace,
+    binding: PrerequisiteBindings<'_>, output: &mut impl Write) -> (Result<()>, PrerequisiteDelivery) {
     let error = match original {
         Ok(()) => return (original, PrerequisiteDelivery::NotNeeded),
-        Err(error) if role == UiRole::Prerequisite => error,
-        Err(_) => return (original, PrerequisiteDelivery::NotNeeded),
+        Err(error) => error,
     };
     // A genuine returned escape is visible as unannotated, never assigned a
     // guessed stage/API from a last status. Earlier genuine first stays immutable.
     trace.prerequisite_fault(PrerequisiteCheck::U01, error, None, None);
     let mut bytes = [0u8; PREREQUISITE_FAULT_BUFFER_BYTES];
-    let length = trace.prerequisite.and_then(|record| prerequisite_fault_frame(record, error, binding, &mut bytes));
+    let length = trace.prerequisite.and_then(|record| returned_fault_frame(role, record, error, binding, &mut bytes));
     let delivery = match length { Some(length) => prerequisite_sink(output, &bytes[..length]),
         None => PrerequisiteDelivery::EncodingFailed };
     (original, delivery) // Delivery has no native Error/Unknown/park authority.
 }
 pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
     // This optional fixed DATA record exists before the original first Clock.
-    let mut trace = InputTrace::prerequisite_only(role == UiRole::Prerequisite);
+    let mut trace = InputTrace::prerequisite_only(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke));
     let mut capture = ObserverCapture::default();
     let original = run_prerequisite_traced(role, entry_tick, &mut trace, &mut capture);
     if original.is_err() && observer_role(role) {
@@ -2547,12 +2573,16 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             let _ = prerequisite_sink(&mut std::io::stdout().lock(), &bytes[..length]);
         }
     }
-    if role != UiRole::Prerequisite || original.is_ok() { return original; }
+    if !matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke) || original.is_ok() { return original; }
     // Standard Write facade for the already-owned harness stdout. No new file,
     // HANDLE, alternate sink or close, and no additional owner-clock sample.
     let mut output = std::io::stdout().lock();
-    let (original, delivery) = prerequisite_returned(role, original, &mut trace,
-        PrerequisiteBindings::new(option_env!("GITHUB_SHA"), option_env!("MRK_WINDOWS_SOURCE_TREE"), option_env!("GITHUB_RUN_ID")), &mut output);
+    let binding = PrerequisiteBindings::new(option_env!("GITHUB_SHA"), option_env!("MRK_WINDOWS_SOURCE_TREE"), option_env!("GITHUB_RUN_ID"));
+    let (original, delivery) = match role {
+        UiRole::Prerequisite => prerequisite_returned(role, original, &mut trace, binding, &mut output),
+        UiRole::NormalSmoke => normal_smoke_returned(role, original, &mut trace, binding, &mut output),
+        _ => return original,
+    };
     let _local_delivery_complete = delivery.locally_complete();
     original
 }
@@ -3237,6 +3267,21 @@ mod contract_tests {
     #[test]
     fn prerequisite_frame_is_closed_bounded_and_binding_exact() {
         use PrerequisiteCheck as C; use PrerequisiteStage as G;
+        let check_smoke = |record: PrerequisiteRecord, returned: Error, binding: PrerequisiteBindings<'_>, legacy: &str| {
+            let mut output = [0u8; PREREQUISITE_FAULT_BUFFER_BYTES];
+            let length = returned_fault_frame(ReturnedFaultRole::NormalSmoke, record, returned, binding, &mut output).expect("smoke frame");
+            assert!(length <= PREREQUISITE_FAULT_FRAME_MAX_BYTES && length <= 652);
+            assert_eq!(length + 12, legacy.len());
+            let expected = legacy.replacen(PREREQUISITE_FAULT_PREFIX, NORMAL_SMOKE_FAULT_PREFIX, 1)
+                .replacen(PREREQUISITE_OWNER, NORMAL_SMOKE_OWNER, 1)
+                .replacen(";mode=prerequisite-only;", ";mode=normal-smoke;", 1);
+            assert_eq!(&output[..length], expected.as_bytes());
+            assert!(expected.starts_with("\nMRK_WINDOWS_UI_NORMAL_SMOKE_FAULT_V1="));
+            assert!(expected.contains(";owner=ordinary_owner::hosted_normal_ui_smoke_original_handle_contract;mode=normal-smoke;"));
+            for bound in [0, 1, length - 1] {
+                assert!(returned_fault_frame(ReturnedFaultRole::NormalSmoke, record, returned, binding, &mut output[..bound]).is_none());
+            }
+        };
         let mut trace = prerequisite_trace(G::AccountProfile, C::N03);
         let _ = trace.prerequisite_native_result::<()>(C::N03, Err(Error::Unavailable),
             PrerequisiteNative::nt(PrerequisiteApi::BCryptGenRandom, PrerequisiteSelector::None, i32::MIN),
@@ -3256,6 +3301,7 @@ mod contract_tests {
             assert!(length <= PREREQUISITE_FAULT_FRAME_MAX_BYTES && length <= 664);
             let text = std::str::from_utf8(&output[..length]).expect("ASCII").to_owned();
             assert!(text.starts_with("\nMRK_WINDOWS_UI_PREREQUISITE_FAULT_V1=source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;"));
+            assert!(text.contains(";owner=ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract;mode=prerequisite-only;"));
             assert!(text.contains(";run=99999999999999999999;attempt=1;"));
             assert!(text.ends_with(";coverage=mapped;end=1\n"));
             let payload = text.trim_matches('\n').strip_prefix(PREREQUISITE_FAULT_PREFIX).expect("prefix");
@@ -3265,12 +3311,14 @@ mod contract_tests {
             for bound in [0, 1, length - 1] {
                 assert!(prerequisite_fault_frame(record, Error::Unavailable, prerequisite_bindings(), &mut output[..bound]).is_none());
             }
+            check_smoke(record, Error::Unavailable, prerequisite_bindings(), &text);
         }
         let unavailable = PrerequisiteBindings::new(Some(r"C:\private-account"), Some("0000000000000000000000000000000000000000"), Some("01"));
         let length = prerequisite_fault_frame(record, Error::Unsafe, unavailable, &mut output).expect("explicit unavailable");
         let text = std::str::from_utf8(&output[..length]).expect("ASCII");
         assert!(text.contains("source=unavailable;tree=unavailable;run=unavailable;"));
         for private in ["private-account", "C:\\", "password", "handle=", "pid=", "accountName"] { assert!(!text.contains(private)); }
+        check_smoke(record, Error::Unsafe, unavailable, text);
         for bad in ["", "0", "01", "+1", "-1", "1\n", "100000000000000000000", "1;end=1"] {
             assert_eq!(PrerequisiteBindings::new(None, None, Some(bad)).run, "unavailable");
         }
@@ -3280,10 +3328,13 @@ mod contract_tests {
             kind: PrerequisiteKind::Exit, value: Some(i64::from(u32::MAX) + 1),
             status: PrerequisiteStatus::None, code: None });
         assert!(prerequisite_fault_frame(invalid, Error::Unsafe, prerequisite_bindings(), &mut output).is_none());
+        assert!(returned_fault_frame(ReturnedFaultRole::NormalSmoke, invalid, Error::Unsafe, prerequisite_bindings(), &mut output).is_none());
         invalid = record; invalid.first.as_mut().expect("first").check = C::U01;
         assert!(prerequisite_fault_frame(invalid, Error::Unsafe, prerequisite_bindings(), &mut output).is_none());
+        assert!(returned_fault_frame(ReturnedFaultRole::NormalSmoke, invalid, Error::Unsafe, prerequisite_bindings(), &mut output).is_none());
         let forged = PrerequisiteBindings { source: "private", tree: "unavailable", run: "unavailable" };
         assert!(prerequisite_fault_frame(record, Error::Unsafe, forged, &mut output).is_none());
+        assert!(returned_fault_frame(ReturnedFaultRole::NormalSmoke, record, Error::Unsafe, forged, &mut output).is_none());
     }
 
     #[test]
@@ -3291,17 +3342,21 @@ mod contract_tests {
         for write in [PrerequisiteWrite::Full, PrerequisiteWrite::Short, PrerequisiteWrite::Zero,
             PrerequisiteWrite::Interrupted, PrerequisiteWrite::Error, PrerequisiteWrite::Overreported] {
             for flush in [PrerequisiteFlush::Ok, PrerequisiteFlush::Interrupted, PrerequisiteFlush::Error] {
-                let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E02);
-                let original = trace.prerequisite_result::<()>(PrerequisiteCheck::E02, Err(Error::State));
-                let first = prerequisite_first(&trace);
-                let mut output = PrerequisiteOutput::new(write, flush);
-                let (returned, delivery) = prerequisite_returned(UiRole::Prerequisite, original, &mut trace, prerequisite_bindings(), &mut output);
-                assert_eq!(returned, original); assert_eq!(prerequisite_first(&trace), first);
-                assert_eq!(delivery, PrerequisiteDelivery::Attempted { write, flush });
-                assert_eq!(delivery.locally_complete(), write == PrerequisiteWrite::Full && flush == PrerequisiteFlush::Ok);
-                assert_eq!(output.calls, ["write", "flush"]);
-                assert!(output.bytes.starts_with(b"\nMRK_WINDOWS_UI_PREREQUISITE_FAULT_V1="));
-                assert!(output.bytes.ends_with(b";end=1\n"));
+                for (role, prefix) in [(UiRole::Prerequisite, PREREQUISITE_FAULT_PREFIX), (UiRole::NormalSmoke, NORMAL_SMOKE_FAULT_PREFIX)] {
+                    let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E02);
+                    let original = trace.prerequisite_result::<()>(PrerequisiteCheck::E02, Err(Error::State));
+                    let first = prerequisite_first(&trace);
+                    let mut output = PrerequisiteOutput::new(write, flush);
+                    let (returned, delivery) = if role == UiRole::Prerequisite {
+                        prerequisite_returned(role, original, &mut trace, prerequisite_bindings(), &mut output)
+                    } else { normal_smoke_returned(role, original, &mut trace, prerequisite_bindings(), &mut output) };
+                    assert_eq!(returned, original); assert_eq!(prerequisite_first(&trace), first);
+                    assert_eq!(delivery, PrerequisiteDelivery::Attempted { write, flush });
+                    assert_eq!(delivery.locally_complete(), write == PrerequisiteWrite::Full && flush == PrerequisiteFlush::Ok);
+                    assert_eq!(output.calls, ["write", "flush"]);
+                    assert!(output.bytes.starts_with(format!("\n{prefix}").as_bytes()));
+                    assert!(output.bytes.ends_with(b";end=1\n"));
+                }
             }
         }
         let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E02);
@@ -3311,17 +3366,32 @@ mod contract_tests {
         let (returned, delivery) = prerequisite_returned(UiRole::Prerequisite, original, &mut trace, invalid, &mut output);
         assert_eq!(returned, original); assert_eq!(delivery, PrerequisiteDelivery::EncodingFailed);
         assert!(output.calls.is_empty() && output.bytes.is_empty());
+        let first = prerequisite_first(&trace);
+        let (returned, delivery) = normal_smoke_returned(UiRole::NormalSmoke, original, &mut trace, invalid, &mut output);
+        assert_eq!(returned, original); assert_eq!(prerequisite_first(&trace), first);
+        assert_eq!(delivery, PrerequisiteDelivery::EncodingFailed);
+        assert!(output.calls.is_empty() && output.bytes.is_empty());
     }
 
     #[test]
     fn prerequisite_return_guard_keeps_unknown_and_deadline_semantics() -> Result<()> {
         for (role, original) in [(UiRole::Prerequisite, Ok(())), (UiRole::NormalSmoke, Err(Error::Unknown)),
-            (UiRole::ProjectDraft, Err(Error::Unavailable))] {
-            let mut trace = InputTrace::prerequisite_only(role == UiRole::Prerequisite);
+            (UiRole::ProjectDraft, Err(Error::Unavailable)), (UiRole::QuitPassive, Err(Error::Unsafe)), (UiRole::DocumentLoss, Err(Error::State))] {
+            let mut trace = InputTrace::prerequisite_only(true); // Role guard, not disabled DATA, must keep the old wrapper silent.
             let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
             let (returned, delivery) = prerequisite_returned(role, original, &mut trace, prerequisite_bindings(), &mut output);
             assert_eq!(returned, original); assert_eq!(delivery, PrerequisiteDelivery::NotNeeded);
             assert!(output.calls.is_empty() && output.bytes.is_empty());
+            assert!(trace.prerequisite.expect("enabled").first.is_none());
+        }
+        for (role, original) in [(UiRole::NormalSmoke, Ok(())), (UiRole::Prerequisite, Err(Error::Unknown)),
+            (UiRole::ProjectDraft, Err(Error::Unavailable)), (UiRole::QuitPassive, Err(Error::Unsafe)), (UiRole::DocumentLoss, Err(Error::State))] {
+            let mut trace = InputTrace::prerequisite_only(true);
+            let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
+            let (returned, delivery) = normal_smoke_returned(role, original, &mut trace, prerequisite_bindings(), &mut output);
+            assert_eq!(returned, original); assert_eq!(delivery, PrerequisiteDelivery::NotNeeded);
+            assert!(output.calls.is_empty() && output.bytes.is_empty());
+            assert!(trace.prerequisite.expect("enabled").first.is_none());
         }
         for clock in [PrerequisiteClock::NotCreated, PrerequisiteClock::LastUnlatched, PrerequisiteClock::LastLatched] {
             let mut trace = prerequisite_trace(PrerequisiteStage::Entry, PrerequisiteCheck::E03);
@@ -3340,6 +3410,34 @@ mod contract_tests {
             assert_eq!(trace.prerequisite.expect("enabled").clock, clock);
             assert!(std::str::from_utf8(&output.bytes).expect("ASCII").contains(&format!(";clock={};", clock.label())));
         }
+        // Returned entry/retirement/finality DATA, not invocation of those native
+        // paths. The original first native fact survives a later error/clock.
+        for (stage, check) in [(PrerequisiteStage::Entry, PrerequisiteCheck::E02),
+            (PrerequisiteStage::Retirement, PrerequisiteCheck::R01), (PrerequisiteStage::Retirement, PrerequisiteCheck::R02),
+            (PrerequisiteStage::Final, PrerequisiteCheck::Z01), (PrerequisiteStage::Final, PrerequisiteCheck::Z02)] {
+            let mut trace = prerequisite_trace(stage, check);
+            let native = PrerequisiteNative::boolean(PrerequisiteApi::WriteFile, PrerequisiteSelector::None, 0, Some(5));
+            assert_eq!(trace.prerequisite_native_result::<()>(check, Err(Error::Unavailable), native, None), Err(Error::Unavailable));
+            let first = prerequisite_first(&trace);
+            trace.prerequisite_at(PrerequisiteStage::Final, PrerequisiteCheck::Z02); trace.prerequisite_clock(true);
+            let original = trace.prerequisite_result::<()>(PrerequisiteCheck::T01, Err(Error::Unsafe));
+            let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Error, PrerequisiteFlush::Error);
+            let (returned, _) = normal_smoke_returned(UiRole::NormalSmoke, original, &mut trace, prerequisite_bindings(), &mut output);
+            assert_eq!(returned, original); assert_eq!(prerequisite_first(&trace), first);
+            assert_eq!(first.native, native); assert_eq!(output.calls, ["write", "flush"]);
+            let text = std::str::from_utf8(&output.bytes).expect("ASCII");
+            assert!(text.contains(&format!(";stage={};check={};", stage.label(), check.label())));
+            assert!(text.contains(";first=Unavailable;returned=Unsafe;api=WriteFile;"));
+            assert!(text.ends_with(";clock=last-latched;coverage=mapped;end=1\n"));
+        }
+        let mut escape = InputTrace::prerequisite_only(true);
+        let mut output = PrerequisiteOutput::new(PrerequisiteWrite::Full, PrerequisiteFlush::Ok);
+        let (returned, _) = normal_smoke_returned(UiRole::NormalSmoke, Err(Error::Bounds), &mut escape, prerequisite_bindings(), &mut output);
+        assert_eq!(returned, Err(Error::Bounds));
+        let first = prerequisite_first(&escape);
+        assert_eq!((first.stage, first.check), (PrerequisiteStage::Escape, PrerequisiteCheck::U01));
+        assert!(first.native.is_none() && first.detail.is_none());
+        assert!(std::str::from_utf8(&output.bytes).expect("ASCII").ends_with(";clock=not-created;coverage=unannotated;end=1\n"));
         // Pending ownership has no original body return to give the guard.
         // Neither a prior first fault nor diagnostic DATA settles that original.
         let mut fixture = InertProfile::new()?;
@@ -3357,6 +3455,10 @@ mod contract_tests {
         // itself still cannot change it into another Error or native cleanup.
         let (returned, _) = prerequisite_returned(UiRole::Prerequisite, Err(Error::Unknown), &mut trace, prerequisite_bindings(), &mut output);
         assert_eq!(returned, Err(Error::Unknown)); assert!(frame.unresolved() && !frame.settled());
+        let first = prerequisite_first(&trace);
+        let (returned, _) = normal_smoke_returned(UiRole::NormalSmoke, Err(Error::Unknown), &mut trace, prerequisite_bindings(), &mut output);
+        assert_eq!(returned, Err(Error::Unknown)); assert_eq!(prerequisite_first(&trace), first);
+        assert!(frame.unresolved() && !frame.settled());
         Ok(())
     }
 

@@ -13118,6 +13118,17 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
                 helper.windows_normal_ui_prerequisite_fault_frame(self.prerequisite_frame(
                     api="ReadFile", kind="bool", value="0", status="win32", code=value))
         raw = self.prerequisite_frame()
+        # The new returned NormalSmoke line is diagnostic-only and must not be
+        # admitted by the historical prerequisite-only consumer.
+        smoke = raw.replace(b"MRK_WINDOWS_UI_PREREQUISITE_FAULT_V1=", b"MRK_WINDOWS_UI_NORMAL_SMOKE_FAULT_V1=", 1)
+        smoke = smoke.replace(b"ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract",
+                              b"ordinary_owner::hosted_normal_ui_smoke_original_handle_contract", 1)
+        smoke = smoke.replace(b";mode=prerequisite-only;", b";mode=normal-smoke;", 1)
+        self.assertEqual(len(smoke) + 12, len(raw))
+        for wrong in (smoke, raw.replace(b"PREREQUISITE_FAULT_V1=", b"NORMAL_SMOKE_FAULT_V1=", 1),
+                      self.prerequisite_frame(owner="ordinary_owner::hosted_normal_ui_smoke_original_handle_contract"),
+                      self.prerequisite_frame(mode="normal-smoke")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_prerequisite_fault_frame(wrong)
         for wrong in (raw[1:], raw[:-1], raw.replace(b"\n", b"\r\n"), b"\x1b[31m" + raw,
                       raw.replace(b";check=n03;", b";check=n03;check=n03;"),
                       raw.replace(b";stage=account-profile;check=n03;", b";check=n03;stage=account-profile;"),
@@ -13711,17 +13722,72 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         self.assertIn("pub(super) prerequisite: Option<PrerequisiteRecord>", texts["qualification_result.rs"])
         self.assertIn("if record.first.is_none()", texts["qualification_result.rs"])
         self.assertIn("fn prerequisite_staged(&self)", texts["qualification_result.rs"])
-        self.assertIn("if role != UiRole::Prerequisite { diagnostic_smoke(stage,", texts["ordinary_owner_ui.rs"])
-        owner = texts["ordinary_owner_ui.rs"].split("fn run_prerequisite_traced(", 1)[1].split("mod contract_tests {", 1)[0]
+        ui = texts["ordinary_owner_ui.rs"]
+        self.assertIn("if role != UiRole::Prerequisite { diagnostic_smoke(stage,", ui)
+        owner = ui[ui.index("fn run_prerequisite_traced("):ui.index("// Inert regressions.")]
+        self.assertEqual(len(owner.encode("utf-8")), 29427)
+        self.assertEqual(hashlib.sha256(owner.encode("utf-8")).hexdigest(),
+                         "be01e58ed49e95c5aee95d4dd677b40f49c9435405241b6176cdbe551b5e083d")
         self.assertIn("return observation; // Failed process/driver never permits profile/account deletion.", owner)
         self.assertIn("loop { std::thread::park();", owner)
-        self.assertNotIn("prerequisite_returned(", owner) # Only outside the genuine returned body.
-        for name, marker, expected_hash in (('ordinary_owner_ui.rs', 'fn diagnostic_smoke(', '21ec6a84cc5a514f7b47a24f4681d965b665a4322b74a7b6e64b7af83c8d3558'), ('qualification_result.rs', 'pub(super) fn diagnostic_data(', 'ab3529915977ff5f8ac4c1c174e72921e13342ee1bddceb5b5694b7d83872a1d'), ('hosted_tests.rs', 'pub(super) fn write_unavailable(', '8ae40ee83a61b59b27c1397ce715209ebfc33f8d5d41823d42d9a870dcdcfaa0')):
+        for outer_only in ("prerequisite_returned(", "normal_smoke_returned(", "returned_fault(", "returned_fault_frame(", "prerequisite_sink("):
+            self.assertNotIn(outer_only, owner) # Return-bound output stays outside the genuine native body.
+        smoke = ui[ui.index("struct SmokeTrace {"):ui.index("\n}\n", ui.index("impl SmokeTrace {")) + 4]
+        self.assertEqual(hashlib.sha256(smoke.encode("utf-8")).hexdigest(),
+                         "c9ef9faef3383a608d4e899fb6d6a302dfd1e5d0b9a055b056e156f92976e6a2")
+        self.assertIn("fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }", ui)
+        for name, marker, expected_hash in (('ordinary_owner_ui.rs', 'fn diagnostic_smoke(', '21ec6a84cc5a514f7b47a24f4681d965b665a4322b74a7b6e64b7af83c8d3558'), ('qualification_result.rs', 'pub(super) fn diagnostic_data(', 'ab3529915977ff5f8ac4c1c174e72921e13342ee1bddceb5b5694b7d83872a1d'), ('hosted_tests.rs', 'pub(super) fn write_unavailable(', '8ae40ee83a61b59b27c1397ce715209ebfc33f8d5d41823d42d9a870dcdcfaa0'), ('ordinary_owner_ui.rs', 'fn prerequisite_sink(', '17393a2ee3bd136e4b5f24f439ce654babf8460db90f525ba6b3c1f5ffb24f04')):
             source = texts[name]; begin = source.index(marker)
             end = source.index("\n}\n", begin) + 3
             self.assertEqual(hashlib.sha256(source[begin:end].encode("utf-8")).hexdigest(), expected_hash)
+        self.assertIn("enum ReturnedFaultRole { Prerequisite, NormalSmoke }", ui)
+        labels = ui.split("impl ReturnedFaultRole {", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(labels, """
+    fn labels(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Prerequisite => (PREREQUISITE_FAULT_PREFIX, PREREQUISITE_OWNER, "prerequisite-only"),
+            Self::NormalSmoke => (NORMAL_SMOKE_FAULT_PREFIX, NORMAL_SMOKE_OWNER, "normal-smoke"),
+        }
+    }""")
+        for role, wrapper, constant, owner_test in (("Prerequisite", "prerequisite_returned", "PREREQUISITE", "prerequisite"),
+                                                   ("NormalSmoke", "normal_smoke_returned", "NORMAL_SMOKE", "smoke")):
+            self.assertIn(f'const {constant}_FAULT_PREFIX: &str = "MRK_WINDOWS_UI_{constant}_FAULT_V1=";', ui)
+            self.assertIn(f'const {constant}_OWNER: &str = "ordinary_owner::hosted_normal_ui_{owner_test}_original_handle_contract";', ui)
+            guard = ui.split("fn " + wrapper + "(", 1)[1].split("\n}\n", 1)[0]
+            self.assertEqual(guard, "role: UiRole, original: Result<()>, trace: &mut InputTrace,\n"
+                "    binding: PrerequisiteBindings<'_>, output: &mut impl Write) -> (Result<()>, PrerequisiteDelivery) {\n"
+                f"    if role != UiRole::{role} {{ return (original, PrerequisiteDelivery::NotNeeded); }}\n"
+                f"    returned_fault(ReturnedFaultRole::{role}, original, trace, binding, output)")
+        run = ui.split("pub(super) fn run(", 1)[1].split("\nfn run_prerequisite_traced(", 1)[0]
+        enabled = "let mut trace = InputTrace::prerequisite_only(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke));"
+        invoked = "let original = run_prerequisite_traced(role, entry_tick, &mut trace, &mut capture);"
+        guarded = "if !matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke) || original.is_ok() { return original; }"
+        self.assertEqual(run.count("run_prerequisite_traced("), 1)
+        self.assertLess(run.index(enabled), run.index(invoked)); self.assertLess(run.index(invoked), run.index(guarded))
+        for role, wrapper in (("Prerequisite", "prerequisite_returned"), ("NormalSmoke", "normal_smoke_returned")):
+            call = f"UiRole::{role} => {wrapper}(role, original, &mut trace, binding, &mut output),"
+            self.assertEqual(run.count(call), 1); self.assertLess(run.index(guarded), run.index(call))
+        returned = ui[ui.index("fn returned_fault("):ui.index("pub(super) fn run(")]
+        for forbidden in ("Clock::", "Instant::", "GetTickCount", "GetLastError", "GetExitCodeProcess", "CreateProcess", "CloseHandle", "std::thread::", ".effect(", ".effect_traced("):
+            self.assertNotIn(forbidden, run + returned)
+        self.assertIn("Ok(()) => return (original, PrerequisiteDelivery::NotNeeded)", returned)
+        self.assertIn("trace.prerequisite_fault(PrerequisiteCheck::U01, error, None, None);", returned)
+        self.assertIn("(original, delivery) // Delivery has no native Error/Unknown/park authority.", returned)
+        self.assertIn("const PREREQUISITE_FAULT_FRAME_MAX_BYTES: usize = 664;", ui)
+        self.assertIn("const PREREQUISITE_FAULT_BUFFER_BYTES: usize = 2048;", ui)
+        self.assertIn("returned_fault_frame(ReturnedFaultRole::Prerequisite, record, returned, binding, output)", ui)
+        begin = ui.index("fn returned_fault_frame("); end = ui.index("\n}\n", begin) + 3
+        encoder = ui[begin:end]
+        # Invert only the fixed-label extraction; every old grammar/redaction/
+        # validation byte must still match the admitted prerequisite encoder.
+        legacy_encoder = encoder.replace("fn returned_fault_frame(role: ReturnedFaultRole, ", "fn prerequisite_fault_frame(", 1)
+        legacy_encoder = legacy_encoder.replace("returned: Error,\n    binding:", "returned: Error, binding:", 1)
+        legacy_encoder = legacy_encoder.replace("    let (prefix, owner, mode) = role.labels();\n", "", 1)
+        legacy_encoder = legacy_encoder.replace(r'\n{prefix}source={};tree={};run={};attempt=1;owner={owner};mode={mode};',
+            r'\n{PREREQUISITE_FAULT_PREFIX}source={};tree={};run={};attempt=1;owner={PREREQUISITE_OWNER};mode=prerequisite-only;', 1)
+        self.assertEqual(hashlib.sha256(legacy_encoder.encode("utf-8")).hexdigest(),
+                         "bacf582a730c5a04500efd3da181fb29f83cbe92bbc8b9b9a9705c3838b6ee67")
         for private in ("accountName", "accountSid", "password", "hProcess", "path.display", "std::env::var"):
-            encoder = texts["ordinary_owner_ui.rs"].split("fn prerequisite_fault_frame(", 1)[1].split("\n#[derive", 1)[0]
             self.assertNotIn(private, encoder)
 
     def test_prerequisite_diagnostic_source_graph_and_selected_inert_results_are_closed(self):
