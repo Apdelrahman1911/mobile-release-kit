@@ -39,14 +39,55 @@ impl Clock {
     }
 }
 
-impl Launch {
-    fn ui(request: &UiRequest, identity: &str, raw_request: &str, output: &Path,
-        account: &Account, parent: &[u8], endpoint: u64) -> Result<Pin<Box<Self>>> {
-        Self::ui_traced(request, identity, raw_request, output, account, parent, endpoint, &mut InputTrace::default())
+// NormalSmoke has no result children. Keep native scratch in the existing
+// fresh profile owner, and use the already-present read/traverse-only task root
+// as cwd. Profile creation still belongs solely to LOGON_WITH_PROFILE.
+fn normal_smoke_profile_directory<'a>(role: UiRole, profile: Option<&'a Profile>, trace: &mut InputTrace) -> Result<Option<&'a Path>> {
+    if role != UiRole::NormalSmoke { return Ok(None); }
+    let profile = profile.ok_or(Error::Unsafe)?;
+    profile.binding_permitted_traced(trace)?;
+    need(profile.getter_entered && profile.getter_return != 0
+        && profile.units > 1 && profile.units as usize <= profile.directory.len())?;
+    let count = profile.directory.iter().position(|unit| *unit == 0).ok_or(Error::Unsafe)?;
+    let parent = String::from_utf16(&profile.directory[..count]).map_err(|_| Error::Unsafe)?;
+    need(Path::new(&parent).is_absolute() && profile.expected.is_absolute()
+        && profile.expected == Path::new(&parent).join(&profile.name))?;
+    Ok(Some(profile.expected.as_path()))
+}
+fn normal_smoke_launch_directories(role: UiRole, app: &str, output: &Path, root: &Path, profile: Option<&Path>,
+    pairs: &mut [(String, String)], directory: &mut Vec<u16>) -> Result<()> {
+    if role != UiRole::NormalSmoke { return Ok(()); }
+    let profile = profile.ok_or(Error::Unsafe)?;
+    let root_text = root.to_str().ok_or(Error::Unsafe)?;
+    let output_text = output.to_str().ok_or(Error::Unsafe)?;
+    let profile_text = profile.to_str().ok_or(Error::Unsafe)?;
+    need(root.is_absolute() && output.is_absolute() && profile.is_absolute()
+        && output == root.join(role.name("output")) && Path::new(app) == root.join("mobile-release-kit-desktop.exe")
+        && !root_text.eq_ignore_ascii_case(output_text) && !root_text.eq_ignore_ascii_case(profile_text)
+        && !output_text.eq_ignore_ascii_case(profile_text) && *directory == wide(output_text))?;
+    let mut temp = None; let mut tmp = None;
+    for (index, (name, value)) in pairs.iter().enumerate() {
+        if name.eq_ignore_ascii_case("TEMP") {
+            need(temp.is_none() && value.as_str() == output_text)?; temp = Some(index);
+        } else if name.eq_ignore_ascii_case("TMP") {
+            need(tmp.is_none() && value.as_str() == output_text)?; tmp = Some(index);
+        }
     }
-    fn ui_traced(request: &UiRequest, identity: &str, raw_request: &str, output: &Path,
+    let temp = temp.ok_or(Error::Unsafe)?; let tmp = tmp.ok_or(Error::Unsafe)?;
+    // Every refusal is before mutation; retain names/order and every other pair.
+    pairs[temp].1 = profile_text.to_owned(); pairs[tmp].1 = profile_text.to_owned();
+    *directory = wide(root_text); Ok(())
+}
+
+impl Launch {
+    fn ui(request: &UiRequest, identity: &str, raw_request: &str, output: &Path, root: &Path, profile: Option<&Profile>,
+        account: &Account, parent: &[u8], endpoint: u64) -> Result<Pin<Box<Self>>> {
+        Self::ui_traced(request, identity, raw_request, output, root, profile, account, parent, endpoint, &mut InputTrace::default())
+    }
+    fn ui_traced(request: &UiRequest, identity: &str, raw_request: &str, output: &Path, root: &Path, profile: Option<&Profile>,
         account: &Account, parent: &[u8], endpoint: u64, trace: &mut InputTrace) -> Result<Pin<Box<Self>>> {
         trace.prerequisite_scope(PrerequisiteCheck::D02, |trace| {
+            let profile_directory = normal_smoke_profile_directory(request.role, profile, trace)?;
             let binding = Binding { source: request.source.clone(), tree: request.tree.clone(), run: request.run.clone(),
                 artifact: request.app.path.clone(), bytes: request.app.bytes, sha: request.app.sha.clone(),
                 command_sha: request.app.command_sha.clone(), identity: identity.to_owned() };
@@ -58,6 +99,8 @@ impl Launch {
             let mut pairs: Vec<(String, String)> = text.split('\0').filter(|entry| !entry.is_empty()).map(|entry| {
                 entry.split_once('=').map(|(name, value)| (name.to_owned(), value.to_owned())).ok_or(Error::Unsafe)
             }).collect::<Result<_>>()?;
+            normal_smoke_launch_directories(request.role, &request.app.path, output, root, profile_directory,
+                &mut pairs, &mut current.directory)?;
             pairs.retain(|(name, _)| !name.starts_with("MRK_WINDOWS_NATIVE_") && name != "MRK_WINDOWS_ORDINARY_OUTPUT");
             pairs.extend([
                 ("MRK_WINDOWS_NORMAL_UI_REQUEST".to_owned(), raw_request.to_owned()),
@@ -2543,7 +2586,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         trace.prerequisite_at(PrerequisiteStage::Launch, PrerequisiteCheck::L01);
         stage = "ui-original-create";
         launch = Some(Launch::ui_traced(&selected, &after.wire(), std::str::from_utf8(&raw).map_err(|_| Error::Unsafe)?,
-            &output, current, &parent, clock.endpoint_tick, trace)?);
+            &output, &root, profile.as_ref(), current, &parent, clock.endpoint_tick, trace)?);
         request = Some(selected);
         launch.as_mut().ok_or(Error::State)?.as_mut().enter_traced(current, clock.start, &mut clock.latched, &mut clock.aggregate, trace)?;
         clock.effect_traced(trace)?; stage = "ui-profile-original-binding";
@@ -4277,6 +4320,121 @@ mod contract_tests {
 
     // DATA-only coverage for the precise common-path output-inventory labels.
     // This neither runs native inventory nor substitutes for its Windows route.
+    fn normal_smoke_launch_directory_contract() -> Result<()> {
+        // Original slots and absence completions are inert DATA, never OS calls.
+        fn prepared() -> Result<InertProfile> {
+            let mut fixture = InertProfile::new()?;
+            fixture.returned(AbsenceEpoch::BeforeLogon, 0xc0000034u32 as i32, null_mut(), F::STATUS_PENDING, usize::MAX)?;
+            let p = &mut fixture.0; let parent = wide(r"C:\Users");
+            p.directory[..parent.len()].copy_from_slice(&parent); p.units = parent.len() as u32;
+            p.getter_entered = true; p.getter_return = 1; p.prestate = true;
+            p.expected = Path::new(r"C:\Users").join(&p.name); Ok(fixture)
+        }
+        let role = UiRole::NormalSmoke;
+        assert_eq!(normal_smoke_profile_directory(role, None, &mut InputTrace::default()), Err(Error::Unsafe));
+        let unprepared = InertProfile::new()?;
+        assert!(normal_smoke_profile_directory(role, Some(&unprepared.0), &mut InputTrace::default()).is_err());
+        let fixture = prepared()?; let profile = fixture.0.expected.clone();
+        assert_eq!(normal_smoke_profile_directory(role, Some(&fixture.0), &mut InputTrace::default()), Ok(Some(profile.as_path())));
+        for invalid in 0..11 {
+            let mut fixture = prepared()?;
+            match invalid {
+                0 => fixture.0.unknown = true,
+                1 => fixture.0.prestate = false,
+                2 => fixture.0.exact = true,
+                3 => fixture.0.delete_entered = true,
+                4 => fixture.0.settled = true,
+                5 => fixture.0.getter_entered = false,
+                6 => fixture.0.getter_return = 0,
+                7 => fixture.0.units = 0,
+                8 => fixture.0.expected = Path::new(r"C:\Elsewhere").join(&fixture.0.name),
+                9 => fixture.0.expected = PathBuf::from(&fixture.0.name),
+                _ => fixture.0.absence_mut(AbsenceEpoch::AfterDeletion)?.claim()?,
+            }
+            assert_eq!(normal_smoke_profile_directory(role, Some(&fixture.0), &mut InputTrace::default()),
+                Err(if invalid == 0 { Error::Unknown } else { Error::Unsafe }));
+        }
+        let mut bound = prepared()?;
+        let parent = bound.0.paths[0].original.index;
+        let canonical = format!("{}\\{}", bound.0.native.slot(parent)?.canonical, bound.0.name);
+        let original = bound.0.native.reserve(Kind::Directory, Some(parent), &bound.0.name, canonical)?;
+        let slot = bound.0.native.slot_mut(original.index)?;
+        slot.state = SlotState::Owned; unsafe { *slot.output.get() = 42usize as F::HANDLE; }
+        bound.0.profile = Some(ProfilePath { original, metadata: bound.0.paths[0].metadata.clone() });
+        assert_eq!(normal_smoke_profile_directory(role, Some(&bound.0), &mut InputTrace::default()), Err(Error::Unsafe));
+
+        let root = PathBuf::from(r"D:\mrk\root"); let output = root.join(role.name("output"));
+        let app = root.join("mobile-release-kit-desktop.exe"); let app_text = app.to_str().ok_or(Error::Unsafe)?;
+        let output_text = output.to_str().ok_or(Error::Unsafe)?;
+        let baseline = vec![
+            ("SystemRoot".to_owned(), r"C:\Windows".to_owned()),
+            ("TEMP".to_owned(), output_text.to_owned()), ("TMP".to_owned(), output_text.to_owned()),
+            ("MRK_WINDOWS_ORDINARY_OUTPUT".to_owned(), output_text.to_owned()),
+            ("MRK_WINDOWS_NORMAL_UI_OUTPUT".to_owned(), output_text.to_owned()),
+            ("unchanged".to_owned(), "sentinel=value".to_owned()),
+        ];
+        let initial_directory = wide(output_text);
+        for (temp, tmp) in [("TEMP", "TMP"), ("tEmP", "tMp")] {
+            let mut values = baseline.clone(); values[1].0 = temp.to_owned(); values[2].0 = tmp.to_owned();
+            let mut expected = values.clone(); let mut directory = initial_directory.clone();
+            expected[1].1 = profile.to_str().ok_or(Error::Unsafe)?.to_owned(); expected[2].1 = expected[1].1.clone();
+            normal_smoke_launch_directories(role, app_text, &output, &root, Some(&profile), &mut values, &mut directory)?;
+            assert_eq!(values, expected); assert_eq!(directory, wide(root.to_str().ok_or(Error::Unsafe)?));
+            assert_eq!(values[4], baseline[4]); // The explicitly named result-output directory is not scratch.
+        }
+        for (key, mixed) in [("TEMP", "tEmP"), ("TMP", "tMp")] {
+            for invalid in 0..5 {
+                let mut values = baseline.clone();
+                match invalid {
+                    0 => values.retain(|(name, _)| !name.eq_ignore_ascii_case(key)),
+                    1 => values.push((key.to_owned(), output_text.to_owned())),
+                    2 => values.push((key.to_ascii_lowercase(), output_text.to_owned())),
+                    3 => values.push((mixed.to_owned(), output_text.to_owned())),
+                    _ => values.iter_mut().find(|(name, _)| name.as_str() == key).ok_or(Error::State)?.1 = "wrong".to_owned(),
+                }
+                let expected = values.clone(); let mut directory = initial_directory.clone();
+                assert_eq!(normal_smoke_launch_directories(role, app_text, &output, &root, Some(&profile), &mut values, &mut directory),
+                    Err(Error::Unsafe));
+                assert_eq!(values, expected); assert_eq!(directory, initial_directory);
+            }
+        }
+        for (bad_app, bad_output, bad_root, bad_profile) in [
+            (root.join("other.exe"), output.clone(), root.clone(), Some(profile.clone())),
+            (app.clone(), root.join("other-output"), root.clone(), Some(profile.clone())),
+            (app.clone(), output.clone(), root.join("other-root"), Some(profile.clone())),
+            (app.clone(), root.clone(), root.clone(), Some(profile.clone())),
+            (app.clone(), output.clone(), root.clone(), Some(root.clone())),
+            (app.clone(), output.clone(), root.clone(), Some(output.clone())),
+            (app.clone(), output.clone(), root.clone(), Some(PathBuf::from(r"d:\MRK\ROOT"))),
+            (app.clone(), output.clone(), root.clone(), Some(PathBuf::from("relative-profile"))),
+            (app.clone(), output.clone(), PathBuf::from("relative-root"), Some(profile.clone())),
+            (app.clone(), PathBuf::from("relative-output"), root.clone(), Some(profile.clone())),
+            (app.clone(), output.clone(), root.clone(), None),
+        ] {
+            let mut values = baseline.clone(); let mut directory = initial_directory.clone();
+            assert_eq!(normal_smoke_launch_directories(role, bad_app.to_str().ok_or(Error::Unsafe)?, &bad_output, &bad_root,
+                bad_profile.as_deref(), &mut values, &mut directory), Err(Error::Unsafe));
+            assert_eq!(values, baseline); assert_eq!(directory, initial_directory);
+        }
+        let mut values = baseline.clone(); let mut directory = wide(root.to_str().ok_or(Error::Unsafe)?);
+        let wrong_directory = directory.clone();
+        assert_eq!(normal_smoke_launch_directories(role, app_text, &output, &root, Some(&profile), &mut values, &mut directory),
+            Err(Error::Unsafe));
+        assert_eq!(values, baseline); assert_eq!(directory, wrong_directory);
+        let mut unknown = prepared()?; unknown.0.unknown = true;
+        for role in [UiRole::Prerequisite, UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+            assert_eq!(normal_smoke_profile_directory(role, None, &mut InputTrace::default()), Ok(None));
+            assert_eq!(normal_smoke_profile_directory(role, Some(&unknown.0), &mut InputTrace::default()), Ok(None));
+            for unused in [None, Some(Path::new("relative-unused-profile"))] {
+                let mut values = baseline.clone(); let mut directory = initial_directory.clone();
+                normal_smoke_launch_directories(role, "unused-app", Path::new("unused-output"), Path::new("unused-root"),
+                    unused, &mut values, &mut directory)?;
+                assert_eq!(values, baseline); assert_eq!(directory, initial_directory);
+            }
+        }
+        Ok(())
+    }
+
     fn output_inventory_diagnostic_contract() {
         let source = include_str!("ordinary_owner_ui.rs");
         let inventory = source.split_once("fn output_poststate(").unwrap().1
@@ -4350,6 +4508,7 @@ mod contract_tests {
         dashboard_name_observation_contract(); dashboard_stale_name_contract();
         startup_diagnostic_contract();
         quit_logical_controls_contract();
+        normal_smoke_launch_directory_contract().expect("closed normal-smoke directory routing");
         output_inventory_diagnostic_contract();
         // Actual finite native-containment routing; no native call is entered.
         use crate::ui::quit_native::Failure as Q;
