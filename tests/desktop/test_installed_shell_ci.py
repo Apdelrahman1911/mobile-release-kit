@@ -3932,7 +3932,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
             with self.subTest(role=role):
                 selecting = source.split("    pub(super) fn select_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
                 activating = source.split("    pub(super) fn activate_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
-                self.assertEqual(selecting.count("dialog.set_filename("), 1 if role == "session_file" else 0)
+                self.assertNotIn("dialog.set_filename(", selecting)
                 self.assertEqual(activating.count("dialog.file()"), 1)
                 readiness = "let Some(file) = dialog.file() else"
                 self.assertIn(readiness, activating)
@@ -3941,6 +3941,19 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                 wait = activating.split(readiness, 1)[1].split("if !file.equal(", 1)[0]
                 self.assertIn("return Ok(false)", wait)
                 if role == "session_file":
+                    self.assertEqual(selecting.count("dialog.set_current_folder(parent)"), 1)
+                    self.assertEqual(selecting.count("dialog.select_file(&target_file).is_err()"), 1)
+                    navigation, passive = selecting.split("let target_file =", 1)
+                    self.assertIn("if !parent_navigation_reserved {", navigation)
+                    self.assertLess(navigation.index("q.session_file_parent_navigation(id, index)?"), navigation.index("dialog.set_current_folder(parent)"))
+                    self.assertIn("return Ok(false);", navigation)
+                    self.assertNotIn("set_current_folder", passive + activating)
+                    guards = ["dialog.is_mapped()", "dialog.current_folder_file()", "if !mapped || !parent_ready",
+                              "q.session_file_selection(id, index)?", "dialog.select_file(&target_file)"]
+                    self.assertEqual([passive.index(item) for item in guards], sorted(passive.index(item) for item in guards))
+                    self.assertIn("file.equal(&parent_file)", passive)
+                    self.assertIn("q.session_file_wait(index, false, W::NotSampled, P::NotSampled);", selecting)
+                    self.assertNotIn("P::Sampled", selecting)
                     different = "if !file.equal(&gtk::gio::File::for_path(&path))"
                     self.assertEqual(activating.count("file.equal("), 3)  # One original predicate, two diagnostic comparisons.
                     self.assertEqual(activating.count("dialog.is_mapped()"), 1)

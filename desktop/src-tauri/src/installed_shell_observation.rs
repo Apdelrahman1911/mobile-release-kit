@@ -650,7 +650,24 @@ enum SessionPresentation { Native, DeadlineError }
 struct SessionSample {
     snapshot: InstalledSessionSnapshot, presentation: SessionPresentation, display: Option<Value>,
 }
-struct SessionFile { id: u32, index: u8, kind: &'static str, select: bool, picker: Picker }
+struct SessionFile { id: u32, index: u8, kind: &'static str, select: bool, picker: Picker,
+    parent_navigation_reserved: bool }
+impl SessionFile {
+    fn navigation_matches(&self) -> bool { self.parent_navigation_reserved == self.select }
+    fn selection_pending(&self) -> bool {
+        self.picker.created && !self.picker.selected && !self.picker.activated && !self.picker.responded
+            && !self.picker.filename && !self.picker.disposal && !self.picker.destroyed
+            && !self.picker.released && !self.picker.returned
+    }
+    fn reserve_parent_navigation(&mut self) -> bool {
+        if !self.select || !self.selection_pending() || self.parent_navigation_reserved { return false; }
+        self.parent_navigation_reserved = true; true
+    }
+    fn reserve_selection(&mut self) -> bool {
+        if !self.select || !self.selection_pending() || !self.parent_navigation_reserved { return false; }
+        self.picker.selected = true; true
+    }
+}
 struct SessionRecord {
     admission_issued: bool, admitted: bool, fixture: Option<SessionFixture>,
     diagnostic: Option<SessionDiagnostic>,
@@ -759,11 +776,55 @@ fn assert_session_recipe_contract() {
         assert_eq!(case.assessments(),assessments);
         assert_eq!(recipe.iter().filter(|a| matches!(a,SA::Choose(..))).count(),choosers);
         assert!(recipe.iter().all(|a| !matches!(a,SA::Fields("android-firebase"))));
+        // Exercise the actual per-file reservations, not a second GTK model.
+        // Original owner/id/endpoint binding remains in the Record transaction.
+        for (index,action) in recipe.iter().enumerate() {
+            let SA::Choose(name,kind,_) = *action else { continue; };
+            let index = index as u8;
+            let fresh = || SessionFile { id:3,index,kind,select:!name.is_empty(),
+                picker:Picker { created:true,..Picker::default() },parent_navigation_reserved:false };
+            let mut file = fresh();
+            assert!(!file.reserve_selection() && !file.picker.selected);
+            if file.select {
+                assert!(file.reserve_parent_navigation() && file.parent_navigation_reserved && !file.picker.selected);
+                for _ in 0..3 { assert!(!file.reserve_parent_navigation() && !file.picker.selected); }
+                assert!(file.reserve_selection() && file.picker.selected && file.navigation_matches());
+                assert!(!file.reserve_parent_navigation() && !file.reserve_selection());
+            } else {
+                assert!(!file.reserve_parent_navigation() && !file.parent_navigation_reserved && file.navigation_matches());
+                let mut corrupt = SessionFile { parent_navigation_reserved:true,..fresh() };
+                assert!(!corrupt.navigation_matches() && !corrupt.reserve_parent_navigation() && !corrupt.reserve_selection());
+            }
+            for picker in [
+                Picker::default(),
+                Picker { created:true,selected:true,..Picker::default() },
+                Picker { created:true,activated:true,..Picker::default() },
+                Picker { created:true,responded:true,..Picker::default() },
+                Picker { created:true,filename:true,..Picker::default() },
+                Picker { created:true,disposal:true,..Picker::default() },
+                Picker { created:true,destroyed:true,..Picker::default() },
+                Picker { created:true,released:true,..Picker::default() },
+                Picker { created:true,returned:true,..Picker::default() },
+            ] {
+                let mut invalid = SessionFile { picker,..fresh() };
+                assert!(!invalid.reserve_parent_navigation() && !invalid.parent_navigation_reserved);
+                invalid.parent_navigation_reserved = invalid.select;
+                assert!(!invalid.reserve_selection());
+            }
+            let selecting = Step::Session(SessionStep::SetFile(index));
+            let activating = Step::Session(SessionStep::ActivateFile(index));
+            assert!(session_file_wait_pending(selecting,Some(Pending::Dom(selecting)),index,false));
+            assert!(!session_file_wait_pending(selecting,Some(Pending::Dom(selecting)),index+1,false));
+            assert!(!session_file_wait_pending(selecting,Some(Pending::Dom(activating)),index,false));
+            assert!(!session_file_wait_pending(activating,Some(Pending::Dom(activating)),index,false));
+            assert!(!session_file_wait_pending(selecting,None,index,false));
+        }
         if matches!(case,SessionCase::Loss|SessionCase::Deadline) {
             assert!(recipe.last()==Some(&SA::Held));
             assert!(recipe.iter().all(|a| !matches!(a,SA::Keep|SA::Assign|SA::Remove)));
         }
     }
+    assert!(SessionCase::Refusals.recipe().get(24)==Some(&SA::Choose("replacement.jks","android-keystore",None)));
     let end=Instant::now();
     assert!(session_original_clock(Some(end),Some(end),false));
     assert!(session_original_clock(Some(end),None,true));
@@ -7639,7 +7700,7 @@ impl Observation {
         let Some(case)=self.case.session() else { return false; }; let s=&r.session;
         s.admitted && s.draft.is_some() && s.requests==s.returns && s.recipe_done==case.recipe().len() && s.assessed==case.assessments() as u8
             && s.requests[SessionCommand::Prepare.index()]==s.assessed && s.returns[SessionCommand::Prepare.index()]==s.assessed
-            && s.files.iter().all(|file| file.picker.settled(file.select))
+            && s.files.iter().all(|file| file.navigation_matches() && file.picker.settled(file.select))
             && match case {
                 SessionCase::Inputs=>s.files.len()==3 && s.captures==3 && s.captures_closed==3 && s.kept==5 && s.assigned==6 && s.removed==1
                     && s.reassessed && s.context_revoked && s.replaced && s.quit_preserved,
@@ -7677,20 +7738,20 @@ impl Observation {
         let Some((index,SA::Choose(file,expected,_)))=self.session_action(r.step) else { self.fail(); return; };
         let name=match kind { crate::credential_format::FileKind::AndroidKeystore=>"android-keystore", crate::credential_format::FileKind::AndroidFirebase=>"android-firebase" };
         if name!=expected || id<=2 || r.session.files.len()>=9 || r.session.files.iter().any(|f| f.id==id || f.index==index) { self.fail(); return; }
-        r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()}});
+        r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()},parent_navigation_reserved:false});
     }
-    pub(super) fn session_file_dialog(&self, id: u32, index: u8) -> Result<(&'static str,bool),()> {
+    pub(super) fn session_file_dialog(&self, id: u32, index: u8) -> Result<(&'static str,bool,bool),()> {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
         let Some(file)=r.session.files.last().filter(|file| file.id==id && file.index==index) else {
             self.session_fail(&mut r,SessionRejection::GtkDialogRecord); return Err(());
         };
         if self.failed.load(Ordering::SeqCst) { return Err(()); }
         if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }
-        if !file.picker.created || file.picker.responded || file.picker.destroyed
+        if !file.picker.created || file.picker.responded || file.picker.destroyed || file.parent_navigation_reserved && !file.select
             || !matches!(r.pending,Some(Pending::Dom(Step::Session(SessionStep::SetFile(i) | SessionStep::ActivateFile(i)))) if i==index) {
             self.session_fail(&mut r,SessionRejection::GtkDialogRecord); return Err(());
         }
-        Ok((file.kind,file.select))
+        Ok((file.kind,file.select,file.parent_navigation_reserved))
     }
     pub(super) fn session_file_target(&self, index: u8) -> Option<PathBuf> {
         let SA::Choose(file,_,_)=*self.case.session()?.recipe().get(usize::from(index))? else { return None; };
@@ -7702,20 +7763,35 @@ impl Observation {
         self.case.session()?;
         Some(self.project_path()?.parent()?.join("sources").join("firebase.json"))
     }
-    pub(super) fn session_file_selection(&self, id: u32, index: u8) -> Result<(),()> {
+    pub(super) fn session_file_parent_navigation(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
         if self.failed.load(Ordering::SeqCst) { return Err(()); }
         if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }
-        if r.pending!=Some(Pending::Dom(Step::Session(SessionStep::SetFile(index)))) {
+        if !session_file_wait_pending(r.step,r.pending,index,false) {
             self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
         }
         let Some(file)=r.session.files.last_mut().filter(|file| file.id==id && file.index==index) else {
             self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
         };
-        if !file.select || file.picker.selected || file.picker.activated {
+        if !file.reserve_parent_navigation() {
             self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
         }
-        file.picker.selected=true; Ok(())
+        Ok(())
+    }
+    pub(super) fn session_file_selection(&self, id: u32, index: u8) -> Result<(),()> {
+        let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }
+        if !session_file_wait_pending(r.step,r.pending,index,false) {
+            self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
+        }
+        let Some(file)=r.session.files.last_mut().filter(|file| file.id==id && file.index==index) else {
+            self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
+        };
+        if !file.reserve_selection() {
+            self.session_fail(&mut r,SessionRejection::GtkSelectionState); return Err(());
+        }
+        Ok(())
     }
     pub(super) fn session_file_activation(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
@@ -7727,7 +7803,7 @@ impl Observation {
         let Some(file)=r.session.files.last_mut().filter(|file| file.id==id && file.index==index) else {
             self.session_fail(&mut r,SessionRejection::GtkActivationState); return Err(());
         };
-        if file.picker.selected!=file.select || file.picker.activated {
+        if file.picker.selected!=file.select || file.picker.activated || !file.navigation_matches() {
             self.session_fail(&mut r,SessionRejection::GtkActivationState); return Err(());
         }
         file.picker.activated=true; Ok(())
@@ -7768,9 +7844,10 @@ impl Observation {
         let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
             if result!=Ok(false) { self.session_fail(&mut r,SessionRejection::GtkReturnState); } return;
         };
+        if file.parent_navigation_reserved && !file.select { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; }
         match result {
             Ok(false) if !file.picker.activated && (step!=SessionStep::SetFile(index) || !file.picker.selected)=>{},
-            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated=>r.step=Step::Session(SessionStep::ActivateFile(index)),
+            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated && file.navigation_matches()=>r.step=Step::Session(SessionStep::ActivateFile(index)),
             Ok(true) if step==SessionStep::ActivateFile(index)=>{
                 if !file.picker.activation_returned(result) { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; } r.step=Step::Session(SessionStep::Capture(index));
             }, _=>self.session_fail(&mut r,SessionRejection::GtkReturnState),
@@ -8163,8 +8240,8 @@ fn metadata_script(step: MetadataStep) -> Option<String> {
             if (heading!=='Review text changes') return {state:'wait',reason:'heading-not-review',heading:heading===''?'empty':
                 heading==='Text status could not be verified'?'protocol-unverified':heading==='Checking the saved locale…'?'opening':
                 heading==='Preparing text changes…'?'preparing':'other'};
-            const rows=p.querySelectorAll('.metadata-file-review');if (rows.length!==3 || document.querySelector('dialog')) throw 0;
-            for (const row of rows) {const summary=row.querySelector(':scope > summary');show(summary);if (!row.open) summary.click();}
+            const details=p.querySelectorAll('.metadata-file-review');if (details.length!==3 || document.querySelector('dialog')) throw 0;
+            for (const row of details) {const summary=row.querySelector(':scope > summary');show(summary);if (!row.open) summary.click();}
             return {state:'ready'};"#,
         MetadataStep::ReadReview(_) => r#"const m=controls(),p=panel();if (text(p.querySelector('.section-heading h2'))!=='Review text changes') return {state:'wait'};
             if (document.querySelector('dialog')) throw 0;return {state:'ready',review:review(),draft:rows(m).map(row=>({id:row.id,text:row.input.value}))};"#,

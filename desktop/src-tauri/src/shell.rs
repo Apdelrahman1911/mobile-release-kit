@@ -1678,7 +1678,7 @@ mod owned_gtk {
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    fn observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8, activating: bool) -> Result<Option<(u32, gtk::FileChooserDialog, bool)>, ()> {
+    fn observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8, activating: bool) -> Result<Option<(u32, gtk::FileChooserDialog, bool, bool)>, ()> {
         use installed_observation::{SessionRejection as R, SessionWait as W};
         if !gtk::is_initialized_main_thread() { q.session_file_failed(R::GtkThread); return Err(()); }
         let original = DIALOG.with(|book| {
@@ -1704,7 +1704,7 @@ mod owned_gtk {
         let original_facts = call.facts().is_some_and(|facts| facts.created && facts.showing && !facts.constructing
             && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none());
         if !original_facts { q.session_file_failed(R::GtkOwnerFacts); return Err(()); }
-        let (kind, select) = q.session_file_dialog(id, index)?;
+        let (kind, select, parent_navigation_reserved) = q.session_file_dialog(id, index)?;
         let title = match kind {
             "android-keystore" => "Choose an Android JKS keystore",
             "android-firebase" => "Choose Android Firebase JSON",
@@ -1720,19 +1720,35 @@ mod owned_gtk {
             || dialog.property::<gtk::FileChooserAction>("action") != gtk::FileChooserAction::Open
             || !dialog.property::<bool>("local-only") || dialog.property::<bool>("select-multiple") || dialog.property::<bool>("create-folders")
             || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { q.session_file_failed(R::GtkDialogProperties); return Err(()); }
-        Ok(Some((id, dialog, select)))
+        Ok(Some((id, dialog, select, parent_navigation_reserved)))
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn select_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
-        use installed_observation::SessionRejection as R;
-        let Some((id, dialog, select)) = observed_session_file(app, q, index, false)? else { return Ok(false); };
+        use installed_observation::{SessionRejection as R, SessionWait as W, SessionPickerReadiness as P};
+        let Some((id, dialog, select, parent_navigation_reserved)) = observed_session_file(app, q, index, false)? else { return Ok(false); };
         if !select { q.session_file_failed(R::GtkSelectionState); return Err(()); }
         let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
+        let Some(parent) = path.parent() else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
+        // v7 picker samples remain activation-only; do not forge a Set sample.
+        q.session_file_wait(index, false, W::NotSampled, P::NotSampled);
+        if !parent_navigation_reserved {
+            // Reserve before the single native navigation, outside every guard.
+            // Later Set callbacks only wait; they never replay this setter.
+            q.session_file_parent_navigation(id, index)?;
+            if !dialog.set_current_folder(parent) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }
+            return Ok(false);
+        }
+        let target_file = gtk::gio::File::for_path(&path);
+        let parent_file = gtk::gio::File::for_path(parent);
+        let mapped = dialog.is_mapped();
+        let current_folder = dialog.current_folder_file();
+        let parent_ready = current_folder.as_ref().is_some_and(|file| file.equal(&parent_file));
+        if !mapped || !parent_ready { return Ok(false); }
         q.session_file_selection(id, index)?;
-        // One setter on the real chooser, not a selection receipt. Its actual
-        // accepted callback alone performs the original filename() transfer.
-        if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }
+        if dialog.select_file(&target_file).is_err() { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }
+        // Setter success is not selection/transfer evidence. ActivateFile still
+        // requires the exact selected GFile and the original response callback.
         Ok(true)
     }
 
@@ -1740,7 +1756,7 @@ mod owned_gtk {
     pub(super) fn activate_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
         use installed_observation::{SessionRejection as R, SessionWait as W,
             SessionPickerReadiness as P, SessionPickerFolder as F, SessionPickerSelection as S};
-        let Some((id, dialog, select)) = observed_session_file(app, q, index, true)? else { return Ok(false); };
+        let Some((id, dialog, select, _)) = observed_session_file(app, q, index, true)? else { return Ok(false); };
         let mut picker = P::NotSampled;
         if select {
             let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
