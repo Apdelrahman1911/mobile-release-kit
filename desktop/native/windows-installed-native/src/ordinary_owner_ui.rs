@@ -862,6 +862,15 @@ fn observer_read_scope<T>(trace: Option<&ObserverCaptureTrace>, operation: Obser
 fn observer_read_result<T>(trace: Option<&ObserverCaptureTrace>, check: ObserverCaptureCheck, original: Result<T>) -> Result<T> {
     match trace { Some(trace) => trace.result(check, original), None => original }
 }
+// The caller has already evaluated this one Boolean. Record only its original
+// false result, without evaluating a later && operand or changing the value.
+fn observer_poststate_predicate(trace: Option<&ObserverCaptureTrace>, operation: ObserverCaptureOperation,
+    index: Option<u8>, check: ObserverCaptureCheck, original: bool) -> bool {
+    if let Some(trace) = trace {
+        let _ = trace.scope(operation, index, || trace.result(check, need(original)));
+    }
+    original
+}
 fn observer_native<T>(native: &mut NativeBook, trace: Option<&ObserverCaptureTrace>, operation: ObserverCaptureOperation, index: Option<u8>,
     observe: impl FnOnce(&mut NativeBook) -> Result<T>) -> Result<T> {
     match trace { Some(trace) => trace.scope(operation, index, || native.observer_capture_observe(trace, observe)), None => observe(native) }
@@ -950,128 +959,168 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
     diagnostic: &mut Option<ObserverDiagnosticOriginal>, capture: &mut ObserverCapture,
     role: UiRole, output: &Path, output_index: usize, result_index: Option<usize>, clock: &mut Clock,
     trace: &mut InputTrace, smoke: Option<&Smoke>) -> Result<()> {
-    if observer_role(role) { need(!capture.claimed)?; capture.claimed = true; }
+    use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
+    let read_trace = observer_role(role).then_some(&capture.reader);
+    if observer_role(role) {
+        observer_read_scope(read_trace, O::OutputPoststate, None, || observer_read_result(read_trace, C::ReadOnce, need(!capture.claimed)))?;
+        capture.claimed = true;
+    }
     let mut projection = None;
-    // Observe each original result once; this only narrows the existing first
-    // diagnostic. No extra native operation, inventory pass or failure policy.
+    // Same original Result, first-only DATA for either diagnostic role. None
+    // performs the original expression once without constructing a Smoke owner.
     macro_rules! output_result {
-        ($check:ident, $original:expr) => {
-            smoke_result(smoke, SmokePhase::OutputPoststate, SmokeCheck::$check, $original)
+        ($check:ident, $operation:expr, $index:expr, $capture_check:ident, $original:expr) => {
+            observer_read_scope(read_trace, $operation, $index, || observer_read_result(read_trace, C::$capture_check,
+                smoke_result(smoke, SmokePhase::OutputPoststate, SmokeCheck::$check, $original)))
         };
     }
-    trace.prerequisite_scope(PrerequisiteCheck::O01, |trace| {
-        let (drive, parts) = output_result!(OutputDecode, decode::dos_location(output_result!(OutputLocation, output.to_str().ok_or(Error::Unsafe))?))?;
-        output_result!(OutputDepth, need(parts.len() < 16))?; output_result!(Clock, clock.effect_traced(trace))?;
-        let device = output_result!(OutputDrive, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))?; let name = format!("{device}\\");
-        let root = output_result!(OutputRootReserve, native.prerequisite_observe(trace, PrerequisiteCheck::NB01, |native| native.reserve(Kind::Directory, None, &name, name.clone())))?;
-        output_result!(OutputRootOpen, native.prerequisite_observe(trace, PrerequisiteCheck::NB02, |native| native.call(Call::Open(root.index), null_mut(), Vec::new())))?;
-        output_result!(OutputRootNoninherited, native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.noninherited(root.index)))?; output_result!(OutputFilesystem, native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&root)))?;
-        let root_metadata = output_result!(OutputRootMetadata, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&root)))?;
-        let mut entries = vec![(root, root_metadata)];
-        for name in parts {
-            output_result!(Clock, clock.effect_traced(trace))?;
-            let original = output_result!(OutputAncestorOpen, native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(&output_result!(OutputParentOriginal, entries.last().ok_or(Error::State))?.0, &name, FileKind::Directory)))?;
-            let metadata = output_result!(OutputAncestorMetadata, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original)))?; entries.push((original, metadata));
+    macro_rules! poststate_result {
+        ($operation:expr, $index:expr, $check:ident, $original:expr) => {
+            observer_read_scope(read_trace, $operation, $index, || observer_read_result(read_trace, C::$check, $original))
+        };
+    }
+    macro_rules! predicate {
+        ($operation:expr, $index:expr, $check:ident, $original:expr) => {
+            observer_poststate_predicate(read_trace, $operation, $index, C::$check, $original)
+        };
+    }
+    observer_read_scope(read_trace, O::OutputPoststate, None, || trace.prerequisite_scope(PrerequisiteCheck::O01, |trace| {
+        let (drive, parts) = output_result!(OutputDecode, O::OutputLocation, None, DosLocation, decode::dos_location(output_result!(OutputLocation, O::OutputLocation, None, PathText, output.to_str().ok_or(Error::Unsafe))?))?;
+        output_result!(OutputDepth, O::OutputLocation, None, PathDepth, need(parts.len() < 16))?; output_result!(Clock, O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
+        let device = output_result!(OutputDrive, O::DriveBefore, None, HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))?; let name = format!("{device}\\");
+        let root = output_result!(OutputRootReserve, O::RootReserve, Some(0), HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB01, |native| native.reserve(Kind::Directory, None, &name, name.clone())))?;
+        output_result!(OutputRootOpen, O::RootOpen, Some(0), HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB02, |native| native.call(Call::Open(root.index), null_mut(), Vec::new())))?;
+        output_result!(OutputRootNoninherited, O::RootNoninherited, Some(0), HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB03, |native| native.noninherited(root.index)))?; output_result!(OutputFilesystem, O::RootFilesystem, Some(0), HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.local_ntfs(&root)))?;
+        let root_metadata = output_result!(OutputRootMetadata, O::RootMetadata, Some(0), HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&root)))?;
+        // The third tuple element is only a closed role for the existing final
+        // metadata loop. It neither identifies nor replaces an original cursor.
+        let mut entries = vec![(root, root_metadata, (O::CursorMetadataAfter, Some(0)))];
+        for (position, name) in parts.into_iter().enumerate() {
+            let index = Some((position + 1) as u8); // Earlier <16 DATA bound.
+            output_result!(Clock, O::AncestorOpen, index, OriginalClock, clock.effect_traced(trace))?;
+            let original = output_result!(OutputAncestorOpen, O::AncestorOpen, index, HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB06, |native| native.open_child(&output_result!(OutputParentOriginal, O::AncestorOpen, index, ParentOriginal, entries.last().ok_or(Error::State))?.0, &name, FileKind::Directory)))?;
+            let metadata = output_result!(OutputAncestorMetadata, O::AncestorMetadata, index, HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(&original)))?; entries.push((original, metadata, (O::CursorMetadataAfter, index)));
         }
         let at = entries.len() - 1;
         trace.at(InputRole::Output, Some(output_index as u8));
-        let output_stamp = output_result!(OutputStamp, files[output_index].stamp_traced(trace))?;
-        output_result!(OutputIdentity, need(entries[at].1.identity.volume_serial == output_stamp.volume && entries[at].1.identity.file_id == output_stamp.id))?;
-        let mut directories = vec![(at, at - 1)];
+        let output_stamp = output_result!(OutputStamp, O::OutputOriginal, None, OriginalStamp, files[output_index].stamp_traced(trace))?;
+        output_result!(OutputIdentity, O::OutputBinding, None, HelperReturn, need(
+            predicate!(O::OutputBinding, None, VolumeSerial, entries[at].1.identity.volume_serial == output_stamp.volume)
+            && predicate!(O::OutputBinding, None, FileId, entries[at].1.identity.file_id == output_stamp.id)))?;
+        let mut directories = vec![(at, at - 1, 0u8)];
         let mut children: Vec<(usize, String, Stamp, FileKind)> = Vec::with_capacity(9);
         if let Some(result) = result_index {
             trace.at(InputRole::Output, Some(result as u8));
-            children.push((at, role.name("result.private.json"), files[result].stamp_traced(trace)?, FileKind::File));
+            children.push((at, role.name("result.private.json"), poststate_result!(O::ResultOriginal, None, OriginalStamp, files[result].stamp_traced(trace))?, FileKind::File));
         }
         // Share-read-only excludes append cursors before this retained parent
         // original's full EOF read. The raw tail (even partial) is PRIVATE DATA,
         // never an additional application-readiness or success predicate.
-        need(diagnostic.is_some() == matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss))?;
+        poststate_result!(O::OutputPoststate, None, JournalPresent, need(diagnostic.is_some() == matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss)))?;
         if let Some(diagnostic) = diagnostic.as_mut() {
-            clock.effect_traced(trace)?;
+            poststate_result!(O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
             let name = diagnostic.name();
-            let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false, None)?;
-            projection = Some(observed); clock.effect_traced(trace)?;
-            children.push((at, name, stamp, FileKind::File)); entries.push((original, metadata));
+            let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false, read_trace)?;
+            projection = Some(observed); poststate_result!(O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
+            children.push((at, name, stamp, FileKind::File)); entries.push((original, metadata, (O::JournalCursorMetadataAfter, Some(16))));
         }
         if let Some(fixture) = fixture.as_mut() {
             let project_path = output.join("project");
-            for (index, before) in [fixture.project, fixture.app, fixture.release].into_iter().zip(&fixture.directory_stamps) {
-                let after = files[index].stamp()?;
-                need(after.volume == before.volume && after.id == before.id && after.creation == before.creation
-                    && after.attributes == before.attributes && after.links == before.links)?;
+            for (position, (index, before)) in [fixture.project, fixture.app, fixture.release].into_iter().zip(&fixture.directory_stamps).enumerate() {
+                let slot = Some(position as u8); // Fixed project/app/release roles0..2.
+                let after = poststate_result!(O::FixtureDirectoryOriginal, slot, OriginalStamp, files[index].stamp())?;
+                poststate_result!(O::FixtureDirectoryOriginal, slot, StampStable, need(
+                    predicate!(O::FixtureDirectoryOriginal, slot, VolumeSerial, after.volume == before.volume)
+                    && predicate!(O::FixtureDirectoryOriginal, slot, FileId, after.id == before.id)
+                    && predicate!(O::FixtureDirectoryOriginal, slot, CreationTime, after.creation == before.creation)
+                    && predicate!(O::FixtureDirectoryOriginal, slot, Attributes, after.attributes == before.attributes)
+                    && predicate!(O::FixtureDirectoryOriginal, slot, Links, after.links == before.links)))?;
             }
-            let project = native.open_child(&entries[at].0, "project", FileKind::Directory)?;
-            let metadata = native.metadata(&project)?; let project_at = entries.len(); entries.push((project, metadata));
-            need(entries[project_at].1.identity.file_id == files[fixture.project].stamp()?.id)?;
-            directories.push((project_at, at));
-            children.push((at, "project".to_owned(), files[fixture.project].stamp()?, FileKind::Directory));
+            let project = poststate_result!(O::FixtureDirectoryOpen, Some(0), HelperReturn, native.open_child(&entries[at].0, "project", FileKind::Directory))?;
+            let metadata = poststate_result!(O::FixtureDirectoryMetadata, Some(0), HelperReturn, native.metadata(&project))?; let project_at = entries.len(); entries.push((project, metadata, (O::FixtureDirectoryMetadataAfter, Some(0))));
+            poststate_result!(O::FixtureDirectoryBinding, Some(0), FileId, need(entries[project_at].1.identity.file_id == poststate_result!(O::FixtureDirectoryOriginal, Some(0), OriginalStamp, files[fixture.project].stamp())?.id))?;
+            directories.push((project_at, at, 1));
+            children.push((at, "project".to_owned(), poststate_result!(O::FixtureDirectoryOriginal, Some(0), OriginalStamp, files[fixture.project].stamp())?, FileKind::Directory));
             let mut branch = Vec::with_capacity(2);
-            for (name, index) in [("app", fixture.app), ("release", fixture.release)] {
-                let original = native.open_child(&entries[project_at].0, name, FileKind::Directory)?;
-                let metadata = native.metadata(&original)?; let n = entries.len(); entries.push((original, metadata));
-                need(entries[n].1.identity.file_id == files[index].stamp()?.id)?;
-                directories.push((n, project_at)); branch.push(n);
-                children.push((project_at, name.to_owned(), files[index].stamp()?, FileKind::Directory));
+            for (position, (name, index)) in [("app", fixture.app), ("release", fixture.release)].into_iter().enumerate() {
+                let slot = Some((position + 1) as u8);
+                let original = poststate_result!(O::FixtureDirectoryOpen, slot, HelperReturn, native.open_child(&entries[project_at].0, name, FileKind::Directory))?;
+                let metadata = poststate_result!(O::FixtureDirectoryMetadata, slot, HelperReturn, native.metadata(&original))?; let n = entries.len(); entries.push((original, metadata, (O::FixtureDirectoryMetadataAfter, slot)));
+                poststate_result!(O::FixtureDirectoryBinding, slot, FileId, need(entries[n].1.identity.file_id == poststate_result!(O::FixtureDirectoryOriginal, slot, OriginalStamp, files[index].stamp())?.id))?;
+                directories.push((n, project_at, (position + 2) as u8)); branch.push(n);
+                children.push((project_at, name.to_owned(), poststate_result!(O::FixtureDirectoryOriginal, slot, OriginalStamp, files[index].stamp())?, FileKind::Directory));
             }
-            for file in &fixture.original_files { need(files[file.index].stamp()? == file.stamp)?; }
+            for (position, file) in fixture.original_files.iter().enumerate() {
+                poststate_result!(O::FixtureFileOriginal, Some(position as u8), StampStable, need(poststate_result!(O::FixtureFileOriginal, Some(position as u8), OriginalStamp, files[file.index].stamp())? == file.stamp))?;
+            }
             for (position, parent, name) in [(0, branch[0], "build.gradle.kts"), (1, project_at, "version.properties"),
                 (2, project_at, "keep.txt")] {
+                let slot = Some(position as u8);
                 let file = &fixture.original_files[position];
                 children.push((parent, name.to_owned(), file.stamp.clone(), FileKind::File));
                 // The retained share-read-only original protects immutable bytes;
                 // this fresh cursor adds full EOF readback, not replacement identity.
-                let original = native.open_child(&entries[parent].0, name, FileKind::File)?;
-                let metadata = native.metadata(&original)?;
-                clock.effect_traced(trace)?; native.no_alternate_streams(&original)?; clock.effect_traced(trace)?;
-                need(metadata.identity.volume_serial == file.stamp.volume && metadata.identity.file_id == file.stamp.id
-                    && native.read_next(&original, LIMIT)? == file.bytes && native.read_next(&original, 1)?.is_empty())?;
-                entries.push((original, metadata));
+                let original = poststate_result!(O::FixtureFileOpen, slot, HelperReturn, native.open_child(&entries[parent].0, name, FileKind::File))?;
+                let metadata = poststate_result!(O::FixtureFileMetadata, slot, HelperReturn, native.metadata(&original))?;
+                poststate_result!(O::FixtureFileStreams, slot, OriginalClock, clock.effect_traced(trace))?; poststate_result!(O::FixtureFileStreams, slot, HelperReturn, native.no_alternate_streams(&original))?; poststate_result!(O::FixtureFileStreams, slot, OriginalClock, clock.effect_traced(trace))?;
+                poststate_result!(O::FixtureFileRead, slot, HelperReturn, need(
+                    predicate!(O::FixtureFileMetadata, slot, VolumeSerial, metadata.identity.volume_serial == file.stamp.volume)
+                    && predicate!(O::FixtureFileMetadata, slot, FileId, metadata.identity.file_id == file.stamp.id)
+                    && predicate!(O::FixtureFileRead, slot, BytesEqual, poststate_result!(O::FixtureFileRead, slot, ReadReturned, native.read_next(&original, LIMIT))? == file.bytes)
+                    && predicate!(O::FixtureFileEof, slot, EndOfFile, poststate_result!(O::FixtureFileEof, slot, ReadReturned, native.read_next(&original, 1))?.is_empty())))?;
+                entries.push((original, metadata, (O::FixtureFileMetadataAfter, slot)));
             }
             let config = if fixture.initial_config {
-                let original = &fixture.original_files[3]; need(files[original.index].stamp()? == original.stamp)?; original.index
+                let original = &fixture.original_files[3]; poststate_result!(O::FixtureFileOriginal, Some(3), StampStable, need(poststate_result!(O::FixtureFileOriginal, Some(3), OriginalStamp, files[original.index].stamp())? == original.stamp))?; original.index
             } else {
-                need(role == UiRole::ProjectDraft)?;
-                let index = input(files, &project_path.join("release").join("mobile-release.json"), false, FS::FILE_GENERIC_READ, clock, trace)?;
-                need(files[index].read(LIMIT)? == UI_FIXTURE_CONFIG_AFTER)?; index
+                poststate_result!(O::ConfigurationInput, None, Role, need(role == UiRole::ProjectDraft))?;
+                let index = poststate_result!(O::ConfigurationInput, None, HelperReturn, input(files, &project_path.join("release").join("mobile-release.json"), false, FS::FILE_GENERIC_READ, clock, trace))?;
+                poststate_result!(O::ConfigurationRead, None, BytesEqual, need(poststate_result!(O::ConfigurationRead, None, ReadReturned, files[index].read(LIMIT))? == UI_FIXTURE_CONFIG_AFTER))?; index
             };
-            let stamp = files[config].stamp()?;
+            let stamp = poststate_result!(O::FixtureFileOriginal, Some(3), OriginalStamp, files[config].stamp())?;
             children.push((branch[1], "mobile-release.json".to_owned(), stamp.clone(), FileKind::File));
-            let original = native.open_child(&entries[branch[1]].0, "mobile-release.json", FileKind::File)?;
-            let metadata = native.metadata(&original)?;
-            clock.effect_traced(trace)?; native.no_alternate_streams(&original)?; clock.effect_traced(trace)?;
-            need(metadata.identity.volume_serial == stamp.volume && metadata.identity.file_id == stamp.id
-                && native.read_next(&original, LIMIT)? == if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER }
-                && native.read_next(&original, 1)?.is_empty())?;
-            entries.push((original, metadata));
-        } else { output_result!(OutputRole, need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke)))?; }
+            let original = poststate_result!(O::FixtureFileOpen, Some(3), HelperReturn, native.open_child(&entries[branch[1]].0, "mobile-release.json", FileKind::File))?;
+            let metadata = poststate_result!(O::FixtureFileMetadata, Some(3), HelperReturn, native.metadata(&original))?;
+            poststate_result!(O::FixtureFileStreams, Some(3), OriginalClock, clock.effect_traced(trace))?; poststate_result!(O::FixtureFileStreams, Some(3), HelperReturn, native.no_alternate_streams(&original))?; poststate_result!(O::FixtureFileStreams, Some(3), OriginalClock, clock.effect_traced(trace))?;
+            poststate_result!(O::FixtureFileRead, Some(3), HelperReturn, need(
+                predicate!(O::FixtureFileMetadata, Some(3), VolumeSerial, metadata.identity.volume_serial == stamp.volume)
+                && predicate!(O::FixtureFileMetadata, Some(3), FileId, metadata.identity.file_id == stamp.id)
+                && predicate!(O::FixtureFileRead, Some(3), BytesEqual, poststate_result!(O::FixtureFileRead, Some(3), ReadReturned, native.read_next(&original, LIMIT))? == if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER })
+                && predicate!(O::FixtureFileEof, Some(3), EndOfFile, poststate_result!(O::FixtureFileEof, Some(3), ReadReturned, native.read_next(&original, 1))?.is_empty())))?;
+            entries.push((original, metadata, (O::FixtureFileMetadataAfter, Some(3))));
+        } else { output_result!(OutputRole, O::OutputPoststate, None, Role, need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke)))?; }
         trace.prerequisite_check(PrerequisiteCheck::O02);
-        for (index, parent) in directories {
+        for (index, parent, position) in directories {
             trace.prerequisite_check(PrerequisiteCheck::O02);
             let mut seen = std::collections::BTreeSet::new();
             loop {
-                output_result!(Clock, clock.effect_traced(trace))?; let Some(batch) = output_result!(OutputEntryBatch, native.prerequisite_observe(trace, PrerequisiteCheck::NB09, |native| native.next_entries(&entries[index].0)))? else { break; };
+                output_result!(Clock, O::DirectoryBatch, Some(position), OriginalClock, clock.effect_traced(trace))?; let Some(batch) = output_result!(OutputEntryBatch, O::DirectoryBatch, Some(position), HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB09, |native| native.next_entries(&entries[index].0)))? else { break; };
                 for entry in batch {
-                    output_result!(OutputEntryAdmission, need(seen.insert(entry.name.clone()) && seen.len() <= 6))?;
-                    if entry.name == "." { output_result!(OutputDotIdentity, need(entry.file_id == entries[index].1.identity.file_id))?; continue; }
-                    if entry.name == ".." { output_result!(OutputParentIdentity, need(entry.file_id == entries[parent].1.identity.file_id))?; continue; }
-                    let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe))?;
-                    output_result!(OutputEntryBinding, need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume))?;
+                    output_result!(OutputEntryAdmission, O::DirectoryEntry, Some(position), HelperReturn, need(
+                        predicate!(O::DirectoryEntry, Some(position), EntryUnique, seen.insert(entry.name.clone()))
+                        && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= 6)))?;
+                    if entry.name == "." { output_result!(OutputDotIdentity, O::DirectoryEntry, Some(position), DotIdentity, need(entry.file_id == entries[index].1.identity.file_id))?; continue; }
+                    if entry.name == ".." { output_result!(OutputParentIdentity, O::DirectoryEntry, Some(position), ParentIdentity, need(entry.file_id == entries[parent].1.identity.file_id))?; continue; }
+                    let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, O::DirectoryEntry, Some(position), ExpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe))?;
+                    output_result!(OutputEntryBinding, O::DirectoryEntry, Some(position), HelperReturn, need(
+                        predicate!(O::DirectoryEntry, Some(position), FileId, entry.file_id == expected.id)
+                        && predicate!(O::DirectoryEntry, Some(position), EntryKind, entry.kind == *kind)
+                        && predicate!(O::DirectoryEntry, Some(position), VolumeSerial, entries[index].1.identity.volume_serial == expected.volume)))?;
                 }
             }
             trace.prerequisite_check(PrerequisiteCheck::O03);
             let expected: std::collections::BTreeSet<_> = children.iter().filter(|(p, _, _, _)| *p == index)
                 .map(|(_, name, _, _)| name.clone()).chain([".".to_owned(), "..".to_owned()]).collect();
-            output_result!(OutputRoster, need(seen == expected))?;
+            output_result!(OutputRoster, O::DirectoryRoster, Some(position), ExactRoster, need(seen == expected))?;
         }
-        for (original, before) in &entries { output_result!(Clock, clock.effect_traced(trace))?; output_result!(OutputPostMetadata, need(output_result!(OutputPostMetadataRead, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(original)))? == *before))?; }
-        output_result!(OutputMappingUnchanged, need(output_result!(OutputFinalDrive, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))? == device))?; output_result!(Clock, clock.effect_traced(trace))?;
+        for (original, before, (operation, index)) in &entries { output_result!(Clock, *operation, *index, OriginalClock, clock.effect_traced(trace))?; output_result!(OutputPostMetadata, *operation, *index, StampStable, need(output_result!(OutputPostMetadataRead, *operation, *index, HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB07, |native| native.metadata(original)))? == *before))?; }
+        output_result!(OutputMappingUnchanged, O::DriveAfter, None, MappingStable, need(output_result!(OutputFinalDrive, O::DriveAfter, None, HelperReturn, native.prerequisite_observe(trace, PrerequisiteCheck::NB05, |native| native.mapping(&drive)))? == device))?; output_result!(Clock, O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
         if let Some(fixture) = fixture.as_mut() { fixture.verified = true; }
         // A later failure can reuse only this fully validated DATA cache. No
         // partial/failed inventory pass licenses another root or journal read.
         if let Some(projection) = projection { capture.projection = projection; }
         Ok(())
-    })
+    }))
 }
 
 // Qualification-only, same-thread DATA. No caller text or native identity can
@@ -3719,7 +3768,29 @@ mod contract_tests {
             let _ = capture.reader.scope(O::JournalRead, index, || capture.reader.result::<()>(C::ReadCount, Err(error)));
             assert!(observer_capture_frame(UiRole::ProjectDraft, &capture, &mut bytes).is_none());
         }
-        assert_eq!(ObserverCaptureOperation::ALL.len(), 33); assert_eq!(ObserverCaptureCheck::ALL.len(), 78);
+        // The new families use only local synthetic role positions. The old
+        // journal16 bound is not broadened to admit arbitrary owner slot IDs.
+        for (operation, maximum) in [
+            (O::OutputPoststate, None), (O::ResultOriginal, None),
+            (O::ConfigurationInput, None), (O::ConfigurationRead, None),
+            (O::FixtureDirectoryOriginal, Some(2)), (O::FixtureDirectoryOpen, Some(2)),
+            (O::FixtureDirectoryMetadata, Some(2)), (O::FixtureDirectoryBinding, Some(2)),
+            (O::FixtureDirectoryMetadataAfter, Some(2)),
+            (O::FixtureFileOriginal, Some(3)), (O::FixtureFileOpen, Some(3)),
+            (O::FixtureFileMetadata, Some(3)), (O::FixtureFileStreams, Some(3)),
+            (O::FixtureFileRead, Some(3)), (O::FixtureFileEof, Some(3)),
+            (O::FixtureFileMetadataAfter, Some(3)),
+            (O::DirectoryBatch, Some(3)), (O::DirectoryEntry, Some(3)), (O::DirectoryRoster, Some(3)),
+        ] {
+            for index in [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(16), Some(17)] {
+                capture.reader = ObserverCaptureTrace::default();
+                let original = capture.reader.scope(operation, index, || capture.reader.result::<()>(C::OriginalClock, Err(Error::Unsafe)));
+                let admitted = maximum.map_or(index.is_none(), |maximum| index.is_some_and(|index| index <= maximum));
+                assert_eq!(observer_capture_frame(UiRole::ProjectDraft, &capture, &mut bytes).is_some(), admitted);
+                assert_eq!(original, Err(Error::Unsafe));
+            }
+        }
+        assert_eq!(ObserverCaptureOperation::ALL.len(), 52); assert_eq!(ObserverCaptureCheck::ALL.len(), 90);
         Ok(())
     }
 
@@ -5011,16 +5082,31 @@ mod contract_tests {
             assert_eq!(inventory.matches(&format!("output_result!({name},")).count(), 1, "{name}");
         }
         assert_eq!(inventory.matches("native.next_entries(&entries[index].0)").count(), 1);
+        assert_eq!(inventory.matches("clock.effect_traced(trace)").count(), 11);
+        assert_eq!(inventory.matches("native.read_next(&original, LIMIT)").count(), 2);
+        assert_eq!(inventory.matches("native.read_next(&original, 1)").count(), 2);
+        assert_eq!(inventory.matches("native.no_alternate_streams(&original)").count(), 2);
+        assert_eq!(inventory.matches("observer_journal_poststate(").count(), 1);
         for predicate in [
             "need(parts.len() < 16)",
-            "need(seen.insert(entry.name.clone()) && seen.len() <= 6)",
+            "predicate!(O::DirectoryEntry, Some(position), EntryUnique, seen.insert(entry.name.clone()))\n                        && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= 6)",
             "need(entry.file_id == entries[index].1.identity.file_id)",
             "need(entry.file_id == entries[parent].1.identity.file_id)",
             "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)",
-            "need(entry.file_id == expected.id && entry.kind == *kind && entries[index].1.identity.volume_serial == expected.volume)",
+            "predicate!(O::DirectoryEntry, Some(position), FileId, entry.file_id == expected.id)\n                        && predicate!(O::DirectoryEntry, Some(position), EntryKind, entry.kind == *kind)\n                        && predicate!(O::DirectoryEntry, Some(position), VolumeSerial, entries[index].1.identity.volume_serial == expected.volume)",
             ".map(|(_, name, _, _)| name.clone()).chain([\".\".to_owned(), \"..\".to_owned()]).collect()",
             "need(seen == expected)",
         ] { assert!(inventory.contains(predicate), "{predicate}"); }
+        assert!(inventory.contains("observer_role(role).then_some(&capture.reader)"));
+        assert!(inventory.contains("diagnostic, false, read_trace)?"));
+        assert!(inventory.contains("let mut entries = vec![(root, root_metadata, (O::CursorMetadataAfter, Some(0)))];"));
+        assert!(inventory.contains("(O::JournalCursorMetadataAfter, Some(16))"));
+        assert!(inventory.contains("(O::FixtureDirectoryMetadataAfter, slot)"));
+        assert!(inventory.contains("(O::FixtureFileMetadataAfter, Some(3))"));
+        assert_eq!(inventory.matches("capture.claimed = true;").count(), 1);
+        assert!(!inventory.contains("capture.claimed = false"));
+        assert_eq!(inventory.matches("capture.projection = projection").count(), 1);
+        assert!(inventory.find("fixture.verified = true").unwrap() < inventory.find("capture.projection = projection").unwrap());
         let owner = source.split_once("fn run_prerequisite_traced(").unwrap().1
             .split_once("    trace.prerequisite_at(PrerequisiteStage::Settlement").unwrap().0;
         assert_eq!(owner.matches("output_poststate(").count(), 1);
@@ -5038,6 +5124,36 @@ mod contract_tests {
             assert_eq!(smoke_result::<()>(Some(&smoke), SmokePhase::Retirement, SmokeCheck::ProfileRetirement, Err(Error::Unknown)), Err(Error::Unknown));
             assert_eq!(smoke.trace.first.get(), Some(first));
             assert_eq!(smoke_result::<()>(None, SmokePhase::OutputPoststate, SmokeCheck::OutputUnexpectedChild, Err(error)), Err(error));
+        }
+        // Exercise the same Boolean observer used inside the actual original
+        // conjunctions. A failed atom must not evaluate a subsequent operand.
+        use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
+        fn sampled(seen: &Cell<u8>, rejected: u8, position: u8) -> bool {
+            seen.set(seen.get() | (1 << position)); rejected != position
+        }
+        for rejected in 0..=4 {
+            for enabled in [false, true] {
+                let baseline = Cell::new(0);
+                let expected = need(sampled(&baseline, rejected, 0) && sampled(&baseline, rejected, 1)
+                    && sampled(&baseline, rejected, 2) && sampled(&baseline, rejected, 3));
+                let seen = Cell::new(0); let trace = ObserverCaptureTrace::default();
+                let observed = enabled.then_some(&trace);
+                let actual = need(observer_poststate_predicate(observed, O::FixtureFileMetadata, Some(2), C::VolumeSerial, sampled(&seen, rejected, 0))
+                    && observer_poststate_predicate(observed, O::FixtureFileMetadata, Some(2), C::FileId, sampled(&seen, rejected, 1))
+                    && observer_poststate_predicate(observed, O::FixtureFileRead, Some(2), C::BytesEqual, sampled(&seen, rejected, 2))
+                    && observer_poststate_predicate(observed, O::FixtureFileEof, Some(2), C::EndOfFile, sampled(&seen, rejected, 3)));
+                assert_eq!(actual, expected); assert_eq!(seen.get(), baseline.get());
+                let expected_first = enabled.then_some(rejected).filter(|index| *index < 4).map(|index| {
+                    [(O::FixtureFileMetadata, C::VolumeSerial), (O::FixtureFileMetadata, C::FileId),
+                        (O::FixtureFileRead, C::BytesEqual), (O::FixtureFileEof, C::EndOfFile)][index as usize]
+                });
+                assert_eq!(trace.first().map(|first| (first.operation, first.check)), expected_first);
+                if let Some(first) = trace.first() {
+                    assert_eq!((first.index, first.error, first.native, first.detail), (Some(2), Some(Error::Unsafe), None, None));
+                    let _ = trace.scope(O::OutputPoststate, None, || trace.result::<()>(C::HelperReturn, Err(Error::Bounds)));
+                    assert_eq!(trace.first(), Some(first));
+                }
+            }
         }
     }
 

@@ -83,6 +83,25 @@ capture_labels!(ObserverCaptureOperation {
     JournalCursorMetadataAfter => "journal-cursor-metadata-after",
     CursorMetadataAfter => "cursor-metadata-after",
     DriveAfter => "drive-after",
+    OutputPoststate => "output-poststate",
+    ResultOriginal => "result-original",
+    FixtureDirectoryOriginal => "fixture-directory-original",
+    FixtureDirectoryOpen => "fixture-directory-open",
+    FixtureDirectoryMetadata => "fixture-directory-metadata",
+    FixtureDirectoryBinding => "fixture-directory-binding",
+    FixtureFileOriginal => "fixture-file-original",
+    FixtureFileOpen => "fixture-file-open",
+    FixtureFileMetadata => "fixture-file-metadata",
+    FixtureFileStreams => "fixture-file-streams",
+    FixtureFileRead => "fixture-file-read",
+    FixtureFileEof => "fixture-file-eof",
+    FixtureDirectoryMetadataAfter => "fixture-directory-metadata-after",
+    FixtureFileMetadataAfter => "fixture-file-metadata-after",
+    ConfigurationInput => "configuration-input",
+    ConfigurationRead => "configuration-read",
+    DirectoryBatch => "directory-batch",
+    DirectoryEntry => "directory-entry",
+    DirectoryRoster => "directory-roster",
 });
 capture_labels!(ObserverCaptureCheck {
     ParentSettled => "parent-settled",
@@ -163,7 +182,35 @@ capture_labels!(ObserverCaptureCheck {
     MappingStable => "mapping-stable",
     Input => "input",
     Admission => "admission",
+    OriginalClock => "original-clock",
+    OriginalStamp => "original-stamp",
+    Role => "role",
+    BytesEqual => "bytes-equal",
+    EndOfFile => "end-of-file",
+    EntryUnique => "entry-unique",
+    EntryLimit => "entry-limit",
+    ExpectedChild => "expected-child",
+    EntryKind => "entry-kind",
+    DotIdentity => "dot-identity",
+    ParentIdentity => "parent-identity",
+    ExactRoster => "exact-roster",
 });
+
+// New poststate positions are fixed synthetic roles, never native slot IDs.
+// Preserve the old <=16 grammar for every pre-existing operation.
+fn capture_position_valid(operation: ObserverCaptureOperation, index: Option<u8>) -> bool {
+    use ObserverCaptureOperation as O;
+    if index.is_some_and(|index| index > 16) { return false; }
+    match operation {
+        O::FixtureDirectoryOriginal | O::FixtureDirectoryOpen | O::FixtureDirectoryMetadata
+        | O::FixtureDirectoryBinding | O::FixtureDirectoryMetadataAfter => index.is_some_and(|index| index <= 2),
+        O::FixtureFileOriginal | O::FixtureFileOpen | O::FixtureFileMetadata | O::FixtureFileStreams
+        | O::FixtureFileRead | O::FixtureFileEof | O::FixtureFileMetadataAfter
+        | O::DirectoryBatch | O::DirectoryEntry | O::DirectoryRoster => index.is_some_and(|index| index <= 3),
+        O::OutputPoststate | O::ResultOriginal | O::ConfigurationInput | O::ConfigurationRead => index.is_none(),
+        _ => true,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ObserverCaptureNative {
@@ -215,7 +262,7 @@ pub(crate) struct ObserverCaptureFailure {
 impl ObserverCaptureFailure {
     fn valid(self) -> bool {
         use ObserverCaptureCheck as C;
-        if self.index.is_some_and(|index| index > 16) || self.error == Some(Error::Unknown) { return false; }
+        if !capture_position_valid(self.operation, self.index) || self.error == Some(Error::Unknown) { return false; }
         if self.error.is_none() {
             return self.operation == ObserverCaptureOperation::Eligibility && self.index.is_none()
                 && self.native.is_none() && self.detail.is_none()

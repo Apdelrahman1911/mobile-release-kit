@@ -14439,6 +14439,11 @@ WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS = (
     'journal-acl-after', 'journal-streams-after', 'journal-original-metadata-after', 'journal-original-stability',
     'journal-cursor-binding', 'journal-cursor-streams', 'journal-cursor-metadata-after', 'cursor-metadata-after',
     'drive-after',
+    'output-poststate', 'result-original', 'fixture-directory-original', 'fixture-directory-open',
+    'fixture-directory-metadata', 'fixture-directory-binding', 'fixture-file-original', 'fixture-file-open',
+    'fixture-file-metadata', 'fixture-file-streams', 'fixture-file-read', 'fixture-file-eof',
+    'fixture-directory-metadata-after', 'fixture-file-metadata-after', 'configuration-input', 'configuration-read',
+    'directory-batch', 'directory-entry', 'directory-roster',
 )
 WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS = (
     'parent-settled', 'child-original', 'child-returned', 'child-created',
@@ -14461,7 +14466,17 @@ WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS = (
     'descriptor-account', 'streams-returned', 'streams-data', 'read-state',
     'read-returned', 'read-count', 'stamp-stable', 'mapping-stable',
     'input', 'admission',
+    'original-clock', 'original-stamp', 'role', 'bytes-equal', 'end-of-file',
+    'entry-unique', 'entry-limit', 'expected-child', 'entry-kind', 'dot-identity', 'parent-identity', 'exact-roster',
 )
+WINDOWS_NORMAL_UI_OBSERVER_POSTSTATE_POSITIONS = {
+    'output-poststate': None, 'result-original': None, 'configuration-input': None, 'configuration-read': None,
+    'fixture-directory-original': 2, 'fixture-directory-open': 2, 'fixture-directory-metadata': 2,
+    'fixture-directory-binding': 2, 'fixture-directory-metadata-after': 2,
+    'fixture-file-original': 3, 'fixture-file-open': 3, 'fixture-file-metadata': 3, 'fixture-file-streams': 3,
+    'fixture-file-read': 3, 'fixture-file-eof': 3, 'fixture-file-metadata-after': 3,
+    'directory-batch': 3, 'directory-entry': 3, 'directory-roster': 3,
+}
 WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_GATES = (
     'parent-settled', 'child-original', 'child-returned', 'child-created',
     'child-signaled', 'child-exit-observed', 'child-process-closed', 'child-thread-closed',
@@ -14502,6 +14517,10 @@ def windows_normal_ui_observer_capture_failure(value: object) -> dict:
     require(type(value["operation"]) is str and value["operation"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS
             and type(value["check"]) is str and value["check"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS
             and (value["index"] is None or integer_between(value["index"], 0, 16)), "Windows observer reader predicate differs")
+    if value["operation"] in WINDOWS_NORMAL_UI_OBSERVER_POSTSTATE_POSITIONS:
+        maximum = WINDOWS_NORMAL_UI_OBSERVER_POSTSTATE_POSITIONS[value["operation"]]
+        require(value["index"] is None if maximum is None else integer_between(value["index"], 0, maximum),
+                "Windows observer poststate role position differs")
     if value["kind"] == "not-attempted":
         require(value["operation"] == "eligibility" and value["check"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_GATES
                 and value["index"] is value["error"] is value["native"] is value["detail"] is None,

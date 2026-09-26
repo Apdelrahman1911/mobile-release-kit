@@ -14585,6 +14585,36 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                 fault["detail"] = bad
                 with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
 
+    def test_poststate_capture_uses_closed_family_positions_without_widening_native_data(self):
+        positions = {
+            'output-poststate': None, 'result-original': None, 'configuration-input': None, 'configuration-read': None,
+            'fixture-directory-original': 2, 'fixture-directory-open': 2, 'fixture-directory-metadata': 2,
+            'fixture-directory-binding': 2, 'fixture-directory-metadata-after': 2,
+            'fixture-file-original': 3, 'fixture-file-open': 3, 'fixture-file-metadata': 3, 'fixture-file-streams': 3,
+            'fixture-file-read': 3, 'fixture-file-eof': 3, 'fixture-file-metadata-after': 3,
+            'directory-batch': 3, 'directory-entry': 3, 'directory-roster': 3,
+        }
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_OBSERVER_POSTSTATE_POSITIONS, positions)
+        for operation, maximum in positions.items():
+            for index in (None, False, True, -1, 0, 1, 2, 3, 4, 16, 17):
+                frame = self.capture_frame_data()
+                frame["captureFailure"].update(operation=operation, index=index, check="original-clock",
+                                               error="Unsafe", native=None, detail=None)
+                admitted = index is None if maximum is None else type(index) is int and 0 <= index <= maximum
+                with self.subTest(operation=operation, index=index):
+                    if admitted:
+                        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+                    else:
+                        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for check in ("original-stamp", "role", "bytes-equal", "end-of-file", "entry-unique", "entry-limit",
+                      "expected-child", "entry-kind", "dot-identity", "parent-identity", "exact-roster"):
+            frame = self.capture_frame_data()
+            frame["captureFailure"].update(operation="directory-entry", index=0, check=check,
+                                           error="Unsafe", native=None, detail=None)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+            frame["captureFailure"]["native"] = self.capture_frame_data()["captureFailure"]["native"]
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+
     def test_capture_failure_native_pairs_are_scoped_failed_scalars_not_handles(self):
         pairs = [("QueryDosDeviceW", "none", "count"), ("GetFinalPathNameByHandleW", "none", "count"),
                  ("NtCreateFile", "none", "ntstatus"), ("NtQueryVolumeInformationFile", "file-fs-device-information", "ntstatus"),
@@ -14672,8 +14702,8 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
             block = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
             self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', block)), expected)
             self.assertEqual(len(expected), len(set(expected)))
-        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS), 33)
-        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS), 78)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS), 52)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS), 90)
         observe = book.split("    fn observer_capture_observe<", 1)[1].split("    #[cfg(test)]", 1)[0]
         self.assertLess(observe.index("self.prerequisite_returned.set(None)"), observe.index("let original = observe(self)"))
         self.assertIn("admission_before.is_none()", observe)
@@ -14700,7 +14730,25 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         self.assertIn("original.is_ok().then_some(C::NativeClockAfter)", ui)
         self.assertIn("capture.reader.first().is_some() && capture.projection != ObserverProjection::default()", ui)
         self.assertIn("if !observer_role(role) || capture.unresolved { return None; }", ui)
-        self.assertIn("diagnostic, false, None)?", ui)
+        self.assertIn("diagnostic, false, read_trace)?", ui)
+        poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
+        self.assertIn("observer_role(role).then_some(&capture.reader)", poststate)
+        self.assertEqual(poststate.count("capture.claimed = true;"), 1)
+        self.assertNotIn("capture.claimed = false", poststate)
+        self.assertEqual(poststate.count("capture.projection = projection"), 1)
+        self.assertLess(poststate.index("fixture.verified = true"), poststate.index("capture.projection = projection"))
+        # Exact ordered original IO/native/clock sites from reviewed source00938ad4.
+        # DATA wrappers must not add, remove, reorder or replace one of them.
+        calls = __import__("re").findall(
+            r"\b(?:native\.[a-z_]+|clock\.effect_traced|files\[[^\]]+\]\.(?:stamp(?:_traced)?|read(?:_traced)?))\(", poststate)
+        self.assertEqual(len(calls), 58)
+        self.assertEqual(hashlib.sha256("\n".join(calls).encode()).hexdigest(),
+                         "680a402a6e76d88acf0a944447d0ef47a0e832326fc9e2c41fd2d489b23ac44b")
+        predicate = ui.split("fn observer_poststate_predicate(", 1)[1].split("fn observer_native<", 1)[0]
+        self.assertIn("trace.scope(operation, index, || trace.result(check, need(original)))", predicate)
+        self.assertTrue(predicate.rstrip().endswith("original\n}"))
+        for forbidden in ("native.", "clock.", "GetLastError", "GetTickCount", "std::thread", "clone("):
+            self.assertNotIn(forbidden, predicate)
         self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
 
 class WindowsNormalUiGuiTests(unittest.TestCase):
