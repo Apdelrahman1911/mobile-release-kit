@@ -15263,6 +15263,68 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         self.assertIn('UiRole::NormalSmoke => need(Path::new(&self.app.path) == root.join("mobile-release-kit-desktop.exe"))',source)
         self.assertIn('UiRole::Prerequisite => need(self.app.path == self.owner.path)',source)
 
+    def test_observer_scratch_uses_prepared_profile_without_moving_output_cwd(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        source = (root / "ordinary_owner_ui.rs").read_text()
+        def span(start, end):
+            at = source.index(start); return source[at:source.index(end, at)]
+        profile = span("fn normal_ui_scratch_profile_directory<", "fn normal_ui_launch_directories(")
+        routing = span("fn normal_ui_launch_directories(", "impl Launch {")
+        for body in (profile, routing):
+            self.assertIn("if role != UiRole::NormalSmoke && !observer_role(role)", body)
+            self.assertLess(body.index("!observer_role(role)"), body.index("profile.ok_or(Error::Unsafe)?"))
+            for forbidden in ("unsafe", "GetProfilesDirectoryW", "CreateProfile", "CreateProcess", "DeleteProfileW",
+                              "std::env::", "std::fs::", "open_child(", "std::thread::"):
+                self.assertNotIn(forbidden, body)
+        observer = source.split("fn observer_role(", 1)[1].split("\n", 1)[0]
+        self.assertIn("matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss)", observer)
+        self.assertIn("return Ok(None)", profile); self.assertIn("return Ok(())", routing)
+        self.assertIn("profile.binding_permitted_traced(trace)?", profile)
+        self.assertIn("profile.getter_entered && profile.getter_return != 0", profile)
+        self.assertIn("profile.units > 1 && profile.units as usize <= profile.directory.len()", profile)
+        self.assertIn("profile.expected == Path::new(&parent).join(&profile.name)", profile)
+        self.assertIn("Ok(Some(profile.expected.as_path()))", profile)
+        self.assertIn('app == root.join("mobile-release-kit-desktop.exe")', routing)
+        self.assertIn('root.join("target").join("x86_64-pc-windows-msvc").join("debug").join("deps")', routing)
+        self.assertIn('name.strip_prefix("installed_shell_observation-")', routing)
+        self.assertIn('name.strip_suffix(".exe")).is_some_and(|hash| is_hex(hash, 16))', routing)
+        self.assertIn('output == root.join(role.name("output")) && app_bound', routing)
+        self.assertIn("*directory == wide(output_text)", routing)
+        for expression in ("!root_text.eq_ignore_ascii_case(output_text)", "!root_text.eq_ignore_ascii_case(profile_text)",
+                           "!output_text.eq_ignore_ascii_case(profile_text)"):
+            self.assertIn(expression, routing)
+        mutation = routing.index("pairs[temp].1 = profile_text.to_owned();")
+        for check in ("temp.is_none() && value.as_str() == output_text", "tmp.is_none() && value.as_str() == output_text",
+                      "let temp = temp.ok_or(Error::Unsafe)?; let tmp = tmp.ok_or(Error::Unsafe)?;"):
+            self.assertLess(routing.index(check), mutation)
+        self.assertIn("pairs[tmp].1 = profile_text.to_owned();", routing)
+        self.assertEqual(routing.count("*directory = wide("), 1)
+        self.assertIn("if role == UiRole::NormalSmoke { *directory = wide(root_text); }", routing)
+        for forbidden in ("pairs.push", "pairs.retain", "pairs.clear", "MRK_WINDOWS_NORMAL_UI_OUTPUT"):
+            self.assertNotIn(forbidden, routing)
+        launch = span("    fn ui_traced(", "// Every registry output/name/query/close destination")
+        self.assertLess(launch.index("normal_ui_scratch_profile_directory(request.role, profile, trace)?"),
+                        launch.index("Self::new_traced(OwnerVariant::Ordinary"))
+        self.assertLess(launch.index("normal_ui_launch_directories(request.role, &request.app.path, output, root, profile_directory,"),
+                        launch.index("pairs.retain("))
+        self.assertIn("current.logon_flags = T::LOGON_WITH_PROFILE;", launch)
+        selected = source.split("    fn native_smoke_never_credits_posting_or_partial_release_as_finality()", 1)[1].split("\n    #[test]", 1)[0]
+        self.assertIn("for role in [UiRole::NormalSmoke, UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss]", selected)
+        self.assertEqual(selected.count("normal_ui_launch_directory_contract(role)"), 1)
+        cases = span("    fn normal_ui_launch_directory_contract(", "    fn output_inventory_diagnostic_contract()")
+        for case in ("else { initial_directory.clone() }", "assert_eq!(values, expected); assert_eq!(directory, expected_directory)",
+                     "assert_eq!(values, baseline); assert_eq!(directory, initial_directory)", "for role in [UiRole::Prerequisite]",
+                     "other_role_app", "installed_shell_observation-0123456789abcdeF.exe", "profile.as_path()"):
+            self.assertIn(case, cases)
+        # Baseline d8577ec7: scratch routing may not alter the profile owner,
+        # inventory/diagnostic pass, or original process/settlement/retirement path.
+        for start, end, expected in (
+            ("struct ProfilePath {", "fn input(", "c44857c7988b2c5e58a5859e1e82f5109ae4c10cf410fec859797789b6adc6d5"),
+            ("fn output_poststate(", "// Qualification-only, same-thread DATA.", "66158707aa835ff2818b081ab602931de298c3c1eb1ee05d3faa7738bf4c6368"),
+            ("fn run_prerequisite_traced(", "// Inert regressions.", "3c470aa11c189c5e15de5245187b6391eeae111b13a4e5223404ed731fc07130"),
+        ):
+            self.assertEqual(hashlib.sha256(span(start, end).encode()).hexdigest(), expected)
+
     def test_gui_owner_finality_and_shared_observer_acl_account_chain(self):
         used=set(); identity=None; security=None
         for index,role in enumerate(helper.WINDOWS_NORMAL_UI_GUI_ROLES,1):
