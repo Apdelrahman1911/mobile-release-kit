@@ -6591,9 +6591,25 @@ class FailureLabelSinkContracts(unittest.TestCase):
         activating = body(shell, "activate_observed_session_file")
         self.assertIn("observed_session_file(app, q, index, false)?", selecting)
         self.assertIn("observed_session_file(app, q, index, true)?", activating)
-        self.assertEqual(selecting.count("dialog.set_filename(&path)"), 1)
-        self.assertLess(selecting.index("q.session_file_selection(id, index)?"), selecting.index("dialog.set_filename(&path)"))
-        self.assertIn("if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
+        self.assertNotIn("dialog.set_filename(", selecting)
+        self.assertEqual(selecting.count("dialog.set_current_folder(parent)"), 1)
+        self.assertEqual(selecting.count("dialog.select_file(&target_file).is_err()"), 1)
+        navigation, passive = selecting.split("let target_file =", 1)
+        self.assertIn("if !parent_navigation_reserved {", navigation)
+        self.assertLess(navigation.index("q.session_file_parent_navigation(id, index)?"), navigation.index("dialog.set_current_folder(parent)"))
+        self.assertIn("return Ok(false);", navigation)
+        self.assertNotIn("set_current_folder", passive + activating)
+        guards = ["dialog.is_mapped()", "dialog.current_folder_file()", "file.equal(&parent_file)",
+                  "if !mapped || !parent_ready", "q.session_file_selection(id, index)?", "dialog.select_file(&target_file)"]
+        self.assertEqual([passive.index(guard) for guard in guards], sorted(passive.index(guard) for guard in guards))
+        self.assertIn("if !dialog.set_current_folder(parent) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", navigation)
+        self.assertIn("if dialog.select_file(&target_file).is_err() { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", passive)
+        self.assertIn("if !select { q.session_file_failed(R::GtkSelectionState); return Err(()); }", selecting)
+        self.assertLess(selecting.index("if !select"), selecting.index("q.session_file_parent_navigation("))
+        self.assertIn("q.session_file_wait(index, false, W::NotSampled, P::NotSampled);", selecting)
+        self.assertNotIn("P::Sampled", selecting)
+        for forbidden in ("Instant::", "sleep", "read_dir", "std::fs", ".response(", ".filename("):
+            self.assertNotIn(forbidden, selecting + activating)
         insensitive = "if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive, picker); return Ok(false); }"
         self.assertLess(activating.index(insensitive), activating.index("q.session_file_activation(id, index)?"))
         self.assertLess(activating.index("q.session_file_activation(id, index)?"), activating.index("button.emit_clicked()"))
@@ -6607,16 +6623,47 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("q.session_file_filename(observed_id,path.as_ref().ok().map(PathBuf::as_path))", response)
         self.assertLess(response.index("let path = native_path(dialog, &call);"), response.index("q.session_file_filename("))
         self.assertLess(response.index("q.session_file_filename("), response.index("call.selected_path(path)"))
-        for name in ("session_file_failed", "session_file_dialog", "session_file_selection", "session_file_activation",
+        for name in ("session_file_failed", "session_file_dialog", "session_file_parent_navigation", "session_file_selection", "session_file_activation",
                      "session_file_filename", "session_file_response", "session_file_returned", "native_destroyed", "native_released"):
             callback = body(source, name)
             self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
             self.assertIn("self.session_fail(&mut r,", callback)
             self.assertNotIn("self.session_file_failed(", callback); self.assertNotIn("self.record()", callback)
-        for name in ("session_file_dialog", "session_file_selection", "session_file_activation"):
+        for name in ("session_file_dialog", "session_file_parent_navigation", "session_file_selection", "session_file_activation"):
             callback = body(source, name)
             self.assertLess(callback.index("self.failed.load(Ordering::SeqCst)"), callback.index("Instant::now()>=self.end"))
             self.assertIn("if Instant::now()>=self.end { self.session_fail(&mut r,SessionRejection::GtkObserverEndpoint); return Err(()); }", callback)
+        for name, reserve in (("session_file_parent_navigation", "reserve_parent_navigation()"),
+                              ("session_file_selection", "reserve_selection()")):
+            callback = body(source, name)
+            guards = ["self.record_at(Boundary::Gtk)", "self.failed.load(Ordering::SeqCst)", "Instant::now()>=self.end",
+                      "session_file_wait_pending(r.step,r.pending,index,false)", "file.id==id && file.index==index", reserve]
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertEqual(callback.count(reserve), 1)
+            self.assertNotIn("self.end =", callback)
+        operation = source.split("impl SessionFile {", 1)[1].split("struct SessionRecord {", 1)[0]
+        self.assertEqual(operation.count("self.parent_navigation_reserved = true"), 1)
+        self.assertNotIn("self.parent_navigation_reserved = false", operation)
+        self.assertEqual(operation.count("self.picker.selected = true"), 1)
+        self.assertIn("self.parent_navigation_reserved == self.select", operation)
+        for field in ("selected", "activated", "responded", "filename", "disposal", "destroyed", "released", "returned"):
+            self.assertIn("!self.picker." + field, operation)
+            self.assertIn("Picker { created:true," + field + ":true,..Picker::default() }", source)
+        self.assertIn("self.picker.created", operation)
+        self.assertEqual(operation.count("!self.select || !self.selection_pending()"), 2)
+        self.assertIn("|| self.parent_navigation_reserved { return false; }", operation)
+        self.assertIn("|| !self.parent_navigation_reserved { return false; }", operation)
+        self.assertIn("!file.navigation_matches()", body(source, "session_file_activation"))
+        self.assertIn("file.navigation_matches() && file.picker.settled(file.select)", source)
+        self.assertIn('SessionCase::Refusals.recipe().get(24)==Some(&SA::Choose("replacement.jks","android-keystore",None))', source)
+        for guard in ("selecting,Some(Pending::Dom(selecting)),index+1,false",
+                      "selecting,Some(Pending::Dom(activating)),index,false",
+                      "activating,Some(Pending::Dom(activating)),index,false",
+                      "selecting,None,index,false"):
+            self.assertIn("assert!(!session_file_wait_pending(" + guard + "));", source)
+        self.assertIn("assert!(!file.reserve_selection() && !file.picker.selected);", source)
+        self.assertIn("assert!(!file.reserve_parent_navigation() && !file.parent_navigation_reserved && file.navigation_matches());", source)
+        self.assertIn("assert!(!corrupt.navigation_matches() && !corrupt.reserve_parent_navigation() && !corrupt.reserve_selection());", source)
         filename = body(source, "session_file_filename")
         reasons = ["GtkFilenameState", "GtkFilenameAbsent", "GtkFilenameDifferent", "file.picker.filename=true"]
         self.assertEqual([filename.index(reason) for reason in reasons], sorted(filename.index(reason) for reason in reasons))
@@ -6636,9 +6683,10 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertEqual(lifecycle, """        let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
             if result!=Ok(false) { self.session_fail(&mut r,SessionRejection::GtkReturnState); } return;
         };
+        if file.parent_navigation_reserved && !file.select { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; }
         match result {
             Ok(false) if !file.picker.activated && (step!=SessionStep::SetFile(index) || !file.picker.selected)=>{},
-            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated=>r.step=Step::Session(SessionStep::ActivateFile(index)),
+            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated && file.navigation_matches()=>r.step=Step::Session(SessionStep::ActivateFile(index)),
             Ok(true) if step==SessionStep::ActivateFile(index)=>{
                 if !file.picker.activation_returned(result) { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; } r.step=Step::Session(SessionStep::Capture(index));
             }, _=>self.session_fail(&mut r,SessionRejection::GtkReturnState),
