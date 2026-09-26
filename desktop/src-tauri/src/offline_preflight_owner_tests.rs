@@ -13,7 +13,7 @@ fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
@@ -23,6 +23,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None,
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
@@ -37,7 +38,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let p = RunProjection { operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
         phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
     owner.original_for_test().inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
-        accepted: false, terminal: false, unknown: false, final_join_seen: false });
+        accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });
     (owner, session)
 }
 

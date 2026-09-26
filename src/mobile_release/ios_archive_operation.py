@@ -1,8 +1,8 @@
-"""Original saved unsigned archive operation, with one finite inspection.
+"""Original saved iOS build/recovery operation, with one finite inspection.
 
 The operation owns the actual project invocation, saved-input descriptors,
-exclusive retained output and full-Xcode bindings. Parsed paths, hashes and UI
-receipts never replace these original owners. No signing/Store/CLI API exists.
+exclusive retained output and native-tool bindings. Parsed paths, hashes and UI
+receipts never replace these original owners. No Store or CLI runner exists.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ._desktop_ios_archive_control import IOSArchiveInput
-from ._desktop_ios_archive_protocol import IOSArchiveRequest, REASONS, ROLES, STAGES, require
+from ._desktop_ios_archive_protocol import IOSArchiveRequest, REASONS, ROLES, SIGNED_ROLES, stages, require
 from ._desktop_ios_archive_selection import (
     SavedIOSSelection, bind_saved_ios_version, select_saved_ios_configuration,
 )
@@ -185,6 +185,8 @@ class _OriginalIOSFiles:
         self.developer: _Directory | None = None
         self.sdk: _Directory | None = None
         self.xcodebuild: _Held | None = None
+        self.system_tools: dict[str, _Held] = {}
+        self.system_directory: _Directory | None = None
         self.tool_directories: list[_Held] = []
         self.work: _Held | None = None
         self.work_children: dict[str, _Held] = {}
@@ -193,7 +195,9 @@ class _OriginalIOSFiles:
         self.close_claimed = self.close_complete = False
 
     def point(self) -> None:
-        if self.operation.close_claimed or self.guard.depth:
+        if self.operation.source.recovery and not self.operation.close_claimed:
+            self.operation._tick()
+        elif self.operation.close_claimed or self.guard.depth:
             self.operation.cleanup_checkpoint()
         else:
             self.operation._tick()
@@ -202,6 +206,8 @@ class _OriginalIOSFiles:
         """Borrow only a descriptor already rooted in this original operation."""
         require(type(number) is int and number >= 0)
         if any(original.slot.number == number for original in self.live):
+            return
+        if self.operation.signing is not None and self.operation.signing.known_descriptor(number):
             return
         invocation = self.operation.invocation
         project = None if invocation is None else invocation._original_project
@@ -212,7 +218,7 @@ class _OriginalIOSFiles:
                 and any(slot.number == number for slot in self.namespace.slots)):
             return
         if any(directory is not None and any(slot.number == number for slot in directory.slots)
-               for directory in (self.developer, self.sdk)):
+               for directory in (self.developer, self.sdk, self.system_directory)):
             return
         owner = self.operation.snapshot_binding.owner
         if owner is not None:
@@ -429,9 +435,46 @@ class _OriginalIOSFiles:
         self.check_held(self.work_children[role])
         return self.namespace.path / "work" / role
 
+    def write_export_options(self, content: bytes) -> _Held:
+        self.point()
+        require(self.operation.signing is not None and type(content) is bytes and 0 < len(content) <= 16 * 1024
+                and "ExportOptions.plist" not in self.work_children and self.work is not None)
+        self.check_held(self.work)
+        require(all(_name_key(name) != _name_key("ExportOptions.plist") for name in self.names(self.work.slot.number)))
+        original = self._reserve(self.work.slot.number, "ExportOptions.plist", directory=False, parent_record=self.work)
+        self.work_children["ExportOptions.plist"] = original
+        number = original.slot.open(original.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, dir_fd=original.parent)
+        original.identity = _file(os.fstat(number))
+        self.check_held(original)
+        offset = 0
+        while offset < len(content):
+            self.point()
+            count = os.write(number, content[offset:])
+            require(type(count) is int and 0 < count <= len(content) - offset)
+            offset += count
+        os.fsync(number)
+        original.identity = _file(os.fstat(number))
+        self.check_export_options(original, content)
+        os.fsync(original.parent)
+        return original
+
+    def check_export_options(self, original: _Held, content: bytes) -> None:
+        self.check_held(original)
+        require(original is self.work_children.get("ExportOptions.plist") and not original.directory
+                and original.identity["size"] == len(content)
+                and os.pread(original.slot.number, len(content) + 1, 0) == content)
+        self.check_held(original)
+
     def acquire_tools(self) -> None:
         self.point()
         require(self.developer is None and self.sdk is None and self.xcodebuild is None)
+        if self.operation.source.recovery:
+            require(self.system_directory is None and not self.system_tools)
+            self.system_directory = _Directory(Path("/usr/bin"), self.guard, edit_checkpoints=True)
+            self.system_directory.acquire()
+            self.system_tools["security"] = self._hold(self.system_directory.fd, "security", directory=False)
+            self.check_tools()
+            return
         expected = self.operation.request.native["toolchain"]
         self.developer = _Directory(Path(expected["developerDir"]), self.guard, edit_checkpoints=True)
         self.developer.acquire()
@@ -448,10 +491,25 @@ class _OriginalIOSFiles:
             self.tool_directories.append(original)
             parent = original.slot.number
         self.xcodebuild = self._hold(parent, "xcodebuild", directory=False)
+        if self.operation.signing is not None:
+            self.system_directory = _Directory(Path("/usr/bin"), self.guard, edit_checkpoints=True)
+            self.system_directory.acquire()
+            for name in ("security", "codesign", "openssl"):
+                self.system_tools[name] = self._hold(self.system_directory.fd, name, directory=False)
         self.check_tools()
 
     def check_tools(self) -> None:
         self.point()
+        if self.operation.source.recovery:
+            require(self.developer is None and self.sdk is None and self.xcodebuild is None
+                    and self.system_directory is not None and set(self.system_tools) == {"security"})
+            self.system_directory.check()
+            original = self.system_tools["security"]
+            self.check_held(original)
+            value = os.fstat(original.slot.number)
+            require(_tool_data(value) == self.operation.request.native["security"]
+                    and value.st_uid == 0 and value.st_mode & 0o022 == 0)
+            return
         require(self.developer is not None and self.sdk is not None and self.xcodebuild is not None)
         self.developer.check()
         self.sdk.check()
@@ -464,11 +522,20 @@ class _OriginalIOSFiles:
                 and _directory_data(values[1]) == expected["sdkIdentity"]
                 and _tool_data(values[2]) == expected["xcodebuildIdentity"])
         require(all(value.st_uid in {0, os.geteuid()} and value.st_mode & 0o022 == 0 for value in values))
+        if self.operation.signing is not None:
+            require(self.system_directory is not None and set(self.system_tools) == {"security", "codesign", "openssl"})
+            self.system_directory.check()
+            for name, original in self.system_tools.items():
+                self.check_held(original)
+                value = os.fstat(original.slot.number)
+                require(_tool_data(value) == self.operation.request.native["signingTools"][name]
+                        and value.st_uid == 0 and value.st_mode & 0o022 == 0)
 
     def require_work_consumers(self) -> None:
         operation = self.operation
         operation.owner()
         require(operation.commands_settled() and not self.iterators
+                and (operation.signing is None or operation.signing.inputs_closed())
                 and operation.snapshot_binding.dependents_settled_for(
                     owner=operation.snapshot_binding.owner, cancellation=self.guard))
 
@@ -585,6 +652,8 @@ class _OriginalIOSFiles:
             actions.append(self.sdk.close)
         if self.developer is not None:
             actions.append(self.developer.close)
+        if self.system_directory is not None:
+            actions.append(self.system_directory.close)
         if self.namespace is not None:
             actions.append(self.namespace.cleanup)
         for action in actions:
@@ -597,7 +666,7 @@ class _OriginalIOSFiles:
         self.close_complete = first is None and not self.live and all(held.slot.close_state == "CLOSED" for held in self.held) and all(
             iterator.close_state == "CLOSED" for iterator in self.iterators) and all(
             directory is None or all(slot.close_state == "CLOSED" for slot in directory.slots)
-            for directory in (self.sdk, self.developer)) and (self.namespace is None or self.namespace.closed()) and all(
+            for directory in (self.sdk, self.developer, self.system_directory)) and (self.namespace is None or self.namespace.closed()) and all(
             removal.state in {"NEW", "NO_EFFECT", "DELETED"} for removal in self.removals)
         if first is not None:
             raise first
@@ -759,6 +828,36 @@ class OriginalIOSArchive:
         self.check()
 
 
+class OriginalIOSIPA:
+    """Exact exported file beneath this operation's retained export directory."""
+
+    def __init__(self, operation, directory: _Held, original: _Held) -> None:
+        require(operation.signing is not None and directory.directory and not original.directory
+                and original.parent_record is directory and operation._ipa is None)
+        self.operation, self.directory, self.original = operation, directory, original
+        self.inventory = None
+
+    @property
+    def path(self) -> Path:
+        self.check()
+        return self.operation.files.namespace.path / "export" / self.original.name
+
+    def check(self) -> None:
+        operation = self.operation
+        operation.checkpoint()
+        require(operation._ipa is self)
+        operation.files.namespace.check()
+        operation.files.check_held(self.original)
+
+    @contextmanager
+    def root(self):
+        self.check()
+        require(self.operation.snapshot_binding.consumer_active)
+        os.lseek(self.original.slot.number, 0, os.SEEK_SET)
+        yield self.original.slot.number
+        self.check()
+
+
 @dataclass(frozen=True, slots=True)
 class BoundIOSInputs:
     config: ReleaseConfig
@@ -781,10 +880,13 @@ class IOSArchiveOperation:
         self.snapshot_binding = IOSArchiveSnapshotBinding(self)
         self.inspection_deadline: _IOSInspectionDeadline | None = None
         self._artifact: OriginalIOSArchive | None = None
+        self._ipa = None
+        self.signing = None
         self.failure = None
         self.counters: dict[str, int] = {}
-        self._roles = {role: "new" for role in ROLES}
-        self._command_slots = {role: None for role in ROLES}
+        self.roles = () if source.recovery else SIGNED_ROLES if source.signed else ROLES
+        self._roles = {role: "new" for role in self.roles}
+        self._command_slots = {role: None for role in self.roles}
         self._returned: dict[str, int] = {}
         self._pending = None
         self._command_before = 0
@@ -793,6 +895,9 @@ class IOSArchiveOperation:
         self.cleanup_errors: list[BaseException] = []
         self.tool_version: str | None = None
         source.bind_operation(self)  # Root before any child constructor/effect.
+        if source.account_lifecycle:
+            from ._desktop_ios_signed_operation import SignedIOSOperation
+            self.signing = SignedIOSOperation(self)
         self.files = _OriginalIOSFiles(self)
 
     def owner(self) -> None:
@@ -814,7 +919,10 @@ class IOSArchiveOperation:
     def checkpoint(self) -> None:
         self._tick()
         require(self.invocation is not None)
-        self.invocation.require(root=self.root, cancellation=self.guard, signing_lease=None)
+        self.invocation.require(root=self.root, cancellation=self.guard,
+            signing_lease=None if self.signing is None else self.invocation.signing_lease)
+        if self.signing is not None and self.invocation.project_owner is not None:
+            require(self.invocation.signing_lease is self.signing.lease)
         if self.invocation.project_owner is not None:
             _, identity = self.invocation._ios_archive_root(self)
             if identity != self.request.native["rootIdentity"]:
@@ -822,14 +930,14 @@ class IOSArchiveOperation:
 
     def cleanup_checkpoint(self) -> None:
         self.owner()
-        endpoint = self.source.work_end + 10
-        if self.source.first_failure is not None:
-            endpoint = min(endpoint, self.source.first_failure + 10)
+        endpoint = self.source.cleanup_endpoint()
         if time.monotonic() >= endpoint:
             self.fail("work-retained")
 
     def charge(self, name: str, amount: int, limit: int) -> None:
-        if self.close_claimed or self.guard.depth:
+        if self.source.recovery and not self.close_claimed:
+            self._tick()
+        elif self.close_claimed or self.guard.depth:
             self.cleanup_checkpoint()
         else:
             self._tick()
@@ -902,6 +1010,13 @@ class IOSArchiveOperation:
         self.check_inputs()
         self.prepared = True
 
+    def prepare_recovery(self) -> None:
+        self.checkpoint()
+        require(self.source.recovery and self.inputs is None and not self.prepared
+                and self.files.namespace is None and self.files.work is None)
+        self.files.acquire_tools()
+        self.prepared = True
+
     def require(self, config: ReleaseConfig, cancellation) -> None:
         self.checkpoint()
         require(self.inputs is not None and self.inputs.config is config and cancellation is self.guard
@@ -917,14 +1032,15 @@ class IOSArchiveOperation:
 
     def advance(self, stage: str) -> None:
         self.checkpoint()
-        require(stage in STAGES and (self.stage == "accepted" or STAGES.index(stage) > STAGES.index(self.stage)))
+        order = stages(self.request.context)
+        require(stage in order and (self.stage == "accepted" or order.index(stage) > order.index(self.stage)))
         self.stage = stage
         self.source.progress(stage)
 
     def commands_settled(self) -> bool:
         self.owner()
         facts = self.guard.lifetime_ledger.verdict()
-        return (facts.cleanup_complete and facts.contained and facts.profile_calls == 0 and self._pending is None
+        return (facts.cleanup_complete and facts.contained and (facts.profile_calls == 0 if self.signing is None else self.signing.commands_settled()) and self._pending is None
                 and all(state in {"new", "not-configured", "no-call"}
                         or state not in {"armed", "calling", "attempted"} and self._command_outcome(role) is not None
                         for role, state in self._roles.items()))
@@ -933,6 +1049,9 @@ class IOSArchiveOperation:
         """Root only the original pending role's slot; never poll or dispatch."""
         from ._command_process import CommandOutcomeSlot, _Outer
         self.owner()
+        if self.signing is not None:
+            self.signing.bind_command_slot(engine, slot)
+            return
         role = self._pending
         require(type(engine) is _Outer and type(slot) is CommandOutcomeSlot
                 and engine.guard is self.guard and engine.owns is False
@@ -950,6 +1069,8 @@ class IOSArchiveOperation:
             CommandOutcomeSlot, NoTargetProof, OriginalCommandFinality, OriginalCommandOutcome, RouteHistory, _Outer,
         )
         self.owner()
+        if self.signing is not None:
+            return self.signing.outcome(role)
         slot = self._command_slots[role]
         if type(slot) is not CommandOutcomeSlot:
             return None
@@ -991,6 +1112,8 @@ class IOSArchiveOperation:
     def command_dispatch(self):
         self.owner()
         dispatched = self.guard.lifetime_ledger.verdict().command_dispatched
+        if dispatched is not True and self.signing is not None and not self.signing.commands_settled():
+            return None
         # A prior positive attempt stays positive, but absent finality never
         # becomes known no-effect merely because no ledger slot was published.
         if dispatched is not True and any(state not in {"new", "not-configured", "no-call"}
@@ -1000,8 +1123,8 @@ class IOSArchiveOperation:
 
     def _arm(self, role: str) -> None:
         self.checkpoint()
-        require(role in ROLES and self._roles[role] == "new" and self.commands_settled())
-        prior = ROLES[:ROLES.index(role)]
+        require(role in self.roles and self._roles[role] == "new" and self.commands_settled())
+        prior = self.roles[:self.roles.index(role)]
         require(all(self._roles[name] == "not-configured" or self._returned.get(name) == 0 for name in prior))
         self._command_before = self.guard.lifetime_ledger.verdict().commands
         self._roles[role], self._pending = "armed", role
@@ -1010,7 +1133,7 @@ class IOSArchiveOperation:
         self.checkpoint()
         require(self.prepared)
         tool = self.request.native["toolchain"]
-        return {"PATH": tool["developerDir"] + "/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        value = {"PATH": tool["developerDir"] + "/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 "DEVELOPER_DIR": tool["developerDir"], "SDKROOT": tool["sdk"],
                 "HOME": str(self.files.work_path("home")), "TMPDIR": str(self.files.work_path("tmp")),
                 "CFFIXED_USER_HOME": str(self.files.work_path("home")),
@@ -1018,6 +1141,7 @@ class IOSArchiveOperation:
                 "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
                 "MOBILE_RELEASE_VERSION_NAME": self.inputs.saved.release.name,
                 "MOBILE_RELEASE_BUILD_NUMBER": str(self.inputs.saved.release.build)}
+        return value if self.signing is None else self.signing.main_environment(value)
 
     def command_limits(self, timeout: int, capture: bool, output_limit: int) -> tuple[int, int]:
         self.checkpoint()
@@ -1036,17 +1160,23 @@ class IOSArchiveOperation:
             runner = run_owned
             arguments = {"cwd": self.root, "environ": self.command_environment(),
                 "capture": role in {"xcode-version", "ios-sdk"},
-                "timeout": {"xcode-version": 30, "ios-sdk": 30, "prepare": 600, "archive": 3600}[role],
+                "timeout": {"xcode-version": 30, "ios-sdk": 30, "prepare": 600, "archive": 3600, "export": 1800}[role],
                 "output_limit": 2 * 1024**2, "cancellation": self.guard}
             self._roles[role] = "calling"
-            result = runner(argv, **arguments)
+            if self.signing is not None and role in {"prepare", "archive", "export"}:
+                session = self.signing.session
+                require(session is not None and self.signing.lease.active is session)
+                result = session.run(list(argv), kind="build", cwd=self.root, capture=arguments["capture"],
+                    timeout=arguments["timeout"], environ=arguments["environ"])
+            else:
+                result = runner(argv, **arguments)
             # Actual return is retained before any later STOP/drift check.
             self.owner()
             self._observe_command(role)
             facts = self.guard.lifetime_ledger.verdict()
             require(self._roles[role] == "returned" and self._returned[role] == result.returncode
                     and facts.cleanup_complete and facts.contained and facts.command_dispatched is True
-                    and facts.profile_calls == 0 and facts.commands == self._command_before + 1)
+                    and (self.signing is not None or facts.profile_calls == 0) and facts.commands == self._command_before + 1)
         except BaseException as error:
             self.remember(error)
             if self._roles[role] == "armed":
@@ -1078,17 +1208,53 @@ class IOSArchiveOperation:
         self._run("prepare", value)
 
     def run_archive(self, argv: list[str]) -> None:
-        from .ios import _archive_command
+        from .ios import _archive_command, _signing_archive_settings
         self.require(self.inputs.config, self.guard)
         selected = self.inputs.saved.configuration
         expected = _archive_command(selected.container, self.files.configured_container(), selected.scheme,
             selected.configuration, self.files.namespace.path / "archive.xcarchive", self.inputs.saved.release,
             program=self.request.native["toolchain"]["developerDir"] + "/usr/bin/xcodebuild",
             derived_data=self.files.work_path("DerivedData"))
-        expected += ["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"]
+        expected += (_signing_archive_settings(self.inputs.config.section("ios")["teamId"], self.signing.profile_specifier)
+                     if self.signing is not None else ["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
         require(argv == expected)
         require(all(_name_key(name) != "archive.xcarchive" for name in self.files.names(self.files.namespace.fd)))
         self._run("archive", tuple(argv))
+
+    def run_export(self) -> None:
+        import plistlib
+        from .ios import _export_options
+        self.require(self.inputs.config, self.guard)
+        require(self.signing is not None and self.signing.phase == "building" and self._ipa is None)
+        self.artifact().check()
+        require(self.files.names(self.files.namespace.fd) == {"work", "archive.xcarchive"})
+        ios = self.inputs.config.section("ios")
+        content = plistlib.dumps(_export_options(ios["bundleId"], ios["teamId"], self.signing.profile_specifier), sort_keys=True)
+        options = self.files.write_export_options(content)
+        self.files.check_export_options(options, content)
+        self._run("export", (self.request.native["toolchain"]["developerDir"] + "/usr/bin/xcodebuild", "-exportArchive",
+            "-archivePath", str(self.artifact().path), "-exportPath", str(self.files.namespace.path / "export"),
+            "-exportOptionsPlist", str(self.files.work_path("ExportOptions.plist"))))
+        self.files.check_export_options(options, content)
+        require(self.commands_settled() and self._returned.get("export") == 0
+                and self.files.names(self.files.namespace.fd) == {"work", "archive.xcarchive", "export"})
+        directory = self.files._hold(self.files.namespace.fd, "export", directory=True)
+        names = self.files.names(directory.slot.number, limit=128)
+        candidates = [name for name in names if name.endswith(".ipa")]
+        if len(candidates) != 1:
+            self.fail("artifact-missing")
+        name = candidates[0]
+        require(0 < len(name.encode("utf-8")) <= 255 and not any(ord(char) < 32 or ord(char) == 127 or char in "/\\:" for char in name))
+        original = self.files._hold(directory.slot.number, name, directory=False, parent_record=directory)
+        require(0 < original.identity["size"] <= 4 * 1024**3)
+        self._ipa = OriginalIOSIPA(self, directory, original)
+        self._ipa.check()
+
+    def ipa(self) -> OriginalIOSIPA:
+        self.checkpoint()
+        require(type(self._ipa) is OriginalIOSIPA and self.signing is not None)
+        self._ipa.check()
+        return self._ipa
 
     def capture_after(self) -> OriginalIOSArchive:
         self.checkpoint()
@@ -1114,7 +1280,13 @@ class IOSArchiveOperation:
         require(cancellation is self.guard and self.inspection_deadline is None
                 and self.snapshot_binding.owner is None and not self.snapshot_binding.finish_claimed
                 and self.commands_settled() and self._returned.get("archive") == 0)
-        require(type(artifacts) is dict and artifacts == {"ios-archive": self.artifact().path})
+        expected = {"ios-archive": self.artifact().path}
+        if self.signing is not None:
+            require(self.signing.phase == "inspecting" and self.signing.inputs_closed()
+                    and self.signing.session is not None and self.signing.session.closed
+                    and self._returned.get("export") == 0)
+            expected["ios-ipa"] = self.ipa().path
+        require(type(artifacts) is dict and artifacts == expected)
         self.inspection_deadline = _IOSInspectionDeadline(self, InspectionDeadline())
         return self.inspection_deadline
 
@@ -1125,8 +1297,11 @@ class IOSArchiveOperation:
         require(type(snapshot) is IOSArtifactSnapshot and snapshot._owner is binding.owner
                 and snapshot.deadline is self.inspection_deadline and snapshot.cancellation is self.guard
                 and binding.consumer_active and self.artifact().inventory is None
-                and set(snapshot.bindings) == {"ios-archive"} and type(snapshot.bindings["ios-archive"]) is dict)
+                and set(snapshot.bindings) == ({"ios-archive"} if self.signing is None else {"ios-archive", "ios-ipa"})
+                and type(snapshot.bindings["ios-archive"]) is dict)
         self._artifact.inventory = snapshot.bindings["ios-archive"]
+        if self.signing is not None:
+            self._ipa.inventory = snapshot.bindings["ios-ipa"]
 
     def snapshot_closed(self) -> bool:
         binding = self.snapshot_binding
@@ -1177,7 +1352,7 @@ class IOSArchiveOperation:
         return {role: ({"outcome": "exited", "exitCode": self._returned[role]} if role in self._returned else
                        {"outcome": "not-configured" if self._roles[role] == "not-configured" else
                                    "not-dispatched" if self._roles[role] in {"new", "no-call", "no-target"} else "unknown", "exitCode": None})
-                for role in ROLES}
+                for role in self.roles}
 
     def disposition(self) -> dict:
         binding, namespace = self.snapshot_binding, None if self.files is None else self.files.namespace

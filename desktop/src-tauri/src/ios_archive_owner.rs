@@ -1,6 +1,6 @@
-//! Typed unsigned-iOS-archive adapter. SavedCommandOwner keeps every original
+//! Typed iOS build/recovery adapter. SavedCommandOwner keeps every original
 //! resource and join; neither invoke futures nor DATA receipts become owners.
-use std::time::Instant;
+use std::{time::Instant, sync::Arc};
 use tokio::sync::{oneshot, watch};
 use crate::{asset_source::RegisteredRoot, error::BridgeError,
     ios_archive_protocol::{Availability, Prepare, Start, Status}, runtime::RuntimeConfig,
@@ -31,8 +31,19 @@ impl IOSArchiveOwner {
     pub(crate) fn prepare(&self, input: Prepare, registration: u32, project: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
         self.saved.prepare_ios(input, registration, project, gate)
     }
+    pub(crate) fn prepare_material(&self, input: Prepare, registration: u32, project: RegisteredRoot, gate: Availability,
+        material: Option<Arc<crate::asset_session::IOSSigningMaterial>>) -> Result<Status, BridgeError> {
+        self.saved.prepare_ios_material(input, registration, project, gate, material)
+    }
+    pub(crate) fn prepared_material(&self, operation: &str, generation: &str) -> Result<Option<Arc<crate::asset_session::IOSSigningMaterial>>, BridgeError> {
+        self.saved.prepared_ios_material(operation, generation)
+    }
     pub(crate) fn start(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability) -> Result<Admitted, BridgeError> {
         self.saved.start_ios(input, admitted_at, registered, gate)
+    }
+    pub(crate) fn start_material(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability,
+        material: Option<Arc<crate::asset_session::IOSSigningMaterial>>) -> Result<Admitted, BridgeError> {
+        self.saved.start_ios_material(input, admitted_at, registered, gate, material)
     }
     pub(crate) fn status(&self, gate: Availability) -> Result<Status, BridgeError> { self.saved.status_ios(gate) }
     pub(crate) fn cancel(&self, operation: &str, generation: &str, gate: Availability) -> Result<Status, BridgeError> {

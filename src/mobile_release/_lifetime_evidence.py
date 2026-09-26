@@ -252,6 +252,11 @@ class ProfileCallEvidence:
         _require(type(ledger) is LifetimeLedger and ledger._owner is guard)
         self._guard, self._ledger = guard, ledger
         ledger._bind_profile(self)
+        source = getattr(guard, "_ios_archive_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _require(operation.signing is not None)
+            operation.signing.bind_profile(self)
         if self._blocked:
             ledger._abort()
 
@@ -391,6 +396,11 @@ class ProfileCallEvidence:
             if self._ledger is not None:
                 self._ledger._finish_profile(self, verdict)
                 self._published = True
+                source = getattr(self._guard, "_ios_archive_source", None)
+                if source is not None:
+                    operation = source.require_operation()
+                    _require(operation.signing is not None)
+                    operation.signing.finish_profile(self)
         except BaseException as error:
             self._record_fault(error)
             if primary is None:

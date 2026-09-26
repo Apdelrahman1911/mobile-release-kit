@@ -94,14 +94,23 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
 
 // Native-only metadata hint. Not serialized, hashed into an ID, or a capability
 // to recapture bytes. Every later registration probe must match fresh originals.
-pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[derive(Clone, PartialEq, Eq)]
+struct OriginAlias { name: Vec<u8>, target: Vec<u8>, identity: FileIdentity }
+pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity,
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    alias: Option<OriginAlias>,
+}
 pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin: Arc<OriginWitness> }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 impl OriginWitness {
     // Pure retained DATA accounting; this neither reopens nor qualifies a path.
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
-        std::mem::size_of::<Self>().checked_add(self.path.capacity())?
-            .checked_add(self.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)
+        let bytes = std::mem::size_of::<Self>().checked_add(self.path.capacity())?
+            .checked_add(self.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)?;
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let bytes = match &self.alias { Some(alias) => bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?, None => bytes };
+        Some(bytes)
     }
 }
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -151,7 +160,8 @@ pub(crate) struct InstalledSourceFacts {
 }
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
-    match kind { FileKind::AndroidKeystore => 32 * 1024 * 1024, FileKind::AndroidFirebase | FileKind::IosFirebase => 4 * 1024 * 1024 }
+    match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => 32 * 1024 * 1024,
+        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile => 4 * 1024 * 1024 }
 }
 fn private_file(mode: u32) -> bool { mode & 0o077 == 0 }
 fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<usize, Reason> {
@@ -461,6 +471,7 @@ mod linux {
             FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore"),
             FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
             FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
+            FileKind::AppleP12 | FileKind::AppleProfile => return Err(Reason::UnsupportedPlatform),
         };
         if !matches || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
     }
@@ -792,6 +803,8 @@ mod linux {
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/google-services.json")).is_err());
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/GoogleService-Info.plist.p12")).is_err());
             assert_eq!(material_limit(FileKind::IosFirebase), 4 * 1024 * 1024);
+            assert_eq!(suffix(FileKind::AppleP12, Path::new("/fictional/certificate.p12")), Err(Reason::UnsupportedPlatform));
+            assert_eq!(suffix(FileKind::AppleProfile, Path::new("/fictional/app.mobileprovision")), Err(Reason::UnsupportedPlatform));
         }
         #[test]
         fn unconfirmed_originals_are_not_relabelled_as_known_settlement() {

@@ -189,7 +189,9 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        if self.active and self.buffer:
+        material_phase = self.domain is SavedCommandDomain.IOSArchive and self.material_pending
+        active = self.active and not material_phase
+        if active and self.buffer:
             self.stop()
             return
         try:
@@ -202,13 +204,17 @@ class _SavedCommandInput:
                            SavedCommandDomain.ProjectRecovery: "Original project recovery input changed",
                            SavedCommandDomain.IOSArchive: "Original saved build input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
-            limit = 1 if self.active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
+            if material_phase and (not self.material_receiving or self.buffer):
+                # The original bounded private reader drains this buffer before
+                # another read. A large body is not a large public JSON frame.
+                return
+            limit = 1 if active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
             self._require(limit > 0)
             try:
                 chunk = os.read(self.fd, limit)
             except BlockingIOError:
                 return
-            if not chunk or self.active:
+            if not chunk or active:
                 self.stop()
                 return
             self.buffer.extend(chunk)
@@ -229,10 +235,13 @@ class _SavedCommandInput:
             if position >= 0:
                 raw = bytes(self.buffer[:position + 1])
                 del self.buffer[:position + 1]
-                self.active = True  # Leftovers and any further byte are STOP.
+                if self.domain is SavedCommandDomain.IOSArchive:
+                    request = _protocol(self.domain).parse_request(raw)
+                    self._request_material(request)
+                self.active = True  # Signed pending input remains inert until account/project admission.
                 self.guard.check()
-                request = _protocol(self.domain).parse_request(raw)
-                self.guard.check()
+                if self.domain is not SavedCommandDomain.IOSArchive:
+                    request = _protocol(self.domain).parse_request(raw)
                 self.request_returned = True
                 return request
             self._require(self.fd is not None)

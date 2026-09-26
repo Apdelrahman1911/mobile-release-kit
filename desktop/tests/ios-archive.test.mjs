@@ -5,17 +5,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { IOSArchiveController, iosArchiveOwnerReason, iosArchiveHelp, iosArchiveInputHelp,
-  iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp } from '../src/iosArchive.ts';
+  iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp } from '../src/iosArchive.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { IOS_ARCHIVE_CONSENT, IOS_ARCHIVE_COUNTER_MAX, IOS_ARCHIVE_EVENT, IOS_ARCHIVE_LIMITATIONS, IOS_ARCHIVE_SCOPE,
-  copyIOSArchiveRequest, encodeIOSArchiveRequest, parseIOSArchiveStatus, iosArchiveOperationProgress, iosArchiveError } from '../src/iosArchiveProtocol.ts';
+  IOS_SIGNED_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_SCOPE, IOS_SIGNED_ARCHIVE_LIMITATIONS, IOS_RECOVERY_CONSENT,
+  IOS_ACCOUNT_RECOVERY_CONFIRMATION, IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_RECOVERY_LIMITATIONS,
+  copyIOSArchiveRequest, encodeIOSArchiveRequest, parseIOSArchiveStatus, parseIOSSigningPolicy, iosArchiveOperationProgress, iosArchiveError } from '../src/iosArchiveProtocol.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
 const CONFIG = { bytes: 512, sha256: 'd'.repeat(64) }, NEW_CONFIG = { bytes: 524, sha256: 'e'.repeat(64) };
 const VERSION = { bytes: 41, sha256: 'f'.repeat(64) };
+const P12 = '1'.repeat(32), PROFILE = '2'.repeat(32), FIREBASE = '3'.repeat(32), TOKEN = '4'.repeat(32);
+const ACCOUNT_SESSION = '5'.repeat(32), PROJECT_SESSION = '6'.repeat(32);
 const clone = (value) => structuredClone(value);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let n = 0; n < 16; n++) await Promise.resolve(); };
@@ -33,10 +37,11 @@ function snapshot({ config = CONFIG, source = 'release/version.properties', ios 
     discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
     assurance: clone(assurance), issues: [] };
 }
-function workspace() {
+function workspace(savedSnapshot = snapshot()) {
   let value = workspaceReducer(initialWorkspace, { type: 'select', project: { id: 'p1', name: 'Inert iOS project', path: '/inert/never-forwarded' } });
+  if (savedSnapshot === null) return value;
   value = workspaceReducer(value, { type: 'snapshot-start', projectId: 'p1', requestId: 1 });
-  return workspaceReducer(value, { type: 'snapshot-done', projectId: 'p1', requestId: 1, snapshot: snapshot(), observedAt: 1 });
+  return workspaceReducer(value, { type: 'snapshot-done', projectId: 'p1', requestId: 1, snapshot: savedSnapshot, observedAt: 1 });
 }
 function observation(project, patch = {}) {
   return { schemaVersion: 2, source: project.snapshot.config.data.version.source, version: { name: '1.2.3', build: 42 },
@@ -44,9 +49,10 @@ function observation(project, patch = {}) {
 }
 const request = () => ({ projectId: 'p1', draftRevision: 2, baselineGeneration: 3, savedConfig: clone(CONFIG),
   savedVersion: { ...VERSION, source: 'release/version.properties', name: '1.2.3', build: 42 } });
-const context = (input) => ({ ...clone(input), platform: 'ios', operation: 'ios-unsigned-archive' });
+const context = (input) => ({ ...clone(input), platform: 'ios', operation: input.recovery ? 'ios-local-recovery' : input.signing ? 'ios-signed-export' : 'ios-unsigned-archive' });
 const operation = (input = request(), patch = {}) => ({ operationId: OP, ownerGeneration: OWNER, context: context(input), phase: 'awaiting-consent',
-  intentUsable: true, outcome: null, reason: 'none', stage: null, activity: null, disposition: null, result: null, ...patch });
+  intentUsable: true, outcome: null, reason: 'none', stage: null, activity: null,
+  ...(input.recovery ? { report: null } : { disposition: null, result: null }), ...patch });
 const status = (revision = 0, op = null, availability = 'available') => ({ schemaVersion: 1, statusRevision: revision, availability, operation: op });
 const running = (op, stage = 'archiving') => ({ ...clone(op), phase: 'running', intentUsable: false, stage });
 const terminal = (op, outcome = 'cancelled', reason = outcome) => ({ ...clone(op), phase: 'terminal', intentUsable: false, outcome, reason });
@@ -61,8 +67,48 @@ function completed(op, selected = selection()) {
     result: { schemaVersion: 1, scope: IOS_ARCHIVE_SCOPE, usedConfig: clone(op.context.savedConfig), usedVersion: clone(op.context.savedVersion),
       archive: directory + '/archive.xcarchive', entries: 10, bytes: 1000, limitations: [...IOS_ARCHIVE_LIMITATIONS] } };
 }
-function harness(t, { initial = status(), listenGate = null, completeVersion = true } = {}) {
-  let state = workspace(), registry = clone(initial), clock = 10, other = null, versionOverride;
+function signingPolicy(optional = []) {
+  const kinds = [['apple-p12', P12], ['apple-profile', PROFILE], ...optional.map((kind) => [kind, kind === 'ios-firebase' ? FIREBASE : TOKEN])];
+  return { teamId: 'A1B2C3D4E5', distributionCertificateSha256: 'e'.repeat(64),
+    assignments: kinds.map(([kind, recordId], index) => ({ kind, recordId, recordRevision: index + 1, contextRevision: 3 })) };
+}
+function signedSnapshot(ios = {}) {
+  const { teamId, distributionCertificateSha256 } = signingPolicy();
+  return snapshot({ ios: { teamId, distributionCertificateSha256, symbols: { policy: 'retain' }, ...ios } });
+}
+function assetState(optional = []) {
+  const assignments = signingPolicy(optional).assignments;
+  return { mode: 'native', scope: { platform: 'ios', stage: 'candidate', purpose: 'signing' }, contextCurrent: true,
+    busy: null, updatingContext: false, observing: false, observationFailed: false, blocked: false, error: null, previewDeadline: null,
+    entryGeneration: 1, selectionKind: null, cancelledOperationId: null, originPending: false, intent: null, reviewReady: false,
+    status: { schemaVersion: 1, statusRevision: 7, mode: 'session', capability: { available: true, reason: 'none' },
+      context: { revision: 3, projectId: 'p1', platform: 'ios', stage: 'candidate', purpose: 'signing' },
+      operation: { operationId: 9, operation: 'bind', phase: 'idle', reason: 'none', source: 'captured', settlement: 'known', selectionToken: null, assessment: null, preview: null },
+      records: assignments.map((row) => ({ kind: row.kind, recordId: row.recordId, revision: row.recordRevision, availability: 'assigned' })),
+      assignments: assignments.map((row) => ({ ...row, availability: 'available' })) } };
+}
+function signedCompleted(op, selected = selection({ symbolsPolicy: 'retain' })) {
+  const value = completed(op, selected);
+  value.activity.commands.export = { outcome: 'exited', exitCode: 0 };
+  value.activity.findings = ['signing-material', 'profile-material', 'artifact-correspondence', 'ipa-structure', 'ipa-profile', 'ipa-entitlements', 'ipa-signer',
+    ...(op.context.signing.assignments.some((row) => row.kind === 'ios-firebase') ? ['firebase-material'] : [])].map((check) => ({ check, status: 'PASS' }));
+  value.result = { ...value.result, scope: IOS_SIGNED_ARCHIVE_SCOPE, limitations: [...IOS_SIGNED_ARCHIVE_LIMITATIONS],
+    ipa: `.mobile-release/desktop-ios-archive/${op.operationId}/export/Inert.ipa`, ipaBytes: 128,
+    pairing: { nativePaths: 2, nativeIdentities: 2, presentSymbolSlices: 1 } };
+  return value;
+}
+const recoveryRequest = (action = 'inspect', session = action === 'account' ? ACCOUNT_SESSION : PROJECT_SESSION) =>
+  ({ projectId: 'p1', recovery: action === 'inspect' ? { action } : { action, session } });
+function recoveryCompleted(op, patch = {}) {
+  const action = op.context.recovery.action;
+  return { ...clone(op), phase: 'terminal', intentUsable: false, outcome: 'complete', reason: 'none', stage: 'disposing-work',
+    activity: { stage: 'disposing-work' }, report: { schemaVersion: 1, scope: 'local-ios-recovery',
+      account: action === 'inspect' ? { status: 'pending', session: ACCOUNT_SESSION, next: 'ordinary' } : action === 'account' ? { status: 'recovered', session: op.context.recovery.session, next: 'none' } : null,
+      project: action === 'inspect' ? { status: 'cleanup-only', session: PROJECT_SESSION, next: 'ordinary' } : action === 'project' ? { status: 'recovered', session: op.context.recovery.session, next: 'none' } : null,
+      limitations: [...IOS_RECOVERY_LIMITATIONS] }, ...patch };
+}
+function harness(t, { initial = status(), listenGate = null, completeVersion = true, savedSnapshot = snapshot(), assets = null } = {}) {
+  let state = workspace(savedSnapshot), registry = clone(initial), clock = 10, other = null, versionOverride, currentAssets = clone(assets);
   const calls = [], reads = [], subscriptions = [], versionCalls = [], order = [];
   const selected = () => state.selectedId ? state.projects[state.selectedId] : null;
   const version = new ReleaseVersionController(selected);
@@ -82,6 +128,7 @@ function harness(t, { initial = status(), listenGate = null, completeVersion = t
   };
   const controller = new IOSArchiveController({ selectedProject: selected,
     releaseVersion: () => versionOverride === undefined ? version.getSnapshot() : versionOverride,
+    assetSession: () => currentAssets,
     otherOperationReason: () => typeof other === 'function' ? other() : other, now: () => clock });
   // Same synchronous lifetime wiring required in App; not a late React effect.
   const unsubscribeVersion = version.subscribe(controller.syncReleaseVersion);
@@ -96,6 +143,8 @@ function harness(t, { initial = status(), listenGate = null, completeVersion = t
   return { api, controller, version, calls, reads, subscriptions, versionCalls, order, ready, readVersion,
     get state() { return controller.getSnapshot(); }, get workspace() { return state; }, get project() { return selected(); },
     get versionState() { return version.getSnapshot(); },
+    get assets() { return currentAssets; },
+    setAssets(value) { currentAssets = clone(value); controller.syncAssetSession(); },
     overrideVersion(value) { versionOverride = value; controller.syncReleaseVersion(); },
     replace(project) { state = { ...state, projects: { ...state.projects, [project.project.id]: project } }; version.syncProject(); controller.syncProject(); },
     dispatch(action) {
@@ -118,8 +167,20 @@ function start(h, op) {
   h.controller.setAcknowledged(op.operationId, op.ownerGeneration, true);
   const done = h.controller.start(op.operationId, op.ownerGeneration), call = h.calls.at(-1); assert.equal(call.kind, 'start'); return { call, done };
 }
+async function reviewedRecovery(h, action = 'inspect', inspected = null, patch = {}) {
+  await h.ready; h.controller.setVisible(false); h.controller.setRecoveryVisible(true);
+  const count = h.calls.length, preparing = h.controller.prepareRecovery(action, inspected), call = h.calls.at(-1);
+  assert.equal(h.calls.length, count + 1); assert.equal(call.kind, 'prepare');
+  const op = operation(call.input, patch); h.reply(call, status((h.state.status?.statusRevision ?? 0) + 1, op)); await preparing;
+  assert.ok(h.state.consent); assert.equal(h.state.consent.acknowledged, false); return op;
+}
+async function inspectedRecovery(h, patch = {}) {
+  const op = await reviewedRecovery(h), sent = start(h, op), complete = recoveryCompleted(op, patch);
+  h.reply(sent.call, status(2, complete)); await sent.done;
+  assert.equal(h.state.historical, false); assert.equal(h.state.status.operation.outcome, complete.outcome); return complete;
+}
 
-test('four raw requests stay closed and domain-local; no tools, signing or deadline may be supplied', () => {
+test('four raw requests stay closed and domain-local; no tools, malformed signing or deadline may be supplied', () => {
   const input = request(), copied = copyIOSArchiveRequest('prepare_ios_archive', input);
   assert.deepEqual(clone(copied), input); assert.notEqual(copied.savedVersion, input.savedVersion);
   const decode = (raw) => JSON.parse(new TextDecoder().decode(raw));
@@ -286,6 +347,256 @@ test('reciprocal operation admission blocks prepare without a fake self-busy con
   assert.ok(op.intentUsable);
 });
 
+test('signed public policy binds ordered unique current revisions without admitting private/native fields', () => {
+  for (const optional of [[], ['ios-firebase'], ['project-read-token'], ['ios-firebase', 'project-read-token']]) {
+    const input = { ...request(), signing: signingPolicy(optional) };
+    assert.deepEqual(clone(copyIOSArchiveRequest('prepare_ios_archive', input)), input);
+    assert.ok(parseIOSArchiveStatus(status(1, operation(input))));
+    const changed = operation(input); changed.context.operation = 'ios-unsigned-archive';
+    assert.equal(parseIOSArchiveStatus(status(1, changed)), null);
+  }
+  const base = signingPolicy(['ios-firebase', 'project-read-token']);
+  for (const mutate of [
+    (p) => { p.teamId = 'a1b2c3d4e5'; }, (p) => { p.distributionCertificateSha256 = 'E'.repeat(64); },
+    (p) => { p.assignments.reverse(); }, (p) => { p.assignments.shift(); }, (p) => { p.assignments[1].kind = 'apple-p12'; },
+    (p) => { p.assignments[1].recordId = p.assignments[0].recordId; }, (p) => { p.assignments[1].contextRevision++; },
+    (p) => { p.assignments[0].recordRevision = 0; }, (p) => { p.assignments[0].contextRevision = 0; },
+    (p) => { p.assignments[0].recordRevision = IOS_ARCHIVE_COUNTER_MAX + 1; },
+    (p) => { p.assignments[0].file = 'PRIVATE_CANARY'; }, (p) => { p.password = 'PRIVATE_CANARY'; },
+    (p) => { p.nativeValidation = 'verified'; }, (p) => { p.assignments = null; },
+  ]) { const value = clone(base); mutate(value); assert.equal(parseIOSSigningPolicy(value), null); }
+  for (const signing of [null, {}, 'PRIVATE_CANARY']) assert.equal(copyIOSArchiveRequest('prepare_ios_archive', { ...request(), signing }), null);
+  for (const field of ['signingTools', 'signingContext', 'material', 'password', 'privateKey', 'profile', 'native', 'recovery'])
+    assert.equal(copyIOSArchiveRequest('prepare_ios_archive', { ...request(), signing: base, [field]: null }), null, field);
+  const begin = { operationId: OP, ownerGeneration: OWNER, consentVersion: IOS_SIGNED_ARCHIVE_CONSENT };
+  assert.deepEqual(clone(copyIOSArchiveRequest('start_ios_archive', begin)), begin);
+  assert.equal(copyIOSArchiveRequest('start_ios_archive', { ...begin, confirmation: IOS_ACCOUNT_RECOVERY_CONFIRMATION }), null);
+});
+
+test('signed IPA projection requires exact core findings, export, pairing and native terminal finality', () => {
+  for (const optional of [[], ['ios-firebase']]) {
+    const complete = signedCompleted(operation({ ...request(), signing: signingPolicy(optional) }));
+    assert.ok(parseIOSArchiveStatus(status(1, complete)));
+    for (const mutate of [
+      (op) => { op.phase = 'running'; op.outcome = null; },
+      (op) => { op.phase = 'unknown'; op.outcome = 'unknown'; op.reason = 'cleanup-unknown'; },
+      (op) => { op.activity.commands.export.exitCode = 1; }, (op) => { delete op.activity.commands.export; },
+      (op) => { op.activity.findings.pop(); }, (op) => { op.activity.findings[0].status = 'CONFIGURED'; },
+      (op) => { op.activity.findings[1] = clone(op.activity.findings[0]); },
+      (op) => { op.activity.selection.symbolsPolicy = 'required'; },
+      (op) => { op.result.scope = IOS_ARCHIVE_SCOPE; }, (op) => { op.result.ipaBytes = 0; },
+      (op) => { op.result.ipaBytes = 4 * 1024 ** 3 + 1; }, (op) => { op.result.pairing.nativeIdentities = 0; },
+      (op) => { op.result.pairing.presentSymbolSlices = 100001; }, (op) => { op.result.pairing.rawPath = 'PRIVATE_CANARY'; },
+      (op) => { op.result.limitations = [...IOS_ARCHIVE_LIMITATIONS]; }, (op) => { op.result.usedConfig.sha256 = '0'.repeat(64); },
+      (op) => { op.result.ipa = op.result.ipa.replace(OP, OTHER); }, (op) => { op.result.ipa = op.result.ipa.replace('Inert.ipa', '../Inert.ipa'); },
+      (op) => { op.result.ipa = op.result.ipa.replace('Inert.ipa', 'x:Inert.ipa'); },
+      (op) => { op.result.ipa = op.result.ipa.replace('Inert.ipa', 'é'.repeat(126) + '.ipa'); },
+      (op) => { op.disposition.work = 'unknown'; }, (op) => { op.lifetime = { complete: true }; },
+    ]) { const changed = clone(complete); mutate(changed); assert.equal(parseIOSArchiveStatus(status(1, changed)), null); }
+    const early = running(complete, 'materializing-signing'); early.activity = null; early.disposition = null; early.result = null; early.outcome = null;
+    assert.ok(parseIOSArchiveStatus(status(1, early)));
+    const unsigned = operation(); unsigned.stage = 'validating-signing'; unsigned.phase = 'running'; unsigned.intentUsable = false;
+    assert.equal(parseIOSArchiveStatus(status(1, unsigned)), null);
+  }
+});
+
+test('signed controller binds only saved public policy and exact idle assigned session metadata; unchanged rereads preserve review', async (t) => {
+  const optional = ['ios-firebase', 'project-read-token'];
+  const h = harness(t, { savedSnapshot: signedSnapshot({ distributionCertificateSha256: Array(32).fill('EE').join(':') }), assets: assetState(optional) });
+  await h.ready; assert.equal(h.controller.setArchiveMode('signed'), true);
+  const op = await reviewed(h), original = h.state.consent;
+  assert.equal(op.context.operation, 'ios-signed-export'); assert.deepEqual(h.calls[0].input.signing, signingPolicy(optional));
+  assert.doesNotMatch(JSON.stringify(h.calls[0].input), /password|privateKey|profileBytes|signingTools|root/);
+  const reread = clone(h.assets); reread.observing = true; reread.status.statusRevision++;
+  h.setAssets(reread); assert.equal(h.state.consent, original);
+  h.controller.setAcknowledged(OP, OWNER, true); assert.equal(h.controller.startReason(), null);
+  const sent = start(h, op); assert.deepEqual(sent.call.input, { operationId: OP, ownerGeneration: OWNER, consentVersion: IOS_SIGNED_ARCHIVE_CONSENT });
+  assert.equal(h.controller.setArchiveMode('unsigned'), false);
+  h.controller.setVisible(false); assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 0);
+  h.reply(sent.call, status(2, signedCompleted(op))); await sent.done;
+  assert.equal(h.state.status.operation.result.scope, IOS_SIGNED_ARCHIVE_SCOPE); assert.equal(iosArchiveOwnerReason(h.state), null);
+});
+
+test('signed preparation refuses absent, stale, foreign, pending and partially available assignment sources', async (t) => {
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState(['ios-firebase']) });
+  await h.ready; h.controller.setArchiveMode('signed');
+  for (const mutate of [
+    (a) => { a.mode = 'preview'; }, (a) => { a.contextCurrent = false; }, (a) => { a.blocked = true; },
+    (a) => { a.observationFailed = true; }, (a) => { a.originPending = true; }, (a) => { a.busy = 'bind'; },
+    (a) => { a.updatingContext = true; }, (a) => { a.scope.purpose = 'full'; }, (a) => { a.scope.stage = 'production'; },
+    (a) => { a.status.mode = 'closed'; }, (a) => { a.status.capability.available = false; },
+    (a) => { a.status.context.projectId = 'p2'; }, (a) => { a.status.context.platform = 'android'; },
+    (a) => { a.status.context.purpose = 'full'; }, (a) => { a.status.context.stage = 'production'; },
+    (a) => { a.status.operation.phase = 'preview'; }, (a) => { a.status.operation.settlement = 'unknown'; },
+    (a) => { a.status.assignments.shift(); }, (a) => { a.status.assignments[0].contextRevision++; },
+    (a) => { a.status.assignments[0].recordRevision++; }, (a) => { a.status.assignments[0].availability = 'unavailable'; },
+    (a) => { a.status.records[0].availability = 'mutation-pending'; },
+    (a) => { a.status.assignments[2].availability = 'unavailable'; },
+  ]) {
+    const value = assetState(['ios-firebase']); mutate(value); h.setAssets(value);
+    assert.ok(h.state.signing.issue); await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  }
+  h.setAssets(null); await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  h.setAssets(assetState()); assert.equal(h.state.signing.issue, null); await reviewed(h);
+});
+
+test('signed dirty drafts never become signing context while original unsigned saved-input behavior is retained', async (t) => {
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() });
+  await h.ready; h.controller.setArchiveMode('signed');
+  h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.teamId', value: 'Z9Y8X7W6V5' }); await h.readVersion();
+  await h.controller.prepare(); assert.equal(h.calls.length, 0); assert.match(h.state.signing.issue, /unsaved draft/);
+  h.controller.setArchiveMode('unsigned'); const op = await reviewed(h);
+  assert.equal(op.context.operation, 'ios-unsigned-archive'); assert.equal(Object.hasOwn(h.calls[0].input, 'signing'), false);
+  assert.equal(h.project.draft.ios.teamId, 'Z9Y8X7W6V5');
+});
+
+test('assignment, context, session mutation and mode changes synchronously retire late signed Prepare without rearming Start', async (t) => {
+  for (const change of [
+    (h) => { const a = clone(h.assets); a.status.assignments[0].recordRevision++; h.setAssets(a); },
+    (h) => { const a = clone(h.assets); a.contextCurrent = false; h.setAssets(a); },
+    (h) => { const a = clone(h.assets); a.busy = 'choose-file'; h.setAssets(a); },
+    (h) => { const a = clone(h.assets); a.originPending = true; h.setAssets(a); },
+    (h) => { h.controller.setArchiveMode('unsigned'); },
+  ]) {
+    const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await h.ready; h.controller.setArchiveMode('signed');
+    const preparing = h.controller.prepare(), call = h.calls.at(-1), before = h.state.contextGeneration;
+    change(h); assert.ok(h.state.contextGeneration > before); assert.equal(h.state.consent, null);
+    const op = operation(call.input); h.reply(call, status(1, op)); await preparing;
+    assert.equal(h.state.consent, null); assert.equal(h.calls.at(-1).kind, 'cancel');
+    await h.controller.start(OP, OWNER); assert.equal(h.calls.filter((entry) => entry.kind === 'start').length, 0);
+    h.reply(h.calls.at(-1), status(2, terminal(op, 'cancelled', 'context-changed'))); await flush();
+  }
+});
+
+test('recovery requests are a disjoint closed union with exact actions and fixed Start confirmations', () => {
+  for (const action of ['inspect', 'account', 'project']) {
+    const input = recoveryRequest(action); assert.deepEqual(clone(copyIOSArchiveRequest('prepare_ios_archive', input)), input);
+    assert.ok(parseIOSArchiveStatus(status(1, operation(input))));
+    for (const key of ['draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'signing', 'native', 'manual', 'security', 'root'])
+      assert.equal(copyIOSArchiveRequest('prepare_ios_archive', { ...input, [key]: null }), null, key);
+  }
+  for (const recovery of [{ action: 'inspect', session: ACCOUNT_SESSION }, { action: 'inspect', session: null }, { action: 'account' },
+    { action: 'project', session: 'not-a-token' }, { action: 'manual', session: ACCOUNT_SESSION }, { action: 'account', session: ACCOUNT_SESSION, manual: false }])
+    assert.equal(copyIOSArchiveRequest('prepare_ios_archive', { projectId: 'p1', recovery }), null);
+  const begin = { operationId: OP, ownerGeneration: OWNER, consentVersion: IOS_RECOVERY_CONSENT };
+  for (const confirmation of [undefined, IOS_ACCOUNT_RECOVERY_CONFIRMATION, IOS_PROJECT_RECOVERY_CONFIRMATION]) {
+    const input = { ...begin, ...(confirmation === undefined ? {} : { confirmation }) };
+    assert.deepEqual(clone(copyIOSArchiveRequest('start_ios_archive', input)), input);
+  }
+  for (const confirmation of [null, true, 'yes', 'manual', ACCOUNT_SESSION]) assert.equal(copyIOSArchiveRequest('start_ios_archive', { ...begin, confirmation }), null);
+});
+
+test('recovery reports are terminal observations with exact sessions and never expose archive or material data', () => {
+  for (const action of ['inspect', 'account', 'project']) {
+    const complete = recoveryCompleted(operation(recoveryRequest(action))); assert.ok(parseIOSArchiveStatus(status(1, complete)));
+    for (const mutate of [
+      (op) => { op.phase = 'running'; op.outcome = null; },
+      (op) => { op.phase = 'unknown'; op.outcome = 'unknown'; op.reason = 'cleanup-unknown'; },
+      (op) => { op.report.limitations.reverse(); }, (op) => { op.report.scope = IOS_SIGNED_ARCHIVE_SCOPE; },
+      (op) => { op.activity.commands = {}; }, (op) => { op.activity.selection = null; },
+      (op) => { op.disposition = null; }, (op) => { op.result = null; }, (op) => { op.context.savedVersion = null; },
+      (op) => { op.report = null; }, (op) => { op.stage = 'archiving'; },
+      (op) => { op.report[action === 'project' ? 'project' : 'account'].session = null; },
+      (op) => { op.report[action === 'project' ? 'project' : 'account'].next = 'force'; },
+    ]) { const changed = clone(complete); mutate(changed); assert.equal(parseIOSArchiveStatus(status(1, changed)), null); }
+    if (action !== 'inspect') {
+      const foreign = clone(complete); foreign.report[action].session = OTHER; assert.equal(parseIOSArchiveStatus(status(1, foreign)), null);
+      const extra = clone(complete); extra.report[action === 'project' ? 'account' : 'project'] = { status: 'idle', session: null, next: 'none' };
+      assert.equal(parseIOSArchiveStatus(status(1, extra)), null);
+    }
+  }
+  const inspect = recoveryCompleted(operation(recoveryRequest()));
+  for (const row of [
+    { status: 'idle', session: null, next: 'none' }, { status: 'busy', session: null, next: 'wait' },
+    { status: 'conflict', session: ACCOUNT_SESSION, next: 'preserve' }, { status: 'manual-required', session: ACCOUNT_SESSION, next: 'manual' },
+    { status: 'pending', session: ACCOUNT_SESSION, next: 'manual' },
+  ]) { const value = clone(inspect); value.report.account = row; assert.ok(parseIOSArchiveStatus(status(1, value))); }
+  for (const row of [{ status: 'recovered', session: ACCOUNT_SESSION, next: 'none' }, { status: 'cleanup-only', session: ACCOUNT_SESSION, next: 'ordinary' },
+    { status: 'idle', session: ACCOUNT_SESSION, next: 'none' }, { status: 'busy', session: null, next: 'ordinary' }]) {
+    const value = clone(inspect); value.report.account = row; assert.equal(parseIOSArchiveStatus(status(1, value)), null);
+  }
+  const halted = clone(inspect); halted.outcome = 'failed'; halted.reason = 'recovery-attention';
+  halted.report.account = { status: 'busy', session: null, next: 'wait' }; halted.report.project = { status: 'not-inspected', session: null, next: 'preserve' };
+  assert.ok(parseIOSArchiveStatus(status(1, halted)));
+});
+
+test('recovery can inspect without saved configuration/version/draft and separately confirms only its own finalized exact session', async (t) => {
+  for (const action of ['account', 'project']) {
+    const h = harness(t, { savedSnapshot: null, completeVersion: false });
+    const report = await inspectedRecovery(h); assert.equal(h.versionCalls.length, 0);
+    assert.deepEqual(h.calls[0].input, recoveryRequest());
+    assert.deepEqual(h.calls[1].input, { operationId: OP, ownerGeneration: OWNER, consentVersion: IOS_RECOVERY_CONSENT });
+    assert.equal(h.state.project.savedConfig, null); assert.equal(h.state.project.savedVersion, null);
+    assert.equal(h.controller.recoveryReason(action, report), null);
+    const changed = clone(report); changed.report[action].session = OTHER;
+    await h.controller.prepareRecovery(action, changed); assert.equal(h.calls.length, 2);
+    const op = await reviewedRecovery(h, action, report, { operationId: OTHER });
+    assert.deepEqual(h.calls[2].input, recoveryRequest(action));
+    await h.controller.start(OTHER, OWNER); assert.equal(h.calls.length, 3);
+    const sent = start(h, op); await h.controller.start(OTHER, OWNER);
+    assert.equal(h.calls.filter((call) => call.kind === 'start').length, 2);
+    assert.deepEqual(sent.call.input, { operationId: OTHER, ownerGeneration: OWNER, consentVersion: IOS_RECOVERY_CONSENT,
+      confirmation: action === 'account' ? IOS_ACCOUNT_RECOVERY_CONFIRMATION : IOS_PROJECT_RECOVERY_CONFIRMATION });
+    h.controller.setRecoveryVisible(false); assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 0);
+    h.reply(sent.call, status(4, recoveryCompleted(op))); await sent.done;
+    assert.equal(h.state.status.operation.report[action].status, 'recovered'); assert.equal(iosArchiveOwnerReason(h.state), null);
+  }
+});
+
+test('recovery retains stopped and non-grant inspection reports without offering their ordinary actions', async (t) => {
+  for (const [outcome, reason, eligible] of [
+    ['timed-out', 'timed-out', false], ['failed', 'command-incomplete', false],
+    ['refused', 'runtime-unavailable', false], ['cancelled', 'cancelled', false],
+    ['complete', 'none', true], ['failed', 'recovery-attention', true], ['refused', 'recovery-attention', true],
+  ]) {
+    const h = harness(t, { savedSnapshot: null, completeVersion: false });
+    const report = await inspectedRecovery(h, { outcome, reason });
+    assert.equal(h.state.historical, false); assert.equal(h.state.integrityFailed, false);
+    assert.deepEqual(clone(h.state.status.operation), report); assert.equal(h.controller.recoveryReason(), null);
+    for (const action of ['account', 'project']) {
+      if (eligible) assert.equal(h.controller.recoveryReason(action, report), null);
+      else {
+        assert.match(h.controller.recoveryReason(action, report), /did not grant ordinary recovery/);
+        await h.controller.prepareRecovery(action, report); assert.equal(h.calls.length, 2);
+        assert.deepEqual(clone(h.state.status.operation.report), report.report);
+      }
+    }
+  }
+});
+
+test('recovery refuses old, foreign, busy, conflicting or manual reports instead of adopting their displayed sessions', async (t) => {
+  const foreign = recoveryCompleted(operation(recoveryRequest()));
+  const observed = harness(t, { initial: status(2, foreign), savedSnapshot: null, completeVersion: false });
+  await observed.ready; observed.controller.setRecoveryVisible(true);
+  await observed.controller.prepareRecovery('account', foreign); assert.equal(observed.calls.length, 0);
+  for (const row of [{ status: 'busy', session: null, next: 'wait' }, { status: 'conflict', session: ACCOUNT_SESSION, next: 'preserve' },
+    { status: 'manual-required', session: ACCOUNT_SESSION, next: 'manual' }, { status: 'pending', session: ACCOUNT_SESSION, next: 'manual' }]) {
+    const h = harness(t, { savedSnapshot: null, completeVersion: false });
+    const report = await inspectedRecovery(h, { report: { ...foreign.report, account: row } });
+    await h.controller.prepareRecovery('account', report); assert.equal(h.calls.length, 2); assert.ok(h.controller.recoveryReason('account', report));
+  }
+  const stale = harness(t, { savedSnapshot: null, completeVersion: false }), report = await inspectedRecovery(stale);
+  stale.controller.selectionIntent(); await stale.controller.prepareRecovery('project', report); assert.equal(stale.calls.length, 2);
+});
+
+test('recovery lost Start and Unknown keep original ownership while hidden or expired unused reviews retire once', async (t) => {
+  const h = harness(t, { savedSnapshot: null, completeVersion: false }), op = await reviewedRecovery(h), sent = start(h, op);
+  sent.call.reject({ code: 'lost', message: 'PRIVATE_CANARY' }); await sent.done;
+  assert.equal(h.state.consent, null); assert.equal(h.calls.at(-1).kind, 'cancel');
+  h.reply(h.calls.at(-1), status(2, terminal(op, 'unknown', 'cleanup-unknown'), 'cleanup-unknown')); await flush();
+  await h.controller.prepareRecovery(); await h.controller.start(OP, OWNER);
+  h.controller.beginConnection(); await h.controller.connect({ ...h.api });
+  assert.equal(h.calls.filter((call) => call.kind === 'prepare').length, 1); assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+  assert.equal(h.subscriptions.length, 1); assert.equal(h.state.nativeBlocked, true); assert.doesNotMatch(JSON.stringify(h.state), /PRIVATE_CANARY/);
+  for (const retire of [(h) => h.controller.setRecoveryVisible(false), (h) => h.clock(300010)]) {
+    const next = harness(t, { savedSnapshot: null, completeVersion: false }), review = await reviewedRecovery(next);
+    retire(next); await next.controller.checkStatus(); await next.controller.start(OP, OWNER);
+    assert.equal(next.state.consent, null); assert.equal(next.calls.filter((call) => call.kind === 'cancel').length, 1);
+    assert.equal(next.calls.filter((call) => call.kind === 'start').length, 0);
+    next.reply(next.calls.at(-1), status(2, terminal(review))); await flush();
+  }
+});
+
 test('native bridge sends only Raw requests; preview never provides fabricated execution', async () => {
   const calls = [], listeners = [];
   const api = createNativeApi('native', async (command, body) => { calls.push({ command, body }); return status(); },
@@ -304,12 +615,16 @@ test('actual app shares status/cancel and retirement; each important archive cho
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   for (const literal of ['iosArchiveControllerRef.current?.beforeWorkspaceAction(action)', 'iosArchiveControllerRef.current?.syncProject()',
     'iosArchive.beginConnection()', 'iosArchive.connect(connection)', 'iosArchive.syncReleaseVersion()', 'iosArchive.selectionIntent()',
-    'iosArchive.setSelectionPending(true)', 'iosArchive.setSelectionPending(false)', '<IOSArchiveResultView', '<IOSArchive state={iosArchiveState}'])
+    'iosArchive.setSelectionPending(true)', 'iosArchive.setSelectionPending(false)', '<IOSArchiveResultView', '<IOSArchive state={iosArchiveState}',
+    'assetSession: assetSession.getSnapshot', 'assetSession.subscribe(() => iosArchive.syncAssetSession())', 'iosArchive.setRecoveryVisible', '<IOSRecovery state={iosArchiveState}'])
     assert.ok(app.includes(literal), literal);
   assert.match(app, /preflightBusy\(\) \?\? androidBusy\(\) \?\? iosBusy\(\)/);
   const component = readFileSync(new URL('../src/components/IOSArchive.tsx', import.meta.url), 'utf8');
   for (const action of ['observe-version', 'review', 'acknowledge', 'start', 'cancel'])
     assert.ok(component.includes(`data-mrk-ios-archive-action="${action}"`));
-  for (const help of [iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp])
+  for (const help of [iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp])
     for (const field of ['label', 'requiredness', 'requiredWhen', 'what', 'why', 'where', 'format', 'failure']) assert.ok(help[field]?.length, `${help.label}: ${field}`);
+  assert.ok(component.includes('controller.prepareRecovery(')); assert.ok(component.includes('controller.setArchiveMode('));
+  assert.match(iosSigningHelp.format, /ios.teamId.*ios.distributionCertificateSha256.*password write-only/);
+  assert.match(iosRecoveryHelp.failure, /live Unknown stays owned.*manual recheck is not supported/);
 });

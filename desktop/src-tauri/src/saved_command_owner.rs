@@ -12,7 +12,7 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, Child
     all(target_os = "macos", target_arch = "aarch64")))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire, ios_archive_protocol as ios_wire,
-    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile};
+    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile, asset_session::IOSSigningMaterial};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::{android_toolchain::AndroidToolchainCustody,
     installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody, OfflinePreflightRuntimeSlots, ProjectRecoveryRuntimeSlots}};
@@ -30,8 +30,18 @@ const RECOVERY_WORK: Duration = Duration::from_secs(120);
 const RECOVERY_HARD: Duration = Duration::from_secs(130);
 // Separate iOS production gate. Source wiring is not installed Mac qualification.
 const IOS_ARCHIVE_NATIVE_QUALIFIED: bool = false;
+// Signed account/material/export qualification is not inherited from an
+// installed unsigned-archive observation or a successful format assessment.
+const IOS_SIGNED_NATIVE_QUALIFIED: bool = false;
+const IOS_RECOVERY_NATIVE_QUALIFIED: bool = false;
 const IOS_WORK: Duration = Duration::from_secs(5400);
 const IOS_HARD: Duration = Duration::from_secs(5410);
+const IOS_SIGNED_CLEANUP: Duration = Duration::from_secs(5520);
+const IOS_SIGNED_HARD: Duration = Duration::from_secs(5530);
+const IOS_SIGNED_SETTLEMENT: Duration = Duration::from_secs(130);
+const IOS_RECOVERY_WORK: Duration = Duration::from_secs(120);
+const IOS_RECOVERY_CLEANUP: Duration = Duration::from_secs(240);
+const IOS_RECOVERY_HARD: Duration = Duration::from_secs(250);
 const INTENT: Duration = Duration::from_secs(300);
 const OFFLINE_WORK: Duration = Duration::from_secs(1800);
 const OFFLINE_HARD: Duration = Duration::from_secs(1810);
@@ -72,6 +82,9 @@ impl SavedCommandDomain {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Context { OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context) }
 impl Context {
+    fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
+    fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
+    fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), _ => self.domain().frame_limit() } }
     fn domain(&self) -> SavedCommandDomain { match self {
         Self::OfflinePreflight(_) => SavedCommandDomain::OfflinePreflight, Self::AndroidBuild(_) => SavedCommandDomain::AndroidBuild, Self::ProjectRecovery(_) => SavedCommandDomain::ProjectRecovery, Self::IOSArchive(_) => SavedCommandDomain::IOSArchive,
     } }
@@ -169,6 +182,8 @@ enum Reason {
     ToolchainMismatch, ProjectAdmissionRefused, CommandFailed, CommandIncomplete, ArtifactMissing,
     ArtifactAmbiguous, ArtifactUnsafe, ArtifactChanged, InputLimit, ResultLimit,
     WorkRetained, CleanupUnknown, ContainerRequired, SchemeRequired, ContainerMissing, ArchiveValidationFailed, ProjectChanged, ReviewStale, ManualRequired, ProjectBusy, ProjectConflict, RecoveryIncomplete,
+    SigningPolicyRequired, SigningInputMissing, SigningInputInvalid, SigningValidationFailed,
+    AccountAdmissionRefused, ArtifactValidationFailed, SymbolsUploadNotRequested, RecoveryAttention,
 }
 impl Reason {
     fn recovery(self) -> Result<recovery_wire::Reason, BridgeError> { Ok(match self {
@@ -275,6 +290,14 @@ impl Reason {
         ios_wire::Reason::ArtifactUnsafe => Self::ArtifactUnsafe,
         ios_wire::Reason::ArtifactChanged => Self::ArtifactChanged,
         ios_wire::Reason::ArchiveValidationFailed => Self::ArchiveValidationFailed,
+        ios_wire::Reason::SigningPolicyRequired => Self::SigningPolicyRequired,
+        ios_wire::Reason::SigningInputMissing => Self::SigningInputMissing,
+        ios_wire::Reason::SigningInputInvalid => Self::SigningInputInvalid,
+        ios_wire::Reason::SigningValidationFailed => Self::SigningValidationFailed,
+        ios_wire::Reason::AccountAdmissionRefused => Self::AccountAdmissionRefused,
+        ios_wire::Reason::ArtifactValidationFailed => Self::ArtifactValidationFailed,
+        ios_wire::Reason::SymbolsUploadNotRequested => Self::SymbolsUploadNotRequested,
+        ios_wire::Reason::RecoveryAttention => Self::RecoveryAttention,
         ios_wire::Reason::InputLimit => Self::InputLimit,
         ios_wire::Reason::ResultLimit => Self::ResultLimit,
         ios_wire::Reason::WorkRetained => Self::WorkRetained,
@@ -316,6 +339,14 @@ impl Reason {
         Self::ArtifactUnsafe => ios_wire::Reason::ArtifactUnsafe,
         Self::ArtifactChanged => ios_wire::Reason::ArtifactChanged,
         Self::ArchiveValidationFailed => ios_wire::Reason::ArchiveValidationFailed,
+        Self::SigningPolicyRequired => ios_wire::Reason::SigningPolicyRequired,
+        Self::SigningInputMissing => ios_wire::Reason::SigningInputMissing,
+        Self::SigningInputInvalid => ios_wire::Reason::SigningInputInvalid,
+        Self::SigningValidationFailed => ios_wire::Reason::SigningValidationFailed,
+        Self::AccountAdmissionRefused => ios_wire::Reason::AccountAdmissionRefused,
+        Self::ArtifactValidationFailed => ios_wire::Reason::ArtifactValidationFailed,
+        Self::SymbolsUploadNotRequested => ios_wire::Reason::SymbolsUploadNotRequested,
+        Self::RecoveryAttention => ios_wire::Reason::RecoveryAttention,
         Self::InputLimit => ios_wire::Reason::InputLimit,
         Self::ResultLimit => ios_wire::Reason::ResultLimit,
         Self::WorkRetained => ios_wire::Reason::WorkRetained,
@@ -336,7 +367,10 @@ impl Reason {
             Self::SavedVersionMissing | Self::SavedVersionInvalid | Self::SavedVersionChanged | Self::SavedVersionSensitive |
             Self::SavedVersionUnsafe | Self::SavedVersionTooLarge | Self::ModuleRequired | Self::ToolchainUnavailable |
             Self::ToolchainMismatch | Self::CommandFailed | Self::ArtifactMissing | Self::ArtifactAmbiguous |
-            Self::ArtifactUnsafe | Self::ArtifactChanged | Self::WorkRetained | Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete | Self::ContainerRequired | Self::SchemeRequired | Self::ContainerMissing | Self::ArchiveValidationFailed => return Err(BridgeError::protocol()),
+            Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete | Self::ArtifactUnsafe | Self::ArtifactChanged | Self::WorkRetained | Self::ContainerRequired | Self::SchemeRequired
+            | Self::ContainerMissing | Self::ArchiveValidationFailed | Self::SigningPolicyRequired | Self::SigningInputMissing
+            | Self::SigningInputInvalid | Self::SigningValidationFailed | Self::AccountAdmissionRefused
+            | Self::ArtifactValidationFailed | Self::SymbolsUploadNotRequested | Self::RecoveryAttention => return Err(BridgeError::protocol()),
         })
     }
     fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
@@ -353,7 +387,9 @@ impl Reason {
             Self::ArtifactAmbiguous => android_wire::Reason::ArtifactAmbiguous, Self::ArtifactUnsafe => android_wire::Reason::ArtifactUnsafe, Self::ArtifactChanged => android_wire::Reason::ArtifactChanged,
             Self::InputLimit => android_wire::Reason::InputLimit, Self::ResultLimit => android_wire::Reason::ResultLimit, Self::WorkRetained => android_wire::Reason::WorkRetained,
             Self::CleanupUnknown => android_wire::Reason::CleanupUnknown,
-        Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete | Self::ContainerRequired | Self::SchemeRequired | Self::ContainerMissing | Self::ArchiveValidationFailed => return Err(BridgeError::protocol()),
+        Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete | Self::ContainerRequired | Self::SchemeRequired | Self::ContainerMissing | Self::ArchiveValidationFailed
+        | Self::SigningPolicyRequired | Self::SigningInputMissing | Self::SigningInputInvalid | Self::SigningValidationFailed
+        | Self::AccountAdmissionRefused | Self::ArtifactValidationFailed | Self::SymbolsUploadNotRequested | Self::RecoveryAttention => return Err(BridgeError::protocol()),
     }) }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,15 +483,35 @@ impl Status {
 }
 
 #[derive(Clone, Copy)]
-struct Clocks { admitted: Instant, work: Instant, finality: Instant }
+struct Clocks { admitted: Instant, work: Instant, finality: Instant, cleanup: Instant, signed: bool, recovery: bool }
 impl Clocks {
     fn new(domain: SavedCommandDomain, admitted: Instant) -> Self {
         let (work, hard) = match domain { SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
             SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD), SavedCommandDomain::IOSArchive => (IOS_WORK, IOS_HARD), SavedCommandDomain::ProjectRecovery => (RECOVERY_WORK, RECOVERY_HARD) };
-        Self { admitted, work: admitted + work, finality: admitted + hard }
+        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false }
+    }
+    fn for_context(context: &Context, admitted: Instant) -> Self {
+        let mut clocks = Self::new(context.domain(), admitted);
+        if context.signed_ios() {
+            clocks.cleanup = admitted + IOS_SIGNED_CLEANUP;
+            clocks.finality = admitted + IOS_SIGNED_HARD;
+            clocks.signed = true;
+        } else if context.recovery_ios() {
+            clocks.work = admitted + IOS_RECOVERY_WORK;
+            clocks.cleanup = admitted + IOS_RECOVERY_CLEANUP;
+            clocks.finality = admitted + IOS_RECOVERY_HARD;
+            clocks.recovery = true;
+        }
+        clocks
     }
     fn settlement(self, first_stop: Option<Instant>) -> Instant {
-        first_stop.map_or(self.finality, |first| self.finality.min(first + SETTLEMENT))
+        first_stop.map_or(self.finality, |first| self.finality.min(first + if self.signed || self.recovery { IOS_SIGNED_SETTLEMENT } else { SETTLEMENT }))
+    }
+    fn cleanup_end(self, first_stop: Option<Instant>) -> Instant {
+        first_stop.map_or(self.cleanup, |first| self.cleanup.min(first + if self.signed || self.recovery { Duration::from_secs(120) } else { SETTLEMENT }))
+    }
+    fn audit_end(self, first_stop: Option<Instant>) -> Instant {
+        if self.signed || self.recovery { self.settlement(first_stop) } else { self.work.min(self.settlement(first_stop)) }
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
     fn installed_ios(admitted: Instant) -> Self {
@@ -464,7 +520,7 @@ impl Clocks {
         // the renderer, the environment, a subphase, or a later observation.
         let work = IOS_WORK.min(Duration::from_secs(300));
         let hard = IOS_HARD.min(work + SETTLEMENT);
-        Self { admitted, work: admitted + work, finality: admitted + hard }
+        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false }
     }
 }
 #[derive(Clone)]
@@ -493,12 +549,37 @@ struct Inner {
 struct Registry {
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
     capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
+    recovery: Option<Arc<IOSRecoveryObservation>>,
 }
-struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String> }
+struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+    material: Option<Arc<IOSSigningMaterial>>, recovery: Option<Arc<IOSRecoveryObservation>> }
 struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
 struct Active {
     owner: Arc<Session>, projection: RunProjection, first_stop: Option<Instant>, work_expired: bool,
-    accepted: bool, terminal: bool, unknown: bool, final_join_seen: bool,
+    accepted: bool, terminal: bool, unknown: bool, final_join_seen: bool, context_invalidated: bool,
+}
+/// Issued only by reconcile after the actual positive original final join.
+/// The renderer's session string is a comparison, not an admission capability.
+/// Retain the original Session and its consumed Ready result, not a report
+/// detached from the operation which produced and finalized it.
+struct IOSRecoveryObservation { original: Arc<Session>, terminal: ios_wire::Terminal }
+impl IOSRecoveryObservation {
+    fn matches(&self, context: &Context, registration: u32, project: &RegisteredRoot) -> bool {
+        let Context::IOSArchive(context) = context else { return false; };
+        let Context::IOSArchive(inspected) = &self.original.context else { return false; };
+        if !context.recovery() || !inspected.recovery() || self.original.registration != registration || &self.original.project != project
+            || inspected.project_id != context.project_id || self.terminal.context != *inspected || !self.terminal.settled()
+            || !inspected.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect)
+            || !self.original.watchdog_joined.load(Ordering::SeqCst) || self.original.watchdog_failed.load(Ordering::SeqCst)
+            || self.original.resource_unknown.load(Ordering::SeqCst) || !self.original.material_retired.load(Ordering::SeqCst)
+            || !self.original.watchdog_return.lock().is_ok_and(|r| matches!(r.as_ref(), Some(Ok(true)))) { return false; }
+        let Some(intent) = &context.recovery else { return false; };
+        let Some(report) = &self.terminal.report else { return false; };
+        let row = match intent.action { ios_wire::RecoveryAction::Account => report.account.as_ref(),
+            ios_wire::RecoveryAction::Project => report.project.as_ref(), ios_wire::RecoveryAction::Inspect => return false };
+        row.is_some_and(|row| row.session.is_some() && row.session == intent.session && row.next == ios_wire::RecoveryNext::Ordinary
+            && matches!(row.status, ios_wire::RecoveryState::Pending | ios_wire::RecoveryState::CleanupOnly))
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage { AndroidBuild(android_wire::Stage), IOSArchive(ios_wire::Stage) }
@@ -544,7 +625,7 @@ impl RunProjection {
                     && t.outcome != recovery_wire::Outcome::Unknown && t.settled() => self.result.clone(),
                 Some(Terminal::IOSArchive(t)) if t.outcome != ios_wire::Outcome::Complete
                     && t.outcome != ios_wire::Outcome::Unknown && t.settled()
-                    && t.disposition.output != ios_wire::OutputDisposition::RetainedLocalResult => self.result.clone(),
+                    && t.disposition.as_ref().is_none_or(|d| d.output != ios_wire::OutputDisposition::RetainedLocalResult) => self.result.clone(),
                 _ => None,
             }
         } else { None };
@@ -573,18 +654,20 @@ impl RunProjection {
     }
     fn ios(self) -> Result<ios_wire::Projection, BridgeError> {
         let Context::IOSArchive(context) = self.context else { return Err(BridgeError::protocol()); };
-        let (result, activity, disposition) = match self.result {
-            Some(Terminal::IOSArchive(t)) => (t.result, Some(t.activity), Some(t.disposition)),
-            None => (None, None, None), Some(Terminal::OfflinePreflight(_) | Terminal::AndroidBuild(_) | Terminal::ProjectRecovery(_)) => return Err(BridgeError::protocol()),
+        let (result, activity, disposition, report) = match self.result {
+            Some(Terminal::IOSArchive(t)) => (t.result, Some(t.activity), t.disposition, t.report),
+            None => (None, None, None, None), Some(Terminal::OfflinePreflight(_)) | Some(Terminal::AndroidBuild(_)) | Some(Terminal::ProjectRecovery(_)) => return Err(BridgeError::protocol()),
         };
         Ok(ios_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.ios(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::ios),
-            reason: self.reason.ios()?, stage: match self.stage { None => None, Some(Stage::IOSArchive(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition })
+            reason: self.reason.ios()?, stage: match self.stage { None => None, Some(Stage::IOSArchive(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition, report })
     }
 }
 struct Session {
     domain: SavedCommandDomain, id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
     registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>, request: AsyncMutex<Option<Vec<u8>>>,
+    material: Mutex<Option<Arc<IOSSigningMaterial>>>, material_retired: AtomicBool,
+    recovery: Option<Arc<IOSRecoveryObservation>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
     native_audit_cutoff: watch::Sender<Instant>,
     output_bytes: AtomicUsize, resource_unknown: AtomicBool,
@@ -599,6 +682,18 @@ struct Session {
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     fixture: Option<Arc<offline_tests::hosted::Permit>>,
+}
+impl Session {
+    fn recovery_matches(&self) -> bool {
+        match (&self.context, &self.recovery) {
+            (Context::IOSArchive(context), Some(original)) if context.recovery() =>
+                original.matches(&self.context, self.registration, &self.project),
+            (Context::IOSArchive(context), None) if context.recovery() =>
+                context.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect),
+            (_, None) => true,
+            _ => false,
+        }
+    }
 }
 #[derive(Default)]
 struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
@@ -716,13 +811,16 @@ impl AndroidNativeBooks {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 struct IOSNativeBooks {
     runtime: IOSArchiveRuntimeSlots, tools: IOSXcodeSlots, selection: Option<VerifiedRuntime>,
-    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>,
+    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>, signed: bool, recovery: bool,
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl IOSNativeBooks {
     fn new(audit: watch::Receiver<Instant>) -> Self {
+        Self::new_selected(audit, false, false)
+    }
+    fn new_selected(audit: watch::Receiver<Instant>, signed: bool, recovery: bool) -> Self {
         Self { runtime: IOSArchiveRuntimeSlots::new(), tools: IOSXcodeSlots::new(audit.clone()), selection: None,
-            phase: NativePhase::New, failure: None, settlement_started: false, audit }
+            phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery }
     }
     fn inspect_once(&mut self, runtime: &RuntimeConfig, end: Instant, stop: &watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         if self.phase != NativePhase::New { return Err(BridgeError::cleanup_unknown()); }
@@ -733,22 +831,40 @@ impl IOSNativeBooks {
         };
         self.selection = Some(VerifiedRuntime { python: selected.python.clone(), bootstrap: selected.bootstrap.clone(),
             core: selected.core.clone(), cwd: selected.cwd.clone() });
-        if let Err(failure) = self.tools.inspect_once(end, stop) {
+        let tools = if self.signed && self.recovery { Err(AdmissionFailure::Inventory) }
+            else if self.recovery { self.tools.inspect_recovery_once(end, stop) }
+            else if self.signed { self.tools.inspect_signed_once(end, stop) } else { self.tools.inspect_once(end, stop) };
+        if let Err(failure) = tools {
             self.phase = NativePhase::Refused; self.failure.get_or_insert(failure);
             return Err(SavedCommandDomain::IOSArchive.unavailable());
         }
         self.phase = NativePhase::Ready;
         Ok(selected)
     }
-    fn request_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolchainBinding, AdmissionFailure> {
+    fn selected_binding(&self, expected: &VerifiedRuntime) -> Result<(), AdmissionFailure> {
         if self.phase != NativePhase::Ready || self.failure.is_some() || self.settlement_started { return Err(AdmissionFailure::AlreadyUsed); }
         let selected = self.selection.as_ref().ok_or(AdmissionFailure::Unknown)?;
         if (&selected.python, &selected.bootstrap, &selected.core, &selected.cwd)
             != (&expected.python, &expected.bootstrap, &expected.core, &expected.cwd) { return Err(AdmissionFailure::Identity); }
+        Ok(())
+    }
+    fn request_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolchainBinding, AdmissionFailure> {
+        self.selected_binding(expected)?;
+        if self.recovery { return Err(AdmissionFailure::Inventory); }
         self.tools.binding_data()
     }
+    fn signing_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::SigningToolBindings, AdmissionFailure> {
+        if !self.signed { return Err(AdmissionFailure::Inventory); }
+        let _ = self.request_binding(expected)?;
+        self.tools.signing_binding_data()
+    }
+    fn recovery_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolIdentity, AdmissionFailure> {
+        self.selected_binding(expected)?;
+        if !self.recovery || self.signed { return Err(AdmissionFailure::Inventory); }
+        self.tools.recovery_binding_data()
+    }
     fn check_before_spawn(&mut self, selected: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<(), AdmissionFailure> {
-        let _ = self.request_binding(selected)?;
+        self.selected_binding(selected)?;
         let result = (|| {
             self.runtime.transfer_once()?;
             let original = self.runtime.capability()?.prepare_once(end, stop)?;
@@ -914,8 +1030,17 @@ impl SavedCommandOwner {
     }
     pub(crate) fn prepare_ios(&self, input: ios_wire::Prepare, registration: u32, project: RegisteredRoot,
         gate: ios_wire::Availability) -> Result<ios_wire::Status, BridgeError> {
+        self.prepare_ios_material(input, registration, project, gate, None)
+    }
+    pub(crate) fn prepare_ios_material(&self, input: ios_wire::Prepare, registration: u32, project: RegisteredRoot,
+        gate: ios_wire::Availability, material: Option<Arc<IOSSigningMaterial>>) -> Result<ios_wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
-        self.prepare(Context::IOSArchive(input.context()), registration, project, Availability::from_ios(gate))?.ios()
+        self.prepare_bound(Context::IOSArchive(input.context()), registration, project, Availability::from_ios(gate), material)?.ios()
+    }
+    pub(crate) fn prepared_ios_material(&self, operation: &str, generation: &str) -> Result<Option<Arc<IOSSigningMaterial>>, BridgeError> {
+        self.require_domain(SavedCommandDomain::IOSArchive)?;
+        self.inner.lock().prepared.as_ref().filter(|p| p.projection.operation_id == operation && p.projection.owner_generation == generation)
+            .map(|p| p.material.clone()).ok_or_else(|| self.inner.domain.invalid_owner())
     }
     pub(crate) fn start_android(&self, input: android_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
         gate: android_wire::Availability) -> Result<crate::android_build_owner::Admitted, BridgeError> {
@@ -926,9 +1051,21 @@ impl SavedCommandOwner {
     }
     pub(crate) fn start_ios(&self, input: ios_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
         gate: ios_wire::Availability) -> Result<crate::ios_archive_owner::Admitted, BridgeError> {
+        self.start_ios_material(input, admitted_at, registered, gate, None)
+    }
+    pub(crate) fn start_ios_material(&self, input: ios_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
+        gate: ios_wire::Availability, material: Option<Arc<IOSSigningMaterial>>) -> Result<crate::ios_archive_owner::Admitted, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
-        let admitted = self.start(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
-            admitted_at, registered, Availability::from_ios(gate))?;
+        {
+            let registry = self.inner.lock();
+            let prepared = registry.prepared.as_ref().filter(|p| p.projection.operation_id == input.operation_id
+                && p.projection.owner_generation == input.owner_generation).ok_or_else(|| self.inner.domain.invalid_owner())?;
+            if !matches!(&prepared.projection.context, Context::IOSArchive(context) if input.consent_matches(context)) {
+                return Err(self.inner.domain.invalid_owner());
+            }
+        }
+        let admitted = self.start_bound(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
+            admitted_at, registered, Availability::from_ios(gate), material)?;
         Ok(crate::ios_archive_owner::Admitted::new(admitted.status.ios()?, admitted.release))
     }
     pub(crate) fn status_android(&self, gate: android_wire::Availability) -> Result<android_wire::Status, BridgeError> {
@@ -984,7 +1121,7 @@ impl SavedCommandOwner {
             ios_observation_identity: Arc::new(()),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
-            prepared: None, active: None, last: None, recovery_review: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            prepared: None, active: None, last: None, recovery_review: None, recovery: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
             fixture: Mutex::new(None),
@@ -1006,12 +1143,30 @@ impl SavedCommandOwner {
     }
     /// DATA only under the actual DocumentBinding mutex and native registration
     /// lookup. No filesystem/tool/runtime inspection, child or cleanup task.
-    fn prepare(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
+    fn prepare(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
+        self.prepare_bound(context, registration, project, gate, None)
+    }
+    fn prepare_bound(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+        material: Option<Arc<IOSSigningMaterial>>) -> Result<Status, BridgeError> {
         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
         if context.domain() != self.inner.domain { return Err(self.inner.domain.invalid_owner()); }
+        if context.signed_ios() && !IOS_SIGNED_NATIVE_QUALIFIED || context.recovery_ios() && !IOS_RECOVERY_NATIVE_QUALIFIED {
+            return Err(prepare_refusal(self.inner.domain, Availability::RuntimeUnqualified));
+        }
+        if context.signed_ios() != material.is_some() || material.as_ref().is_some_and(|original|
+            !matches!(&context, Context::IOSArchive(c) if original.matches(c, registration, &project))) {
+            return Err(self.inner.domain.invalid_owner());
+        }
         self.reconcile(); let mut r = self.inner.lock();
         let reason = self.inner.availability(&r, gate);
         if reason != Availability::Available { return Err(prepare_refusal(self.inner.domain, reason)); }
+        let recovery = match &context {
+            Context::IOSArchive(c) if c.recovery() && c.recovery.as_ref().is_some_and(|r| r.action != ios_wire::RecoveryAction::Inspect) => {
+                Some(r.recovery.as_ref().filter(|o| o.matches(&context, registration, &project)).cloned().ok_or_else(||
+                    BridgeError::new("ios_archive_unavailable", "Inspect current local recovery state in this project before reviewing its exact session."))?)
+            },
+            _ => None,
+        };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(observation) = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
             observation.control.claim(match self.inner.domain {
@@ -1044,7 +1199,7 @@ impl SavedCommandOwner {
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
-        r.prepared = Some(Prepared { projection, expires, registration, project, recovery_stamp });
+        r.prepared = Some(Prepared { projection, expires, registration, project, recovery_stamp, material, recovery });
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.
@@ -1053,14 +1208,38 @@ impl SavedCommandOwner {
     /// T is captured synchronously at DocumentBinding Start entry, before any
     /// await/entropy/runtime/acquisition. Consume matching consent FIRST.
     fn start(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability) -> Result<Admitted, BridgeError> {
-        let clocks = self.inner.start_clocks(admitted_at);
+        self.start_bound(input, admitted_at, registered, gate, None)
+    }
+    fn start_bound(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability,
+        material: Option<Arc<IOSSigningMaterial>>) -> Result<Admitted, BridgeError> {
         let mut r = self.inner.lock();
         if !r.prepared.as_ref().is_some_and(|p| p.projection.operation_id == input.operation_id && p.projection.owner_generation == input.owner_generation) {
             return Err(self.inner.domain.invalid_owner()); // Foreign/replayed Start never stops another owner.
         }
         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
+        let clocks = if prepared.projection.context.signed_ios() || prepared.projection.context.recovery_ios() {
+            Clocks::for_context(&prepared.projection.context, admitted_at)
+        } else { self.inner.start_clocks(admitted_at) };
+        let material_matches = match (&prepared.material, &material) {
+            (None, None) => !prepared.projection.context.signed_ios(),
+            (Some(original), Some(current)) => Arc::ptr_eq(original, current) && matches!(&prepared.projection.context,
+                Context::IOSArchive(context) if context.signed() && original.matches(context, prepared.registration, &prepared.project)),
+            _ => false,
+        };
+        let recovery_matches = match (&prepared.projection.context, &prepared.recovery) {
+            (Context::IOSArchive(c), Some(original)) if c.recovery() => r.recovery.as_ref().is_some_and(|current|
+                Arc::ptr_eq(original, current) && original.matches(&prepared.projection.context, prepared.registration, &prepared.project)),
+            (Context::IOSArchive(c), None) if c.recovery() => c.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect),
+            (_, None) => true,
+            _ => false,
+        };
+        // Starting any new work consumes the former inspected observation.
+        // It cannot license a second recovery after even a known refusal.
+        r.recovery = None;
         let mut refused = if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
-            else if registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
+            else if !material_matches || !recovery_matches || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
+            else if prepared.projection.context.signed_ios() && !IOS_SIGNED_NATIVE_QUALIFIED
+                || prepared.projection.context.recovery_ios() && !IOS_RECOVERY_NATIVE_QUALIFIED { Some(Reason::RuntimeUnavailable) }
             else { None };
         let availability = self.inner.availability(&r, gate);
         if matches!(availability, Availability::CleanupUnknown | Availability::Shutdown | Availability::DocumentLost)
@@ -1081,13 +1260,15 @@ impl SavedCommandOwner {
         let executor = executor.ok_or_else(|| self.inner.domain.unavailable())?;
         let profile = profile.ok_or_else(|| self.inner.domain.unavailable())?;
         let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
-        let (native_audit_cutoff, audit_cutoff) = watch::channel(clocks.work);
+        let (native_audit_cutoff, audit_cutoff) = watch::channel(clocks.audit_end(None));
         let (frames, receiver) = mpsc::channel(2);
         let context = prepared.projection.context;
         let projection = RunProjection { operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         let owner = Arc::new(Session { domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff,
+            material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!clocks.signed),
+            recovery: prepared.recovery,
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
@@ -1104,7 +1285,7 @@ impl SavedCommandOwner {
                 } else { None },
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 ios_native: (self.inner.domain == SavedCommandDomain::IOSArchive)
-                    .then(|| Arc::new(Mutex::new(IOSNativeBooks::new(audit_cutoff)))),
+                    .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery)))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -1139,7 +1320,7 @@ impl SavedCommandOwner {
         let mut watchdog_slot = owner.watchdog.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         let mut manager = owner.manager.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         let mut observer = owner.observer.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
-        r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false,
+        r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false, context_invalidated: false,
             accepted: false, terminal: false, unknown: false, final_join_seen: false });
         *watchdog_slot = Some(executor.spawn(watchdog(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
         book.writer = Some(executor.spawn(write_request(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
@@ -1174,21 +1355,28 @@ impl SavedCommandOwner {
     }
     pub(crate) fn document_lost(&self) {
         let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
+        r.recovery = None;
+        if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         self.inner.retire_prepared(&mut r, Reason::DocumentLost);
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::DocumentLost, Instant::now()); }
         self.inner.bump(&mut r);
     }
     pub(crate) fn context_changed(&self) {
         let mut r = self.inner.lock(); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+        r.recovery = None;
+        if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, Instant::now()); }
     }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool {
         let r = self.inner.lock(); r.active.as_ref().is_none_or(|a| a.owner.registration == registration)
             && r.prepared.as_ref().is_none_or(|p| p.registration == registration)
             && r.recovery_review.as_ref().is_none_or(|reviewed| reviewed.registration == registration)
+            && r.recovery.as_ref().is_none_or(|o| o.original.registration == registration)
     }
     pub(crate) fn request_shutdown(&self) {
         let mut r = self.inner.lock(); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
+        r.recovery = None;
+        if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::Shutdown, Instant::now()); }
         self.inner.bump(&mut r);
     }
@@ -1226,11 +1414,32 @@ impl SavedCommandOwner {
                 // handle/owner. final_join_seen prevents re-polling that handle.
                 owner.resource_unknown.store(true, Ordering::SeqCst); self.inner.unknown_locked(&mut r, &owner); return;
             }
+            // The private loan stays on the SAME Session until the actual
+            // final Ready result is recorded and the original hard clock is
+            // clear. Unknown/lost joins retain it; Drop is not settlement.
+            if let Ok(mut material) = owner.material.lock() {
+                if owner.clocks.signed != material.is_some() || owner.material_retired.load(Ordering::SeqCst) == owner.clocks.signed {
+                    owner.resource_unknown.store(true, Ordering::SeqCst); self.inner.unknown_locked(&mut r, &owner); return;
+                }
+                material.take();
+                owner.material_retired.store(true, Ordering::SeqCst);
+            } else {
+                owner.resource_unknown.store(true, Ordering::SeqCst); self.inner.unknown_locked(&mut r, &owner); return;
+            }
             watchdog_slot.take();
             if let Some(mut active) = r.active.take() {
                 if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
                 active.projection.phase = if active.unknown { Phase::Unknown } else { Phase::Terminal };
                 if active.projection.outcome.is_none() { set_failure_outcome(&mut active.projection); }
+                if !active.unknown && !active.context_invalidated && !r.document_lost && !r.stopping {
+                    if let Some(Terminal::IOSArchive(t)) = &active.projection.result {
+                        if t.context.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect)
+                            && t.settled() && t.report.is_some() && t.lifetime.stop_observed == ios_wire::CoreStop::None
+                            && matches!(active.projection.reason, Reason::None | Reason::RecoveryAttention) {
+                            r.recovery = Some(Arc::new(IOSRecoveryObservation { original: owner.clone(), terminal: t.clone() }));
+                        }
+                    }
+                }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Ok(mut observation) = self.inner.observation.lock() {
                     if let Some(observation) = observation.as_mut().filter(|o| o.original.as_ref().is_some_and(|s| Arc::ptr_eq(s, &owner))) {
@@ -1299,7 +1508,7 @@ fn set_failure_outcome(p: &mut RunProjection) {
         }
     }
     if let Some(Terminal::IOSArchive(t)) = &p.result {
-        if t.outcome == ios_wire::Outcome::Failed && t.disposition.work == ios_wire::WorkDisposition::RetainedWork {
+        if t.outcome == ios_wire::Outcome::Failed && t.disposition.as_ref().is_some_and(|d| d.work == ios_wire::WorkDisposition::RetainedWork) {
             p.outcome = Some(Outcome::Failed); return;
         }
     }
@@ -1424,7 +1633,7 @@ impl Inner {
         let at = at.min(owner.clocks.work).max(owner.clocks.admitted); let mut changed = false;
         if active.first_stop.is_none() { active.first_stop = Some(at); changed = true; }
         if matches!(owner.domain, SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive) {
-            let end = owner.clocks.work.min(owner.clocks.settlement(active.first_stop));
+            let end = owner.clocks.audit_end(active.first_stop);
             owner.native_audit_cutoff.send_if_modified(|current| {
                 if end < *current { *current = end; true } else { false }
             });
@@ -1563,12 +1772,34 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     let mut request = owner.request.lock().await;
     let mut stop = owner.stop.subscribe();
     let mut sent = false; let mut failed = false;
+    // Clone only the original Arc, never its private buffers. The Session keeps
+    // that same loan after this writer returns until final native/core joins.
+    let material = { match owner.material.lock() {
+        Ok(material) => material.clone(),
+        Err(_) => { failed = true; None },
+    } };
+    let header = material.as_ref().map(|value| value.header()).transpose();
+    if owner.context.signed_ios() != material.is_some() || header.is_err()
+        || material.as_ref().is_some_and(|value| !matches!(&owner.context, Context::IOSArchive(context)
+            if value.matches(context, owner.registration, &owner.project))) { failed = true; }
     if !*stop.borrow() {
         match (input.io.as_mut(), request.as_ref()) {
-            (Some(writer), Some(bytes)) if bytes.len() <= owner.domain.request_limit() => {
+            (Some(writer), Some(bytes)) if !failed && bytes.len() <= owner.domain.request_limit() => {
                 let result = tokio::select! { biased;
                     _ = stop.changed() => None,
-                    result = writer.write_all(bytes) => Some(result),
+                    result = async {
+                        writer.write_all(bytes).await?;
+                        if let Some(material) = material.as_ref() {
+                            let header = header.as_ref().ok().and_then(Option::as_ref)
+                                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                            let parts = material.parts().map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                            writer.write_all(crate::asset_session::IOS_MATERIAL_PREFIX).await?;
+                            writer.write_all(header).await?;
+                            for (_, bytes) in parts { writer.write_all(bytes).await?; }
+                            writer.write_all(crate::asset_session::IOS_MATERIAL_SUFFIX).await?;
+                        }
+                        Ok::<(), std::io::Error>(())
+                    } => Some(result),
                 };
                 match result { Some(Ok(())) => sent = true, Some(Err(_)) => failed = true, None => {} }
             }
@@ -1578,8 +1809,8 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     request.take(); drop(request); // Retire only this original bounded input.
     if failed { inner.stop(&owner, Reason::ProtocolError); }
     if sent && !failed {
-        // Hold this sole writer after the one complete request. Closing it is
-        // STOP, not ordinary request framing or a renderer acknowledgment.
+        // Hold this sole writer after the entire request/private phase. Closing
+        // it is STOP, not ordinary framing or a renderer acknowledgment.
         while !*stop.borrow_and_update() { if stop.changed().await.is_err() { failed = true; break; } }
     }
     let closed = close_original(&mut input);
@@ -1699,7 +1930,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                     bytes.push(*byte);
                     if *byte == b'\n' {
                         frames += 1;
-                        let frame = if frames <= owner.domain.frame_limit() {
+                        let frame = if frames <= owner.context.frame_limit() {
                             match decoder.as_mut() { Some(decoder) => decoder.push(&bytes, &owner), None => Err(BridgeError::protocol()) }
                         } else { Err(BridgeError::protocol()) };
                         let delivered = match frame { Ok(frame) => enqueue_frame(&inner, &owner, frame).await, Err(_) => false };
@@ -2117,7 +2348,9 @@ fn spawn_android_original(inner: &Inner, owner: &Session, runtime: VerifiedRunti
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, native: Option<Arc<Mutex<IOSNativeBooks>>>) {
     if owner.domain != SavedCommandDomain::IOSArchive || inner.domain != owner.domain || !inner.qualified()
+        || owner.context.signed_ios() && !IOS_SIGNED_NATIVE_QUALIFIED || owner.context.recovery_ios() && !IOS_RECOVERY_NATIVE_QUALIFIED
         || Profile::current(owner.domain) != Some(owner.profile) { inner.stop(owner, Reason::ToolchainUnavailable); return; }
+    if !owner.recovery_matches() { inner.stop(owner, Reason::StaleIntent); return; }
     let Some(native) = native else { inner.stop(owner, Reason::ToolchainUnavailable); return; };
     let mut native = match native.lock() { Ok(native) => native, Err(_) => { inner.unknown(owner); return; } };
     // Fixed reviewed bootstrap only. Xcode selection travels as owner DATA in
@@ -2161,7 +2394,7 @@ fn native_consumers_returned(book: &Resources, startup: &Startup, inner: &Inner,
         || book.waited.as_ref().is_none_or(|s| !s.success()) || startup.child.is_some() || book.writer.is_some()
         || book.stdout.is_some() || book.stderr.is_some() || book.write_failed || book.out_failed || book.err_failed { return false; }
     let io = book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
-        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.decoder_settled && (2..=owner.domain.frame_limit()).contains(&e.frames))
+        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.decoder_settled && (2..=owner.context.frame_limit()).contains(&e.frames))
         && book.err_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 0);
     let registry = inner.lock();
     io && original_session(&registry, owner) && registry.active.as_ref().is_some_and(|a| a.accepted && a.terminal
@@ -2301,10 +2534,28 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         (Context::IOSArchive(context), Profile::IOSArchive(profile)) => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                let binding = book.ios_native.as_ref().and_then(|native| native.lock().ok())
-                    .and_then(|native| native.request_binding(&runtime).ok());
-                match binding { Some(binding) => ios_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding),
-                    None => Err(owner.domain.unavailable()) }
+                let construct = || {
+                    let native = book.ios_native.as_ref().ok_or_else(|| owner.domain.unavailable())?
+                        .lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    if native.signed != context.signed() || native.recovery != context.recovery() { return Err(owner.domain.invalid_owner()); }
+                    if context.recovery() {
+                        if !owner.recovery_matches() { return Err(owner.domain.invalid_owner()); }
+                        let security = native.recovery_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
+                        return ios_wire::request_recovery(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &security);
+                    }
+                    let binding = native.request_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
+                    if context.signed() {
+                        let tools = native.signing_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
+                        let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                        let original = material.as_ref().filter(|value| value.matches(context, owner.registration, &owner.project))
+                            .ok_or_else(|| owner.domain.invalid_owner())?;
+                        ios_wire::request_signed(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd,
+                            &binding, &tools, &original.context_data())
+                    } else {
+                        ios_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding)
+                    }
+                };
+                construct()
             }
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             { let _ = (context, profile); Err(owner.domain.unavailable()) }
@@ -2551,7 +2802,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && book.out_end.as_ref().is_some_and(|r| r.decoder_settled && !r.failed && match owner.domain {
                     SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery => r.frames == 2,
                     SavedCommandDomain::AndroidBuild => (2..=8).contains(&r.frames),
-                    SavedCommandDomain::IOSArchive => (2..=ios_wire::MAX_FRAMES).contains(&r.frames),
+                    SavedCommandDomain::IOSArchive => (2..=owner.context.frame_limit()).contains(&r.frames),
                 })
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)

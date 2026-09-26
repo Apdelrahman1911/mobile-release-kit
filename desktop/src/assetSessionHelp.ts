@@ -15,6 +15,23 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
   },
   'android-keystore/storePassword': { format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. The private-input flow accepts the write-only value for assessment and separately confirmed storage; it does not unlock the keystore.' },
   'android-keystore/keyPassword': { format: privateValueFormat, failure: 'Missing input is not a password failure. This session does not test the password or perform signing. No value is displayed back to you.' },
+  'apple-p12/file': {
+    where: 'Ask the authorized Apple Distribution signing-key owner for a P12 export containing the existing certificate and private key, with its password. On a separately admitted Apple-silicon Mac, select the private original outside registered project folders. Do not generate or replace a signing identity just to satisfy this screen.',
+    format: 'An original .p12 or .pfx file, at most 32 MiB, with a supported PKCS#12 version-3 envelope. Signed-data authSafe variants have a separate 4 MiB parser ceiling. These are mechanical observations, not password or trust checks.',
+    failure: 'A format refusal never changes the original. A recognized envelope does not prove the password, private key, certificate expiry or approved distribution identity. Actual validation belongs to the separately admitted signed export.',
+    suffixes: ['.p12', '.pfx'],
+  },
+  'apple-p12/password': {
+    where: 'Use the original password set by the authorized owner when this P12 was exported. Ask that owner if it is unknown; do not paste it into project settings or logs.',
+    format: privateValueFormat,
+    failure: 'A missing value prevents a usable signing input. Supplied means retained for assessment, not that the P12 was unlocked. Password correctness is checked only by the core signed-export flow.',
+  },
+  'apple-profile/file': {
+    where: 'Obtain the Apple-issued App Store provisioning profile from the authorized developer-account owner. It must cover the saved team, explicit bundle ID and reviewed Apple Distribution certificate. Select its private original outside registered projects on the separately admitted Mac.',
+    format: 'An original .mobileprovision file, at most 4 MiB, containing a complete supported DER CMS SignedData envelope. No password is entered for this file. One primary profile is supported; extension/profile mismatches are not guessed.',
+    failure: 'CMS format is not proof of Apple authenticity, valid dates, entitlements or team/bundle/signer correspondence. Those checks belong to core signing validation; session assessment cannot authorize a release.',
+    suffixes: ['.mobileprovision'],
+  },
   'android-firebase/file': {
     where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. Select that private original outside registered project folders. Do not use an exported service-account private key.',
     format: 'An original UTF-8 .json file, at most 4 MiB, within this importer’s document/complexity limits. Decoded duplicate names are refused. The core checks every supported client structure and the configured application ID; CLI parsing rules are unchanged.',
@@ -93,7 +110,7 @@ const controls: Record<string, Partial<HelpContent>> = {
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',
     where: 'Click Select file and use the native picker. No manual registration, internal directory copying, path entry or renaming is required.',
-    format: 'One private original outside all registered projects on the qualified local filesystem. Supported file checks are JKS headers, Android Firebase JSON and iOS Firebase XML plist only. Binary plist is not supported; native availability is a separate gate.',
+    format: 'One private original outside all registered projects on the separately admitted local filesystem. Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, and macOS-only P12 / DER CMS profile envelopes; native availability is a separate gate. Apple authenticity and password correctness are not format observations. P8 and binary plist are not enabled.',
   },
   prepare: {
     requiredWhen: 'After file selection and companion entry, or when reviewing a scalar or retained record.',

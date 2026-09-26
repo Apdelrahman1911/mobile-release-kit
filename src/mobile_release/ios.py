@@ -1154,20 +1154,35 @@ def _archive_command(container: tuple[str, str], container_path: Path, scheme: s
             f"CURRENT_PROJECT_VERSION={release.build}"]
 
 
+def _signing_archive_settings(team: str, profile: str) -> list[str]:
+    return ["MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual", f"MOBILE_RELEASE_IOS_DEVELOPMENT_TEAM={team}",
+            f"MOBILE_RELEASE_IOS_PROVISIONING_PROFILE_SPECIFIER={profile}",
+            "MOBILE_RELEASE_IOS_CODE_SIGN_IDENTITY=Apple Distribution"]
+
+
+def _export_options(bundle: str, team: str, profile: str) -> dict:
+    return {"method": "app-store-connect", "destination": "export", "signingStyle": "manual", "teamID": team,
+            "signingCertificate": "Apple Distribution", "provisioningProfiles": {bundle: profile},
+            "stripSwiftSymbols": False, "thinning": "<none>", "uploadSymbols": False}
+
+
 def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: SigningSession | None = None,
                   execution_source=None, cancellation: DefaultCancellation | None = None,
                   operation: IOSArchiveOperation | None = None) -> dict[str, Path]:
     if operation is not None:
         from .ios_archive_operation import IOSArchiveOperation
         from ._desktop_ios_archive_protocol import require
-        require(type(operation) is IOSArchiveOperation and signed is False
-                and signing_session is None and execution_source is None)
+        require(type(operation) is IOSArchiveOperation and type(signed) is bool and execution_source is None)
+        require((not signed and operation.signing is None and signing_session is None) or
+                signed and operation.signing is not None and signing_session is operation.signing.session
+                and operation.signing.lease.active is signing_session and operation.signing.phase == "building")
         operation.require(config, cancellation)
         if sys.platform != "darwin":
             raise ValidationError("iOS archive requires a macOS host")
         selected = operation.inputs.saved.configuration
-        operation.advance("checking-xcode")
-        operation.check_xcode()
+        if not signed:
+            operation.advance("checking-xcode")
+            operation.check_xcode()
         if selected.prepare:
             operation.advance("preparing")
             operation.run_preparation()
@@ -1179,10 +1194,15 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
             archive, operation.inputs.saved.release,
             program=operation.request.native["toolchain"]["developerDir"] + "/usr/bin/xcodebuild",
             derived_data=operation.files.work_path("DerivedData"))
-        command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
+        command.extend(_signing_archive_settings(config.section("ios")["teamId"], operation.signing.profile_specifier)
+                       if signed else ["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
         operation.advance("archiving")
         operation.run_archive(command)
         artifact = operation.capture_after()
+        if signed:
+            operation.advance("exporting")
+            operation.run_export()
+            return {"ios-archive": artifact.path, "ios-ipa": operation.ipa().path}
         # Diagnostic compatibility value only. Desktop consumes the original
         # operation.artifact(), and the validator owns its one finite snapshot.
         return {"ios-archive": artifact.path}
@@ -1227,14 +1247,7 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
             profile = os.environ.get("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER")
             if not profile:
                 raise ValidationError("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER is required for signed export")
-            command.extend(
-                [
-                    "MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual",
-                    f"MOBILE_RELEASE_IOS_DEVELOPMENT_TEAM={ios.get('teamId', '')}",
-                    f"MOBILE_RELEASE_IOS_PROVISIONING_PROFILE_SPECIFIER={profile}",
-                    "MOBILE_RELEASE_IOS_CODE_SIGN_IDENTITY=Apple Distribution",
-                ]
-            )
+            command.extend(_signing_archive_settings(ios.get("teamId", ""), profile))
         else:
             command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
         build_environment = {
@@ -1274,17 +1287,7 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
 
         import plistlib
 
-        export_options = {
-            "method": "app-store-connect",
-            "destination": "export",
-            "signingStyle": "manual",
-            "teamID": ios.get("teamId"),
-            "signingCertificate": "Apple Distribution",
-            "provisioningProfiles": {ios.get("bundleId"): os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]},
-            "stripSwiftSymbols": False,
-            "thinning": "<none>",
-            "uploadSymbols": False,
-        }
+        export_options = _export_options(ios.get("bundleId"), ios.get("teamId"), os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"])
         export_plist = build_root / "ExportOptions.plist"
         build_directory.check()
         with export_plist.open("wb") as handle:

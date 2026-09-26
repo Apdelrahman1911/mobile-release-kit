@@ -205,7 +205,7 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
-    if (kind == 1) {
+    if (kind == 1 || kind == 3) {
         if (code == NSModalResponseOK) return 1;
         if (code == NSModalResponseCancel) return 2;
     } else if (kind == 2) {
@@ -284,7 +284,7 @@ void *mrk_panel_reserve(void) {
     @try { return [[MRKInstalledPanel alloc] init]; } @catch (NSException *e) { (void)e; return NULL; }
 }
 int mrk_panel_start(void *opaque, int kind) {
-    if (!pthread_main_np() || !opaque || (kind != 1 && kind != 2)) return EINVAL;
+    if (!pthread_main_np() || !opaque || (kind != 1 && kind != 2 && kind != 3)) return EINVAL;
     MRKInstalledPanel *s = opaque;
     if (s->attempted || s->unknown) return EALREADY;
     s->attempted = YES; s->kind = kind;
@@ -295,10 +295,10 @@ int mrk_panel_start(void *opaque, int kind) {
         if (!main || [main isKindOfClass:[NSPanel class]] || [main attachedSheet]) return EPERM;
         s->started = YES;
         s->parent = [main retain];
-        if (kind == 1) {
+        if (kind == 1 || kind == 3) {
             NSOpenPanel *panel = [NSOpenPanel openPanel]; s->window = [panel retain];
-            [panel setTitle:@"Choose a mobile project folder"];
-            [panel setCanChooseFiles:NO]; [panel setCanChooseDirectories:YES];
+            [panel setTitle:kind == 1 ? @"Choose a mobile project folder" : @"Choose a signing or iOS build-input file"];
+            [panel setCanChooseFiles:kind == 3]; [panel setCanChooseDirectories:kind == 1];
             [panel setAllowsMultipleSelection:NO]; [panel setCanCreateDirectories:NO];
             [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:NO];
         } else {
@@ -343,7 +343,7 @@ int mrk_panel_start(void *opaque, int kind) {
                     if (observed) s->observationCompletion.response = s->response == 1 ? MRK_COMPLETION_ACCEPT
                         : s->response == 2 ? MRK_COMPLETION_DECLINE : MRK_COMPLETION_OTHER;
 #endif
-                    if (s->response == 1 && kind == 1) {
+                    if (s->response == 1 && (kind == 1 || kind == 3)) {
                         NSURL *url = [(NSOpenPanel *)s->window URL];
                         const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
                         if (!path || path[0] != '/' || strnlen(path, sizeof(s->selected)) >= sizeof(s->selected)) s->unknown = YES;
@@ -363,7 +363,7 @@ int mrk_panel_start(void *opaque, int kind) {
             // No native call/run-loop pumping after this final completion fact.
             s->callbackActive = NO;
         });
-        if (kind == 1) [(NSOpenPanel *)s->window beginSheetModalForWindow:s->parent completionHandler:s->completion];
+        if (kind == 1 || kind == 3) [(NSOpenPanel *)s->window beginSheetModalForWindow:s->parent completionHandler:s->completion];
         else [s->alert beginSheetModalForWindow:s->parent completionHandler:s->completion];
         return 0;
     } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }

@@ -157,11 +157,25 @@ def run_owned(
         from ._desktop_saved_command_control import SavedCommandDomain, source_domain
         domain = source_domain(source)
         if (type(cancellation) is not DefaultCancellation or cancellation._saved_command_input() is not source
-                or source.guard is not cancellation or cleanup):
+                or source.guard is not cancellation):
             message = ("Offline preflight command has no original input binding"
                        if domain is SavedCommandDomain.OfflinePreflight
                        else "Saved build command has no original input binding")
             raise ValueError(message)
+        if domain is SavedCommandDomain.IOSArchive and source.account_lifecycle:
+            operation = source.require_operation()
+            from ._desktop_ios_signed_operation import SignedIOSOperation
+            if type(operation.signing) is not SignedIOSOperation or _evidence is not None or on_start is not None:
+                raise ValueError("Signed iOS command lacks its original operation")
+            with operation.signing.command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+                    text=text, output_limit=output_limit, cleanup=cleanup, scope=execution_scope,
+                    binding=journal_binding) as (selected, environment, timeout, output_limit):
+                return run_command(selected, environ=environment, cwd=cwd, timeout=timeout, capture=capture, text=text,
+                    output_limit=output_limit, cancellation=cancellation, on_start=None,
+                    cleanup=cleanup and not source.recovery,
+                    execution_scope=execution_scope, journal_binding=journal_binding)
+        if cleanup:
+            raise ValueError("Saved command cleanup has no original signed account owner")
         timeout, output_limit = source.command_limits(timeout, capture, output_limit)
         # Complete nonzero results remain ordinary policy DATA. This seam
         # changes neither the C/A/W owner nor its original cleanup allowance.

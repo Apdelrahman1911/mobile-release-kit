@@ -50,7 +50,7 @@ import { ReleaseVersionEditor, ReleaseVersionSave } from './components/ReleaseVe
 import { EnvironmentDiagnostics } from './components/EnvironmentDiagnostics.tsx';
 import { OfflinePreflight } from './components/OfflinePreflight.tsx';
 import { AndroidBuild, AndroidBuildResultView } from './components/AndroidBuild.tsx';
-import { IOSArchive, IOSArchiveResultView } from './components/IOSArchive.tsx';
+import { IOSArchive, IOSArchiveResultView, IOSRecovery } from './components/IOSArchive.tsx';
 import { Icon } from './components/Icon.tsx';
 import type { IconName } from './components/Icon.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
@@ -371,6 +371,7 @@ export function App() {
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
     releaseVersion: releaseVersion.getSnapshot,
+    assetSession: assetSession.getSnapshot,
     otherOperationReason: () => preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? savedCommandPrerequisiteReason(),
   }));
   iosArchiveControllerRef.current = iosArchive;
@@ -494,6 +495,9 @@ export function App() {
   useEffect(() => releaseVersion.subscribe(() => androidBuild.syncReleaseVersion()), [releaseVersion, androidBuild]);
   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
   useEffect(() => releaseVersion.subscribe(() => iosArchive.syncReleaseVersion()), [releaseVersion, iosArchive]);
+  // Exact assignment/context changes retire signed consent before a new render;
+  // idle retained records remain available to the existing native borrower.
+  useEffect(() => assetSession.subscribe(() => iosArchive.syncAssetSession()), [assetSession, iosArchive]);
 
   useEffect(() => {
     void bootstrap();
@@ -541,7 +545,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
   const refreshReason = savedCommandBusy() ?? methodReason(info, 'project.snapshot', mode);
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
@@ -769,7 +773,7 @@ export function App() {
           onShow={() => navigate('recovery')} onHelp={setHelp} />}
         {page !== 'releases' && <IOSArchive state={iosArchiveState} controller={iosArchive} compact
           projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
-          onShow={() => navigate('releases')} onHelp={setHelp} />}
+          onShow={() => navigate(iosArchiveState.status?.operation?.context.operation === 'ios-local-recovery' ? 'recovery' : 'releases')} onHelp={setHelp} />}
         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
@@ -803,16 +807,19 @@ export function App() {
           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
-            onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp} />} />}
+            onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
-        {page === 'recovery' && <Recovery evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState} onOpenEvidence={() => navigate('releases')} />}
+        {page === 'recovery' && <><Recovery evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState} onOpenEvidence={() => navigate('releases')} />}
           projectRecovery={<ProjectRecovery state={projectRecoveryState} controller={projectRecovery}
           projectName={session?.project.name ?? null} operationProjectName={projectRecoveryState.status?.operation ? workspace.projects[projectRecoveryState.status.operation.context.projectId]?.project.name ?? null : null}
           onHelp={setHelp} />}
           attention={retainedEditAttention(workspace.projects, saveState.recoveryProjects, workflowState.recoveryProjects, metadataState.edit.recoveryProjects, versionEditState.edit.recoveryProjects)}
-          choosingProject={choosing} onOpenProject={showRetainedEditProject} onHelp={setHelp} />}
+          choosingProject={choosing} onOpenProject={showRetainedEditProject} onHelp={setHelp} />
+          <IOSRecovery state={iosArchiveState} controller={iosArchive} projectName={session?.project.name ?? null}
+            operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} onHelp={setHelp} /></>}
         <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>
       </main>
     </div>

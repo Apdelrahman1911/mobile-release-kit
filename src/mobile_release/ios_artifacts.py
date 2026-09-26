@@ -935,11 +935,13 @@ def _source_descriptor(path, flags, *, parent=None, owner=None):
             os.close(number)
     else:
         if parent is None and owner._desktop_binding is not None:
-            original = owner._desktop_binding.operation.artifact()
-            if path == original.path:
-                with original.root() as number:
-                    yield number
-                return
+            operation = owner._desktop_binding.operation
+            originals = (operation.artifact(),) if operation.signing is None else (operation.artifact(), operation.ipa())
+            for original in originals:
+                if path == original.path:
+                    with original.root() as number:
+                        yield number
+                    return
             if flags & os.O_DIRECTORY:
                 with owner.directory(path) as number:
                     yield number

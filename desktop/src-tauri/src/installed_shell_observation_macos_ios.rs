@@ -125,7 +125,7 @@ impl Control {
         let Ok(mut hold) = self.hold.lock() else { self.unavailable_witness(); return false; };
         if self.case != Case::Finality || !self.permits() || !self.claimed.load(Ordering::SeqCst)
             || hold.snapshot.is_some() || hold.entered || hold.released || !snapshot.facts.held()
-            || snapshot.terminal.outcome != wire::Outcome::Complete || !snapshot.terminal.settled() {
+            || !terminal_for(Case::Finality, &snapshot) {
             self.unavailable_witness(); return false;
         }
         hold.snapshot = Some(snapshot); true
@@ -498,10 +498,11 @@ impl Fixture {
         if self.finalized || !snapshot.facts.final_for() || !terminal_for(self.case, snapshot)
             || self.stale != (self.case == Case::VersionStale) { return Err(()); }
         use wire::OutputDisposition as O;
-        self.output = match snapshot.terminal.disposition.output {
+        let disposition = snapshot.terminal.disposition.as_ref().ok_or(())?;
+        self.output = match disposition.output {
             O::NotCreated => None,
             O::RetainedIncomplete | O::RetainedLocalResult => Some(Output { operation: snapshot.facts.operation_id.clone(),
-                archive: snapshot.terminal.disposition.output == O::RetainedLocalResult }),
+                archive: disposition.output == O::RetainedLocalResult }),
             O::Unknown => return Err(()),
         };
         self.verify(root, uid)?; self.finalized = true; Ok(())
@@ -530,38 +531,43 @@ fn version_value(case: Case) -> Value {
         "savedVersion":{"bytes":super::VERSION.len(),"sha256":super::digest(super::VERSION)}})
 }
 fn context_matches(case: Case, project: &str, context: &wire::Context) -> bool {
+    let (Some(saved_config), Some(saved_version)) = (&context.saved_config, &context.saved_version) else { return false; };
     context.project_id == project && context.platform == wire::Platform::Ios && context.operation == wire::Operation::IOSUnsignedArchive
-        && serde_json::to_value(&context.saved_config).ok() == Some(version_value(case)["savedConfig"].clone())
-        && serde_json::to_value(&context.saved_version).ok() == Some(json!({"source":"version.properties","name":"1.2.3","build":7,
+        && context.signing.is_none() && context.recovery.is_none()
+        && serde_json::to_value(saved_config).ok() == Some(version_value(case)["savedConfig"].clone())
+        && serde_json::to_value(saved_version).ok() == Some(json!({"source":"version.properties","name":"1.2.3","build":7,
             "bytes":super::VERSION.len(),"sha256":super::digest(super::VERSION)}))
 }
 fn terminal_for(case: Case, snapshot: &Snapshot) -> bool {
     let t = &snapshot.terminal;
-    if !t.settled() { return false; }
+    if t.context.operation != wire::Operation::IOSUnsignedArchive || t.context.platform != wire::Platform::Ios
+        || t.context.signing.is_some() || t.context.recovery.is_some() || t.report.is_some() || !t.settled() { return false; }
+    let (Some(activity), Some(disposition)) = (t.activity.archive_activity(), t.disposition.as_ref()) else { return false; };
     use wire::{CommandOutcome as C, Outcome as O, Reason as R, OutputDisposition as D};
     let zero = |c: &wire::CommandData| c.outcome == C::Exited && c.exit_code == Some(0);
     let not_dispatched = |c: &wire::CommandData| c.outcome == C::NotDispatched && c.exit_code.is_none();
-    let commands = &t.activity.commands;
+    let commands = &activity.commands;
+    if commands.export.is_some() { return false; }
     match case {
         Case::ToolchainPrerequisite => t.outcome == O::Failed && t.reason == R::CommandFailed
             && zero(&commands.xcode_version) && zero(&commands.ios_sdk)
             && commands.prepare.outcome == C::Exited && commands.prepare.exit_code == Some(1)
-            && not_dispatched(&commands.archive) && t.result.is_none() && t.activity.findings.is_empty()
-            && t.disposition.output == D::RetainedIncomplete,
+            && not_dispatched(&commands.archive) && t.result.is_none() && activity.findings.is_empty()
+            && disposition.output == D::RetainedIncomplete,
         Case::VersionStale => t.outcome == O::Refused && t.reason == R::SavedVersionChanged
             && [&commands.xcode_version, &commands.ios_sdk, &commands.prepare, &commands.archive].into_iter().all(not_dispatched)
-            && t.result.is_none() && t.activity.findings.is_empty() && t.disposition.output == D::NotCreated,
+            && t.result.is_none() && activity.findings.is_empty() && disposition.output == D::NotCreated,
         Case::Cancel => t.outcome == O::Cancelled && t.reason == R::Cancelled
             && zero(&commands.xcode_version) && zero(&commands.ios_sdk)
             // Known original finality does not invent an exit status for a
             // stopped command. Unknown here is result DATA, not custody.
             && matches!(commands.prepare.outcome, C::NotDispatched | C::Exited | C::Unknown)
-            && not_dispatched(&commands.archive) && t.result.is_none() && t.disposition.output == D::RetainedIncomplete,
+            && not_dispatched(&commands.archive) && t.result.is_none() && disposition.output == D::RetainedIncomplete,
         Case::UnsignedArchive | Case::Finality => t.outcome == O::Complete && t.reason == R::None
             && zero(&commands.xcode_version) && zero(&commands.ios_sdk) && zero(&commands.archive)
             && commands.prepare.outcome == C::NotConfigured && commands.prepare.exit_code.is_none()
-            && t.activity.selection.as_ref().is_some_and(|s| s.symbols_policy == wire::SymbolsPolicy::Required)
-            && t.result.is_some() && t.disposition.output == D::RetainedLocalResult,
+            && activity.selection.as_ref().is_some_and(|s| s.symbols_policy == wire::SymbolsPolicy::Required)
+            && t.result.is_some() && disposition.output == D::RetainedLocalResult,
     }
 }
 impl Record {
@@ -631,9 +637,10 @@ impl Record {
         let Some(op) = self.status.as_ref().and_then(|s| s.operation.as_ref()) else { return false; };
         if !self.start_requested || !self.start_returned || op.phase != wire::Phase::Terminal || !snapshot.facts.final_for()
             || snapshot.facts.operation_id != op.operation_id || snapshot.facts.owner_generation != op.owner_generation
+            || snapshot.terminal.context != op.context || op.report.is_some()
             || !terminal_for(case, &snapshot) || op.outcome != Some(snapshot.terminal.outcome)
             || op.reason != snapshot.terminal.reason || op.activity.as_ref() != Some(&snapshot.terminal.activity)
-            || op.disposition.as_ref() != Some(&snapshot.terminal.disposition) || op.result != snapshot.terminal.result { return false; }
+            || op.disposition != snapshot.terminal.disposition || op.result != snapshot.terminal.result { return false; }
         if self.held.as_ref().is_some_and(|held| held.terminal != snapshot.terminal
             || held.facts.operation_id != snapshot.facts.operation_id || held.facts.owner_generation != snapshot.facts.owner_generation) { return false; }
         if let Some(previous) = &self.terminal { return previous == &snapshot; }
@@ -702,12 +709,17 @@ pub(super) fn data_checks() -> bool {
     let context = preparation.context();
     if !context_matches(case, "inert-ios-parser", &context) || context_matches(Case::Cancel, "inert-ios-parser", &context)
         || context_matches(case, "foreign-project", &context) { return false; }
-    let mut old_pair = context.clone(); old_pair.saved_version.build = 8;
+    let mut old_pair = context.clone();
+    let Some(old_version) = old_pair.saved_version.as_mut() else { return false; }; old_version.build = 8;
     if context_matches(case, "inert-ios-parser", &old_pair) { return false; }
+    let mut missing_version = context.clone(); missing_version.saved_version = None;
+    let mut missing_config = context.clone(); missing_config.saved_config = None;
+    if context_matches(case, "inert-ios-parser", &missing_version)
+        || context_matches(case, "inert-ios-parser", &missing_config) { return false; }
     let operation = "a".repeat(32); let generation = "b".repeat(32);
     let prepared = wire::Projection { operation_id: operation.clone(), owner_generation: generation.clone(), context: context.clone(),
         phase: wire::Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: wire::Reason::None,
-        stage: None, activity: None, disposition: None, result: None };
+        stage: None, activity: None, disposition: None, result: None, report: None };
     let mut status = wire::Status { schema_version: 1, status_revision: 1, availability: wire::Availability::Busy, operation: Some(prepared) };
     let mut record = Record::default();
     if record.request(case, Step::Prepare, Command::Prepare, &input, Some("inert-ios-parser")) { return false; }
@@ -756,21 +768,33 @@ pub(super) fn data_checks() -> bool {
     let snapshot = Snapshot { facts, terminal };
     if !terminal_for(case, &snapshot) || !terminal_for(Case::Finality, &snapshot)
         || [Case::ToolchainPrerequisite, Case::VersionStale, Case::Cancel].into_iter().any(|case| terminal_for(case, &snapshot)) { return false; }
+    // The additive signed/recovery wire cannot widen this unsigned observer.
+    for mode in [wire::Operation::IOSSignedExport, wire::Operation::IOSLocalRecovery] {
+        let mut other = snapshot.clone(); other.terminal.context.operation = mode;
+        if context_matches(case, "inert-ios-parser", &other.terminal.context)
+            || Case::ALL.into_iter().any(|case| terminal_for(case, &other)) { return false; }
+    }
+    let mut missing_disposition = snapshot.clone(); missing_disposition.terminal.disposition = None;
+    let mut missing_activity = snapshot.clone();
+    let Ok(recovery_activity) = serde_json::from_value(json!({"stage":"disposing-work"})) else { return false; };
+    missing_activity.terminal.activity = recovery_activity;
+    if terminal_for(case, &missing_disposition) || terminal_for(case, &missing_activity) { return false; }
     // A valid core terminal is insufficient before original status publication.
     if record.original(case, snapshot.clone()) { return false; }
     let op = status.operation.as_mut().unwrap();
     op.phase = wire::Phase::Terminal; op.intent_usable = false; op.outcome = Some(snapshot.terminal.outcome);
     op.stage = Some(snapshot.terminal.activity.stage); op.activity = Some(snapshot.terminal.activity.clone());
-    op.disposition = Some(snapshot.terminal.disposition.clone()); op.result = snapshot.terminal.result.clone();
+    op.disposition = snapshot.terminal.disposition.clone(); op.result = snapshot.terminal.result.clone();
     status.status_revision += 1;
     if !record.result(Command::Start, &Ok(status.clone())) { return false; }
     let mut foreign = snapshot.clone(); foreign.facts.owner_generation = "c".repeat(32);
+    let mut wrong_context = snapshot.clone(); wrong_context.terminal.context.project_id = "foreign-project".to_owned();
     let mut provisional = snapshot.clone(); provisional.facts = held.clone();
-    if record.original(case, foreign) || record.original(case, provisional)
+    if record.original(case, foreign) || record.original(case, wrong_context) || record.original(case, provisional)
         || !record.original(case, snapshot.clone()) || record.terminal().is_some() { return false; }
     let mut held_record = record.clone(); held_record.held = Some(Snapshot { facts: held, terminal: snapshot.terminal.clone() });
     if !held_record.original(Case::Finality, snapshot.clone()) { return false; }
-    held_record.held.as_mut().unwrap().terminal.activity.commands.archive.exit_code = Some(1);
+    held_record.held.as_mut().unwrap().terminal.activity.stage = wire::Stage::Inspecting;
     !held_record.original(Case::Finality, snapshot)
 }
 
@@ -917,7 +941,8 @@ impl Record {
                 },
             Step::Final => {
                 let snapshot = self.terminal.as_ref().ok_or(())?;
-                let commands = &snapshot.terminal.activity.commands;
+                if !terminal_for(case, snapshot) { return Err(()); }
+                let commands = &snapshot.terminal.activity.archive_activity().ok_or(())?.commands;
                 let words = |label: &str, command: &wire::CommandData| match command.outcome {
                     wire::CommandOutcome::Exited => format!("{label}: known exit {}.", command.exit_code.unwrap_or(i32::MIN)),
                     wire::CommandOutcome::NotConfigured => format!("{label}: not configured."),
@@ -943,6 +968,7 @@ impl Record {
             || self.released != (case == Case::Finality) || self.held_dom != self.released || self.reciprocal_blocked != self.released
             || self.held.is_some() != self.released || !terminal_for(case, terminal) { return None; }
         if self.version_mutated != (case == Case::VersionStale) { return None; }
+        let activity = terminal.terminal.activity.archive_activity()?;
         Some(json!({"protocol":wire::PROTOCOL,"savedVersionObservation":self.version,"context":self.context,
             "prepareRequestedOnce":true,"prepareReturned":true,"reviewVisible":true,"acknowledged":true,
             "startRequestedOnce":true,"startReturned":true,"statusCallsReturned":self.status_returned,
@@ -950,7 +976,7 @@ impl Record {
             "original":terminal,"finalResultVisible":self.final_dom,
             "prerequisiteOnly":case == Case::ToolchainPrerequisite,
             "cancel":if case == Case::Cancel { Some(json!({"requestedOnce":true,"returned":true,
-                "stageAtClick":"preparing","prepareOutcome":terminal.terminal.activity.commands.prepare,
+                "stageAtClick":"preparing","prepareOutcome":activity.commands.prepare,
                 "activeCommandKillClaimed":false})) } else { None },
             "hold":self.held.as_ref().map(|snapshot| json!({"original":snapshot,"publicSuccessHidden":self.held_dom,
                 "conflictingUiBlocked":self.held_dom,"environmentDiagnosticsBlocked":self.reciprocal_blocked,

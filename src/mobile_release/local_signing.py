@@ -68,6 +68,12 @@ def _require(condition: bool, message: str) -> None:
         raise CredentialError("local signing: " + message)
 
 
+def _desktop_recovery_checkpoint(guard: DefaultCancellation) -> None:
+    source = getattr(guard, "_ios_archive_source", None)
+    if source is not None and source.recovery:
+        source.require_operation().signing.recovery_checkpoint()
+
+
 def _pending() -> SigningPending:
     return SigningPending("local signing cleanup is pending; run mobile-release local-signing status and follow the recovery guide")
 
@@ -204,6 +210,7 @@ def _read_regular(
 ) -> tuple[bytes, os.stat_result] | None:
     descriptor = None
     cancellation, owns = cancellation_owner(cancellation, ProcessCleanupError, "local signing read cancellation cleanup failed")
+    _desktop_recovery_checkpoint(cancellation)
 
     def cleanup() -> None:
         nonlocal descriptor
@@ -221,6 +228,7 @@ def _read_regular(
                     cancellation.activate()
                 try:
                     with cancellation.deferred():
+                        _desktop_recovery_checkpoint(cancellation)
                         descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
                     before = os.fstat(descriptor)
                     _require(stat.S_ISREG(before.st_mode) and 0 <= before.st_size <= maximum,
@@ -230,6 +238,7 @@ def _read_regular(
                                  and stat.S_IMODE(before.st_mode) == 0o600, "recovery control is unsafe")
                     result = bytearray()
                     while len(result) <= maximum:
+                        _desktop_recovery_checkpoint(cancellation)
                         chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(result)))
                         if not chunk:
                             break
@@ -324,6 +333,7 @@ class _RecoveryAttempt:
         self.revoked = True
 
     def check(self, session: SigningSession, *, clear_query: bool = False) -> None:
+        _desktop_recovery_checkpoint(self.lease.cancellation)
         _require(self.pid == os.getpid() and self.owner_thread is threading.current_thread()
                  and session is self.session and session.lease is self.lease
                  and self.lease.active is session and self.lease._recovery_mode is True
@@ -455,6 +465,11 @@ class SigningLease:
         self.home_identity = self.identity = None
         self.locked = False
         self.active: SigningSession | None = None
+        source = getattr(cancellation, "_ios_archive_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _require(operation.signing is not None, "unsigned iOS cannot borrow account signing")
+            operation.signing.bind_lease(self)
 
     @property
     def fd(self) -> int | None:
@@ -544,6 +559,10 @@ class SigningLease:
             self._close_inherited()
             return
         _require(self.owner_thread is threading.current_thread(), "account close owner differs")
+        source = getattr(self.cancellation, "_ios_archive_source", None)
+        signing = None if source is None else source.require_operation().signing
+        if signing is not None:
+            signing.lease_closing(self)
         if self._locked_source is not None:
             self._locked_source.retire()
         self._hold_slot.retire_exports()
@@ -586,6 +605,8 @@ class SigningLease:
             if isinstance(first_failure, (KeyboardInterrupt, SystemExit)):
                 raise first_failure
             raise preserve_lifetime_error(ProcessCleanupError(str(observed)), previous=observed) from None
+        if signing is not None:
+            signing.lease_closed(self)
 
     def _close_inherited(self) -> None:
         # No parent ledger, callback, lock or namespace operation is admissible
@@ -714,8 +735,16 @@ class SigningSession:
         self._command_scope = None
         self._command_binding = None
         self._command_finished = False
+        source = getattr(self.cancellation, "_ios_archive_source", None)
+        if source is not None:
+            source.require_operation().signing.bind_session(self)
 
     def assert_owner(self) -> None:
+        source = getattr(self.cancellation, "_ios_archive_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _require(operation.signing.session is self, "session is not the original iOS signing owner")
+            operation.signing.session_checkpoint(self)
         self.lease.assert_owner()
         _require(self.pid == os.getpid() and not self.closed, "session ownership ended")
         if self.fd is not None:
@@ -1136,6 +1165,13 @@ class SigningSession:
         self.checkpoint()
 
     def finish_original_command_if_settled(self, *, result=None) -> bool:
+        source = getattr(self.cancellation, "_ios_archive_source", None)
+        if source is not None and source.signed:
+            with source.require_operation().signing.command_settlement(self):
+                return self._finish_original_command_if_settled(result=result)
+        return self._finish_original_command_if_settled(result=result)
+
+    def _finish_original_command_if_settled(self, *, result=None) -> bool:
         from ._command_process import NoTargetProof
         from .owned_process import ProcessOutcomeUnknown
 
@@ -1267,6 +1303,7 @@ class SigningSession:
         # Apple's deletion normally removes this source-derived lock too.
         if LOCK_NAME in self.state["native"]:
             _require(self.inventory() == self.state["native"], "native lock identity changed")
+            self.assert_owner()
             os.unlink(LOCK_NAME, dir_fd=self.native_fd)
             os.fsync(self.native_fd)
             self.state["native"] = {}
@@ -1290,6 +1327,7 @@ class SigningSession:
                     owned_identity = record["stageIdentity"]
                     record["ownedIdentity"] = copy.deepcopy(owned_identity)
                 for path, identity in ((info["stage"], record["stageIdentity"]), (name, owned_identity)):
+                    self.assert_owner()
                     details = _stat(fd, path)
                     borrowed = expected_borrowed if path == name else None
                     if borrowed is not None and (details is None or _identity(details) != borrowed["identity"]):
@@ -1351,6 +1389,7 @@ class SigningSession:
                         _require(path == name, "private profile stage was replaced; preserve it")
                         continue
                     _require(_same_file_state(observed, current), "owned profile changed after inspection; preserve it for recovery")
+                    self.assert_owner()
                     os.unlink(path, dir_fd=fd)
                     os.fsync(fd)
         record["phase"] = "resolved"
@@ -1387,6 +1426,7 @@ class SigningSession:
             self._remove_control(name)
         if self.native_fd is not None:
             _require(not _names(self.native_fd), "native directory is not empty")
+            self.assert_owner()
             os.rmdir("keychain", dir_fd=self.fd)
             closing, self.native_fd = self.native_fd, None
             _close(closing)
@@ -1401,6 +1441,7 @@ class SigningSession:
     def _remove_empty_session(self) -> None:
         self.assert_owner()
         _require(not _names(self.fd), "session is not empty")
+        self.assert_owner()
         os.rmdir(self.name, dir_fd=self.lease.fd)
         os.fsync(self.lease.fd)
         # Only this original removal/sync can permit normal lease reuse. A
@@ -1677,6 +1718,7 @@ class SigningSession:
         _require(self._detached(self.observe(journal=False)), "preparation still has native references")
         self._remove_control("intent.pending")
         if self.native_fd is not None:
+            self.assert_owner()
             os.rmdir("keychain", dir_fd=self.fd)
             closing, self.native_fd = self.native_fd, None
             _close(closing)
@@ -1769,10 +1811,10 @@ def _session_name(lease: SigningLease, expected: str | None = None) -> str | Non
     return name[8:]
 
 
-def signing_status(*, home: Path | None = None) -> dict:
+def signing_status(*, home: Path | None = None, cancellation: DefaultCancellation | None = None) -> dict:
     """Sanitized local-only status: no profile, original paths, or native queries."""
     try:
-        with local_signing_lease(home=home, recovery=True) as lease:
+        with local_signing_lease(home=home, recovery=True, cancellation=cancellation) as lease:
             token = _session_name(lease)
             if token is None:
                 return {"status": "idle", "sessions": 0}
@@ -1789,6 +1831,7 @@ def signing_status(*, home: Path | None = None) -> dict:
 def recover_signing(
     token: str, confirmation: str, *, manual: bool = False, home: Path | None = None,
     runner: Callable | None = None, input_stream=None, output_stream=None,
+    cancellation: DefaultCancellation | None = None,
 ) -> dict:
     """No arbitrary path, command, force-reset, credential, Store or PID takeover."""
     _require(type(token) is str and TOKEN_RE.fullmatch(token) is not None, "expected a 32-character lowercase hexadecimal session token")
@@ -1796,7 +1839,7 @@ def recover_signing(
     input_stream = sys.stdin if input_stream is None else input_stream
     output_stream = sys.stdout if output_stream is None else output_stream
     _require(not manual or (input_stream.isatty() and output_stream.isatty()), "manual recovery requires an interactive TTY")
-    with local_signing_lease(home=home, recovery=True) as lease:
+    with local_signing_lease(home=home, recovery=True, cancellation=cancellation) as lease:
         if _session_name(lease, token) is None:
             return {"status": "absent", "session": token}
         session = lease.session(token=token)
