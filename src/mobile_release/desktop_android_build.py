@@ -85,8 +85,9 @@ class AndroidBuildRun:
                         artifact = operation.artifact()
                         findings = validate_aab(
                             artifact.path, expected_application_id=bound.saved.configuration.application_id,
-                            release=bound.release, expected_fingerprint=None, require_tools=True,
-                            check_signer=False, cancellation=self.guard, artifact=artifact,
+                            release=bound.release, expected_fingerprint=(bound.saved.configuration.upload_certificate_sha256
+                                                                        if bound.check_signer else None),
+                            require_tools=True, check_signer=bound.check_signer, cancellation=self.guard, artifact=artifact,
                             tools=operation.tools,
                         )
                         self.report = Report("android-build-inspect", findings=findings)
@@ -114,6 +115,7 @@ class AndroidBuildRun:
                                 project_activity(self.report, stage=operation.stage,
                                                  selection=operation.selection(), command=operation.command_outcome()),
                                 observed, used_config=used_config, used_version=used_version,
+                                validation=self.request.context["artifactValidation"],
                                 toolchain_profile=self.request.native["toolchain"]["profile"],
                             )
                         except (ProtocolError, ValueError, TypeError, RecursionError) as error:
@@ -175,7 +177,8 @@ class AndroidBuildRun:
         operation = self.operation
         operation.owner()
         verdict = self.guard.lifetime_ledger.verdict()
-        if verdict.profile_calls != 0 or verdict.commands > 2:
+        maximum_commands = 4 if self.request.context["artifactValidation"]["mode"] == "upload-signature" else 2
+        if verdict.profile_calls != 0 or verdict.commands > maximum_commands:
             self.guard._abort(ProtocolError("Unexpected Android build lifetime domain"))
             verdict = self.guard.lifetime_ledger.verdict()
         if time.monotonic() >= self.source.work_end:

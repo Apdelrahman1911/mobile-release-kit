@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from ._desktop_android_build_control import AndroidBuildInput
 from ._desktop_android_build_protocol import AndroidBuildRequest, REASONS, STAGES, require
 from ._desktop_android_build_selection import (
-    SavedAndroidSelection, bind_saved_android_version, select_saved_android_configuration,
+    SavedAndroidSelection, bind_saved_android_validation, bind_saved_android_version, select_saved_android_configuration,
 )
 from .build_inputs import InvocationCustody
 from .cancellation import DefaultCancellation
@@ -46,6 +46,7 @@ class BoundAndroidInputs:
     config: ReleaseConfig
     saved: SavedAndroidSelection
     task: str
+    check_signer: bool
 
     @property
     def release(self) -> ReleaseVersion:
@@ -76,6 +77,9 @@ class AndroidBuildOperation:
         self.cleanup_errors: list[BaseException] = []
         self._pending: str | None = None
         self._roles = {"gradle": "new", "bundletool": "new"}
+        if request.context["artifactValidation"]["mode"] == "upload-signature":
+            self._roles.update(jarsigner="new", keytool="new")
+        self._signature_passed = False
         self._command_before: dict[str, int] = {}
         self._returned: dict[str, int] = {}
         self._artifact: OriginalAndroidArtifact | None = None
@@ -170,11 +174,13 @@ class AndroidBuildOperation:
         require(self.inputs is None and self.files is not None)
         raw = self.files.read_input("release/mobile-release.json", limit=MAX_CONFIG_BYTES, optional=True)
         data, selected = select_saved_android_configuration(raw, self.request.context["savedConfig"])
+        check_signer = bind_saved_android_validation(selected, self.request.context["artifactValidation"])
+        require(check_signer is ("jarsigner" in self._roles))
         version = self.files.read_input(selected.source, limit=MAX_VERSION_BYTES, optional=True)
         saved = bind_saved_android_version(selected, version, self.request.context["savedVersion"])
         config = ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data)
         from .android import _bundle_task
-        self.inputs = BoundAndroidInputs(config, saved, _bundle_task(selected.module, selected.variant))
+        self.inputs = BoundAndroidInputs(config, saved, _bundle_task(selected.module, selected.variant), check_signer)
         self.check_inputs()
         return self.inputs
 
@@ -209,6 +215,8 @@ class AndroidBuildOperation:
         from .android_build_tools import AndroidValidationTools
         self.tools = AndroidValidationTools(self, self.request.native["toolchain"])
         self.tools.acquire()
+        if self.inputs.check_signer:
+            self.tools.require_signature_tools()
         self.tools.check_project_inputs(self._project_tool_inputs())
         self.check_inputs()
         self.files.prepare_namespace()
@@ -275,9 +283,14 @@ class AndroidBuildOperation:
         require(role in self._roles and self._pending is None and self._roles[role] == "new")
         facts = self.guard.lifetime_ledger.verdict()
         require(facts.cleanup_complete and facts.contained and not facts.fatal and facts.profile_calls == 0)
-        require(facts.commands == (0 if role == "gradle" else 1))
-        if role == "bundletool":
+        previous = tuple(self._roles)[:tuple(self._roles).index(role)]
+        require(facts.commands == len(previous) and all(self._roles[item] == "returned" for item in previous))
+        if role != "gradle":
             require(self._returned.get("gradle") == 0 and self._artifact is not None)
+        if role in {"jarsigner", "keytool"}:
+            require(self.inputs is not None and self.inputs.check_signer)
+        if role == "keytool":
+            require(self._signature_passed)
         self._command_before[role] = facts.commands
         self._roles[role], self._pending = "armed", role
 
@@ -300,6 +313,37 @@ class AndroidBuildOperation:
         self._arm("bundletool")
         return argv
 
+    def jarsigner_command(self, path: Path, tools) -> tuple[str, ...]:
+        self.checkpoint()
+        require(self.inputs is not None and self.inputs.check_signer and tools is self.tools
+                and self.tools is not None and self._artifact is not None and path == self._artifact.path)
+        self.tools.check()
+        self._artifact.check()
+        argv = self.tools.jarsigner_command(path)
+        self._arm("jarsigner")
+        return argv
+
+    def signature_accepted(self, path: Path, tools) -> None:
+        """Called only after the common jarsigner policy accepts an actual return."""
+        self.checkpoint()
+        require(self.inputs is not None and self.inputs.check_signer and tools is self.tools
+                and self._artifact is not None and path == self._artifact.path and self._artifact._native
+                and not self._signature_passed and self._pending is None
+                and self._roles.get("jarsigner") == "returned" and self._returned.get("jarsigner") in {0, 4})
+        self._artifact.check()
+        self._signature_passed = True
+
+    def keytool_command(self, path: Path, tools) -> tuple[str, ...]:
+        self.checkpoint()
+        require(self.inputs is not None and self.inputs.check_signer and self._signature_passed
+                and tools is self.tools and self.tools is not None and self._artifact is not None
+                and path == self._artifact.path)
+        self.tools.check()
+        self._artifact.check()
+        argv = self.tools.keytool_command(path)
+        self._arm("keytool")
+        return argv
+
     def command_environment(self) -> dict[str, str]:
         self.checkpoint()
         require(self.inputs is not None and self.tools is not None and self.files is not None)
@@ -310,10 +354,11 @@ class AndroidBuildOperation:
         self.checkpoint()
         role = self._pending
         require(role in self._roles and self._roles[role] == "armed"
-                and type(capture) is bool and capture is (role == "bundletool")
+                and type(capture) is bool and capture is (role != "gradle")
                 and type(timeout) is int and timeout > 0 and type(output_limit) is int and output_limit > 0)
         self._roles[role] = "attempted"  # Claim once, before run_command can allocate anything.
-        return min(timeout, 60 if capture else 2700), min(output_limit, 2 * 1024 * 1024)
+        ceiling = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}[role]
+        return min(timeout, ceiling), min(output_limit, 2 * 1024 * 1024)
 
     def returned(self, role: str, code: int) -> None:
         # Store the actual returned command DATA before a later cancellation

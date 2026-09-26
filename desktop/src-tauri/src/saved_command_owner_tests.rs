@@ -231,21 +231,29 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
     assert!(!owner.inner.qualified());
     let wrong_consent = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT});
     assert!(android_wire::start(&wrong_consent).is_err());
+    let old_consent = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":"saved-android-build-inspect-v1"});
+    assert!(android_wire::start(&old_consent).is_err());
     // Unacquired comparison DATA alone cannot arm Android. Inserting an inert
     // intent tests one-use refusal; it does not install a qualification permit.
-    owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::AndroidBuild),
-        expires: Instant::now() + INTENT, registration: 1, project: project() });
-    assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
-    assert!(owner.inner.lock().prepared.is_some());
-    let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
-    let status = owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((1, project())),
-        android_wire::Availability::Available).unwrap().release();
-    let p = status.operation.unwrap();
-    assert_eq!((p.phase, p.outcome), (android_wire::Phase::Terminal, Some(android_wire::Outcome::Refused)));
-    assert!(p.result.is_none() && p.activity.is_none() && p.disposition.is_none() && p.stage.is_none());
-    assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
-    assert!(owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((1, project())),
-        android_wire::Availability::Available).is_err());
+    for context in [android_wire::tests::context(), android_wire::tests::upload_context()] {
+        let owner = application(SavedCommandDomain::AndroidBuild);
+        let mut prepared = projection(SavedCommandDomain::AndroidBuild);
+        prepared.context = Context::AndroidBuild(context.clone());
+        owner.inner.lock().prepared = Some(Prepared { projection: prepared,
+            expires: Instant::now() + INTENT, registration: 1, project: project() });
+        assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+        assert!(owner.inner.lock().prepared.is_some());
+        let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
+        let status = owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((1, project())),
+            android_wire::Availability::Available).unwrap().release();
+        let p = status.operation.unwrap();
+        assert_eq!((p.phase, p.outcome), (android_wire::Phase::Terminal, Some(android_wire::Outcome::Refused)));
+        assert_eq!(p.context, context); // Retirement preserves the original saved mode/fingerprint unchanged.
+        assert!(p.result.is_none() && p.activity.is_none() && p.disposition.is_none() && p.stage.is_none());
+        assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+        assert!(owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((1, project())),
+            android_wire::Availability::Available).is_err());
+    }
 }
 
 #[test]
