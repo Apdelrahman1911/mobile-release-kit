@@ -83,9 +83,18 @@ class LifecycleSourcePinTests(unittest.TestCase):
                 function = next(node for node in driver.body if isinstance(node, ast.FunctionDef) and node.name == name)
                 checks = [node for node in ast.walk(function) if isinstance(node, ast.Call)
                           and isinstance(node.func, ast.Attribute) and node.func.attr == "check_source_pins"]
-                self.assertEqual(len(checks), 1)
-                check = checks[0]
-                self.assertEqual(ast.unparse(check), 'local(\'ubuntu_publication_lifecycle\').check_source_pins(source)')
+                self.assertEqual(len(checks), 2 if name == "verify_installed_shell_compile" else 1)
+                if name == "verify_installed_shell_compile":
+                    android = next(node for node in checks if node.keywords)
+                    self.assertEqual(ast.unparse(android), "lifecycle.check_source_pins(source, android=True)")
+                    branch = next(node for node in ast.walk(function) if isinstance(node, ast.If)
+                                  and any(isinstance(item, ast.Expr) and item.value is android for item in node.body))
+                    self.assertEqual(ast.unparse(branch.test), "same_job")
+                    check = next(node for node in checks if not node.keywords)
+                else:
+                    check = checks[0]
+                self.assertEqual(ast.unparse(check), "lifecycle.check_source_pins(source, android=same_job)"
+                                 if name == "verify_installed_shell" else 'local(\'ubuntu_publication_lifecycle\').check_source_pins(source)')
                 enclosing = next(node.body for node in ast.walk(function) if isinstance(node, ast.Try)
                                  and any(isinstance(item, ast.Expr) and item.value is check for item in node.body))
                 index = next(i for i, node in enumerate(enclosing) if isinstance(node, ast.Expr) and node.value is check)
@@ -101,7 +110,7 @@ class LifecycleSourcePinTests(unittest.TestCase):
         self.assertEqual(len(branches), 1)
         profiles = {
             "verify/desktop-ubuntu-publication": ("  publisher-helpers:", 1),
-            "verify/desktop-installed-shell, verify/desktop-installed-github-readonly, verify/desktop-installed-github-normal-boundaries, verify/desktop-shell-host-metadata": ("  compile:", 2),
+            "verify/desktop-installed-shell, verify/desktop-installed-github-readonly, verify/desktop-installed-github-normal-boundaries, verify/desktop-shell-host-metadata": ("  compile:", 3),
         }
         self.assertIn(branches[0], profiles, "Unknown or mixed publication route")
         job_header, pin_count = profiles[branches[0]]

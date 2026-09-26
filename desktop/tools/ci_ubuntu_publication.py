@@ -1459,8 +1459,13 @@ def hosted_paths():
 
 def preparation_route():
     """Bind the fixed same-job role in each shell preparation, not a caller path."""
-    return ({"shellCase": os.environ["MRK_INSTALLED_SHELL_CASE"], "job": os.environ["GITHUB_JOB"]}
-            if "MRK_INSTALLED_SHELL_CASE" in os.environ else {})
+    result = ({"shellCase": os.environ["MRK_INSTALLED_SHELL_CASE"], "job": os.environ["GITHUB_JOB"]}
+              if "MRK_INSTALLED_SHELL_CASE" in os.environ else {})
+    if os.environ.get("MRK_INSTALLED_SHELL_SCOPE") not in (None, ""):
+        ordinary = installed_shell_scope(local("ubuntu_publication_lifecycle"))
+        D.need(result.get("shellCase") in ("compile", "observe"), "Ordinary21 preparation requires an installed shell owner")
+        result["ordinary21"] = ordinary
+    return result
 
 
 def prepare():
@@ -2318,15 +2323,78 @@ def android_original_command_records(artifact, rows, result, transport, *, deadl
            "Android original command capture root changed or validation was late")
 
 
-def installed_shell_candidate(work, sha, *, lifecycle=None, local_transport=None, deadline=None, github=False):
+def installed_shell_scope(lifecycle):
+    """One explicit fixed scope; historical absence never selects fewer cases."""
+    scope = os.environ.get("MRK_INSTALLED_SHELL_SCOPE")
+    D.need(scope in (None, "", lifecycle.SHELL_ORDINARY_PROFILE), "Unknown installed shell scope")
+    if scope in (None, ""):
+        return None
+    D.need(os.environ.get("GITHUB_REF") == SHELL_REF
+           and os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "actions-artifact-v1"
+           and not os.environ.get("MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256"),
+           "Ordinary21 requires its fixed non-Android artifact route")
+    return lifecycle.shell_ordinary_selection()
+
+
+def installed_shell_scope_record(record, lifecycle, ordinary, *, android_contract=False):
+    """Bind the same SOURCE selection, not a renderer-supplied case roster."""
+    D.need(ordinary is None or type(ordinary) is dict
+           and D.canonical(ordinary) == D.canonical(lifecycle.shell_ordinary_selection()),
+           "Different ordinary21 source selection")
+    D.need(type(record) is dict and ("ordinary21" in record) == (ordinary is not None)
+           and (ordinary is None or D.canonical(record["ordinary21"]) == D.canonical(ordinary)),
+           "Original installed shell scope is missing, mixed or downgraded")
+    if ordinary is not None:
+        D.need("remainingRequiredCases" not in record
+               or D.canonical(record["remainingRequiredCases"]) == D.canonical(ordinary["remainingRequiredCases"]),
+               "Ordinary21 remaining-required-case disclosure differs")
+        D.need(not {"githubReadOnly", "githubReadOnlyProfile", "androidPreparation", "androidOsContractInput",
+                    "androidPublication", "androidBuild", "localTransport", "shellLocalTransport",
+                    "privateCommandRoles", "privateCommandMetadata", "privateCaptureRoots", "privateMaterialMetadata"} & set(record),
+               "Ordinary21 record adopts another installed scope or Android preparation")
+        if android_contract:
+            fields = {"androidBuildMaterials": None, "androidBuildBindings": {}, "androidBuildPublication": None}
+            D.need(set(fields) <= set(record) and all(D.canonical(record[key]) == D.canonical(value) for key, value in fields.items()),
+                   "Ordinary21 requires the exact present null/empty/null Android compile contract")
+
+
+def installed_shell_source_admission():
+    """Read-only SOURCE gate before workflow acquisition, preparation or build."""
+    sha = route(os.environ)
+    D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "compile", "Source admission requires the fixed compiler route")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    ordinary = installed_shell_scope(lifecycle)
+    transport = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT")
+    github = os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)
+    D.need(transport in (None, "actions-artifact-v1", "android-same-job-local-v1")
+           and not (github and transport == "android-same-job-local-v1"), "Source admission transport differs")
+    entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
+    D.need(D.file_record(SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
+           "Workflow reviewed shell lifecycle entry differs before preparation")
+    lifecycle.check_source_pins(SOURCE, android=transport == "android-same-job-local-v1")
+    if transport == "android-same-job-local-v1":
+        D.need(type(local("android_material_preparation").policy().get("hostPolicy")) is dict,
+               "Android same-VM supplier/generated-input policy is not yet admitted")
+    elif ordinary is None and not github:
+        lifecycle.shell_android_materials()  # Full25 is still closed without its original materials.
+        lifecycle.shell_android_publication_data()
+    shell_source_manifest(SOURCE)
+    print("Fixed installed shell SOURCE admitted before acquisition/preparation; no compiler or native entry.", flush=True)
+    return {"sourceSha": sha, **({"ordinary21": ordinary} if ordinary is not None else {})}
+
+
+def installed_shell_candidate(work, sha, *, lifecycle=None, local_transport=None, deadline=None, github=False, ordinary=None):
     """Admit both exact original shell outputs, including failed-job-only reuse."""
     lifecycle = local("ubuntu_publication_lifecycle") if lifecycle is None else lifecycle
+    D.need(D.canonical(ordinary) == D.canonical(installed_shell_scope(lifecycle))
+           and (ordinary is None or not github and local_transport is None),
+           "Candidate/consumer ordinary21 scope or transport differs")
     D.need(type(github) is bool and (not github or local_transport is None
            and os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)),
            "GitHub shell candidate requires its fixed artifact-only route")
-    android_materials = None if github else lifecycle.shell_android_materials()
-    android_bindings = {} if github else lifecycle.shell_android_compile_environment()
-    android_publication = None if github else lifecycle.shell_android_publication_data()
+    android_materials = None if github or ordinary is not None else lifecycle.shell_android_materials()
+    android_bindings = {} if github or ordinary is not None else lifecycle.shell_android_compile_environment()
+    android_publication = None if github or ordinary is not None else lifecycle.shell_android_publication_data()
     artifact = work / "admitted-shell"
     raw = D.read(artifact / "shell-roster.json", SHELL_ROSTER_LIMIT)
     digest = D.sha(os.environ.get("MRK_INSTALLED_SHELL_ROSTER_SHA256"))
@@ -2362,6 +2430,9 @@ def installed_shell_candidate(work, sha, *, lifecycle=None, local_transport=None
     compiler = D.decode(D.read(artifact / "compiler.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
     source_record = D.decode(D.read(artifact / "source.json", 1 << 20), 1 << 20)
     result = D.decode(D.read(artifact / "result.json", 1 << 20), 1 << 20)
+    installed_shell_scope_record(source_record, lifecycle, ordinary)
+    for record in (compiler, result):
+        installed_shell_scope_record(record, lifecycle, ordinary, android_contract=True)
     if local_transport is not None:
         D.need(all(row.get("androidPreparation") == local_transport["materialRecord"] for row in (compiler, result))
                and compiler.get("androidOsContractInput") == result.get("androidOsContractInput")
@@ -3514,11 +3585,12 @@ def verify_installed_shell_compile():
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "compile" and "MRK_INSTALLED_CASE" not in os.environ,
            "Fixed production shell compiler route differs")
     lifecycle = local("ubuntu_publication_lifecycle")
+    ordinary = installed_shell_scope(lifecycle)
     same_job = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
     github = os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)
     D.need(not (github and same_job), "GitHub shell cannot use Android same-job transport")
     material_engine, material_preparation, material_host = None, None, None
-    if same_job or github:
+    if same_job or github or ordinary is not None:
         android_materials, android_bindings, android_publication = None, {}, None
     else:
         android_materials = lifecycle.shell_android_materials()
@@ -3614,7 +3686,9 @@ def verify_installed_shell_compile():
                          "imageOS": os.environ["ImageOS"], "imageVersion": os.environ["ImageVersion"],
                          "kernel": {key: getattr(os.uname(), key) for key in ("sysname", "machine", "release", "version")},
                          "lifecycleEntrySha256": entry_sha, "originalDeadline": repr(deadline),
-                         "nativeQualification": False, "scope": "Fresh normal shell and distinct observer compile only; no new package."}
+                         "nativeQualification": False, "scope": "Fresh normal shell and distinct observer compile only; no new package.",
+                         **({"ordinary21": ordinary} if ordinary is not None else {})}
+        installed_shell_scope_record(source_record, lifecycle, ordinary)
         D.write(public / "source.json", D.canonical(source_record))
         if os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF:
             # This is the SAME compiler consumer, before any package/compiler
@@ -3754,12 +3828,14 @@ def verify_installed_shell_compile():
                     "originalArtifacts": originals, "exportedArtifacts": exports, "selections": selections,
                     "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED), "generatedPermissions": permissions,
                     "androidBuildMaterials": android_materials, "androidBuildBindings": android_bindings,
-                     "androidBuildPublication": android_publication}
+                    "androidBuildPublication": android_publication,
+                    **({"ordinary21": ordinary} if ordinary is not None else {})}
         if same_job:
             compiler["androidPreparation"] = {**D.file_record(material_root / "private/prepared.json", 64 << 10),
                 "path": str(material_root / "private/prepared.json")}
             compiler["androidOsContractInput"] = {**D.file_record(material_root / "os-contract.json", 1 << 20),
                 "path": str(material_root / "os-contract.json")}
+        installed_shell_scope_record(compiler, lifecycle, ordinary, android_contract=True)
         D.write(public / "compiler.json", D.canonical(compiler))
         source_check("after")
         check.phase = "shell-generated-cleanup"
@@ -3801,7 +3877,8 @@ def verify_installed_shell_compile():
             "packageBuilt": False, "helper11Rerun": False,
             "commands": check.original_commands if same_job else check.commands, "qualified": False,
             "compilerCleanup": SHELL_CLEANUP_SUCCESS,
-            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only"}
+            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only",
+            **({"ordinary21": ordinary} if ordinary is not None else {})}
         if same_job:
             result["androidPreparation"] = compiler["androidPreparation"]
             result["androidOsContractInput"] = compiler["androidOsContractInput"]
@@ -3810,6 +3887,7 @@ def verify_installed_shell_compile():
             result["privateCaptureRoots"] = {role: list(identity) for role, identity in check.private_roots.items()}
             result["privateMaterialMetadata"] = list(check.private_metadata["material"])
             result["privateCommandMetadata"] = android_close_compiler_metadata(check)
+        installed_shell_scope_record(result, lifecycle, ordinary, android_contract=True)
         D.write(public / "result.json", D.canonical(result))
         files = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
         retained = {row["path"]: row for row in files}
@@ -3831,6 +3909,7 @@ def verify_installed_shell_compile():
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("shell_roster_sha256=" + pin["sha256"] + "\nshell_producer_attempt=" + os.environ["GITHUB_RUN_ATTEMPT"] + "\n")
             output.write("shell_transport=" + ("android-same-job-local-v1" if same_job else "actions-artifact-v1") + "\n")
+            output.write("shell_scope=" + (ordinary["profile"] if ordinary is not None else "") + "\n")
             if transport_pin is not None:
                 output.write("shell_local_transport_sha256=" + transport_pin["sha256"] + "\n")
         D.need(time.monotonic() < deadline, "Original shell compiler closed late")
@@ -4143,18 +4222,57 @@ def verify_installed():
         raise
 
 
-def shell_project_draft_observation(observed, lifecycle):
+def _shell_ordinary_exports(observed, lifecycle, ordinary):
+    """Correspond only the complete original exports; never inspect live work."""
+    root_value = {"shell": {"ordinary21": ordinary}}
+    names = {"lifecycle-" + name for name in lifecycle.public_files(root_value) | {"client.stdout", "client.stderr"}}
+    files = observed["files"]
+    D.need(type(files) is list and len(files) == len(names) <= lifecycle.SHELL_PUBLIC_FILE_LIMIT + 2,
+           "Ordinary21 original export count differs")
+    indexed = {}
+    for row in files:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["path"]) is str
+               and row["path"] in names and row["path"] not in indexed and type(row["size"]) is int
+               and 0 <= row["size"] <= lifecycle.LIMIT and type(row["sha256"]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "Ordinary21 original export record differs")
+        indexed[row["path"]] = row
+    D.need(set(indexed) == names and sum(row["size"] for row in files) <= lifecycle.TOTAL_LIMIT + lifecycle.LIMIT,
+           "Ordinary21 original export roster or aggregate differs")
+    raw_cases = D.canonical(observed["cases"])
+    D.need(indexed["lifecycle-shell-cases.json"] == {"path": "lifecycle-shell-cases.json", "size": len(raw_cases),
+            "sha256": hashlib.sha256(raw_cases).hexdigest()}, "Ordinary21 case mapping differs from the original capture")
+    placeholders = observed.get("namespacePlaceholders")
+    D.need(type(placeholders) is dict and set(placeholders) == {"fixture", "names", "namespaceOnly", "empty",
+                "originalsAccounted", "rootRetained", "before", "after"}
+           and placeholders["fixture"] == "ordinary21-inert-placeholders-v1"
+           and placeholders["names"] == ordinary["namespacePlaceholders"]
+           and all(placeholders[key] is True for key in ("namespaceOnly", "empty", "originalsAccounted", "rootRetained"))
+           and D.canonical(placeholders["before"]) == D.canonical(placeholders["after"]),
+           "Ordinary21 inert namespace proof is missing or relabelled")
+    for phase in ("before", "after"):
+        name = "lifecycle-shell-ordinary21-placeholders-" + phase + ".json"
+        pin = placeholders[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+               and 0 < pin["size"] <= 8192 and indexed[name] == {"path": name, **pin},
+               "Ordinary21 placeholder proof differs from its original export")
+
+
+def shell_project_draft_observation(observed, lifecycle, *, ordinary=None):
     """Consume only verify_service_result's original-finality-gated DATA."""
-    D.need(type(observed) is dict and observed.get("state") == "normal-shell-installed-runtime-connection-observed"
+    installed_shell_scope_record(observed, lifecycle, ordinary)
+    selection = {"shell": {"ordinary21": ordinary}} if ordinary is not None else {"shell": {}}
+    D.need(type(observed) is dict and observed.get("state") == lifecycle.result_state(selection)
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
-    # The twenty-one-case root cap is170 (168 exact names); its exporter adds the original client's
-    # stdout/stderr, not two more root evidence slots or another capture.
-    D.need(type(cases) is dict and set(cases) == set(lifecycle.SHELL_CASES)
+    # Historical full25:188 root/190 exported. Ordinary21:170 root/172 exported,
+    # including two original inert-placeholder captures. No ceiling is raised.
+    D.need(type(cases) is dict and set(cases) == set(lifecycle.shell_cases(selection))
            and type(combined) is dict and set(combined) == {"native", "fixture"}
            and type(files) is list and len(files) <= lifecycle.SHELL_PUBLIC_FILE_LIMIT + 2,
            "Closed project/draft receipt or exported original roster is missing")
+    if ordinary is not None:
+        _shell_ordinary_exports(observed, lifecycle, ordinary)
     positive = cases["positive"]
     D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "lifecycleDocuments"}
            and positive["case"] == "positive" and type(positive["exitCode"]) is int and positive["exitCode"] == 0
@@ -4214,7 +4332,8 @@ def shell_project_draft_observation(observed, lifecycle):
     _shell_metadata_save_observation(cases["metadata-save"], observed.get("metadataSave"), files, lifecycle)
     _shell_version_save_observation(cases["version-save"], observed.get("versionSave"), files, lifecycle)
     _shell_tools_offline_observation(cases, observed.get("toolsOffline"), files, lifecycle)
-    _shell_android_observation(cases, observed.get("androidBuild"), files, lifecycle)
+    if ordinary is None:
+        _shell_android_observation(cases, observed.get("androidBuild"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -4902,7 +5021,7 @@ def shell_github_observation(observed, lifecycle, profile="github-readonly-insta
     normal_boundaries = profile == lifecycle.SHELL_GITHUB_BOUNDARY_PROFILE
     selected_cases = tuple(selection["cases"])
     state = "installed-github-normal-boundaries-observed" if normal_boundaries else "installed-github-readonly-synthetic-observed"
-    D.need(type(observed) is dict and observed.get("state") == state
+    D.need(type(observed) is dict and "ordinary21" not in observed and observed.get("state") == state
            and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
            and observed.get("shellPackageBuilt") is False, "GitHub closed observation was relabelled as qualification")
     github, cases, files = observed.get("githubReadOnly"), observed.get("cases"), observed.get("files")
@@ -5080,6 +5199,8 @@ def android_native_public_summary(source, observed, preparation, records, lifecy
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    ordinary = installed_shell_scope(lifecycle)
     sha, source, _, root, deadline = resumed_preparation()
     github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)
     normal_boundaries = os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF
@@ -5091,7 +5212,6 @@ def verify_installed_shell():
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
-        lifecycle = local("ubuntu_publication_lifecycle")
         lifecycle.check_source_pins(source, android=same_job)
         D.need(same_job or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") in (None, "actions-artifact-v1"),
                "Unknown installed shell compiler transport")
@@ -5102,7 +5222,7 @@ def verify_installed_shell():
         library, packages, old_compiler, accepted = installed_u_inputs(work)
         transport, material = android_stage_local_inputs(check, sha, lifecycle) if same_job else (None, None)
         binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(
-            work, sha, lifecycle=lifecycle, local_transport=transport, deadline=check.end, github=github)
+            work, sha, lifecycle=lifecycle, local_transport=transport, deadline=check.end, github=github, ordinary=ordinary)
         D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
                "Accepted U platform executable closure differs")
         environment = C.clean_environment(work)
@@ -5129,9 +5249,14 @@ def verify_installed_shell():
             "manifestSha256", "protocolSha256", "exportedArtifacts", "nativeRecord", "frontendRecord",
             "androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")}
         projection["originalRecord"] = D.file_record(work / "admitted-shell/compiler.json", SHELL_METADATA_LIMIT)
+        if ordinary is not None:
+            projection["ordinary21"] = ordinary
+        installed_shell_scope_record(projection, lifecycle, ordinary, android_contract=True)
         shell = {"binaries": binaries, "compiler": projection, "rosterSha256": roster_sha,
                  "producerAttempt": producer_attempt, "acceptedU": accepted, "loaderPolicy": policy}
-        if not github:
+        if ordinary is not None:
+            shell["ordinary21"] = ordinary
+        elif not github:
             shell["androidPublication"] = lifecycle.shell_android_publication_request(root)
         if same_job:
             projection.update({key: compiler[key] for key in ("androidPreparation", "androidOsContractInput")})
@@ -5157,7 +5282,11 @@ def verify_installed_shell():
             if normal_boundaries:
                 source_record.update(normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
                                      normalHttpRequests=False)
-        if not github:
+        if ordinary is not None:
+            source_record.update(ordinary21=ordinary, remainingRequiredCases=ordinary["remainingRequiredCases"],
+                **{key: compiler[key] for key in ("androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")})
+            installed_shell_scope_record(source_record, lifecycle, ordinary, android_contract=True)
+        elif not github:
             source_record["androidBuildPublication"] = compiler["androidBuildPublication"]
         D.write(public / "source.json", D.canonical(source_record))
         request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
@@ -5189,7 +5318,7 @@ def verify_installed_shell():
             else:
                 print("Twenty-two original GitHub synthetic cases retained after service finality; N/D roles remain separate, no normal-destination action or delivery.", flush=True)
             return
-        project_draft = shell_project_draft_observation(observed, lifecycle)
+        project_draft = shell_project_draft_observation(observed, lifecycle, ordinary=ordinary)
         source_check("after")
         D.need(D.canonical(shell_tools_inputs_for_observation()) == D.canonical(tools_inputs),
                "Original Tools input preparation or live Git/Python/JDK nodes changed during shell observations")
@@ -5200,14 +5329,17 @@ def verify_installed_shell():
             "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
             "versionSave": observed["versionSave"],
             "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
-            "androidBuild": observed["androidBuild"], "androidBuildQualificationOnly": True, "androidBuildLimits": lifecycle.SHELL_ANDROID_LIMITS,
-            "androidPublication": observed["androidPublication"],
+            **({"namespacePlaceholders": observed["namespacePlaceholders"]} if ordinary is not None else
+               {"androidBuild": observed["androidBuild"], "androidBuildQualificationOnly": True, "androidBuildLimits": lifecycle.SHELL_ANDROID_LIMITS,
+                "androidPublication": observed["androidPublication"]}),
             "settledFailure": observed["settledFailure"],
-            "commands": check.original_commands if same_job else check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
+            "commands": check.original_commands if same_job else check.commands, "cases": list(lifecycle.shell_cases(request)), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
-            "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}
+            "scope": ("ordinary21-shell-to-accepted-installed-runtime-connection-only" if ordinary is not None
+                      else "normal-shell-to-accepted-installed-runtime-connection-only")}
         if same_job:
             final_result["privateCommandMetadata"] = native_metadata
+        installed_shell_scope_record(final_result, lifecycle, ordinary, android_contract=True)
         D.write(public / "result.json", D.canonical(final_result))
         if same_job:
             records = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
@@ -5222,7 +5354,10 @@ def verify_installed_shell():
             D.need({path.name for path in (root / "public").iterdir()} == {"android-native-summary.json"},
                    "Private Android native output leaked an unapproved public member")
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window, twenty-three success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
+        if ordinary is not None:
+            print("Ordinary21: normal window, nineteen success-requiring observers and one raw-exit1 expected negative retained with service finality; four Android cases remain required; no product/package qualification.", flush=True)
+        else:
+            print("Normal window, twenty-three success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error, private=same_job)
         raise
@@ -5238,6 +5373,8 @@ if __name__ == "__main__":
             verify_installed()
         elif sys.argv[1:] == ["installed-shell-compile"]:
             verify_installed_shell_compile()
+        elif sys.argv[1:] == ["installed-shell-source-admission"]:
+            installed_shell_source_admission()
         elif sys.argv[1:] == ["installed-shell"]:
             verify_installed_shell()
         elif sys.argv[1:] == ["installed-shell-tools-namespace-before"]:

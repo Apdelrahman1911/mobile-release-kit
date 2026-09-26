@@ -878,6 +878,7 @@ class AndroidSameJobIntegrationContracts(unittest.TestCase):
                 stack.enter_context(patch.object(S.sys, "path", list(S.sys.path)))
                 stack.enter_context(patch.dict(S.sys.modules, {"mobile_release.owned_process": SimpleNamespace(run_owned=owner)}))
                 stack.enter_context(patch.dict(S.os.environ, {"MRK_INSTALLED_SHELL_CASE": "observe",
+                    "GITHUB_REF": S.SHELL_REF,
                     "MRK_INSTALLED_SHELL_TRANSPORT": "android-same-job-local-v1", "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1",
                     "ImageOS": "ubuntu24", "ImageVersion": "inert", "MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256": hashlib.sha256(entry.read_bytes()).hexdigest()}, clear=True))
                 stdout = stack.enter_context(patch("sys.stdout", new=io.StringIO()))
@@ -1066,7 +1067,8 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         download = native.split("      - name: Download this run's exact original compiled shell outputs", 1)[1].split("      - name:", 1)[0]
         self.assertIn("steps.compile.outputs.shell_transport == 'actions-artifact-v1'", download)
         compiler = workflow.split("      - name: Compile the normal shell and separate observer once without executing either", 1)[1].split("      - name:", 1)[0]
-        self.assertIn("MRK_INSTALLED_SHELL_TRANSPORT: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'android-same-job-local-v1' || 'actions-artifact-v1' }}", compiler)
+        self.assertIn("MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1", compiler)
+        self.assertIn("MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || '' }}", compiler)
         self.assertIn("MRK_INSTALLED_SHELL_CASE: observe", native)
         # These ordering checks supplement the actual cleanup/transport controls
         # above; the real owner/native path still requires hosted verification.
@@ -2002,10 +2004,11 @@ def closed_android_data(lifecycle, case):
     return receipt, fixture
 
 
-def closed_project_draft_data(lifecycle):
+def closed_project_draft_data(lifecycle, *, ordinary=None):
     """Synthetic closed-result schema DATA only; no native/finality claim."""
     # This fresh test-only module gets invented selectors, never host inputs.
-    lifecycle.SHELL_ANDROID_MATERIALS = deepcopy(ANDROID_MATERIAL_DATA)
+    if ordinary is None:
+        lifecycle.SHELL_ANDROID_MATERIALS = deepcopy(ANDROID_MATERIAL_DATA)
     receipt = deepcopy(lifecycle.SHELL_PROJECT_RECEIPT)
     fixture = {"fixture": "android-saved-readonly-v1", "rootRetained": True, "hintUnchanged": True,
                "savedOutputsMatched": True, "noUnexpectedEntries": True, "noPendingState": True,
@@ -2096,8 +2099,9 @@ def closed_project_draft_data(lifecycle):
                                    "maps": [], "toolsOffline": receipt}
         observed["toolsOffline"][case] = {"native": deepcopy(receipt), "fixture": fixture}
         observed["files"].extend({"path": "lifecycle-shell-" + case + "-" + phase + ".json", **fixture[phase]} for phase in ("before", "after"))
-    observed["androidBuild"] = {}
-    for case in lifecycle.SHELL_ANDROID_CASES:
+    if ordinary is None:
+        observed["androidBuild"] = {}
+    for case in (() if ordinary is not None else lifecycle.SHELL_ANDROID_CASES):
         receipt, fixture = closed_android_data(lifecycle, case)
         observed["cases"][case] = {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
                                    "maps": [], "androidBuild": receipt}
@@ -2120,6 +2124,23 @@ def closed_project_draft_data(lifecycle):
     observed["versionSave"] = {"native": deepcopy(version), "fixture": version_fixture}
     observed["files"].extend({"path": "lifecycle-shell-version-save-" + phase + ".json", **version_fixture[phase]}
                              for phase in ("before", "after"))
+    if ordinary is not None:
+        observed["ordinary21"] = deepcopy(ordinary)
+        observed["state"] = "ordinary21-shell-installed-runtime-connection-observed"
+        pin = {"size": 2048, "sha256": "7" * 64}
+        observed["namespacePlaceholders"] = {"fixture": "ordinary21-inert-placeholders-v1",
+            "names": ["android-build", "android-build-cancel", "android-build-failure", "android-build-refusals"],
+            "namespaceOnly": True, "empty": True, "originalsAccounted": True, "rootRetained": True,
+            "before": deepcopy(pin), "after": deepcopy(pin)}
+        observed["files"].extend({"path": "lifecycle-shell-ordinary21-placeholders-" + phase + ".json", **pin}
+                                 for phase in ("before", "after"))
+        raw = S.D.canonical(observed["cases"])
+        observed["files"].append({"path": "lifecycle-shell-cases.json", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        names = {"lifecycle-" + name for name in lifecycle.public_files({"shell": {"ordinary21": ordinary}})
+                 | {"client.stdout", "client.stderr"}}
+        retained = {row["path"] for row in observed["files"]}
+        observed["files"].extend({"path": name, "size": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+                                 for name in sorted(names - retained))
     return observed
 
 
@@ -3009,7 +3030,7 @@ class InstalledToolsOfflineReceiptContracts(unittest.TestCase):
     def test_eight_closed_engineering_cases_preserve_negative_refused_and_no_child_facts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle"); observed = closed_project_draft_data(lifecycle)
         self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
-        self.assertEqual(len(observed["cases"]), 21)
+        self.assertEqual(len(observed["cases"]), 25)  # Missing scope remains the historical full25, never ordinary21.
         self.assertEqual(set(observed["toolsOffline"]), set(lifecycle.SHELL_TOOLS_OFFLINE_CASES))
         for case, pair in observed["toolsOffline"].items():
             receipt = pair["native"]
@@ -5305,6 +5326,172 @@ class InstalledGitHubNormalBoundaryRouteContracts(unittest.TestCase):
                     python_data.context({**env, **change})
                 with self.assertRaises(policy.Refused):
                     policy.context({**env, **change})
+
+
+class InstalledOrdinary21Contracts(unittest.TestCase):
+    """The existing inert compiler/artifact/closed-DATA seams, not a runner."""
+    def setUp(self):
+        self.lifecycle = S.local("ubuntu_publication_lifecycle")
+        self.selection = self.lifecycle.shell_ordinary_selection()
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.guards = []
+        for module, names in ((self.lifecycle, ("shell_android_materials", "shell_android_compile_environment",
+                "shell_android_publication_data", "bind_shell_android_profile", "service_argv", "verify_service_result")),
+                (S, ("Check", "prepare", "resumed_preparation", "package_inputs", "installed_u_inputs",
+                     "android_stage_local_inputs", "shell_native_inputs", "installed_shell_os_inputs"))):
+            for name in names:
+                self.guards.append(self.stack.enter_context(patch.object(module, name,
+                    side_effect=AssertionError("No preparation, compiler, native or Android work in inert ordinary21 tests"))))
+        self.guards.append(self.stack.enter_context(patch.object(S.subprocess, "Popen", side_effect=AssertionError("No subprocess"))))
+
+    def tearDown(self):
+        for guard in self.guards: guard.assert_not_called()
+
+    def environment(self):
+        return {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+            "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.SHELL_REF, "GITHUB_JOB": "compile", "MRK_UBUNTU_PUBLICATION_VERIFY": "1",
+            "GITHUB_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "MRK_INSTALLED_SHELL_CASE": "compile",
+            "MRK_INSTALLED_SHELL_SCOPE": "ordinary21-v1", "MRK_INSTALLED_SHELL_TRANSPORT": "actions-artifact-v1",
+            "MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256": hashlib.sha256((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()).hexdigest()}
+
+    def artifact(self, work, change=None):
+        env, elf, inputs = transport_data(work)
+        artifact = work / "admitted-shell"
+        for name in ("compiler.json", "source.json", "result.json"):
+            record = S.D.decode((artifact / name).read_bytes())
+            record["ordinary21"] = deepcopy(self.selection)
+            if name != "source.json":
+                record.update(androidBuildMaterials=None, androidBuildBindings={}, androidBuildPublication=None)
+            if change is not None: change(name, record)
+            (artifact / name).write_bytes(S.D.canonical(record))
+        roster = S.D.decode((artifact / "shell-roster.json").read_bytes())
+        roster["files"] = [S.D.file_record(path) for path in sorted(artifact.iterdir()) if path.name != "shell-roster.json"]
+        raw = S.D.canonical(roster); (artifact / "shell-roster.json").write_bytes(raw)
+        return {**self.environment(), **env, "MRK_INSTALLED_SHELL_ROSTER_SHA256": hashlib.sha256(raw).hexdigest()}, elf, inputs
+
+    def test_scope_requires_exact_artifact_ref_and_never_defaults_to_ordinary21(self):
+        env = self.environment()
+        with patch.dict(S.os.environ, env, clear=True):
+            self.assertEqual(S.installed_shell_scope(self.lifecycle), self.selection)
+            self.assertEqual(S.preparation_route()["ordinary21"], self.selection)
+        for change in ({"MRK_INSTALLED_SHELL_SCOPE": "ordinary20-v1"}, {"MRK_INSTALLED_SHELL_SCOPE": "full25"},
+                       {"MRK_INSTALLED_SHELL_TRANSPORT": "android-same-job-local-v1"},
+                       {"MRK_INSTALLED_SHELL_TRANSPORT": ""}, {"MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256": "1" * 64},
+                       {"GITHUB_REF": S.SHELL_GITHUB_REF}, {"GITHUB_REF": S.SHELL_GITHUB_BOUNDARY_REF}, {"GITHUB_REF": "refs/heads/main"}):
+            with self.subTest(change=change), patch.dict(S.os.environ, {**env, **change}, clear=True), self.assertRaises(S.D.Refused):
+                S.installed_shell_scope(self.lifecycle)
+        for absent in ({}, {"MRK_INSTALLED_SHELL_SCOPE": ""}):
+            with patch.dict(S.os.environ, absent, clear=True): self.assertIsNone(S.installed_shell_scope(self.lifecycle))
+
+    def test_scope_records_require_present_null_empty_null_and_same_remaining_four(self):
+        original = {"ordinary21": deepcopy(self.selection), "androidBuildMaterials": None,
+                    "androidBuildBindings": {}, "androidBuildPublication": None}
+        S.installed_shell_scope_record(original, self.lifecycle, self.selection, android_contract=True)
+        for field, replacement in (("ordinary21", None), ("ordinary21", {}),
+                ("androidBuildMaterials", {}), ("androidBuildBindings", []), ("androidBuildPublication", {}),
+                ("remainingRequiredCases", []), ("androidPreparation", None), ("androidOsContractInput", {}),
+                ("localTransport", {}), ("githubReadOnly", {}), ("androidBuild", {}), ("androidPublication", {})):
+            with self.subTest(field=field), self.assertRaises(S.D.Refused):
+                S.installed_shell_scope_record({**original, field: replacement}, self.lifecycle, self.selection, android_contract=True)
+        for field in original:
+            changed = deepcopy(original); changed.pop(field)
+            with self.subTest(missing=field), self.assertRaises(S.D.Refused):
+                S.installed_shell_scope_record(changed, self.lifecycle, self.selection, android_contract=True)
+        with self.assertRaises(S.D.Refused): S.installed_shell_scope_record(original, self.lifecycle, None)
+        with self.assertRaises(S.D.Refused): S.installed_shell_scope_record({}, self.lifecycle, self.selection)
+
+    def test_actual_read_only_source_admission_uses_current_pins_without_android_or_an_owner(self):
+        def local(name):
+            self.assertEqual(name, "ubuntu_publication_lifecycle"); return self.lifecycle
+        with patch.dict(S.os.environ, self.environment(), clear=True), patch.object(S, "local", side_effect=local), \
+             patch.object(self.lifecycle, "check_source_pins", wraps=self.lifecycle.check_source_pins) as pins, \
+             patch.object(S.sys, "stdout", new=io.StringIO()):
+            result = S.installed_shell_source_admission()
+            self.assertEqual(result, {"sourceSha": "a" * 40, "ordinary21": self.selection})
+            pins.assert_called_once_with(SOURCE, android=False)
+
+    def test_source_admission_refuses_stale_entry_or_source_before_any_preparation(self):
+        env = self.environment()
+        with patch.object(S, "local", return_value=self.lifecycle), patch.object(S, "shell_source_manifest") as manifest:
+            with patch.dict(S.os.environ, {**env, "MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256": "0" * 64}, clear=True), self.assertRaises(S.D.Refused):
+                S.installed_shell_source_admission()
+            with patch.dict(S.os.environ, env, clear=True), patch.dict(self.lifecycle.CORE_PINS,
+                    {"__init__.py": (self.lifecycle.CORE_PINS["__init__.py"][0], "0" * 64)}), self.assertRaises(self.lifecycle.Refused):
+                S.installed_shell_source_admission()
+            manifest.assert_not_called()
+
+    def test_compiler_and_consumer_check_scope_before_original_owner_or_android_entry(self):
+        for entry, case in ((S.verify_installed_shell_compile, "compile"), (S.verify_installed_shell, "observe")):
+            with self.subTest(case=case), patch.object(S, "local", return_value=self.lifecycle):
+                env = {**self.environment(), "MRK_INSTALLED_SHELL_CASE": case, "MRK_INSTALLED_SHELL_SCOPE": "unexpected"}
+                with patch.dict(S.os.environ, env, clear=True), self.assertRaises(S.D.Refused): entry()
+                env["MRK_INSTALLED_SHELL_SCOPE"] = "ordinary21-v1"
+                with patch.dict(S.os.environ, env, clear=True), \
+                     patch.object(S, "resumed_preparation", side_effect=RuntimeError("original-owner-boundary")) as original:
+                    with self.assertRaisesRegex(RuntimeError, "original-owner-boundary"): entry()
+                    original.assert_called_once()
+
+    def test_artifact_admission_checks_actual_original_pair_with_no_android_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary); env, elf, inputs = self.artifact(work)
+            with patch.dict(S.os.environ, env, clear=True), patch.object(S, "elf_dependencies", return_value=elf), \
+                 patch.object(S, "shell_source_manifest", return_value=inputs):
+                binaries, compiler, _, digest, producer, artifact = S.installed_shell_candidate(
+                    work, "a" * 40, lifecycle=self.lifecycle, ordinary=self.selection)
+                self.assertEqual(set(binaries), {"normal", "observer"})
+                self.assertEqual((producer, artifact, digest), ("1", "17", env["MRK_INSTALLED_SHELL_ROSTER_SHA256"]))
+                self.assertEqual(compiler["ordinary21"], self.selection)
+                with self.assertRaises(S.D.Refused): S.installed_shell_candidate(work, "a" * 40, lifecycle=self.lifecycle)
+
+    def test_artifact_rejects_mixed_missing_or_downgraded_source_compiler_and_result_scopes(self):
+        mutations = [(name, "ordinary21", "missing") for name in ("source.json", "compiler.json", "result.json")]
+        mutations += [(name, key, value) for name in ("compiler.json", "result.json") for key, value in (
+            ("ordinary21", None), ("androidBuildMaterials", "missing"), ("androidBuildBindings", "missing"),
+            ("androidBuildPublication", "missing"), ("androidBuildMaterials", {}), ("androidBuildBindings", {"MRK_ANDROID_TOOL_INSTANCE": "x"}),
+            ("androidBuildPublication", {}), ("androidPreparation", {}), ("androidOsContractInput", {}), ("githubReadOnly", {}))]
+        for target, key, value in mutations:
+            def change(name, record):
+                if name != target: return
+                if value == "missing": record.pop(key)
+                else: record[key] = value
+            with self.subTest(target=target, key=key), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary); env, elf, inputs = self.artifact(work, change)
+                with patch.dict(S.os.environ, env, clear=True), patch.object(S, "elf_dependencies", return_value=elf), \
+                     patch.object(S, "shell_source_manifest", return_value=inputs), self.assertRaises(S.D.Refused):
+                    S.installed_shell_candidate(work, "a" * 40, lifecycle=self.lifecycle, ordinary=self.selection)
+
+    def test_ordinary_closed_consumer_preserves_all_common_receipts_and_exact172_exports(self):
+        observed = closed_project_draft_data(self.lifecycle, ordinary=self.selection)
+        self.assertEqual(len(observed["files"]), 172)
+        result = S.shell_project_draft_observation(observed, self.lifecycle, ordinary=self.selection)
+        self.assertEqual(result, observed["projectDraft"])
+        self.assertIsNone(self.lifecycle.SHELL_ANDROID_MATERIALS)
+        self.assertEqual(observed["cases"]["settled-failure"]["exitCode"], 1)
+
+    def test_closed_consumer_rejects_other_scopes_partial_cases_files_and_relabelled_placeholders(self):
+        observed = closed_project_draft_data(self.lifecycle, ordinary=self.selection)
+        for fault in ("scope-missing", "scope-changed", "old-state", "android", "github", "file-missing", "file-extra", "file-duplicate",
+                      "placeholder-empty", "placeholder-before", "case-pin", *self.selection["cases"], "android-build", "github-synthetic"):
+            changed = deepcopy(observed)
+            if fault == "scope-missing": changed.pop("ordinary21")
+            elif fault == "scope-changed": changed["ordinary21"]["remainingRequiredCases"] = []
+            elif fault == "old-state": changed["state"] = "normal-shell-installed-runtime-connection-observed"
+            elif fault == "android": changed["androidBuild"] = {}
+            elif fault == "github": changed["githubReadOnly"] = {}
+            elif fault == "file-missing": changed["files"].pop()
+            elif fault == "file-extra": changed["files"].append({"path": "lifecycle-shell-android-build.stdout", "size": 0, "sha256": "f" * 64})
+            elif fault == "file-duplicate": changed["files"][-1] = deepcopy(changed["files"][0])
+            elif fault == "placeholder-empty": changed["namespacePlaceholders"]["empty"] = False
+            elif fault == "placeholder-before": changed["namespacePlaceholders"]["before"]["sha256"] = "f" * 64
+            elif fault == "case-pin": next(row for row in changed["files"] if row["path"] == "lifecycle-shell-cases.json")["sha256"] = "f" * 64
+            elif fault in self.selection["cases"]: changed["cases"].pop(fault)
+            else: changed["cases"][fault] = {"case": fault, "exitCode": 0}
+            with self.subTest(fault=fault), self.assertRaises(S.D.Refused):
+                S.shell_project_draft_observation(changed, self.lifecycle, ordinary=self.selection)
+        with self.assertRaises(S.D.Refused): S.shell_project_draft_observation(observed, self.lifecycle)
+        observed.pop("ordinary21"); observed["state"] = "normal-shell-installed-runtime-connection-observed"
+        with self.assertRaises(S.D.Refused): S.shell_project_draft_observation(observed, self.lifecycle)
 
 
 if __name__ == "__main__":

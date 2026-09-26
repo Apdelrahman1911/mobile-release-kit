@@ -2653,6 +2653,15 @@ def fixture_namespace_data(value):
                           for i, path in enumerate(("/", "/var", "/var/lib"))]}
 
 
+def ordinary_placeholder_data(value):
+    """Fictional closed namespace DATA, never original host metadata."""
+    return {"schemaVersion": 1, "fixture": "ordinary21-inert-placeholders-v1",
+            "ordinary21": L.shell_ordinary_selection(), "namespace": fixture_namespace_data(value),
+            "entries": [{"path": name, "kind": "directory", "children": [],
+                         "identity": [1, 2000 + index, stat.S_IFDIR | 0o700, 0, 0, 2, 4096, 11, 11]}
+                        for index, name in enumerate(("android-build", "android-build-cancel", "android-build-failure", "android-build-refusals"))]}
+
+
 def session_fixture_data(value, case, *, changed=False):
     """In-memory fixture correspondence only; no native inputs are created."""
     namespace = fixture_namespace_data(value)
@@ -3163,12 +3172,15 @@ def settled_failure_capture():
             + b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", b"")
 
 
-def closed_shell_data():
+def closed_shell_data(*, ordinary=False):
     value, expected = installed_handoff(), map_data()
     value.pop("installed")
     value["shell"] = {"rosterSha256": "a" * 64, "producerAttempt": "1", "artifactId": "7",
                       "acceptedU": {"sourceSha": "b" * 40, "runId": "8", "attempt": "1", "artifactId": "9"}}
-    value["shell"]["androidPublication"] = L.shell_android_publication_request(value["taskRoot"])
+    if ordinary:
+        value["shell"]["ordinary21"] = L.shell_ordinary_selection()
+    else:
+        value["shell"]["androidPublication"] = L.shell_android_publication_request(value["taskRoot"])
     maps = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
             for role, row in sorted(expected.items())]
     captures = {"normal": (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""),
@@ -3179,7 +3191,7 @@ def closed_shell_data():
                 **{case: session_capture(case, expected=expected) for case in L.SHELL_SESSION_CASES}, "metadata-save": metadata_capture(),
                 **{case: tools_offline_capture(case) for case in L.SHELL_TOOLS_OFFLINE_CASES},
                 "settled-failure": settled_failure_capture(), "version-save": version_capture(),
-                **{case: android_capture(case) for case in L.SHELL_ANDROID_CASES}}
+                **{case: android_capture(case) for case in (() if ordinary else L.SHELL_ANDROID_CASES)}}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         code = 1 if case == "settled-failure" else 0
@@ -3203,7 +3215,7 @@ def closed_shell_data():
         files["shell-version-save-" + phase + ".json"] = L.canonical(version_fixture_data(value, saved=phase == "after"))
         for case in L.SHELL_TOOLS_OFFLINE_CASES:
             files["shell-" + case + "-" + phase + ".json"] = L.canonical(tools_offline_fixture_data(value, case, after=phase == "after"))
-        for case in L.SHELL_ANDROID_CASES:
+        for case in (() if ordinary else L.SHELL_ANDROID_CASES):
             files["shell-" + case + "-" + phase + ".json"] = L.canonical(android_fixture_data(value, case, after=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
@@ -3214,10 +3226,17 @@ def closed_shell_data():
     outcome = {"shellRosterSha256": value["shell"]["rosterSha256"], "shellProducerAttempt": "1", "shellArtifactId": "7",
                "acceptedU": value["shell"]["acceptedU"], "consumerAttempt": value["attempt"],
                "packageLifecycleQualified": False, "shellPackageBuilt": False, "commands": commands}
-    outcome["androidPublication"] = {"state": "verified-after-consumers", "instance": ANDROID_MATERIAL_DATA["instance"],
-        "materials": deepcopy(ANDROID_MATERIAL_DATA), **deepcopy(ANDROID_PUBLICATION_DATA), "createdDirectories": 7,
-        "verifiedFiles": 5, "verifiedBytes": 5, "manifestPublished": True, "uncertainEntry": None,
-        "qualified": False, "cleanupClaimed": False}
+    if ordinary:
+        outcome["ordinary21"] = L.shell_ordinary_selection()
+        for phase in ("before", "after"):
+            files["shell-ordinary21-placeholders-" + phase + ".json"] = L.canonical(ordinary_placeholder_data(value))
+        for name in L.public_files(value):
+            files.setdefault(name, b"")  # Unconsumed outer-finality captures remain inert in this direct decoder fixture.
+    else:
+        outcome["androidPublication"] = {"state": "verified-after-consumers", "instance": ANDROID_MATERIAL_DATA["instance"],
+            "materials": deepcopy(ANDROID_MATERIAL_DATA), **deepcopy(ANDROID_PUBLICATION_DATA), "createdDirectories": 7,
+            "verifiedFiles": 5, "verifiedBytes": 5, "manifestPublished": True, "uncertainEntry": None,
+            "qualified": False, "cleanupClaimed": False}
     return value, outcome, files, expected
 
 
@@ -4321,7 +4340,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             "_retain('shell-metadata-save-after.json', metadata_after)",
             "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
         final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
-        self.assertEqual(len(final.body), 5)  # Docstring, separate GitHub return, common comparisons and two original loops.
+        self.assertEqual(len(final.body), 7)  # GitHub return, common21 families, selected Android loop and inert placeholders.
         self.assertIsInstance(final.body[1], ast.If)
         self.assertEqual(ast.unparse(final.body[1].test), "shell_github(value)")
         self.assertIsInstance(final.body[1].body[-1], ast.Return)
@@ -4342,6 +4361,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(ast.unparse(tools_loop.iter), "SHELL_TOOLS_OFFLINE_CASES")
         self.assertEqual(ast.unparse(tools_loop.body[0].value.args[0]),
             "canonical(_shell_tools_offline_inventory(value, namespace, case, after=True)) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)")
+        self.assertEqual(ast.unparse(final.body[5].iter), "shell_android_cases(value)")
+        self.assertEqual(ast.unparse(final.body[6].test), "shell_ordinary(value)")
+        self.assertEqual(ast.unparse(final.body[6].body[-1]),
+                         "_retain('shell-ordinary21-placeholders-after.json', after)")
         shell = next(node for node in unit.body if isinstance(node, ast.If) and ast.unparse(node.test) == "'shell' in value")
         loop_index = shell.body.index(loop)
         self.assertEqual(ast.unparse(shell.body[loop_index + 1]), "_shell_fixtures_final(value, namespace)")
@@ -5566,10 +5589,11 @@ class AndroidPublicationContracts(unittest.TestCase):
 class AndroidBuildLifecycleContracts(unittest.TestCase):
     def test_pending_material_refuses_before_fixture_creation_or_any_process(self):
         self.assertIsNone(L.SHELL_ANDROID_MATERIALS)
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
         with patch.object(Path, "mkdir") as mkdir, patch.object(L.subprocess, "Popen") as process:
             for action in (L.shell_android_compile_environment,
                            lambda: L._shell_android_files("android-build"),
-                           lambda: L._shell_fixtures_prepare(installed_handoff())):
+                           lambda: L._shell_fixtures_prepare(value)):
                 with self.assertRaisesRegex(ValueError, "material/OS-closure binding is pending"): action()
             mkdir.assert_not_called(); process.assert_not_called()
         for invalid in ({}, {**ANDROID_MATERIAL_DATA, "root": "/other"},
@@ -5984,8 +6008,9 @@ class ToolsOfflineLifecycleContracts(unittest.TestCase):
     def test_new_postexit_capture_stays_after_the_existing_success_gate(self):
         tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
         unit = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
-        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For) and ast.unparse(node.iter) == "SHELL_CASES")
-        branch = next(node for node in loop.body if isinstance(node, ast.If))
+        loop = next(node for node in ast.walk(unit) if isinstance(node, ast.For) and ast.unparse(node.iter) == "shell_cases(value)")
+        transaction = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
         gate = next(i for i, node in enumerate(branch.orelse) if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
                     and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
         added = next(node for node in branch.orelse[gate + 1:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_TOOLS_OFFLINE_CASES")
@@ -8176,7 +8201,7 @@ class InstalledGitHubReadOnlyDataContracts(unittest.TestCase):
                     L.shell_handoff(changed, [])
             changed = deepcopy(value)
             changed["shell"].pop("artifactId"); changed["shell"]["localTransport"] = {}
-            with self.assertRaisesRegex(L.Refused, "GitHub route cannot adopt Android"):
+            with self.assertRaisesRegex(L.Refused, "Non-Android scope cannot adopt Android"):
                 L.shell_handoff(changed, [])
             changed = deepcopy(value); changed["shell"]["androidPublication"] = {}
             with self.assertRaisesRegex(L.Refused, "Fixed shell handoff fields differ"):
@@ -9132,6 +9157,214 @@ class CompositionRoutingRegressionContracts(unittest.TestCase):
                     self.assertFalse(record["cleanupProven"])
                     self.assertTrue(record["laterLaunchesClosed"])
                     self.assertNotIn("evidence could not be closed", stderr.getvalue())
+
+
+class Ordinary21LifecycleContracts(unittest.TestCase):
+    """Inert SOURCE/DATA and mocked-filesystem tests, never a native owner."""
+    cases = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply",
+             "session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase", "metadata-save",
+             "tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative", "offline-drift",
+             "offline-cancel", "offline-settlement", "settled-failure", "version-save")
+    remaining = ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals")
+
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.guards = [self.stack.enter_context(patch.object(L, name, side_effect=AssertionError("No Android/native work in ordinary21 DATA tests")))
+                       for name in ("command", "package_command", "_publish_android", "_finish_android_publication",
+                                    "_android_closed_publication", "_android_material_engine", "shell_android_materials",
+                                    "shell_android_compile_environment", "shell_android_publication_data",
+                                    "_shell_android_fixtures_prepare", "_shell_android_inventory", "_shell_android_roster")]
+        self.guards.append(self.stack.enter_context(patch.object(L.subprocess, "Popen", side_effect=AssertionError("No process launch"))))
+
+    def tearDown(self):
+        for guard in self.guards:
+            guard.assert_not_called()
+
+    def value(self):
+        value = installed_handoff()
+        value.pop("installed")
+        pin = {"size": 12, "sha256": "c" * 64}
+        binaries = {role: {"path": "/task/admitted-shell/" + role, **pin} for role in ("normal", "observer")}
+        compiler = {"sourceSha": value["sourceSha"], "sourceTree": "d" * 40, "runId": value["runId"], "attempt": "1",
+            "features": L.SHELL_FEATURES, "manifestSha256": L.M, "protocolSha256": L.Q, "exportedArtifacts": binaries,
+            "ordinary21": L.shell_ordinary_selection(), "androidBuildMaterials": None,
+            "androidBuildBindings": {}, "androidBuildPublication": None}
+        value["shell"] = {"binaries": binaries, "compiler": compiler, "rosterSha256": "e" * 64,
+            "producerAttempt": "1", "artifactId": "17", "loaderPolicy": {}, "ordinary21": L.shell_ordinary_selection(),
+            "acceptedU": {"sourceSha": value["compilerRecords"]["sourceSha"], "runId": "5", "attempt": "1", "artifactId": "11"}}
+        return value
+
+    def test_exact21_selection_preserves_historical25_github_and_existing_caps(self):
+        value = self.value()
+        self.assertEqual(L.shell_ordinary_selection(), {"profile": "ordinary21-v1", "cases": list(self.cases),
+            "remainingRequiredCases": list(self.remaining), "namespacePlaceholders": sorted(self.remaining),
+            "androidPreparation": False, "androidExecution": False})
+        self.assertEqual(L.shell_cases(value), self.cases)
+        self.assertEqual(L.shell_observers(value), self.cases[1:])
+        self.assertEqual(L.shell_android_cases(value), ())
+        self.assertFalse(L.shell_android(value))
+        self.assertEqual(L.result_state(value), "ordinary21-shell-installed-runtime-connection-observed")
+        historical = {"shell": {}}
+        self.assertEqual(L.shell_cases(historical), (*self.cases, *self.remaining))
+        self.assertEqual(L.SHELL_CASES, (*self.cases, *self.remaining))
+        self.assertTrue(L.shell_android(historical))
+        self.assertEqual(L.result_state(historical), "normal-shell-installed-runtime-connection-observed")
+        self.assertEqual((len(L.public_files(historical)), len(L.public_files(value))), (188, 170))
+        self.assertEqual((len(L.root_phases(historical)), len(L.root_phases(value))), (39, 35))
+        self.assertEqual(L.shell_public_limit(value), L.shell_public_limit(historical))
+        self.assertEqual((L.SHELL_PUBLIC_FILE_LIMIT, L.TOTAL_LIMIT, L.SHELL_FIXTURE_NAMESPACE_LIMIT), (190, 32 << 20, 2048))
+        self.assertEqual(L.shell_fixture_children(value), L.SHELL_FIXTURE_CHILDREN)
+        self.assertEqual(len(L.shell_fixture_children(value)), 24)
+        self.assertEqual({name for name in L.public_files(value) if name.startswith("shell-android-")}, set())
+        self.assertEqual({name for name in L.public_files(value) if "ordinary21-placeholders" in name},
+                         {"shell-ordinary21-placeholders-before.json", "shell-ordinary21-placeholders-after.json"})
+        for profile, cases in ((L.SHELL_GITHUB_PROFILE, L.SHELL_GITHUB_CASES),
+                               (L.SHELL_GITHUB_BOUNDARY_PROFILE, L.SHELL_GITHUB_BOUNDARY_CASES)):
+            github = {"shell": {"githubReadOnly": L.shell_github_selection(profile)}}
+            self.assertEqual(L.shell_cases(github), cases)
+            self.assertFalse(L.shell_ordinary(github)); self.assertFalse(L.shell_android(github))
+            self.assertFalse(any("ordinary21" in name for name in L.public_files(github)))
+
+    def test_selection_is_closed_and_cannot_mix_profiles_or_freeform_cases(self):
+        for fault in (None, {}, "ordinary21-v1", {**L.shell_ordinary_selection(), "profile": "ordinary20-v1"},
+                      {**L.shell_ordinary_selection(), "cases": list(self.cases[:-1])},
+                      {**L.shell_ordinary_selection(), "cases": [*self.cases, self.remaining[0]]},
+                      {**L.shell_ordinary_selection(), "cases": list(reversed(self.cases))},
+                      {**L.shell_ordinary_selection(), "remainingRequiredCases": []},
+                      {**L.shell_ordinary_selection(), "namespacePlaceholders": []},
+                      {**L.shell_ordinary_selection(), "androidPreparation": 0},
+                      {**L.shell_ordinary_selection(), "androidExecution": True},
+                      {**L.shell_ordinary_selection(), "extra": False}):
+            for reader in (L.shell_cases, L.public_files, L.result_state):
+                with self.subTest(fault=fault, reader=reader.__name__), self.assertRaises(L.Refused):
+                    reader({"shell": {"ordinary21": fault}})
+        for field in ("githubReadOnly", "androidPublication", "localTransport"):
+            with self.subTest(field=field), self.assertRaises(L.Refused):
+                L.shell_cases({"shell": {"ordinary21": L.shell_ordinary_selection(), field: {}}})
+
+    def test_original_handoff_requires_scope_correspondence_and_present_null_android_fields(self):
+        self.assertIsNone(L.shell_handoff(self.value(), []))
+        for target, field, replacement in (
+            ("shell", "ordinary21", None), ("compiler", "ordinary21", None),
+            ("compiler", "ordinary21", {**L.shell_ordinary_selection(), "cases": list(self.cases[:-1])}),
+            *(("compiler", key, "missing") for key in ("ordinary21", "androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")),
+            ("compiler", "androidBuildMaterials", {}), ("compiler", "androidBuildBindings", {"MRK_ANDROID_TOOL_INSTANCE": "invented"}),
+            ("compiler", "androidBuildPublication", {}),
+            *(("compiler", key, {}) for key in ("androidPreparation", "androidOsContractInput", "githubReadOnly", "localTransport")),
+            *(("shell", key, {}) for key in ("androidPublication", "githubReadOnly", "localTransport")),
+        ):
+            value = self.value(); row = value["shell"] if target == "shell" else value["shell"]["compiler"]
+            if replacement == "missing": row.pop(field)
+            else: row[field] = replacement
+            with self.subTest(target=target, field=field, value=replacement), self.assertRaises(L.Refused):
+                L.shell_handoff(value, [])
+        value = self.value(); value["shell"].pop("ordinary21")
+        with self.assertRaises(L.Refused): L.shell_handoff(value, [])
+
+    def test_capacity_admits_selected21_without_android_material_or_fixture_rosters(self):
+        value = self.value()
+        value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024,
+            "installedBytes": {key: 2048 for key in L.VERSIONS}, "installedEntries": {key: 16 for key in L.VERSIONS}}
+        with patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=1 << 30, f_frsize=4096, f_favail=1 << 30)), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)):
+            self.assertIsNone(L._capacity(value))
+
+    def test_placeholder_decoder_requires_exact_empty_originals_and_unchanged_capture(self):
+        value = self.value(); document = ordinary_placeholder_data(value); raw = L.canonical(document)
+        result = L.shell_ordinary_placeholders(value, raw, raw)
+        self.assertTrue(result["namespaceOnly"]); self.assertTrue(result["empty"])
+        self.assertEqual(result["names"], sorted(self.remaining)); self.assertEqual(result["before"], result["after"])
+        for fault in ("child", "mode", "owner", "symlink", "alias", "device", "missing", "extra", "schema", "scope", "replacement", "stamp"):
+            changed = deepcopy(document); row = changed["entries"][0]
+            if fault == "child": row["children"].append("unexpected")
+            elif fault == "mode": row["identity"][2] = stat.S_IFDIR | 0o755
+            elif fault == "owner": row["identity"][3] = 1001
+            elif fault == "symlink": row["kind"] = "symlink"
+            elif fault == "alias": row["identity"][1] = document["namespace"]["identity"][1]
+            elif fault == "device": row["identity"][0] = 2
+            elif fault == "missing": changed["entries"].pop()
+            elif fault == "extra": changed["entries"].append(deepcopy(row))
+            elif fault == "schema": changed["schemaVersion"] = True
+            elif fault == "scope": changed["ordinary21"]["androidExecution"] = True
+            elif fault == "replacement": row["identity"][1] += 100
+            else: row["identity"][8] += 1
+            with self.subTest(fault=fault), self.assertRaises(L.Refused):
+                L.shell_ordinary_placeholders(value, raw, L.canonical(changed))
+
+    def test_complete_mocked_preparation_creates_only_four_empty_root_owned_placeholders(self):
+        value = self.value(); root = L.shell_fixture_root(value)
+        namespace = fixture_namespace_data(value)
+        ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        nodes = {}; writes = []
+        def mkdir(path, *, mode):
+            if path in nodes: raise FileExistsError("inert exclusive creation conflict")
+            nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFDIR | mode, size=4096, stamp=11)
+            if path.parent in nodes: nodes[path.parent].st_nlink += 1
+        def metadata(path):
+            if path not in nodes: raise FileNotFoundError("inert absent name")
+            return deepcopy(nodes[path])
+        def write(path, raw, mode):
+            self.assertNotIn(path, nodes); writes.append(path)
+            nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFREG | mode, size=len(raw), stamp=11)
+        def chmod(path, mode): nodes[path].st_mode = stat.S_IFMT(nodes[path].st_mode) | mode
+        def chown(path, uid, gid, **kwargs): nodes[path].st_uid, nodes[path].st_gid = uid, gid
+        def symlink(target, path): nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFLNK | 0o777, size=len(target), stamp=11)
+        def scan(path):
+            context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=p.name) for p in nodes if p.parent == path))
+            context.__exit__ = Mock(return_value=False); return context
+        with patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "_shell_fixture_ancestry", return_value=ancestry), \
+             patch.object(Path, "mkdir", autospec=True, side_effect=mkdir), patch.object(Path, "lstat", autospec=True, side_effect=metadata), \
+             patch.object(L, "_D", SimpleNamespace(write=write)), patch.object(L, "_xattrs"), \
+             patch.object(L.os, "chown", side_effect=chown), patch.object(L.os, "chmod", side_effect=chmod), \
+             patch.object(L.os, "symlink", side_effect=symlink), patch.object(L.os, "scandir", side_effect=scan), \
+             patch.object(L, "_retain") as retained:
+            binding = L._shell_fixtures_prepare(value)
+            self.assertEqual(L.decode(binding)["children"], list(L.SHELL_FIXTURE_CHILDREN))
+            retained.assert_called_once()
+            name, before = retained.call_args.args
+            self.assertEqual(name, "shell-ordinary21-placeholders-before.json")
+            after = L.canonical(L._shell_ordinary_placeholders_inventory(value, binding))
+            self.assertTrue(L.shell_ordinary_placeholders(value, before, after)["empty"])
+            placeholders = {root / name for name in self.remaining}
+            self.assertEqual({p for p in nodes if any(p == q or p.is_relative_to(q) for q in placeholders)}, placeholders)
+            self.assertFalse(any(p == q or p.is_relative_to(q) for p in writes for q in placeholders))
+            for path in placeholders:
+                self.assertEqual((nodes[path].st_mode, nodes[path].st_uid, nodes[path].st_gid), (stat.S_IFDIR | 0o700, 0, 0))
+            # Existing namespace occupants cannot be adopted on a repeated call.
+            with self.assertRaises(FileExistsError): L._shell_ordinary_placeholders_prepare(value, root)
+            nodes[root / self.remaining[0] / "unexpected"] = inert_stat(9999, stat.S_IFREG | 0o600)
+            with self.assertRaises(L.Refused): L._shell_ordinary_placeholders_inventory(value, binding)
+
+    def test_closed_decoder_validates_all21_original_receipts_and_placeholder_proof_without_android(self):
+        value, outcome, files, expected = closed_shell_data(ordinary=True)
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(set(result["cases"]), set(self.cases))
+        self.assertEqual(result["cases"]["settled-failure"]["exitCode"], 1)
+        self.assertFalse({"androidBuild", "androidPublication", "githubReadOnly"} & set(result))
+        self.assertEqual(result["ordinary21"]["remainingRequiredCases"], list(self.remaining))
+        self.assertTrue(result["namespacePlaceholders"]["empty"])
+
+    def test_closed_decoder_refuses_scope_downgrade_mixed_results_and_partial_or_extra_rosters(self):
+        value, outcome, files, expected = closed_shell_data(ordinary=True)
+        for fault in ("handoff-scope", "outcome-scope", "null-scope", "android-result", "github-result", "file-missing", "file-extra",
+                      *self.cases, *self.remaining, "github-synthetic"):
+            current, result, raw = deepcopy(value), deepcopy(outcome), dict(files)
+            if fault == "handoff-scope": current["shell"].pop("ordinary21")
+            elif fault == "outcome-scope": result.pop("ordinary21")
+            elif fault == "null-scope": result["ordinary21"] = None
+            elif fault == "android-result": result["androidPublication"] = {}
+            elif fault == "github-result": result["githubReadOnly"] = {}
+            elif fault == "file-missing": raw.pop("shell-positive.stdout")
+            elif fault == "file-extra": raw["shell-android-build.stdout"] = b""
+            else:
+                cases = L.decode(raw["shell-cases.json"])
+                if fault in self.cases: cases.pop(fault)
+                else: cases[fault] = {"case": fault, "exitCode": 0}
+                raw["shell-cases.json"] = L.canonical(cases)
+            with self.subTest(fault=fault), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises(L.Refused):
+                L.shell_closed_result(current, result, raw)
 
 
 if __name__ == "__main__":
