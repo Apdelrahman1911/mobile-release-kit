@@ -3,7 +3,7 @@
 import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
 import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, TokenFields, WifFields } from './assetSessionTypes.ts';
-import { ASSET_REASON_HELP, assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
+import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -326,7 +326,11 @@ export class AssetSessionController {
     if (!this.contextReady() || !operation?.selectionToken || operation.selectionToken === this.spentSelection || !this.state.selectionKind ||
         !phase || phase.uncertain || phase.operationId !== operation.operationId || phase.localRevision !== this.localRevision || phase.intent.kind !== this.state.selectionKind) return false;
     const request: CredentialPrepareRequest = { contextRevision: this.state.status!.context!.revision, source: { type: 'selection', selectionToken: operation.selectionToken }, fields };
-    if (!assetRequestFits('credential_prepare', request)) { this.update({ error: assetError({ code: 'asset_invalid_request' }) }); return false; }
+    // The selection token has no renderer kind field. Keep its companions tied
+    // to the original choice; native ownership independently enforces this too.
+    if (!assetRequestFits('credential_prepare', request) || Object.keys(fields).length !== SESSION_FIELDS[this.state.selectionKind].length) {
+      this.update({ error: assetError({ code: 'asset_invalid_request' }) }); return false;
+    }
     this.spentSelection = operation.selectionToken;
     return this.run('prepare', () => this.api!.prepareCredential(request), this.phase(phase.intent, 'prepare', 'save', phase));
   }

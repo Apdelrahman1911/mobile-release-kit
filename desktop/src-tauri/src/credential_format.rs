@@ -14,6 +14,9 @@
 use std::{fmt, io, mem};
 use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Serialize};
 
+#[path = "credential_plist.rs"]
+mod plist_xml;
+
 const JKS_LIMIT: usize = 32 * 1024 * 1024;
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
 const QUOTED_LIMIT: usize = 8192; // Includes both encoded quote bytes.
@@ -34,7 +37,7 @@ const NO_KEY: u32 = u32::MAX;
 const PARSE_ERROR: &str = "credential document refused";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase }
+pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase }
 
 pub(crate) struct Interrupted;
 
@@ -67,7 +70,21 @@ enum Observed {
     Jks { #[serde(rename = "byteCount")] byte_count: u64, version: u8 },
     #[serde(rename = "firebase-json")]
     FirebaseJson { #[serde(rename = "byteCount")] byte_count: u64, document: AndroidProjection },
+    #[serde(rename = "firebase-plist")]
+    FirebasePlist { #[serde(rename = "byteCount")] byte_count: u64, encoding: PlistEncoding, document: IosProjection },
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PlistEncoding { Xml }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum IosRoot { Dictionary, Other }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IosProjection { root: IosRoot, bundle_id: Option<String> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,20 +123,23 @@ pub(crate) fn inspect(
     kind: FileKind, bytes: &[u8], stop: &mut dyn FnMut() -> bool,
 ) -> Result<FileObservation, Interrupted> {
     if stop() { return Err(Interrupted); }
-    let maximum = match kind { FileKind::AndroidKeystore => JKS_LIMIT, FileKind::AndroidFirebase => JSON_LIMIT };
+    let maximum = match kind { FileKind::AndroidKeystore => JKS_LIMIT, FileKind::AndroidFirebase | FileKind::IosFirebase => JSON_LIMIT };
     let observation = if bytes.len() > maximum {
         FileObservation::unavailable(UnavailableReason::MaterialLimit)
     } else if bytes.is_empty() {
         FileObservation::rejected(RejectedReason::EmptyFile)
     } else {
-        match kind {
-            FileKind::AndroidKeystore => jks(bytes),
-            FileKind::AndroidFirebase => match firebase_json(bytes, stop) {
-                Ok(observation) => observation,
-                Err(Failure::Interrupted) => return Err(Interrupted),
-                Err(Failure::Limit(_)) => FileObservation::unavailable(UnavailableReason::ParserLimit),
-                Err(Failure::Malformed) => FileObservation::rejected(RejectedReason::MalformedContainer),
-            },
+        let parsed = match kind {
+            FileKind::AndroidKeystore => Ok(jks(bytes)),
+            FileKind::AndroidFirebase => firebase_json(bytes, stop),
+            FileKind::IosFirebase => plist_xml::inspect(bytes, stop),
+        };
+        match parsed {
+            Ok(observation) => observation,
+            Err(Failure::Interrupted) => return Err(Interrupted),
+            Err(Failure::Limit(_)) => FileObservation::unavailable(UnavailableReason::ParserLimit),
+            Err(Failure::Malformed) => FileObservation::rejected(RejectedReason::MalformedContainer),
+            Err(Failure::UnsupportedVariant) => FileObservation::unavailable(UnavailableReason::UnsupportedVariant),
         }
     };
     if stop() { Err(Interrupted) } else { Ok(observation) }
@@ -141,7 +161,7 @@ fn jks(bytes: &[u8]) -> FileObservation {
 enum Limit { Lexical, Number, Depth, Nodes, KeyStorage, KeyComparison, Projection, Allocation }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Failure { Interrupted, Limit(Limit), Malformed }
+enum Failure { Interrupted, Limit(Limit), Malformed, UnsupportedVariant }
 
 fn poll(stop: &mut dyn FnMut() -> bool) -> Result<(), Failure> {
     if stop() { Err(Failure::Interrupted) } else { Ok(()) }

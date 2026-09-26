@@ -281,6 +281,24 @@ test('preparation targets require the exact current core row, active hint and ac
   } finally { h.controller.dispose(); }
 });
 
+test('a current iOS Firebase requirement opens the same file-only session guide without collection or policy duplication', async () => {
+  const h = harness();
+  try {
+    await read(h, valid([guidedRow('ios-firebase')]));
+    const source = h.state, calls = h.calls.length;
+    const target = h.controller.preparationTarget(source, source.result.requirements[0]);
+    assert.ok(target); assert.equal(target.guideId, 'ios-firebase');
+    assert.equal(sessionPreparationKind(target.guideId), 'ios-firebase');
+    assert.deepEqual(target.scope, { platform: 'ios', stage: 'candidate', purpose: 'full' });
+    assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === target.guideId).fields.map((field) => field.id), ['file']);
+    assert.equal(h.controller.preparationCurrent(target, target), true);
+    assert.equal(h.state, source); assert.equal(h.calls.length, calls);
+    h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.bundleId', value: 'org.changed' });
+    assert.equal(h.controller.preparationCurrent(target, target), false);
+    assert.equal(h.controller.preparationTarget(source, target.requirement), null);
+  } finally { h.controller.dispose(); }
+});
+
 test('retired preparation callbacks cannot revive after stage, project, draft, help, connection or save transitions', async () => {
   const changes = [
     ['stage away and back', (h) => { h.controller.setStage('production'); h.controller.setStage('candidate'); }],
@@ -326,6 +344,12 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   assert.ok(app.includes('releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding)'));
   assert.ok(app.includes('releaseInputs.dispose()') && app.includes('() => setHelp(null)'));
   assert.ok(page.includes('<CredentialSession state={state} controller={controller}'));
+  assert.ok(page.includes('isAssetFileKind(kind.id) ? sessionAvailable'));
+  assert.ok(session.includes('isAssetFileKind(preparation.guideId)') && session.includes('isAssetFileKind(effectiveKindId)'));
+  assert.ok(session.includes("state.selectionKind === 'android-keystore' ? { storePassword:"));
+  assert.match(session, /iOS Firebase scope: XML plist format and bundle-ID match only/);
+  assert.match(session, /Native validation: not run.*Service validation: not run.*Release readiness: unknown/);
+  assert.doesNotMatch(session, /and iOS plist import/);
   assert.ok(page.includes('<AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide}'));
   const navigation = page.slice(page.indexOf('const openGuide ='), page.indexOf('const credentials ='));
   assert.ok(navigation.includes('inputController.preparationCurrent(target, target)'));

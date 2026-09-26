@@ -1281,7 +1281,8 @@ mod owned_gtk {
         if owner.interrupted() { not_created(&call, Reason::UserCancelled); return; }
         let object = match choice {
             DialogChoice::File(kind) => {
-                let title = match kind { FileKind::AndroidKeystore => "Choose an Android JKS keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON" };
+                let title = match kind { FileKind::AndroidKeystore => "Choose an Android JKS keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON",
+                    FileKind::IosFirebase => "Choose iOS Firebase XML plist" };
                 Object::File(gtk::FileChooserDialog::with_buttons(Some(title), Some(&parent), gtk::FileChooserAction::Open,
                     &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)]))
             }
@@ -1346,6 +1347,10 @@ mod owned_gtk {
                             FileKind::AndroidFirebase => {
                                 filter.set_name(Some("Android Firebase JSON (.json)"));
                                 for pattern in ["*.json", "*.JSON"] { filter.add_pattern(pattern); }
+                            }
+                            FileKind::IosFirebase => {
+                                filter.set_name(Some("iOS Firebase XML plist (.plist)"));
+                                for pattern in ["*.plist", "*.PLIST"] { filter.add_pattern(pattern); }
                             }
                         }
                         dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);

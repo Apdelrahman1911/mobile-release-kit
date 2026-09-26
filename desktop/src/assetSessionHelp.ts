@@ -20,6 +20,12 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
     format: 'An original UTF-8 .json file, at most 4 MiB, within this importer’s document/complexity limits. Decoded duplicate names are refused. The core checks every supported client structure and the configured application ID; CLI parsing rules are unchanged.',
     failure: 'Malformed clients or an application-ID mismatch prevent a usable review. A parser-limit refusal is not proof that the original is malformed. No Firebase service is contacted and the original is never changed.',
   },
+  'ios-firebase/file': {
+    where: 'In Firebase Console, open Project settings, choose the intended iOS app under Your apps, and download GoogleService-Info.plist. Select that private original outside registered project folders. Do not use an exported service-account private key.',
+    format: 'An original UTF-8 XML 1.0 .plist file, at most 4 MiB. Binary plist is not supported. This importer bounds depth to 32 and applies scalar, key and document-complexity limits; decoded duplicate keys are refused. The core checks the root dictionary and BUNDLE_ID against the submitted iOS bundle ID.',
+    failure: 'Malformed XML, missing or nonstring BUNDLE_ID, or a bundle-ID mismatch prevent a usable review. Unsupported variants and parser-limit refusals do not prove the original is malformed. XML format and bundle-ID match do not verify a Firebase account or service. No service is contacted and the original is never changed.',
+    suffixes: ['.plist'],
+  },
   'google-wif/provider': { failure: 'Identifier syntax does not prove provider existence, repository binding or token exchange. This session does not log in, request an identity token or import Google ADC.' },
   'google-wif/serviceAccount': { failure: 'An email with the expected format is not proof of impersonation or Google Play permissions. No account or service is contacted.' },
   'project-read-token/token': { format: privateValueFormat, failure: 'Missing input matters only when selected by core requirements. This session does not fetch source or check token permissions. Never use a Store or administrator credential for this field.' },
@@ -62,7 +68,7 @@ const controls: Record<string, Partial<HelpContent>> = {
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',
     where: 'Click Select file and use the native picker. No manual registration, internal directory copying, path entry or renaming is required.',
-    format: 'One private original outside all registered projects on the qualified local filesystem. This first increment supports JKS headers and Android Firebase JSON only.',
+    format: 'One private original outside all registered projects on the qualified local filesystem. Supported file checks are JKS headers, Android Firebase JSON and iOS Firebase XML plist only. Binary plist is not supported; native availability is a separate gate.',
   },
   prepare: {
     requiredWhen: 'After file selection and companion entry, or when reviewing a scalar or retained record.',

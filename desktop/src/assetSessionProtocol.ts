@@ -1,9 +1,10 @@
 // Closed presentation/wire checks. Core alone judges credential policy. These
 // limits apply to already-materialized JS data, not upstream IPC allocations.
 import type { ApiError } from './types.ts';
-import type { AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
+import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
 
-export const ASSET_KINDS = ['android-keystore', 'android-firebase', 'google-wif', 'project-read-token'] as const;
+export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase'] as const;
+export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token'] as const;
 export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown'] as const;
 export const ASSET_PLATFORMS = ['android', 'ios', 'project'] as const;
 export const ASSET_STAGES = ['candidate', 'external-testing', 'production'] as const;
@@ -11,12 +12,14 @@ export const ASSET_PURPOSES = ['full', 'signing', 'store'] as const;
 export const SESSION_FIELDS = {
   'android-keystore': ['storePassword', 'keyAlias', 'keyPassword'],
   'android-firebase': [],
+  'ios-firebase': [],
   'google-wif': ['provider', 'serviceAccount'],
   'project-read-token': ['token'],
 } as const;
 const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'android-keystore': [['file', 'ANDROID_KEYSTORE_BASE64'], ['storePassword', 'ANDROID_KEYSTORE_PASSWORD'], ['keyAlias', 'ANDROID_KEY_ALIAS'], ['keyPassword', 'ANDROID_KEY_PASSWORD']],
   'android-firebase': [['file', 'ANDROID_GOOGLE_SERVICES_JSON_BASE64']],
+  'ios-firebase': [['file', 'IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64']],
   'google-wif': [['provider', 'GOOGLE_WIF_PROVIDER'], ['serviceAccount', 'GOOGLE_SERVICE_ACCOUNT']],
   'project-read-token': [['token', 'PROJECT_READ_TOKEN']],
 };
@@ -33,6 +36,7 @@ function keys(value: unknown, names: readonly string[]): value is ObjectValue {
   return object(value) && Object.keys(value).length === names.length && names.every((key) => Object.hasOwn(value, key));
 }
 function one(value: unknown, values: readonly string[]): boolean { return typeof value === 'string' && values.includes(value); }
+export function isAssetFileKind(value: unknown): value is AssetFileKind { return one(value, ASSET_FILE_KINDS); }
 export function assetCounter(value: unknown): value is number { return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff; }
 function token(value: unknown): value is string { return typeof value === 'string' && value.length === 32 && /^[0-9a-f]{32}$/u.test(value); }
 function projectId(value: unknown): value is string { return typeof value === 'string' && value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9_-]+$/u.test(value); }
@@ -186,7 +190,7 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
     case 'vault_prepare_delete': return recordRef(value);
     case 'asset_context': return keys(value, ['projectId', 'draft', 'platform', 'stage', 'purpose']) && projectId(value.projectId) && object(value.draft) &&
       assetJsonFits(value.draft, 524288) && scope({ platform: value.platform, stage: value.stage, purpose: value.purpose });
-    case 'asset_choose': return keys(value, ['contextRevision', 'kind', 'replacement']) && assetCounter(value.contextRevision) && one(value.kind, ['android-keystore', 'android-firebase']) &&
+    case 'asset_choose': return keys(value, ['contextRevision', 'kind', 'replacement']) && assetCounter(value.contextRevision) && isAssetFileKind(value.kind) &&
       (value.replacement === null || recordRef(value.replacement));
     case 'credential_prepare': {
       if (!object(value) || !assetCounter(value.contextRevision) || !object(value.source)) return false;
@@ -231,7 +235,7 @@ export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   unqualified: 'Native session import has not completed its required qualification. You can read the guides, but this build cannot collect private inputs.',
   'unsupported-platform': 'This session importer currently targets qualified Linux x86_64 systems. macOS, Windows and browser previews remain guide-only.',
   'unsupported-filesystem': 'This first importer supports a qualified local ext-family filesystem, not network, overlay or FUSE locations. Your original file was not changed.',
-  'unsupported-format': 'This first importer supports JKS headers, Android Firebase JSON, Google WIF values and project read tokens. Other formats are not yet enabled.',
+  'unsupported-format': 'This session importer supports JKS headers, Android Firebase JSON, iOS Firebase XML plist, Google WIF values and project read tokens. Binary plist and other file families are not enabled.',
   'invalid-request': 'The submitted input does not fit the supported interface. Review the field guide; no repair or retry was performed.',
   busy: 'The original session operation still owns its slot. Wait for its status or request Cancel; do not start a replacement operation.',
   'source-refused': 'The original file could not be safely captured. It must be a supported private regular file outside registered projects, without symbolic-link traversal. The app will not change its permissions or contents.',
