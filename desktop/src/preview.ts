@@ -1,3 +1,4 @@
+import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
@@ -77,6 +78,7 @@ const workflowUnavailable = async (): Promise<never> => { throw workflowEditErro
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
+const recoveryUnavailable = (): Promise<never> => Promise.reject(projectRecoveryError({ code: 'project_recovery_unavailable' }));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
 const androidUnavailable = (): Promise<never> => Promise.reject(androidBuildError({ code: 'android_build_unavailable' }));
 const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
@@ -162,6 +164,11 @@ export const previewApi: DesktopApi = {
   },
   // Browser requirements are explicit design examples. There is no successful
   // diagnostics fixture, native status, owner or fallback after a bridge error.
+  prepareProjectRecovery: recoveryUnavailable,
+  startProjectRecovery: recoveryUnavailable,
+  projectRecoveryStatus: recoveryUnavailable,
+  cancelProjectRecovery: recoveryUnavailable,
+  subscribeProjectRecovery: recoveryUnavailable,
   prepareAndroidBuild: androidUnavailable,
   startAndroidBuild: androidUnavailable,
   androidBuildStatus: androidUnavailable,

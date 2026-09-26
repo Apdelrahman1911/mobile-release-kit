@@ -184,6 +184,8 @@ class MacInstalledData(unittest.TestCase):
         encoded = TOOL.canonical(manifest) + b"\n"
         value, rows = TOOL.manifest_files(encoded, TOOL.digest(encoded))
         self.assertEqual(set(rows), {row["path"] for row in files})
+        self.assertNotIn("project_recovery_bootstrap.py", rows)  # Historical supplier roster is unchanged.
+        self.assertIn("project_recovery_bootstrap.py", TOOL.CURRENT_BOOTSTRAPS)
         with self.assertRaises(TOOL.Refused):
             TOOL.manifest_files(encoded, "0" * 64)
         manifest["files"] = list(reversed(files))
@@ -897,7 +899,7 @@ def current_data_fixture():
                   "src/mobile_release/_desktop_engine.py": engine,
                   TOOL.CURRENT_CA_SOURCE: b"SYNTHETIC CA DATA, not a trust store\n",
                   TOOL.CURRENT_HELPER_SOURCE: helper}
-        inputs.update({"desktop/" + name: ("# current inert " + name + "\n").encode() for name in TOOL.BOOTSTRAPS})
+        inputs.update({"desktop/" + name: ("# current inert " + name + "\n").encode() for name in TOOL.CURRENT_BOOTSTRAPS})
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -945,10 +947,10 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertEqual(result["currentCoreFileCount"], 2)
             self.assertEqual(result["supplierInventorySha256"], description["supplierInventorySha256"])
             final = TOOL.tree(args.output, current_root_mode=0o555)
-            self.assertEqual(set(final), set(fixture.supplier) | TOOL.BOOTSTRAPS | {"core.zip", "manifest.json", "github-ca.pem"})
+            self.assertEqual(set(final), set(fixture.supplier) | TOOL.CURRENT_BOOTSTRAPS | {"core.zip", "manifest.json", "github-ca.pem"})
             for name, body in fixture.supplier.items():
                 self.assertEqual(final[name], (body, 0o555 if name == "python/bin/python3" else 0o444))
-            for name in TOOL.BOOTSTRAPS | {"github-ca.pem"}:
+            for name in TOOL.CURRENT_BOOTSTRAPS | {"github-ca.pem"}:
                 self.assertEqual(final[name], projection["desktop/" + name])
             TOOL.current_core_matches(final["core.zip"][0], projection)
             self.assertEqual(TOOL.tree(args.work / "source", current_root_mode=0o555), projection)
@@ -1072,7 +1074,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             def incomplete(source, runtime, target):
                 (runtime / "partial-data").write_bytes(b"retained")
                 raise ValueError("injected preparation failure")
-            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare=incomplete)):
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=incomplete)):
                 with self.assertRaises(ValueError):
                     TOOL.current_runtime_command(args)
             self.assertEqual((args.work / "runtime/partial-data").read_bytes(), b"retained")
@@ -1081,10 +1083,10 @@ class MacCurrentRuntimeData(unittest.TestCase):
             args = self.args(fixture, "current-runtime", "projection-mode")
             args.expected_source = source_digest
             def writable_projection(source, runtime, target):
-                result = preparer.prepare(source, runtime, target)
+                result = preparer.prepare_current(source, runtime, target)
                 (source / "desktop").chmod(0o700)
                 return result
-            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare=writable_projection)):
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=writable_projection)):
                 with self.assertRaisesRegex(TOOL.Refused, "current-directory-mode-owner"):
                     TOOL.current_runtime_command(args)
             self.assertFalse(args.output.exists())
@@ -1092,10 +1094,10 @@ class MacCurrentRuntimeData(unittest.TestCase):
             args.expected_source = source_digest
             original = fixture.checkout / "desktop/engine_bootstrap.py"
             def changed_source(source, runtime, target):
-                result = preparer.prepare(source, runtime, target)
+                result = preparer.prepare_current(source, runtime, target)
                 original.write_bytes(b"# changed after captured source\n")
                 return result
-            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare=changed_source)):
+            with mock.patch.object(TOOL, "current_preparer", return_value=SimpleNamespace(prepare_current=changed_source)):
                 with self.assertRaisesRegex(TOOL.Refused, "current-source-post-changed"):
                     TOOL.current_runtime_command(args)
             self.assertFalse(args.output.exists())

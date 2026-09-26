@@ -17,6 +17,8 @@ mod offline_preflight_protocol;
 mod offline_preflight_owner;
 mod android_build_protocol;
 mod android_build_owner;
+mod project_recovery_protocol;
+mod project_recovery_owner;
 mod android_toolchain;
 mod saved_command_owner;
 pub mod runtime;

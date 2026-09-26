@@ -237,7 +237,7 @@ test('SOURCE integration shares one controller and keeps Recovery alerts indepen
   assert.match(source, /const current = !state.pending && !state.uncertain && !state.integrityFailed/);
   assert.match(source, /\['authorizedBy', 'executedBy', 'producedBy'\]/);
   assert.doesNotMatch(source, /useEffect|\bhref\s*=|\bfetch\s*\(|chooseProject|saveDraft|discardDraft/);
-  for (const text of ['File-edit alerts from this session', 'Earlier alerts stay visible', 'Project recovery remains unassessed', 'This is not a clean-state check']) assert.ok(future.includes(text), text);
+  for (const text of ['File-edit alerts from this session', 'Earlier alerts stay visible', 'Other recovery remains unassessed', 'This is not a clean-state check']) assert.ok(future.includes(text), text);
   assert.equal(SAVED_EVIDENCE_WARNING, 'Saved documents only, not live Store status or retry approval.');
   assert.match(releaseEvidenceHelp.where, /Download and extract.*protected release workflow.*final evidence folder, not your project or ZIP.*nested folders unchanged/);
 });

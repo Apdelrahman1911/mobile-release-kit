@@ -147,6 +147,33 @@ class RuntimePreparationTests(unittest.TestCase):
                 self.assertEqual(executable.read_bytes(), b"not an executable; fixture data only\n")
             self.assertEqual(manifests[0], manifests[1])
 
+    def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source"
+            package = source / "src/mobile_release"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_bytes(b'__version__ = "0.3.0"\n')
+            (package / "_desktop_engine.py").write_bytes(b"# inert protocol only\n")
+            desktop = source / "desktop"
+            desktop.mkdir()
+            for name in (*preparation.BOOTSTRAPS, preparation.GITHUB_CA_NAME):
+                (desktop / name).write_bytes(b"INERT DATA; NEVER EXECUTED\n")
+            current = base / "current"
+            (current / "python/bin").mkdir(parents=True)
+            (current / "python/bin/python3").write_bytes(b"INERT SUPPLIER DATA\n")
+            with self.assertRaises(FileNotFoundError):
+                preparation.prepare_current(source, current, "x86_64-unknown-linux-gnu")
+            self.assertEqual({entry.name for entry in current.iterdir()}, {"python"})
+            for name in set(preparation.CURRENT_BOOTSTRAPS) - set(preparation.BOOTSTRAPS):
+                (desktop / name).write_bytes(b"INERT CURRENT ENTRY; NEVER EXECUTED\n")
+            preparation.prepare_current(source, current, "x86_64-unknown-linux-gnu")
+            manifest = json.loads((current / "manifest.json").read_bytes())
+            self.assertEqual({row["path"] for row in manifest["files"]},
+                set(preparation.CURRENT_BOOTSTRAPS) | {"core.zip", "github-ca.pem", "python/bin/python3"})
+            self.assertNotIn("project_recovery_bootstrap.py", preparation.BOOTSTRAPS)
+            self.assertIn("project_recovery_bootstrap.py", preparation.CURRENT_BOOTSTRAPS)
+
     def test_payload_capacity_refuses_before_creating_any_generated_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
