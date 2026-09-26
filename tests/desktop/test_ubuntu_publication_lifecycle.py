@@ -5261,12 +5261,14 @@ class AndroidSameJobLifecycleContracts(unittest.TestCase):
     def test_root_copies_and_imports_only_exact_pinned_protected_helper_and_data(self):
         value = self.value(); root = L.root_path(value)
         names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+                 "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
                  "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
                  for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
         pins = {name: (1, "c" * 64) for name in names}
-        missing_font = {name: pin for name, pin in pins.items() if not name.endswith("/fonts.json")}
-        with patch.object(L, "ANDROID_PREPARATION_PINS", missing_font), self.assertRaises(L.Refused):
-            L._android_source_pins()
+        for missing in ("fonts.json", "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json"):
+            missing_input = {name: pin for name, pin in pins.items() if not name.endswith("/" + missing)}
+            with self.subTest(missing=missing), patch.object(L, "ANDROID_PREPARATION_PINS", missing_input), self.assertRaises(L.Refused):
+                L._android_source_pins()
         with ExitStack() as stack:
             stack.enter_context(patch.multiple(L, __file__=str(root / "entry.py"), _ROOT=None, _END=None,
                                              ANDROID_PREPARATION_PINS=pins))

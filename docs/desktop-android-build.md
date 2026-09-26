@@ -64,6 +64,24 @@ plugin/dependency readiness, or grant build authority. Keep these distinctions:
 A disabled action or closed qualification gate is **not evidence of a missing
 SDK**. Installing another SDK cannot itself qualify this action.
 
+### Verification preparation and stock trust
+
+The fixed Ubuntu verification preparation uses a separate, private
+`stock-ca-consumer-correspondence-v1` check: the exact 121 approved public CA
+certificates and JKS alias mappings must match, with an empty protected custom-CA
+directory. Each of the five existing curl calls retains and rechecks its original
+PEM file and empty CA directory; the batch also retains the exact regenerated
+replay configuration. Original command records, fixed environment/cwd and TLS
+results are checked before any successor. Staging uses only bytes read and
+parsed from the checked original JKS, after successful close.
+
+This is exact consumed-content correspondence, **not proof that a CA updater ran**.
+The stricter metadata collector still requires its original configuration and
+supplier checks; historical refusals are not relabeled as passes. The private
+readback is command-free. SDK license provenance/consent, loader and provider
+qualification, and actual native consumption remain separate requirements.
+The source host policy and preparation gates stay disabled until qualified.
+
 ## Review before starting
 
 Building runs the project's Gradle scripts and plugins. Use only a project you

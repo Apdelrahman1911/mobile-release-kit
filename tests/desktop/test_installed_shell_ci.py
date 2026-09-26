@@ -1120,8 +1120,9 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                      and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
         names = ast.literal_eval(paths)
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(len(names), 80)
+        self.assertEqual(len(names), 82)
         self.assertTrue({"desktop/tools/android_material_preparation.py", "desktop/tools/ci_foundation.py",
+            "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
             "desktop/src-tauri/src/android_toolchain.rs", *("desktop/tools/android_material_data/" + name
             for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))} <= set(names))
         self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (

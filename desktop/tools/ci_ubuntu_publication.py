@@ -2789,6 +2789,7 @@ def shell_source_manifest(source):
              'desktop/tools/hosted_glibc_policy.py',
              'desktop/tools/observe_hosted_python.py',
              "desktop/tools/ci_foundation.py", "desktop/tools/android_material_preparation.py",
+             "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
              "desktop/tools/android_material_data/policy.json", "desktop/tools/android_material_data/suppliers.json",
              "desktop/tools/android_material_data/layout.json.gz", "desktop/tools/android_material_data/archives.json.gz",
              "desktop/tools/android_material_data/fonts.json", "desktop/tools/android_material_data/providers.json",
