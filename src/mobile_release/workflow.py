@@ -246,27 +246,8 @@ def _job_name(name: object, key: str) -> bool:
 
 def _layout(stage: str, phase: str, prefix: str = "") -> dict[str, str]:
     _require(stage in STAGES and phase in {"intent", "final"}, "invalid evidence layout")
-    if phase == "final":
-        result = {
-            prefix + "workflow-provenance.json": "final-provenance",
-            prefix + f"{stage}-receipt.json": "final-receipt",
-            prefix + "store-receipt.json": "raw-store-readback",
-        }
-        if stage == "candidate":
-            result[prefix + "candidate-manifest.json"] = "candidate-manifest"
-        result.update(_layout(stage, "intent", prefix + "operation/"))
-        return result
-    result = {
-        prefix + f"{stage}-operation-intent.json": "operation-intent",
-        prefix + "intent-provenance.json": "intent-provenance",
-    }
-    if stage == "candidate":
-        result[prefix + "store-metadata.zip"] = "candidate-store-metadata"
-    if stage != "candidate":
-        result.update({path: "candidate/" + role for path, role in _layout("candidate", "final", prefix + "candidate/").items()})
-    if stage == "production-submit":
-        result.update({path: "external/" + role for path, role in _layout("external-testing", "final", prefix + "external/").items()})
-    return result
+    from .evidence_layout import evidence_layout
+    return evidence_layout(stage, phase, prefix)
 
 
 def _inventory(root: Path, layout: Mapping[str, str], *, omitted: str | None = None) -> list[dict[str, Any]]:
