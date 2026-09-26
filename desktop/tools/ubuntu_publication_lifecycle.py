@@ -919,7 +919,8 @@ def _android_native_path(value):
         return value.startswith(directory) and "/" not in tail and len(tail) > len(suffix) and tail.endswith(suffix)
     return (value.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
             or value in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf", "/etc/nsswitch.conf",
-                         "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"}
+                         "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf",
+                         "/run/systemd/resolve/stub-resolv.conf"}
             or direct("/etc/fonts/conf.avail/", ".conf") or direct("/usr/share/fontconfig/conf.avail/", ".conf")
             or any(direct("/usr/share/fonts/truetype/" + family + "/", ".ttf") for family in ("dejavu", "lato", "liberation", "noto"))
             or value == "/var/cache/fontconfig/CACHEDIR.TAG"
@@ -1030,7 +1031,13 @@ def _android_publication_plan(raw):
                       and alias["path"].endswith(".conf") and alias["canonical"] in {row["path"] for row in os_files}
                       and alias["canonical"].startswith(("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
                       and alias["canonical"].endswith(".conf"))
-        need((loader_alias or font_alias) and alias["path"] not in os_names and alias["path"].casefold() not in seen_aliases
+        # Match the material/Rust contract's one resolver file, not /run/**.
+        # The real OS observation still checks original ancestry/device/owner.
+        resolver_alias = (alias["path"] == "/etc/resolv.conf"
+                          and alias["canonical"] == "/run/systemd/resolve/stub-resolv.conf"
+                          and alias["target"] in {"/run/systemd/resolve/stub-resolv.conf", "../run/systemd/resolve/stub-resolv.conf"}
+                          and alias["canonical"] in {row["path"] for row in os_files})
+        need((loader_alias or font_alias or resolver_alias) and alias["path"] not in os_names and alias["path"].casefold() not in seen_aliases
              and alias["canonical"] in os_names and "/" + "/".join(destination) == alias["canonical"],
              "Android OS alias escapes its exact canonical contract")
         seen_aliases.add(alias["path"].casefold())

@@ -1,5 +1,6 @@
 """Inert DATA/mocked-command checks; no download, decoder, compiler or native run."""
 from copy import deepcopy
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
@@ -56,6 +57,29 @@ def inert_font_consumers():
               f'Directory: {directory}\nCache: {second}\n--------\n'
               '"Inert.ttf" 0 "Inert:familylang=en:style=Regular"\n').encode()
     return roster, report, font
+
+
+def inert_sdk_receipt():
+    """Synthetic closed-reader DATA only; never a real hosted/licence receipt."""
+    rule = {"path": M.SDK_RECEIPT, "classification": M.SDK_RECEIPT_CLASSIFICATION,
+        "imagePath": M.SDK_IMAGE_DATA, "sourceRecipe": deepcopy(M.SDK_SOURCE_RECIPE),
+        "licenseDefinition": {"id": "android-sdk-license", "normalizedSha1": M.LICENSE_HASH,
+                              "normalizedSha256": M.LICENSE_NORMALIZED_SHA256}}
+    value = {"hostPolicy": {"inputs": {"files": sorted([M.SDK_RECEIPT, M.SDK_IMAGE_DATA]),
+                                    "directories": {}, "absences": []}, "generated": {"sdkLicense": rule}}}
+    bodies = {M.SDK_RECEIPT: b"\n" + M.LICENSE_HASH.encode("ascii"), M.SDK_IMAGE_DATA: M.D.canonical([
+        {"group": "Operating System", "detail": "Ubuntu\n24.04.5\nLTS"},
+        {"group": "Runner Image", "detail": "\n".join(prefix + M.SDK_IMAGE[key] for prefix, key in (
+            ("Image: ", "image_name"), ("Version: ", "image_version"),
+            ("Included Software: ", "image_url"), ("Image Release: ", "image_release")))}])}
+    host = {"graph": {}, "bindings": {"files": {name: {"fixture": name} for name in bodies}}}
+    @contextmanager
+    def reader(binding, selected, limit, deadline):
+        assert binding == host["bindings"]["files"][selected] and len(bodies[selected]) <= limit
+        raw = bodies[selected]
+        yield raw, {"binding": deepcopy(binding), "identity": ["inert-original"],
+                    "file": {"path": selected, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o644}}
+    return value, host, bodies, reader
 
 
 def inert_font_stage(folder, fault=None):
@@ -386,14 +410,17 @@ class AndroidMaterialDataTests(unittest.TestCase):
                   "directories": {"/inert/directory": []}, "absences": ["/inert/absent"]}
         policy = {"hostPolicy": {"inputs": inputs}}
         native = {"original": ["unchanged"]}
-        bindings = {"files": {"/inert/existing": {"original": "existing"}}, "privateSearch": {}}
+        bindings = {"files": {"/inert/existing": {"original": "existing", "size": 1}}, "privateSearch": {}}
         snapshot = deepcopy((native, bindings))
-        bind = Mock(side_effect=lambda path, **options: {"selectedPath": str(path), "options": options})
+        bind = Mock(side_effect=lambda path, **options: {"selectedPath": str(path), "options": options, "size": 1})
         with patch.object(M, "policy", return_value=policy), patch.object(M, "_protected_binding") as file_check, \
-             patch.object(M, "_protected_namespace") as namespace, patch.object(M, "_provider_host_inputs") as providers:
+             patch.object(M, "_protected_namespace") as namespace, patch.object(M, "_provider_host_inputs") as providers, \
+             patch.object(M, "_sdk_receipt_state", return_value={"fixture": "unqualified"}) as receipts:
             host = M.android_host_inputs(native, bindings, bind_path=bind, deadline=time.monotonic() + 30)
         self.assertEqual(providers.call_count, 1)
         self.assertIs(providers.call_args.args[1], host)
+        self.assertIs(receipts.call_args.args[1], host)
+        self.assertEqual(host["graph"]["androidGenerated"], {"sdkLicense": {"fixture": "unqualified"}})
         self.assertEqual((native, bindings), snapshot)
         self.assertIsNot(host["graph"], native)
         self.assertIsNot(host["bindings"]["files"]["/inert/existing"], bindings["files"]["/inert/existing"])
@@ -408,6 +435,184 @@ class AndroidMaterialDataTests(unittest.TestCase):
              self.assertRaisesRegex(M.D.Refused, "original changed"):
             M.android_host_inputs(native, bindings, bind_path=bind, deadline=time.monotonic() + 30)
         self.assertEqual((native, bindings), snapshot)
+
+    def test_small_host_roles_limit_first_binding_and_existing_binding_before_hash(self):
+        limits = {M.SDK_RECEIPT: 4096, M.SDK_IMAGE_DATA: 64 << 10, "/inert/tool": M.FILE_LIMIT,
+                  **{name: M.CONFIGURATION_LIMIT for name in (*M.NETWORK_ROLES, M.RESOLVER_CANONICAL)}}
+        value = {"hostPolicy": {"inputs": {"files": sorted(limits), "directories": {}, "absences": []}}}
+        bind = Mock(side_effect=lambda path, **options: {"size": 1})
+        deadline = time.monotonic() + 30
+        with patch.object(M, "policy", return_value=value), patch.object(M, "_protected_binding"), \
+             patch.object(M, "_provider_host_inputs"), patch.object(M, "_sdk_receipt_state", return_value={}):
+            M.android_host_inputs({}, {"files": {}}, bind_path=bind, deadline=deadline)
+        self.assertEqual({str(call.args[0]): call.kwargs for call in bind.call_args_list},
+                         {name: {"limit": limit} for name, limit in limits.items()})
+        for name, limit in limits.items():
+            value["hostPolicy"]["inputs"]["files"] = [name]
+            bind.reset_mock()
+            with self.subTest(role=name), patch.object(M, "policy", return_value=value), \
+                 patch.object(M, "_protected_binding") as rehash, self.assertRaisesRegex(M.D.Refused, "role extent"):
+                M.android_host_inputs({}, {"files": {name: {"size": limit + 1}}}, bind_path=bind, deadline=deadline)
+            bind.assert_not_called()
+            rehash.assert_not_called()
+        # Direct readback callers share the bound before ancestry or file IO.
+        binding = {"path": M.SDK_RECEIPT, "selectedPath": M.SDK_RECEIPT, "size": 4097,
+                   "sha256": "0" * 64, "identity": [], "links": [], "ancestry": {}}
+        with patch.object(M, "_protected_ancestry") as ancestry, patch.object(M.D, "bound") as rehash, \
+             self.assertRaises(M.D.Refused):
+            M._protected_binding(binding, M.SDK_RECEIPT)
+        ancestry.assert_not_called()
+        rehash.assert_not_called()
+
+    def test_sdk_correspondence_never_supplies_historical_or_legal_authority(self):
+        value, host, bodies, reader = inert_sdk_receipt()
+        deadline = time.monotonic() + 30
+        with patch.object(M, "_stock_host_original", side_effect=reader), patch.object(M, "_protected_binding"):
+            proof = M._sdk_receipt_state(value, host, deadline)
+            self.assertEqual(proof["receiptAuthority"], "unavailable")
+            self.assertIs(proof["producerExecutionProven"], False)
+            self.assertIs(proof["newConsent"], False)
+            self.assertEqual(proof["sourceRecipe"], M.SDK_SOURCE_RECIPE)
+            self.assertEqual(M._sdk_receipt_bytes(host, proof, deadline), bodies[M.SDK_RECEIPT])
+            host["graph"]["androidGenerated"] = {"sdkLicense": proof}
+            with self.assertRaisesRegex(M.D.Refused, "authenticated prior receipt provenance"):
+                M._sdk_receipt_authority(value, host, deadline)
+            for change in ({"receiptAuthority": "approved"}, {"preExistingHostedImageReceipt": True}, {"newConsent": True}):
+                host["graph"]["androidGenerated"]["sdkLicense"] = {**proof, **change}
+                with self.assertRaisesRegex(M.D.Refused, "correspondence changed"):
+                    M._sdk_receipt_authority(value, host, deadline)
+        bind = Mock()
+        with patch.object(M, "policy", return_value=value), self.assertRaises(M.D.Refused):
+            M.android_host_inputs({"androidGenerated": {"sdkLicense": proof}}, {"files": {}}, bind_path=bind, deadline=deadline)
+        bind.assert_not_called()
+
+    def test_sdk_original_protection_close_image_and_deadline_fail_closed(self):
+        value, host, bodies, reader = inert_sdk_receipt()
+        deadline = time.monotonic() + 30
+        with patch.object(M, "_stock_host_original", side_effect=M.D.Refused("inert file-ancestry")), \
+             patch.object(M.D, "write") as write, self.assertRaisesRegex(M.D.Refused, "file-ancestry"):
+            M._sdk_receipt_state(value, host, deadline)
+        write.assert_not_called()
+        @contextmanager
+        def close_failed(*args):
+            with reader(*args) as original:
+                yield original
+            raise OSError("inert original close failed")
+        with patch.object(M, "_stock_host_original", side_effect=reader), patch.object(M, "_protected_binding"):
+            proof = M._sdk_receipt_state(value, host, deadline)
+        with patch.object(M, "_stock_host_original", side_effect=close_failed):
+            with self.assertRaisesRegex(OSError, "close failed"):
+                M._sdk_receipt_state(value, host, deadline)
+            with self.assertRaisesRegex(OSError, "close failed"):
+                M._sdk_receipt_bytes(host, proof, deadline)
+        with patch.object(M, "_stock_host_original", side_effect=reader), \
+             patch.object(M, "_protected_binding", side_effect=M.D.Refused("inert original changed")), \
+             self.assertRaisesRegex(M.D.Refused, "original changed"):
+            M._sdk_receipt_state(value, host, deadline)
+        wrong_image = bodies[M.SDK_IMAGE_DATA].replace(b"20260920.314.1", b"20260920.315.1")
+        with self.assertRaises(M.D.Refused):
+            M._sdk_image_identity(wrong_image)
+        with patch.object(M, "_stock_host_original") as original, self.assertRaises(M.D.Refused):
+            M._sdk_receipt_state(value, host, time.monotonic() - 1)
+        original.assert_not_called()
+
+    def test_sdk_staged_copy_requires_actual_private_mode_and_original_identity(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-android-receipt-inert-") as folder:
+            root, owner = Path(folder), (os.getuid(), os.getgid())
+            for name in ("tools", "tools/sdk", "tools/sdk/licenses"):
+                (root / name).mkdir(mode=0o700)
+            path, raw = root / "tools" / M.GENERATED[2], b"\n" + M.LICENSE_HASH.encode("ascii")
+            M.D.write(path, raw, 0o400)
+            identity = M._private(path, owner)
+            row = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o444}
+            deadline = time.monotonic() + 30
+            M._sdk_staged_receipt(root, owner, row, identity, raw, deadline)
+            path.chmod(0o444)  # A publication mode is not private staging custody.
+            with self.assertRaises(M.D.Refused):
+                M._sdk_staged_receipt(root, owner, row, identity, raw, deadline)
+            path.chmod(0o400)
+            identity = M._private(path, owner)
+            path.rename(path.with_name("inert-original"))
+            M.D.write(path, raw, 0o400)
+            with self.assertRaises(M.D.Refused):
+                M._sdk_staged_receipt(root, owner, row, identity, raw, deadline)
+
+    def test_network_configuration_rules_are_closed_and_not_github_negative_timing(self):
+        deadline = time.monotonic() + 30
+        self.assertEqual(M._network_configuration_data("/etc/nsswitch.conf", b"passwd: files\nhosts: files dns\n", deadline),
+                         {"databases": {"passwd": ["files"], "hosts": ["files", "dns"]}})
+        self.assertEqual(M._network_configuration_data("/etc/host.conf", b"# ordinary\nmulti on\n", deadline), {"multi": True})
+        self.assertEqual(M._network_configuration_data("/etc/gai.conf", b"# defaults\n", deadline), {"defaults": True})
+        hosts_raw = b"127.0.0.1 localhost\n::1 localhost ip6-localhost\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n"
+        self.assertEqual(len(M._network_configuration_data("/etc/hosts", hosts_raw, deadline)["records"]), 4)
+        actual = M._network_configuration_data("/etc/resolv.conf",
+            b"# default resolver\n; whole-line comment\nnameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n", deadline)
+        self.assertEqual(actual, {"nameservers": ["127.0.0.53"], "search": ["."], "options": {
+            "timeout": 5, "attempts": 2, "ndots": 1, "edns0": True, "trust-ad": True}})
+        self.assertLess(actual["options"]["timeout"] * actual["options"]["attempts"], 12)
+        variants = [("/etc/nsswitch.conf", b"hosts: files resolve dns\n"),
+                    ("/etc/nsswitch.conf", b"hosts: files [NOTFOUND=return] dns\n"),
+                    ("/etc/nsswitch.conf", b"hosts: files dns\nhosts: files dns\n"),
+                    ("/etc/host.conf", b"multi on\ntrim .example\n"),
+                    ("/etc/gai.conf", b"precedence ::ffff:0:0/96 100\n"),
+                    ("/etc/hosts", b"127.0.0.1 localhost\n127.0.0.2 localhost\n"),
+                    ("/etc/resolv.conf", b"nameserver 127.0.0.53\noptions timeout:1 timeout:2\n"),
+                    ("/etc/resolv.conf", b"nameserver 127.0.0.53\noptions attempts:99\n"),
+                    ("/etc/resolv.conf", b"nameserver fe80::1%eth0\n"),
+                    ("/etc/resolv.conf", b"nameserver ff02::1\n"),
+                    ("/etc/resolv.conf", b"nameserver 127.0.0.53\nsearch example..test\n"),
+                    ("/etc/resolv.conf", b"# comment\rnameserver 127.0.0.53\n"),
+                    ("/etc/nsswitch.conf", b"# comment\rhosts: files dns\n"),
+                    ("/etc/resolv.conf", b"nameserver 127.0.0.53\r\n"),
+                    ("/etc/resolv.conf", b" nameserver 127.0.0.53\n"),
+                    ("/etc/resolv.conf", b"nameserver 127.0.0.53\nsearch example.test # inline\n"),
+                    ("/etc/resolv.conf", b"nameserver 127.0.0.53\nsearch example.test;inline\n"),
+                    ("/etc/gai.conf", b"#\0\n"), ("/etc/gai.conf", b"\xff"), ("/etc/gai.conf", b""),
+                    ("/etc/gai.conf", b"#\n" * 2049), ("/etc/gai.conf", b"#" * (M.CONFIGURATION_LIMIT + 1))]
+        for role, raw in variants:
+            with self.subTest(role=role, bytes=len(raw)), self.assertRaises(M.D.Refused):
+                M._network_configuration_data(role, raw, deadline)
+        from urllib.parse import urlsplit
+        hosts = {urlsplit(row["url"]).hostname for row in M._control(M.policy(), "suppliers.json")["files"]}
+        for name in hosts | {"services.gradle.org", "downloads.gradle.org", "release-assets.githubusercontent.com"}:
+            with self.subTest(host=name), self.assertRaises(M.D.Refused):
+                M._network_configuration_data("/etc/hosts", ("127.0.0.1 " + name.upper() + ".\n").encode("ascii"), deadline)
+
+    def test_network_source_rule_rechecks_exact_selected_canonical_and_close(self):
+        role, name, raw = "/etc/resolv.conf", M.RESOLVER_CANONICAL, b"nameserver 127.0.0.53\n"
+        deadline = time.monotonic() + 30
+        aliases = [{"path": role, "target": "../run/systemd/resolve/stub-resolv.conf", "canonical": name}]
+        value = {"hostPolicy": {"inputs": {"files": sorted([role, name]), "directories": {}, "absences": []}, "aliases": aliases}}
+        host = {"bindings": {"files": {path: {"identity": ["inert-original"]} for path in (role, name)}}}
+        row = {"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o644}
+        rule = {"path": name, "origin": {"kind": "same-vm", "rule": "network-config", "role": role,
+                "configuration": M._network_configuration_data(role, raw, deadline)}}
+        @contextmanager
+        def reader(*args):
+            self.assertEqual(args[1], role)
+            yield raw, {"binding": {"identity": ["inert-original"]}, "file": row}
+        @contextmanager
+        def close_failed(*args):
+            with reader(*args) as original:
+                yield original
+            raise OSError("inert original close failed")
+        with patch.object(M, "_stock_host_original", side_effect=reader), patch.object(M, "_protected_binding") as recheck, \
+             patch.object(M.os, "readlink", return_value=aliases[0]["target"]):
+            result = M._network_configuration(value, host, rule, row, deadline)
+            self.assertEqual(result["configuration"], rule["origin"]["configuration"])
+            recheck.assert_called_once_with(host["bindings"]["files"][name], name)
+            changed = deepcopy(rule); changed["origin"]["configuration"]["options"]["timeout"] = 12
+            with self.assertRaisesRegex(M.D.Refused, "source rule"):
+                M._network_configuration(value, host, changed, row, deadline)
+            host["bindings"]["files"][name]["identity"] = ["inert-replacement"]
+            with self.assertRaisesRegex(M.D.Refused, "originals differ"):
+                M._network_configuration(value, host, rule, row, deadline)
+            host["bindings"]["files"][name]["identity"] = ["inert-original"]
+            with patch.object(M, "_stock_host_original", side_effect=close_failed), self.assertRaisesRegex(OSError, "close failed"):
+                M._network_configuration(value, host, rule, row, deadline)
+            aliases[0]["target"] = "/run/systemd/resolve/other.conf"
+            with self.assertRaisesRegex(M.D.Refused, "fixed target"):
+                M._network_configuration(value, host, rule, row, deadline)
 
     def test_font_configuration_closes_system_local_and_private_selectors(self):
         names = ["/etc/fonts/fonts.conf", "/etc/fonts/conf.d/50-user.conf", "/etc/fonts/conf.d/51-local.conf"]
