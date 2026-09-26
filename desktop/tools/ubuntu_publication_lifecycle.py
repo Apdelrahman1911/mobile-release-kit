@@ -2496,19 +2496,77 @@ _GITHUB_BOUNDARY_STOP = None
 _GITHUB_BOUNDARY_BODY_ERRORS = []
 
 
-def _github_boundary_material_file(name):
+def _github_boundary_material_phase(diagnostic, phase):
+    if diagnostic is not None:
+        diagnostic["phase"] = phase
+
+
+def _github_boundary_material_reason(error):
+    """Export only fixed diagnostic classes, not exception text or host values."""
+    if isinstance(error, FileNotFoundError):
+        return "absent"
+    if isinstance(error, PermissionError):
+        return "permission-denied"
+    if isinstance(error, OSError):
+        return "read-or-close-error"
+    fixed = {
+        "Unprotected normal-boundary material": "file-owner",
+        "Normal-boundary material link count differs": "file-links",
+        "Mutable/special normal-boundary material": "file-permissions",
+        "Changed normal-boundary material link": "link-changed",
+        "Unreviewed normal resolver material link": "resolver-link-target",
+        "Normal-boundary material link bound exceeded": "link-bound",
+        "Nonordinary or oversized lifecycle file": "file-type-or-bound",
+        "Lifecycle file changed before read": "file-open-changed",
+        "Lifecycle file grew": "file-grew",
+        "Lifecycle file changed during read": "file-read-changed",
+        "Lifecycle file changed after original close": "file-close-changed",
+        "Root input has mutable/special permissions": "file-owner-or-permissions",
+        "Protected input changed after readback": "file-binding-changed",
+        "Normal resolver material changed during observation": "resolver-body-changed",
+        "Original normal-boundary material changed": "file-original-changed",
+        "Normal resolver prerequisite unavailable": "prerequisite-unavailable",
+        "Normal resolver material bound differs": "resolver-data-bound",
+        "Normal NSS hosts database is malformed": "nss-hosts-format",
+        "Normal NSS is delegated, cached, conditional or unreviewed": "nss-hosts-sources",
+        "Normal hosts input shortcuts the original GitHub DNS question": "hosts-shortcut",
+        "Normal resolver nameserver shape differs": "resolver-nameserver-shape",
+        "Normal resolver search bound differs": "resolver-search-bound",
+        "Normal resolver option is unreviewed or duplicated": "resolver-option",
+        "Normal resolver flag has an unexpected value": "resolver-flag-value",
+        "Normal resolver retry option is not bounded": "resolver-retry-bound",
+        "Normal resolver directive is unreviewed": "resolver-directive",
+        "Normal resolver is not the one bounded direct IPv4 loopback recipe": "resolver-recipe",
+        "Actual normal unanswered resolver interval does not exceed the original operation endpoint": "resolver-interval",
+        "Kernel DATA bound exceeded": "kernel-data-bound",
+    }
+    value = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+    if isinstance(error, ValueError) and value is not None:
+        if value in fixed:
+            return fixed[value]
+        for prefix, code in (("Nonordinary lifecycle ancestor path=", "ancestry-type"),
+                             ("Unprotected lifecycle ancestor path=", "ancestry-protection")):
+            if value.startswith(prefix):
+                return code
+    return "invalid-or-changed"
+
+
+def _github_boundary_material_file(name, *, diagnostic=None):
     """Bounded protected link/file DATA, never execution or resolver editing."""
     path, links = Path(name), []
     for _ in range(4):
+        _github_boundary_material_phase(diagnostic, "resolver-ancestry")
         directory(path.parent, protected=True)
+        _github_boundary_material_phase(diagnostic, "resolver-file")
         before = path.lstat()
-        need(before.st_uid == before.st_gid == 0 and before.st_nlink == 1,
-             "Unprotected normal-boundary material")
+        need(before.st_uid == before.st_gid == 0, "Unprotected normal-boundary material")
+        need(before.st_nlink == 1, "Normal-boundary material link count differs")
         if not stat.S_ISLNK(before.st_mode):
             need(not before.st_mode & 0o7022, "Mutable/special normal-boundary material")
             cap = FILE_LIMIT if name == SHELL_GITHUB_BOUNDARY_NFT else 512 << 10 if name.startswith("/boot/config-") else 128 << 10
             row = protected_record(path, cap)
             return {"path": name, "selectedPath": str(path), "links": links, "file": row}
+        _github_boundary_material_phase(diagnostic, "resolver-link")
         target = os.readlink(path)
         need(type(target) is str and 0 < len(target) <= 256 and "\0" not in target
              and identity(path.lstat()) == identity(before), "Changed normal-boundary material link")
@@ -2614,32 +2672,45 @@ def _github_boundary_resolver_shape(nss, hosts, resolver):
 def shell_github_boundary_host_materials():
     """Read-only hosted material observation; no nft/query/socket/subprocess."""
     failures, files, bodies = [], {}, {}
-    def unavailable(label, error):
+    def unavailable(label, error, diagnostic=None):
         need(len(failures) < 24, "Normal-boundary material failure bound")
-        failures.append({"material": label, "errorType": type(error).__name__})
+        row = {"material": label, "errorType": type(error).__name__}
+        if diagnostic is not None:
+            row.update(phase=diagnostic["phase"], refusal=_github_boundary_material_reason(error))
+        failures.append(row)
     for name in SHELL_GITHUB_BOUNDARY_INPUTS:
+        diagnostic = {"phase": "resolver-file"} if name == "/etc/resolv.conf" else None
         try:
-            row = _github_boundary_material_file(name)
+            row = (_github_boundary_material_file(name, diagnostic=diagnostic) if diagnostic is not None
+                   else _github_boundary_material_file(name))
             files[name] = row
             if name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"):
+                _github_boundary_material_phase(diagnostic, "resolver-body")
                 bodies[name] = read(Path(row["selectedPath"]), 128 << 10)
+                _github_boundary_material_phase(diagnostic, "resolver-recheck")
                 need(_github_boundary_material_file(name) == row, "Normal resolver material changed during observation")
         except (OSError, ValueError, UnicodeError) as error:
-            unavailable(name, error)
+            unavailable(name, error, diagnostic)
     packages, resolver, kernel, legacy, shortcuts = None, None, None, None, None
     try:
         packages = _github_boundary_package_data()
     except (OSError, ValueError, UnicodeError) as error:
         unavailable("selected-package-stanzas", error)
+    diagnostic = {"phase": "resolver-prerequisite"}
     try:
+        need(all(name in bodies for name in ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")),
+             "Normal resolver prerequisite unavailable")
+        diagnostic["phase"] = "resolver-parse"
         resolver = _github_boundary_resolver_shape(*(bodies[name] for name in
             ("/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf")))
     except (OSError, ValueError, UnicodeError, KeyError) as error:
-        unavailable("normal-resolver-shape", error)
+        unavailable("normal-resolver-shape", error, diagnostic)
+    diagnostic = {"phase": "kernel-release"}
     try:
         release = _kernel("/proc/sys/kernel/osrelease", 256).strip()
         need(re.fullmatch(r"[A-Za-z0-9.+_-]{1,128}", release) is not None and release == os.uname().release,
              "Normal-boundary kernel release differs")
+        diagnostic["phase"] = "kernel-configuration"
         config = _github_boundary_material_file("/boot/config-" + release)
         raw = read(Path(config["selectedPath"]), 512 << 10)
         relevant = ("CONFIG_CGROUPS", "CONFIG_CGROUP_BPF", "CONFIG_SOCK_CGROUP_DATA", "CONFIG_NF_TABLES",
@@ -2652,11 +2723,16 @@ def shell_github_boundary_host_materials():
                 need(key not in values and value in ("y", "m", "n"), "Duplicate/unreviewed kernel material option")
                 values[key] = value
         need(_github_boundary_material_file("/boot/config-" + release) == config, "Kernel material changed")
+        diagnostic["phase"] = "kernel-version"
         kernel = {"release": release, "version": _kernel("/proc/version", 1024).strip(),
                   "configuration": config, "features": values}
-        legacy = {name: _kernel(name, 4096).splitlines() for name in
-                  ("/proc/net/ip_tables_names", "/proc/net/ip6_tables_names")}
+        observed_legacy = {}
+        for name, label in (("/proc/net/ip_tables_names", "legacy-v4"),
+                            ("/proc/net/ip6_tables_names", "legacy-v6")):
+            observed_legacy[name] = _kernel(name, 4096, diagnostic=diagnostic, label=label).splitlines()
+        legacy = observed_legacy
         shortcuts = {}
+        diagnostic["phase"] = "delegated-sockets"
         for name in ("/run/nscd/socket", "/var/run/nscd/socket"):
             # /var/run is the conventional /run link; only named absence DATA,
             # not an open/delegation to a daemon, is retained.
@@ -2666,12 +2742,13 @@ def shell_github_boundary_host_materials():
             except FileNotFoundError:
                 shortcuts[name] = {"present": False}
     except (OSError, ValueError, UnicodeError) as error:
-        unavailable("kernel-and-host-packet-path", error)
+        unavailable("kernel-and-host-packet-path", error, diagnostic)
     for name, before in list(files.items()):
+        diagnostic = {"phase": "resolver-recheck"} if name == "/etc/resolv.conf" else None
         try:
             need(_github_boundary_material_file(name) == before, "Original normal-boundary material changed")
         except (OSError, ValueError, UnicodeError) as error:
-            unavailable(name + "-post", error)
+            unavailable(name + "-post", error, diagnostic)
     return {"schema": "installed-github-normal-boundary-host-materials-v1", "qualified": False,
             "runtimeSelfAdmission": False, "nftExecuted": False, "dnsQueryIssued": False,
             "files": files, "packages": packages, "kernel": kernel, "resolver": resolver,
@@ -3671,14 +3748,23 @@ def _root_ids():
          and status["NoNewPrivs"].strip() == "1", "Root filesystem IDs/no-new-privs differ")
 
 
-def _kernel(path, limit=64 << 10):
+def _kernel(path, limit=64 << 10, *, diagnostic=None, label=None):
+    if diagnostic is not None:
+        _github_boundary_material_phase(diagnostic, label + "-open")
     fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
+        if diagnostic is not None:
+            _github_boundary_material_phase(diagnostic, label + "-read")
         raw = os.read(fd, limit + 1)
         need(len(raw) <= limit and not os.read(fd, 1), "Kernel DATA bound exceeded")
         return raw.decode("ascii")
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except BaseException:
+            if diagnostic is not None:
+                _github_boundary_material_phase(diagnostic, label + "-close")
+            raise
 
 
 def _status():
