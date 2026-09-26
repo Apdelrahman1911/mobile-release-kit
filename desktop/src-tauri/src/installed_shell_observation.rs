@@ -3262,7 +3262,7 @@ struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
     project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord, version: VersionRecord,
-    session: SessionRecord, github_entry: github::EntryDiagnostic,
+    session: SessionRecord, github_entry: github::EntryDiagnostic, github_guidance: github::GuidanceReload,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
     capability: bool, generation: Option<String>, native_revision: Option<u32>, sessions: Vec<SaveSession>, requests: [u8; 4],
@@ -3328,7 +3328,7 @@ impl Observation {
                 bootstrap: BootstrapProgress::NotSampled,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
                 project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
-                session: SessionRecord::new(case.session()), github_entry: github::EntryDiagnostic::default(),
+                session: SessionRecord::new(case.session()), github_entry: github::EntryDiagnostic::default(), github_guidance: github::GuidanceReload::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
                 capability: false, generation: None, native_revision: None, sessions: Vec::new(), requests: [0; 4],
@@ -3545,8 +3545,17 @@ impl Observation {
             && methods.iter().all(|m| m.get("available").and_then(Value::as_bool).is_some())
             && actions.iter().all(|a| a.get("available").and_then(Value::as_bool) == Some(false));
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        if !valid || r.info { self.fail(); return; }
+        if !valid { self.fail(); return; }
+        if r.info {
+            let scope = self.github_guidance_scope(&r);
+            if !r.github_guidance.app_info(scope) { self.fail(); }
+            return;
+        }
         r.info = true; r.methods = methods.len();
+    }
+    fn github_guidance_scope(&self, r: &Record) -> github::GuidanceReloadScope {
+        github::guidance_reload_scope(r.step, r.pending, self.github.is_some()
+            && !self.failed.load(Ordering::SeqCst) && Instant::now() < self.end)
     }
     pub(super) fn unexpected(&self) { self.fail(); }
     pub(super) fn catalog(&self, result: &Result<Value, BridgeError>) {
@@ -3561,7 +3570,12 @@ impl Observation {
                         field[*key].as_str().is_some_and(|text| !text.is_empty() && text.len() <= 16384 && text.encode_utf16().count() <= 4096))
             });
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        if self.case == Case::Outstanding || !r.info || r.catalog || !valid { self.fail(); return; }
+        if self.case == Case::Outstanding || !r.info || !valid { self.fail(); return; }
+        if r.catalog {
+            let scope = self.github_guidance_scope(&r);
+            if !r.github_guidance.catalog(scope) { self.fail(); }
+            return;
+        }
         if self.case == Case::ProjectPaths && !result.as_ref().is_ok_and(|value| PATH_CASES.iter().all(|case|
             value["fields"].as_array().is_some_and(|fields| fields.iter().filter(|field| field["path"].as_str() == Some(case.name)
                 && field["label"].as_str() == Some(case.label) && field["input"].as_str() == Some("text")).count() == 1))) { self.fail(); return; }
@@ -5129,6 +5143,7 @@ impl Observation {
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
+                Step::GitHubReadOnly(github::Step::EnterRepository) => !r.github_guidance.complete(),
                 Step::VersionSave(VersionStep::ReadOpen(index)) => !r.version.sessions.get(usize::from(index))
                     .is_some_and(|s|s.open_returned && s.projection.phase == edit::Phase::Editing),
                 Step::VersionSave(VersionStep::ReadReview(index)) => !r.version.sessions.get(usize::from(index))
@@ -5288,7 +5303,7 @@ impl Observation {
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4] || r.metadata.requests != [0;4]) { self.fail(); return; }
                     if self.commands.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
                         || r.workflow.requests != [0;4]) { self.fail(); return; }
-                    if self.github.as_ref().is_some_and(|c| !c.ready_to_close() || r.requests != [0;4]
+                    if self.github.as_ref().is_some_and(|c| !r.github_guidance.complete() || !c.ready_to_close() || r.requests != [0;4]
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
                 },
@@ -5303,6 +5318,7 @@ impl Observation {
                         } else { self.fail(); }
                         return;
                     }
+                    if step == Step::GitHubReadOnly(github::Step::ReloadGuidance) && !r.github_guidance.reserve() { self.fail(); return; }
                     r.evaluations += 1; Pending::Dom(step)
                 },
             });
@@ -5927,7 +5943,7 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
                 && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final
-                || (self.commands.as_ref().is_some_and(|c| c.complete()) || self.github.as_ref().is_some_and(|c| c.complete())) && r.info && r.catalog && !r.environment
+                || (self.commands.as_ref().is_some_and(|c| c.complete()) || self.github.as_ref().is_some_and(|c| c.complete() && r.github_guidance.complete())) && r.info && r.catalog && !r.environment
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()

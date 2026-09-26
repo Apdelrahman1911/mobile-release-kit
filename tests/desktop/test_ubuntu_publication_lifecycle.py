@@ -5167,6 +5167,19 @@ class SessionFixtureContracts(unittest.TestCase):
 
 
 class GitHubEntryFailureLabelContracts(unittest.TestCase):
+    def test_guidance_reload_labels_are_closed_and_never_entry_samples(self):
+        labels = (b"GitHubGuidanceReady", b"GitHubGuidanceReload")
+        expected = [b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + label + b"\n" for label in labels]
+        self.assertEqual([line for line in L.SHELL_FAILURE_STEPS if b"=GitHubGuidance" in line], expected)
+        for label, first in zip(labels, expected):
+            raw = first + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+            self.assertEqual(L._shell_label_pair(raw), {
+                "step": label.decode("ascii"), "boundary": "dom", "bootstrapProgress": "advanced"})
+            for invalid in (raw[:-1], raw + b"\n", raw.replace(label, label + b"Extra"),
+                            self.frame().replace(b"GitHubEntry", label)):
+                self.assertIsNone(L._shell_label_pair(invalid))
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+
     @staticmethod
     def frame(*, boundary=b"settlement", progress=b"advanced", **changes):
         fields = {

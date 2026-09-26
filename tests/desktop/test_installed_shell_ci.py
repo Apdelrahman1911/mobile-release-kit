@@ -2868,6 +2868,50 @@ class InstalledToolsNamespaceContracts(unittest.TestCase):
 
 
 class InstalledGitHubEntryDiagnosticSourceContracts(unittest.TestCase):
+    def test_guidance_reload_is_one_current_ui_action_with_closed_bootstrap_replies(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        github = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        app = (SOURCE / "desktop/src/App.tsx").read_text()
+        component = (SOURCE / "desktop/src/components/GitHubConnection.tsx").read_text()
+        self.assertIn("Step::Navigate=>Step::ReadGuidanceReload", github)
+        self.assertIn("Step::ReadGuidanceReload=>Step::ReloadGuidance", github)
+        self.assertIn("Step::ReloadGuidance=>Step::EnterRepository", github)
+        self.assertIn("!shell.info || !shell.catalog || !shell.selected || !shell.snapshot", github)
+        self.assertIn("!shell.snapshot_visible || shell.project_witness.is_none()", github)
+        self.assertEqual(source.count("r.github_guidance.reserve()"), 1)
+        self.assertIn("Step::GitHubReadOnly(github::Step::EnterRepository) => !r.github_guidance.complete()", source)
+        scope = source.split("    fn github_guidance_scope(", 1)[1].split("    pub(super) fn unexpected(", 1)[0]
+        self.assertIn("self.github.is_some()", scope)
+        self.assertIn("!self.failed.load(Ordering::SeqCst) && Instant::now() < self.end", scope)
+        route = github.split("pub(super) fn guidance_reload_scope(", 1)[1].split("pub(super) struct GuidanceReload", 1)[0]
+        self.assertIn("Some(Pending::Dom(ShellStep::GitHubReadOnly(Step::ReloadGuidance)))", route)
+        self.assertIn("(ShellStep::GitHubReadOnly(Step::EnterRepository), None)", route)
+        self.assertIn("_ => GuidanceReloadScope::Outside", route)
+        self.assertEqual(source.count("r.info = true; r.methods = methods.len();"), 1)
+        self.assertEqual(source.count("r.catalog = true;"), 1)
+        self.assertIn("if !r.github_guidance.app_info(scope) { self.fail(); }", source)
+        self.assertIn("if !r.github_guidance.catalog(scope) { self.fail(); }", source)
+        self.assertIn("!r.github_guidance.complete() || !c.ready_to_close()", source)
+        self.assertIn("c.complete() && r.github_guidance.complete()", source)
+        self.assertIn("!shell.relay_joined||!shell.github_guidance.complete()", github)
+        dom = github.split("    pub(super) fn dom(", 1)[1].split("    pub(super) fn ready_to_close(", 1)[0]
+        self.assertLess(dom.index("!shell.github_guidance.click_returned(value)"),
+                        dom.index('if value["state"]=="wait"&&object.len()==1{return;}'))
+        script = github.split("pub(super) fn script(step:Step)", 1)[1]
+        effect = script.split('Step::ReloadGuidance=>r#"', 1)[1].split('Step::EnterRepository=>r#"', 1)[0]
+        self.assertEqual(effect.count(".click()"), 1)
+        self.assertIn("original.card!==current.card||original.button!==current.button||current.button.disabled", effect)
+        self.assertLess(effect.index("delete window.__mrkInstalledGitHubGuidanceReload"), effect.index(".click()"))
+        for forbidden in ("state:'wait'", "setTimeout", "setInterval", "fetch(", "invoke("):
+            self.assertNotIn(forbidden, effect)
+        self.assertIn("Previously loaded help is retained for reading only; it does not enable entry.", script)
+        self.assertIn("if(c.querySelector('form.github-form'))throw 0;", script)
+        self.assertIn("state.helpState === 'current'", component)
+        self.assertIn("connectionControllerRef.current?.setHelp(null);", app)
+        self.assertIn("githubConnection.setHelp(result.githubConnection); syncConnectionContext();", app)
+        self.assertIn("    assert_guidance_reload_contracts();", github)
+        # The Rust inert contracts and original native UI still need execution.
+
     def test_entry_samples_existing_tick_and_wait_without_a_new_nested_record_lock(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
         tick = source.split("    pub(super) fn tick(", 1)[1].split("    pub(super) fn dom(", 1)[0]

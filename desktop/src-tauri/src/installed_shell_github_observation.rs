@@ -66,12 +66,14 @@ impl Case {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Step { Navigate, EnterRepository, Entry, EnterToken, Token, Connect, Observe,
+pub(super) enum Step { Navigate, ReadGuidanceReload, ReloadGuidance, EnterRepository, Entry, EnterToken, Token, Connect, Observe,
     Refresh, ObserveRefresh, Status, ReadStatus, Disconnect, Disconnected, InjectUnknown, Unknown }
 impl Step {
     pub(super) fn failure_line(self) -> &'static [u8] {
         match self {
             Self::Navigate=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubNavigate\n",
+            Self::ReadGuidanceReload=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubGuidanceReady\n",
+            Self::ReloadGuidance=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubGuidanceReload\n",
             Self::EnterRepository=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubRepository\n",
             Self::Entry=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubEntry\n",
             Self::EnterToken=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubToken\n",
@@ -87,6 +89,85 @@ impl Step {
             Self::InjectUnknown=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubUnknownInject\n",
             Self::Unknown=>b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubUnknown\n",
         }
+    }
+}
+
+// Closed accounting for the one ordinary guidance-reload button. These facts
+// do not replace bootstrap, authorize a request, or make retained help current.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum GuidanceClick { #[default] Unreserved, Pending, Returned, Refused }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuidanceReloadScope { Outside, ClickPending, AwaitReplies }
+pub(super) fn guidance_reload_scope(step: ShellStep, pending: Option<Pending>, live: bool) -> GuidanceReloadScope {
+    if !live { return GuidanceReloadScope::Outside; }
+    match (step, pending) {
+        (ShellStep::GitHubReadOnly(Step::ReloadGuidance), Some(Pending::Dom(ShellStep::GitHubReadOnly(Step::ReloadGuidance)))) => GuidanceReloadScope::ClickPending,
+        (ShellStep::GitHubReadOnly(Step::EnterRepository), None) => GuidanceReloadScope::AwaitReplies,
+        _ => GuidanceReloadScope::Outside,
+    }
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct GuidanceReload { click: GuidanceClick, info: bool, catalog: bool }
+impl GuidanceReload {
+    pub(super) fn reserve(&mut self) -> bool {
+        if *self != Self::default() { return false; }
+        self.click = GuidanceClick::Pending; true
+    }
+    fn permits(&self, scope: GuidanceReloadScope) -> bool {
+        matches!((scope, self.click), (GuidanceReloadScope::ClickPending, GuidanceClick::Pending)
+            | (GuidanceReloadScope::AwaitReplies, GuidanceClick::Returned))
+    }
+    pub(super) fn app_info(&mut self, scope: GuidanceReloadScope) -> bool {
+        if !self.permits(scope) || self.info || self.catalog { return false; }
+        self.info = true; true
+    }
+    pub(super) fn catalog(&mut self, scope: GuidanceReloadScope) -> bool {
+        if !self.permits(scope) || !self.info || self.catalog { return false; }
+        self.catalog = true; true
+    }
+    pub(super) fn click_returned(&mut self, value: &Value) -> bool {
+        if self.click != GuidanceClick::Pending { return false; }
+        let ready = value.as_object().is_some_and(|object| object.len() == 1 && value["state"] == "ready");
+        self.click = if ready { GuidanceClick::Returned } else { GuidanceClick::Refused };
+        ready
+    }
+    pub(super) fn complete(&self) -> bool { self.click == GuidanceClick::Returned && self.info && self.catalog }
+}
+fn assert_guidance_reload_contracts() {
+    use GuidanceReloadScope::{AwaitReplies, ClickPending, Outside};
+    let click = ShellStep::GitHubReadOnly(Step::ReloadGuidance);
+    let replies = ShellStep::GitHubReadOnly(Step::EnterRepository);
+    assert!(guidance_reload_scope(click, Some(Pending::Dom(click)), true) == ClickPending);
+    assert!(guidance_reload_scope(replies, None, true) == AwaitReplies);
+    for (step, pending, live) in [(click, None, true), (click, Some(Pending::Dom(replies)), true),
+        (replies, Some(Pending::Dom(replies)), true), (click, Some(Pending::Dom(click)), false),
+        (replies, None, false), (ShellStep::Bootstrap, None, true),
+        (ShellStep::GitHubReadOnly(Step::ReadGuidanceReload), None, true),
+        (ShellStep::GitHubReadOnly(Step::Entry), None, true)] {
+        assert!(guidance_reload_scope(step, pending, live) == Outside);
+    }
+    // All legitimate callback orders use the same original reservation. The
+    // parent holds EnterRepository until all three actual replies are present.
+    for early in 0..=2 {
+        let mut reload = GuidanceReload::default();
+        assert!(!reload.complete() && !reload.app_info(ClickPending) && !reload.catalog(ClickPending));
+        assert!(reload.reserve() && !reload.reserve());
+        assert!(!reload.catalog(ClickPending) && !reload.app_info(Outside) && !reload.app_info(AwaitReplies));
+        if early >= 1 { assert!(reload.app_info(ClickPending)); }
+        if early == 2 { assert!(reload.catalog(ClickPending)); }
+        assert!(!reload.complete());
+        assert!(reload.click_returned(&json!({"state":"ready"})));
+        assert!(!reload.app_info(ClickPending));
+        if early == 0 { assert!(reload.app_info(AwaitReplies)); }
+        if early < 2 { assert!(reload.catalog(AwaitReplies)); }
+        assert!(reload.complete() && !reload.reserve());
+        assert!(!reload.click_returned(&json!({"state":"ready"})) && !reload.app_info(AwaitReplies) && !reload.catalog(AwaitReplies));
+    }
+    for callback in [json!({"state":"wait"}), json!({"state":"error"}), json!({"state":"ready","extra":true}), json!(null)] {
+        let mut reload = GuidanceReload::default(); assert!(reload.reserve());
+        assert!(!reload.click_returned(&callback) && reload.click == GuidanceClick::Refused);
+        assert!(!reload.reserve() && !reload.click_returned(&json!({"state":"ready"}))
+            && !reload.app_info(ClickPending) && !reload.app_info(AwaitReplies) && !reload.complete());
     }
 }
 
@@ -525,6 +606,9 @@ impl Control {
         let Some(shell)=q.record() else{return false;};
         let project=shell.project.as_ref().map(|p|p.id.clone());
         if !shell.snapshot_visible || shell.project_witness.is_none(){self.fail();return false;}
+        if step == Step::ReadGuidanceReload && (!shell.info || !shell.catalog || !shell.selected || !shell.snapshot) {
+            self.fail(); return false;
+        }
         drop(shell);
         let Some(mut r)=self.record() else{return false;};
         if r.project_id.is_none(){r.project_id=project;}
@@ -564,6 +648,9 @@ impl Control {
         let Some(q)=self.original() else{self.fail();return;};
         let Some(mut shell)=q.record_at(Boundary::Dom) else{return;};
         if shell.step!=ShellStep::GitHubReadOnly(step)||shell.pending.take()!=Some(Pending::Dom(ShellStep::GitHubReadOnly(step))){self.fail();return;}
+        // This effectful step never takes the generic wait/re-evaluation path.
+        // Even malformed/wait callbacks permanently spend its one reservation.
+        if step == Step::ReloadGuidance && (q.failed.load(Ordering::SeqCst) || !shell.github_guidance.click_returned(value)) { self.fail(); return; }
         if step == Step::Entry {
             // Capture the existing wait callback before its generic early return.
             // No Control lock or native resample is taken under this parent guard.
@@ -605,7 +692,9 @@ impl Control {
         };
         if !valid{self.fail();return;}
         let next=match step {
-            Step::Navigate=>Step::EnterRepository,
+            Step::Navigate=>Step::ReadGuidanceReload,
+            Step::ReadGuidanceReload=>Step::ReloadGuidance,
+            Step::ReloadGuidance=>Step::EnterRepository,
             Step::EnterRepository=>Step::Entry,
             Step::Entry=>{r.entry=true;Step::EnterToken},
             Step::EnterToken=>Step::Token,
@@ -682,7 +771,7 @@ impl Control {
     pub(super) fn report(&self)->Option<Vec<u8>> {
         if !self.complete(){return None;}
         let q=self.original()?;let shell=q.record()?;let r=self.record()?;
-        if !shell.exit||!shell.originals_final||!shell.relay_joined{return None;}
+        if !shell.exit||!shell.originals_final||!shell.relay_joined||!shell.github_guidance.complete(){return None;}
         serde_json::to_vec(&json!({
             "schemaVersion":1,"fixture":"github-readonly-installed-v1","case":self.case.name(),"sourceCommit":option_env!("GITHUB_SHA")?,
             "normalManifestSha256":N,"productManifestSha256":self.case.manifest(),
@@ -762,6 +851,7 @@ fn dom_observation(value:&Value,status:&wire::Status)->DomObservation {
     }
 }
 pub(super) fn assert_contracts() {
+    assert_guidance_reload_contracts();
     assert_entry_diagnostic_contracts();
     crate::supervisor::github_tls_peer_owner::installed::assert_contracts();
     let mut status=crate::github_connection_session::ConnectionState::new().snapshot();
@@ -806,6 +896,13 @@ pub(super) fn script(step:Step)->Option<String> {
     let body=match step{
         Step::Navigate=>r#"const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="GitHub"]');
             if(!b||b.disabled)return {state:'wait'};show(b);b.click();return {state:'ready'};"#,
+        Step::ReadGuidanceReload=>r#"const current=guidanceReload();if(!current||current.button.disabled)return {state:'wait'};
+            if(Object.hasOwn(window,'__mrkInstalledGitHubGuidanceReload'))throw 0;
+            show(current.button);window.__mrkInstalledGitHubGuidanceReload=current;return {state:'ready'};"#,
+        Step::ReloadGuidance=>r#"const original=window.__mrkInstalledGitHubGuidanceReload;
+            delete window.__mrkInstalledGitHubGuidanceReload;
+            const current=guidanceReload();if(!original||!current||original.card!==current.card||original.button!==current.button||current.button.disabled)throw 0;
+            show(current.button);current.button.click();return {state:'ready'};"#,
         Step::EnterRepository=>r#"if(!selected())return {state:'wait'};const input=card()?.querySelector('input[placeholder="OWNER/REPO"]');
             if(!input||input.disabled)return {state:'wait'};edit(input,'owner/app');return {state:'ready'};"#,
         Step::Entry=>r#"const c=card(),form=c?.querySelector('form.github-form'),b=form?.querySelector('button[type="submit"]'),s=!!selected();
@@ -852,6 +949,18 @@ pub(super) fn script(step:Step)->Option<String> {
         const show=n=>{{n.scrollIntoView({{block:'center'}});const r=n.getBoundingClientRect();if(r.width<=0||r.height<=0||getComputedStyle(n).visibility!=='visible')throw 0;}};
         const button=name=>{{const rows=[...(card()?.querySelectorAll('button')??[])].filter(b=>text(b)===name);if(rows.length>1)throw 0;return rows[0];}};
         const click=name=>{{const b=button(name);if(!b||b.disabled)return {{state:'wait'}};show(b);b.click();return {{state:'ready'}};}};
+        const guidanceReload=()=>{{
+            if(!selected())return null;const cards=document.querySelectorAll('section[aria-label="GitHub connection and observations"]');
+            if(cards.length>1)throw 0;if(cards.length!==1)return null;const c=cards[0];
+            if(c.querySelector('form.github-form'))throw 0;
+            const retained=[...c.querySelectorAll(':scope > p.review-caution[role="status"]')].filter(p=>text(p)==='Previously loaded help is retained for reading only; it does not enable entry.');
+            if(retained.length>1)throw 0;
+            if(retained.length!==1||!c.querySelector('[aria-label="Core GitHub connection help"]'))return null;
+            const rows=[...document.querySelectorAll('button')].filter(b=>text(b)==='Reload service and connection guidance');
+            if(rows.length>1)throw 0;if(rows.length!==1)return null;const b=rows[0];
+            if(b.type!=='button'||b.form!==null||!b.isConnected||b.ownerDocument!==document||!b.parentElement?.classList.contains('button-row'))throw 0;
+            return {{card:c,button:b}};
+        }};
         const edit=(input,value)=>{{show(input);input.focus();input.select();if(!document.execCommand('insertText',false,value))throw 0;}};
         {body}
     }}catch{{return {{state:'error'}};}}}})()"#))
