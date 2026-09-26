@@ -235,7 +235,7 @@ test('fixed core help is closed and unavailable/previous help never enables entr
   assert.equal(h.controller.canRefresh(), false); assert.equal(h.count('disconnect'), 1);
   assert.equal(h.state.retirementPending, true);
   assert.equal(JSON.stringify(h.state).includes(SECRET), false);
-  assert.equal(GITHUB_CONNECTION_ENTRY_AVAILABLE, false);
+  assert.equal(GITHUB_CONNECTION_ENTRY_AVAILABLE, true, 'UI presence cannot override unavailable help or native capability');
 });
 
 test('subscribe precedes first status; observation port and preview have no credential route', async () => {
@@ -456,25 +456,50 @@ test('only nine exact refusal codes acknowledge no admission; arbitrary diagnost
   assert.equal(reads, 0);
 });
 
-test('fixed bridge maps Status and Disconnect safely; compiled entry blocks Connect and Refresh before invoke', async () => {
+test('fixed bridge dispatches the four native commands once without a browser or preview credential route', async () => {
   const calls = []; const seen = []; let eventName; let event;
-  const api = createNativeApi('native', (command, args) => { calls.push({ command, args: clone(args) }); return Promise.resolve(idle()); },
+  const api = createNativeApi('native', (command, args) => {
+    calls.push(command === 'github_connection_connect_token'
+      ? { command, args: { projectId: args.projectId, repository: args.repository }, tokenMatched: args.token === SECRET }
+      : { command, args: clone(args) });
+    return Promise.resolve(idle());
+  },
     (name, listener) => { eventName = name; event = listener; return Promise.resolve(() => { event = null; }); });
   await api.githubConnectionStatus(); await api.disconnectGitHubConnection({ sessionId: 'session-a' });
   const stop = await api.subscribeGitHubConnection((value) => seen.push(value));
   assert.equal(eventName, 'github-connection-status'); event(connected()); event({ token: SECRET });
   assert.equal(seen[0].session.id, 'session-a'); assert.equal(seen[1], null); stop();
-  for (const work of [() => api.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: SECRET }),
-    () => api.refreshGitHubConnection({ sessionId: 'session-a', expectedRevision: 2 })]) {
-    await assert.rejects(work, (error) => error.code === 'github_connection_refused_unqualified' && error.admission === 'not-admitted' && !JSON.stringify(error).includes(SECRET));
-  }
+  await api.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: SECRET });
+  await api.refreshGitHubConnection({ sessionId: 'session-a', expectedRevision: 2 });
   await assert.rejects(api.disconnectGitHubConnection({ sessionId: 'session-a', token: SECRET }),
     (error) => error.code === 'github_connection_refused_invalid_input');
-  assert.deepEqual(calls, [{ command: 'github_connection_status', args: {} }, { command: 'github_connection_disconnect', args: { sessionId: 'session-a' } }]);
+  assert.deepEqual(calls, [{ command: 'github_connection_status', args: {} },
+    { command: 'github_connection_disconnect', args: { sessionId: 'session-a' } },
+    { command: 'github_connection_connect_token', args: { projectId: 'project-a', repository: 'Owner/App' }, tokenMatched: true },
+    { command: 'github_connection_refresh', args: { sessionId: 'session-a', expectedRevision: 2 } }]);
   const bad = createNativeApi('native', () => Promise.reject({ code: 'PrivateNativeFailure', message: SECRET }));
   await assert.rejects(bad.githubConnectionStatus(), (error) => error.admission === 'unknown' && !JSON.stringify(error).includes(SECRET));
-  const unavailable = createNativeApi('unavailable', () => { throw new Error('MUST NOT INVOKE'); });
-  await assert.rejects(unavailable.githubConnectionStatus(), (error) => error.code === 'github_connection_refused_runtime_unavailable');
+  const refused = createNativeApi('native', () => Promise.reject({ code: 'github_connection_refused_unqualified', message: SECRET }));
+  await assert.rejects(refused.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: SECRET }),
+    (error) => error.admission === 'not-admitted' && error.reason === 'unqualified' && !JSON.stringify(error).includes(SECRET));
+  for (const mode of ['preview', 'unavailable']) {
+    const unavailable = createNativeApi(mode, () => { throw new Error('MUST NOT INVOKE'); });
+    await assert.rejects(unavailable.githubConnectionStatus(), (error) => error.code === 'github_connection_refused_runtime_unavailable');
+    await assert.rejects(unavailable.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: SECRET }),
+      (error) => error.code === 'github_connection_refused_runtime_unavailable');
+  }
+});
+
+test('available UI still refuses token handoff when the current native capability is closed or lost', async () => {
+  const h = await attached({ registry: idle(1, false) });
+  assert.equal(GITHUB_CONNECTION_ENTRY_AVAILABLE, true);
+  assert.equal(h.controller.canConnect(), false);
+  assert.equal(h.controller.connectToken(SECRET, h.handoff), false);
+  h.publish(idle(2, true)); assert.equal(h.controller.canConnect(), true);
+  h.publish(idle(3, false)); assert.equal(h.controller.canConnect(), false);
+  assert.equal(h.controller.connectToken(SECRET, h.handoff), false);
+  assert.equal(h.count('connect'), 0);
+  assert.equal(JSON.stringify(h.state).includes(SECRET), false);
 });
 
 test('one explicit token handoff retains only nonsecret intent and binds its new native Connect', async () => {

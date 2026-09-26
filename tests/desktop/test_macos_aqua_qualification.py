@@ -250,6 +250,77 @@ def inert_created_directory(gid=GID):
 
 
 class AquaDataTests(unittest.TestCase):
+    def test_current_owner_pins_match_checkout_and_refuse_stale_before_import(self):
+        root = PATH.parents[2]
+        names = ("owned_process.py", "_command_process.py", "_native_process.py", "cancellation.py")
+        self.assertEqual(tuple(M.OWNER_PINS), names)
+        for name, expected in M.OWNER_PINS.items():
+            path = root / "src" / "mobile_release" / name
+            info = path.lstat()
+            self.assertTrue(stat.S_ISREG(info.st_mode), name)
+            self.assertLessEqual(info.st_size, 256 * 1024, name)
+            self.assertEqual(M.digest(path.read_bytes()), expected, name)
+
+        # The positive check above reads only DATA. The actual loader is entered
+        # only with the known stale pin, under a blocker installed before entry.
+        def core_modules():
+            return {name: module for name, module in sys.modules.items()
+                    if name == "mobile_release" or name.startswith("mobile_release.")}
+        before_modules, before_path, before_pins = core_modules(), sys.path, dict(M.OWNER_PINS)
+        before_path_values = list(before_path)
+        self.assertEqual(before_modules, {})  # Never delete preexisting modules to make this pass.
+        attempted_imports = []
+        original_import = __import__
+
+        def no_core_import(name, globals=None, locals=None, fromlist=(), level=0):
+            package = globals.get("__package__") if type(globals) is dict else None
+            if (name == "mobile_release" or name.startswith("mobile_release.")
+                    or level and type(package) is str
+                    and (package == "mobile_release" or package.startswith("mobile_release."))):
+                attempted_imports.append(name)
+                raise AssertionError("core import attempted before stale owner refusal")
+            return original_import(name, globals, locals, fromlist, level)
+
+        # Contexts restore the original dictionaries/path even if an assertion
+        # fails; the inner assertions detect drift before that restoration.
+        with patch.dict(sys.modules), patch.object(sys, "path", list(before_path)):
+            with patch("builtins.__import__", no_core_import), patch.dict(M.OWNER_PINS, {
+                    "_command_process.py": "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68"}):
+                with self.assertRaisesRegex(M.Refused, "^owner-source-pin$") as refused:
+                    M.load_owner(root)
+                self.assertIs(type(refused.exception), M.Refused)
+                self.assertEqual(attempted_imports, [])
+                self.assertEqual(sys.path, before_path_values)
+                self.assertEqual(core_modules(), before_modules)
+            self.assertEqual(M.OWNER_PINS, before_pins)
+        self.assertIs(sys.path, before_path)
+        self.assertEqual(sys.path, before_path_values)
+        self.assertEqual(core_modules(), before_modules)
+        self.assertEqual(M.OWNER_PINS, before_pins)
+
+        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        label = "      - name: Check current owner pins before native preparation\n"
+        self.assertEqual(workflow.count(label), 1)
+        position = workflow.index(label)
+        self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
+        for later in ("Fail fast on native Scripts ownership and package format (never Installer)",
+                      "Download only the exact accepted M archive (no rebuild or fallback)",
+                      "Compile the fixed debug actual-main observer and normal embedded frontend once",
+                      "Standard Installer only is privileged; never execute the app or Python as root"):
+            self.assertLess(position, workflow.index("      - name: " + later + "\n"))
+        step = workflow.split(label, 1)[1].split("\n      - name:", 1)[0]
+        for required in (
+                "timeout-minutes: 1", '"$MRK_PYTHON" -I -S -B -',
+                'path = pathlib.Path("tests/desktop/test_macos_aqua_qualification.py").absolute()',
+                'suite = unittest.TestSuite([module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")])',
+                "unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)",
+                "result.testsRun != 1", "not result.wasSuccessful()",
+                "result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses",
+                "raise SystemExit(1)"):
+            self.assertIn(required, step)
+        self.assertNotIn("discover(", step)
+        self.assertNotIn("loadTestsFrom", step)
+
     def test_new_directory_group_normalization_precedes_widening(self):
         for gid in (GID, 0):
             for mode in (0o700, 0o755):
@@ -326,7 +397,7 @@ class AquaDataTests(unittest.TestCase):
 
     def test_literal_data_and_protocol_distinctions(self):
         self.assertEqual((len(M.CONFIG), M.digest(M.CONFIG)), (684, "0c47aaffe3971b122f21ebddf8070ab29014c4b7c79a56e23335ed110f1e6acc"))
-        self.assertEqual((len(M.VERSION), len(M.IGNORE_PREFIX), len(M.IGNORE_RULES), len(M.STALE)), (34, 40, 208, 26))
+        self.assertEqual((len(M.VERSION), len(M.IGNORE_PREFIX), len(M.IGNORE_RULES), len(M.STALE)), (34, 40, 299, 26))
         self.assertEqual(M.SOURCE, b'plugins { id("com.android.application") }\nandroid { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
         expected = {
             "first-save": [(1, 1, True, 2, True, "committed", "clean", "none", "none", 3),
@@ -344,6 +415,84 @@ class AquaDataTests(unittest.TestCase):
                              s["nativeReason"], s["writerFrames"]) for s in report["saveSessions"]]
                 self.assertEqual(observed, rows)
                 self.assertEqual(M.parse_result(captured(report), b"", BINDING, case), report)
+
+    def test_review_ignore_lengths_match_the_complete_fixture(self):
+        initial = M.fixture_data("first-save", False)[0][".gitignore"]
+        saved = M.fixture_data("noop-stale", False)[0][".gitignore"]
+        self.assertEqual((len(initial), len(saved)), (40, 339))
+        self.assertEqual(saved, initial + M.IGNORE_RULES)
+        for case in M.CASES:
+            for session in M.expected_result(BINDING, case)["saveSessions"]:
+                with self.subTest(case=case, draft=session["draftRevision"], baseline=session["baselineGeneration"]):
+                    ignore = session["files"][1]
+                    self.assertEqual(ignore, {"path": ".gitignore",
+                        "action": "append" if session["createReleaseDirectory"] else "preserve",
+                        "beforeBytes": len(initial if session["createReleaseDirectory"] else saved),
+                        "afterBytes": len(saved)})
+
+    def test_result_diagnostic_locates_schema_field_without_exporting_values_or_unknown_keys(self):
+        good = M.expected_result(BINDING, "first-save")
+        wrong_value = deepcopy(good); wrong_value["saveSessions"][0]["files"][1]["afterBytes"] = 248
+        wrong_type = deepcopy(good); wrong_type["saveSessions"][0]["files"][1]["afterBytes"] = "PRIVATE_ACTUAL_VALUE"
+        extra_key = deepcopy(good); extra_key["saveSessions"][0]["files"][1]["PRIVATE_UNKNOWN_KEY"] = "PRIVATE_ACTUAL_VALUE"
+        wrong_count = deepcopy(good); wrong_count["saveSessions"].pop()
+        for value, label, location in (
+            (wrong_value, "result-value", "saveSessions[0].files[1].afterBytes"),
+            (wrong_type, "result-type", "saveSessions[0].files[1].afterBytes"),
+            (extra_key, "result-keys", "saveSessions[0].files[1]"),
+            (wrong_count, "result-count", "saveSessions"),
+        ):
+            fixtures, calls = InertFixtures(), []
+            def runner(argv, **kwargs):
+                calls.append(argv)
+                return CompletedProcess(args=argv, returncode=0, stdout=captured(value), stderr=b"")
+            with self.subTest(label=label), self.assertRaises(M.Refused) as caught:
+                M.run_cases(BINDING, fixtures, runner, UID, "runner", self.fail)
+            self.assertEqual((str(caught.exception), calls, fixtures.reads), (label, [[M.EXECUTABLE, "first-save"]], []))
+            output = io.StringIO()
+            M.emit_record(M.diagnostic(caught.exception, None, fixtures), output)
+            report = json.loads(output.getvalue())
+            self.assertEqual((report["reason"], report["resultLocation"]), (label, location))
+            self.assertEqual((report["stage"], report["originalCallReturned"], report["laterCasesStopped"]),
+                             ("result-validation", True, True))
+            self.assertNotIn("PRIVATE_", output.getvalue())
+            with patch.object(M, "_result_location", side_effect=RuntimeError("PRIVATE_DIAGNOSTIC_FAILURE")):
+                fallback = M.diagnostic(caught.exception, None, fixtures)
+            self.assertEqual(fallback["reason"], label)
+            self.assertNotIn("resultLocation", fallback)
+            self.assertNotIn("PRIVATE_", json.dumps(fallback))
+
+    def test_result_diagnostic_omits_unsafe_or_unbounded_locations(self):
+        for location in (None, (), ["saveSessions"], ("PRIVATE_KEY",), ("saveSessions", True),
+                         ("saveSessions", -1), ("saveSessions", 64), ("saveSessions",) * 13,
+                         ("staleMarkerWriterReturnedAndClosed",) * 12):
+            error = M.Refused("result-value")
+            error.result_location = location
+            report = M.diagnostic(error, None, None)
+            self.assertEqual(report["reason"], "result-value")
+            self.assertNotIn("resultLocation", report)
+        self.assertEqual(M._result_location(("saveSessions", 63, "files", 0, "beforeBytes")),
+                         "saveSessions[63].files[0].beforeBytes")
+
+    def test_review_ignore_bound_uses_the_exact_native_fixture_roster(self):
+        # Source/DATA regression only; real DOM execution remains a macOS gate.
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        fixture = M.re.search(r"const IGNORE_LINES: \[&str; ([0-9]+)\] = \[(.*?)\];", observer, M.re.S)
+        self.assertIsNotNone(fixture)
+        expected = M.IGNORE_RULES.decode("ascii").splitlines()
+        self.assertEqual(int(fixture.group(1)), len(expected))
+        self.assertEqual(M.re.findall(r'"([^"]+)"', fixture.group(2)), expected)
+        script = observer.split("fn script(step: Step)", 1)[1].split("\nfn route(", 1)[0]
+        self.assertEqual(script.count("if(ignore.length>{ignore_limit}||counts.length!==3)throw 0;"), 1,
+                         "review-ignore-count-bound")
+        self.assertEqual(script.count('Some(format!(r#"'), 1)
+        self.assertTrue(script.rstrip().endswith('"#, ignore_limit = IGNORE_LINES.len()))\n}'),
+                        "review-ignore-count-argument")
+        native = observer.split("    fn review_sample(", 1)[1].split("\n    pub(super) fn open_request(", 1)[0]
+        self.assertIn("!view.ignore_additions.iter().map(String::as_str).eq(if create { IGNORE_LINES.as_slice() } else { &[] }.iter().copied())", native)
+        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
+        self.assertIn('s.live_review() && s.review.as_ref() == v.get("review")', body)
+        self.assertIn('v["project"].as_str() != self.project_path.to_str()', body)
 
     def test_strict_result_rejects_missing_extra_wrong_type_or_wrong_finality(self):
         good = M.expected_result(BINDING, "first-save")

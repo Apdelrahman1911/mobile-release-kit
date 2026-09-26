@@ -1091,6 +1091,71 @@ class OfflineCLIContractTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(AssertionError):
                 self.shim.offline_saved_configs(changed)
 
+    def test_source_inventory_preserves_literal_plus_and_refuses_invalid_leaf_before_read(self):
+        import hashlib
+        import json
+        value = self.control()
+        names = tuple(sorted(
+            "desktop/packaging/debian/native-notices/notices/crates/" + package + "/" + license
+            for package in ("toml_datetime-1.1.1+spec-1.1.0", "toml_edit-0.25.15+spec-1.1.0",
+                            "toml_parser-1.1.3+spec-1.1.0")
+            for license in ("LICENSE-APACHE", "LICENSE-MIT")))
+        source, root = value["source"], value["root"]
+        scratch, inputs_path = root + "/offline-cli11", root + "/environment-native-inputs.json"
+        # All host facts and file effects are inert DATA, not hosted/native evidence.
+        self.fs.name, self.fs.getcwd = "posix", lambda: scratch
+        self.fs.path.abspath = lambda path: path
+        self.fs.environ = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+            "MRK_DESKTOP_HOSTED_CHECKS": self.shim.OFFLINE_CLI_SCOPE, "GITHUB_SHA": value["sourceSha"],
+            "GITHUB_RUN_ID": value["runId"], "GITHUB_RUN_ATTEMPT": value["attempt"],
+            "GITHUB_REF": "refs/heads/verify/desktop-offline-preflight-native"}
+        self.shim.sys = types.SimpleNamespace(flags=types.SimpleNamespace(isolated=1, no_site=1),
+            dont_write_bytecode=True, version_info=(3, 14, 7), platform="linux", executable=value["python"])
+        self.shim.__file__ = source + "/tests/native_desktop_environment.py"
+        self.fs.Path.iterdir = lambda path: iter(self.fs.Path(name) for name in self.fs.files
+                                                 if self.fs.Path(name).parent == path)
+        originals = {}
+        for key, path in (("root", root), ("source", source), ("offline-cli11", scratch)):
+            details = self.fs.details(self.fs.add(path, mode=stat.S_IFDIR | 0o700))
+            originals[key] = {"device": str(details.st_dev), "inode": str(details.st_ino),
+                              "mode": details.st_mode, "uid": details.st_uid, "gid": details.st_gid}
+        rows = []
+        for name in names:
+            content = ("notice:" + name).encode("ascii")
+            self.fs.add(source + "/" + name, content)
+            rows.append({"path": name, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+        saved = "{}\n"
+        inputs = {key: value[key] for key in
+                  ("scope", "sourceSha", "sourceTree", "runId", "attempt", "platform", "root", "source", "python")}
+        inputs.update(schemaVersion=1, originalDirectories=originals,
+            savedConfigs=[{"case": case, "rawText": saved, "size": len(saved),
+                           "sha256": hashlib.sha256(saved.encode("ascii")).hexdigest()}
+                          for case in self.shim.OFFLINE_CASES])
+        input_file = self.fs.add(inputs_path)
+        def admit(inventory):
+            inputs["sourceFiles"] = inventory
+            raw = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("ascii")
+            input_file.data[:] = raw
+            value["inputsSha256"] = hashlib.sha256(raw).hexdigest()
+            self.fs.calls.clear()
+            return self.shim._offline_cli_admit(value["core"], root + "/offline-cli11-control.json", value)
+        admitted, observed, source_names = admit(rows)
+        self.assertIs(admitted, value)
+        self.assertEqual(observed["sourceFiles"], rows)
+        self.assertEqual(source_names, frozenset(names))
+        self.assertEqual([call[1] for call in self.fs.calls if call[0] == "open"],
+                         [inputs_path] + [source + "/" + name for name in names])
+        self.assertEqual(self.fs.fds, {})
+        for name in ("/notice+spec", "notices/../notice+spec", "notices/./notice+spec", "notices//notice+spec",
+                     "notices/notice+spec/", "C:/notice+spec", "notices\\notice+spec", "notices/notice +spec"):
+            with self.subTest(path=name):
+                with self.assertRaises(AssertionError):
+                    admit([{**rows[0], "path": name}])
+                # The bounded input record read is legitimate; this invalid leaf is never opened.
+                self.assertEqual([call[1] for call in self.fs.calls if call[0] == "open"], [inputs_path])
+                self.assertEqual(self.fs.fds, {})
+        self.assertTrue(all(slot.state == "CLOSED" and slot.error is None for slot in self.shim._ROOTS))
+
     def test_import_routes_bind_tests_namespace_and_workflow_modules(self):
         source = self.fs.Path("/inert/source")
         self.assertEqual(self.shim._offline_cli_import_paths("/inert/source/src", source),

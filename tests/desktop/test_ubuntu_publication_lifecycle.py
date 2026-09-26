@@ -2419,6 +2419,82 @@ class LifecycleData(unittest.TestCase):
                     L.verify_finality(first, last, 0)
 
 
+class GitHubPeerNamespaceWitnessContracts(unittest.TestCase):
+    @staticmethod
+    def observations():
+        start = {
+            "sourceSha": "a" * 40, "entrySha256": "b" * 64, "handoffSha256": "c" * 64,
+            "invocationId": "d" * 32, "deadline": 1300.0,
+            "namespaces": {"user": [4, 11], "pid": [4, 12], "mnt": [4, 13]},
+            "githubPeerNamespaces": {"user": [4, 11], "pid": [4, 12], "mnt": [4, 13], "net": [4, 14]},
+            "unit": {"Id": "mrk-ubuntu-native-10-2.service", "InvocationID": "d" * 32,
+                     "Result": "success", "ControlGroup": "/system.slice/mrk-ubuntu-native-10-2.service"},
+            "effective": {"KillMode": "control-group", "ExitType": "cgroup"},
+            "events": {"memory.events": {"max": 0, "oom": 0, "oom_kill": 0}, "pids.events": {"max": 0}},
+        }
+        stop = {**deepcopy(start), "completion": {
+            "SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"}}
+        return start, stop
+
+    def test_route_requires_both_witnesses_and_preserves_ordinary_finality(self):
+        start, stop = self.observations()
+        L.verify_finality(start, stop, 0, github=True)
+        for remove_start, remove_stop in ((True, False), (False, True), (True, True)):
+            first, last = deepcopy(start), deepcopy(stop)
+            if remove_start:
+                first.pop("githubPeerNamespaces")
+            if remove_stop:
+                last.pop("githubPeerNamespaces")
+            with self.subTest(remove_start=remove_start, remove_stop=remove_stop), self.assertRaises(ValueError):
+                L.verify_finality(first, last, 0, github=True)
+        for first, last in ((start, stop), ({k: v for k, v in start.items() if k != "githubPeerNamespaces"}, stop)):
+            with self.assertRaises(ValueError):
+                L.verify_finality(first, last, 0)
+        start.pop("githubPeerNamespaces")
+        stop.pop("githubPeerNamespaces")
+        L.verify_finality(start, stop, 0)
+        for invalid_context in (None, 0, 1, "true"):
+            with self.assertRaises(ValueError):
+                L.verify_finality(start, stop, 0, github=invalid_context)
+
+    def test_witness_rejects_malformed_pairs_roles_and_changed_stop_domain(self):
+        start, stop = self.observations()
+        self.assertEqual(L._github_peer_namespace_witness(start), start["githubPeerNamespaces"])
+        for field in ("namespaces", "githubPeerNamespaces"):
+            for malformed in ([0, 11], [4, 0], [True, 11], [4, 11.0], [4, -1], [4, 2**64],
+                              [4], [4, 11, 12], (4, 11), ["4", 11], None):
+                invalid = deepcopy(start)
+                invalid[field]["user"] = malformed
+                with self.subTest(field=field, pair=malformed), self.assertRaises(ValueError):
+                    L._github_peer_namespace_witness(invalid)
+            missing = deepcopy(start)
+            missing[field].pop("user")
+            with self.assertRaises(ValueError):
+                L._github_peer_namespace_witness(missing)
+            extra = deepcopy(start)
+            extra[field]["extra"] = [4, 15]
+            with self.assertRaises(ValueError):
+                L._github_peer_namespace_witness(extra)
+        changed = deepcopy(stop)
+        changed["githubPeerNamespaces"]["net"] = [4, 15]
+        with self.assertRaises(ValueError):
+            L.verify_finality(start, changed, 0, github=True)
+        changed = deepcopy(start)
+        changed["namespaces"]["mnt"] = [4, 15]
+        with self.assertRaises(ValueError):
+            L._github_peer_namespace_witness(changed)
+
+    def test_real_producers_and_finality_callers_keep_the_explicit_route(self):
+        source = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text()
+        for producer, following in (("unit_start", "_no_denials"), ("unit_stop", "installed_closed_result")):
+            body = source.split("def " + producer + "(", 1)[1].split("def " + following + "(", 1)[0]
+            self.assertIn('if shell_github(value):', body)
+            self.assertIn('["githubPeerNamespaces"] = _github_boundary_namespaces()', body)
+            self.assertIn('_github_peer_namespace_witness(', body)
+        self.assertIn('verify_finality(start, stop, 0, github=shell_github(value))', source)
+        self.assertIn('verify_finality(start, stop, client_result.returncode, github=shell_github(value))', source)
+
+
 def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
@@ -3234,11 +3310,15 @@ class ShellFixtureNamespaceContracts(unittest.TestCase):
         unit = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
         branch = next(n for n in unit.body if isinstance(n, ast.If) and ast.unparse(n.test) == "'shell' in value")
         loop = next(n for n in branch.body if isinstance(n, ast.For))
-        self.assertEqual(ast.unparse(loop.iter), "SHELL_CASES")
+        self.assertEqual(ast.unparse(loop.iter), "shell_cases(value)")
         self.assertEqual(ast.unparse(branch.body[1]), "expected = _installed_payload(value, loader, original)")
-        self.assertEqual(ast.unparse(branch.body[2]), "namespace = _shell_fixtures_prepare(value)")
-        self.assertIs(branch.body[3], loop)
-        self.assertEqual(ast.unparse(branch.body[4]), "_shell_fixtures_final(value, namespace)")
+        self.assertEqual(ast.unparse(branch.body[2]),
+                         "github_expected = _shell_github_materials_prepare(value, loader, original, expected) if shell_github(value) else None")
+        self.assertEqual(ast.unparse(branch.body[3]), "namespace = _shell_fixtures_prepare(value)")
+        self.assertIsInstance(branch.body[4], ast.If)
+        self.assertEqual(ast.unparse(branch.body[4].test), "shell_github(value)")
+        self.assertIs(branch.body[5], loop)
+        self.assertEqual(ast.unparse(branch.body[6]), "_shell_fixtures_final(value, namespace)")
         self.assertEqual(L.SHELL_CASES[9], "metadata-save")
         self.assertEqual(L.SHELL_CASES[-3:], ("offline-settlement", "settled-failure", "version-save"))
         self.assertEqual(ast.unparse(loop.body[0]), "environment, log_binding = _shell_prepare(value, case, namespace)")
@@ -5215,6 +5295,156 @@ class SessionFixtureContracts(unittest.TestCase):
         self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(session)))
 
 
+
+class GitHubEntryFailureLabelContracts(unittest.TestCase):
+    def test_guidance_reload_labels_are_closed_and_never_entry_samples(self):
+        labels = (b"GitHubGuidanceReady", b"GitHubGuidanceReload")
+        expected = [b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + label + b"\n" for label in labels]
+        self.assertEqual([line for line in L.SHELL_FAILURE_STEPS if b"=GitHubGuidance" in line], expected)
+        for label, first in zip(labels, expected):
+            raw = first + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+            self.assertEqual(L._shell_label_pair(raw), {
+                "step": label.decode("ascii"), "boundary": "dom", "bootstrapProgress": "advanced"})
+            for invalid in (raw[:-1], raw + b"\n", raw.replace(label, label + b"Extra"),
+                            self.frame().replace(b"GitHubEntry", label)):
+                self.assertIsNone(L._shell_label_pair(invalid))
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+
+    @staticmethod
+    def frame(*, boundary=b"settlement", progress=b"advanced", **changes):
+        fields = {
+            "o": b"evaluation-budget", "eval": b"128", "ne": b"128", "ns": b"present",
+            "cap": b"1", "reason": b"none", "sess": b"0", "de": b"128", "dom": b"wait",
+            "sel": b"1", "form": b"1", "submit": b"1", "enabled": b"0", "help": b"na",
+            "repo": b"1", "guide": b"1",
+        }
+        fields.update(changes)
+        return (b"MRK_INSTALLED_SHELL_GITHUB_ENTRY_FAILURE=v1;"
+                + b";".join(key.encode("ascii") + b"=" + value for key, value in fields.items()) + b"\n"
+                + b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHubEntry\n"
+                + b"MRK_INSTALLED_SHELL_FAILURE_PHASE=" + boundary + b"\n"
+                + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=" + progress + b"\n")
+
+    def test_entry_roundtrip_closed_native_and_same_callback_dom_samples(self):
+        parsed = L._shell_label_pair(self.frame())
+        self.assertEqual(parsed, {"step": "GitHubEntry", "boundary": "settlement", "bootstrapProgress": "advanced",
+            "githubEntry": {"origin": "evaluation-budget", "evaluations": 128,
+                "native": {"sampleEvaluations": 128, "status": "present", "capabilityAvailable": True,
+                           "capabilityReason": "none", "sessionPresent": False},
+                "dom": {"sampleEvaluations": 128, "state": "wait", "pageSelected": True, "formPresent": True,
+                        "submitPresent": True, "submitEnabled": False, "helpPresent": None,
+                        "repositoryExpected": True, "helpContainerPresent": True}}})
+        reasons = (b"none", b"unqualified", b"runtime-unavailable", b"publisher-unconfigured", b"not-connected",
+                   b"invalid-input", b"busy", b"unauthorized", b"forbidden", b"not-found-or-inaccessible",
+                   b"target-changed", b"rate-limited", b"network-unavailable", b"tls-failed", b"response-invalid",
+                   b"response-limit", b"expired", b"stale", b"cancelled", b"cleanup-unknown")
+        for reason in reasons:
+            native = L._shell_label_pair(self.frame(reason=reason, cap=b"1" if reason == b"none" else b"0"))["githubEntry"]["native"]
+            self.assertEqual(native["capabilityReason"], reason.decode("ascii"))
+        for presence in (b"absent", b"not-observed"):
+            native = L._shell_label_pair(self.frame(ns=presence, ne=b"128" if presence == b"absent" else b"na",
+                                                    cap=b"na", reason=b"na", sess=b"na"))["githubEntry"]["native"]
+            self.assertEqual(native["status"], presence.decode("ascii"))
+            self.assertIsNone(native["capabilityAvailable"])
+            self.assertIsNone(native["sessionPresent"])
+        # Native and DOM stamps are independent global-counter samples, not a join.
+        earlier = L._shell_label_pair(self.frame(ne=b"17", de=b"93"))["githubEntry"]
+        self.assertEqual((earlier["native"]["sampleEvaluations"], earlier["dom"]["sampleEvaluations"]), (17, 93))
+        unavailable = dict(de=b"na", dom=b"not-observed", sel=b"na", form=b"na", submit=b"na",
+                           enabled=b"na", help=b"na", repo=b"na", guide=b"na")
+        for origin in (b"callback-shape", b"script-error"):
+            data = dict(unavailable, de=b"128", dom=b"error")
+            self.assertEqual(L._shell_label_pair(self.frame(o=origin, boundary=b"dom", **data))["githubEntry"]["origin"],
+                             origin.decode("ascii"))
+        refused = L._shell_label_pair(self.frame(o=b"ready-refused", boundary=b"dom", dom=b"ready",
+                                                enabled=b"1", help=b"0", repo=b"0", guide=b"0"))
+        self.assertFalse(refused["githubEntry"]["dom"]["repositoryExpected"])
+        self.assertFalse(refused["githubEntry"]["dom"]["helpPresent"])
+        deadline = L._shell_label_pair(self.frame(o=b"deadline", boundary=b"deadline", eval=b"127", ne=b"127", **unavailable))
+        self.assertEqual(deadline["githubEntry"]["evaluations"], 127)
+        generic = L._shell_label_pair(self.frame(o=b"not-recorded", eval=b"na", ne=b"na", ns=b"not-observed",
+                                                cap=b"na", reason=b"na", sess=b"na", **unavailable))["githubEntry"]
+        self.assertIsNone(generic["evaluations"])
+        self.assertEqual(generic["native"]["status"], "not-observed")
+        self.assertTrue(all(value is None for key, value in generic["dom"].items() if key != "state"))
+
+    def test_entry_rejects_every_prefix_extra_field_and_unbound_shape(self):
+        good = self.frame()
+        for end in range(len(good)):
+            for raw in (good[:end], good[:end] + b"\n"):
+                if raw != good:
+                    with self.subTest(prefix=end): self.assertIsNone(L._shell_label_pair(raw))
+        lines = good.splitlines(keepends=True)
+        for raw in (good + b"\n", good + b"x", b"".join(lines[1:]), b"".join(lines[1:] + lines[:1]),
+                    good.replace(b"\n", b"\r\n"), good.replace(b"=v1;", b"=v2;"),
+                    good.replace(b"GitHubEntry", b"GitHubToken"), good.replace(b"GitHubEntry", b"Bootstrap"),
+                    good.replace(b";eval=128", b";eval=128;eval=128"), good.replace(b";repo=1", b""),
+                    good.replace(b";guide=1\n", b";guide=1;extra=0\n"), good.replace(b";cap=1", b";cap=true"),
+                    good.replace(b";reason=none", b";reason=private-text"), good.decode("ascii")):
+            with self.subTest(malformed=repr(raw)[:100]): self.assertIsNone(L._shell_label_pair(raw))
+        for key in ("o", "eval", "ne", "ns", "cap", "reason", "sess", "de", "dom", "sel", "form", "submit",
+                    "enabled", "help", "repo", "guide"):
+            prefix = key.encode("ascii") + b"="
+            pieces = lines[0].split(b";")
+            raw = b";".join(piece for piece in pieces if not piece.startswith(prefix))
+            if not raw.endswith(b"\n"): raw += b"\n"
+            self.assertIsNone(L._shell_label_pair(raw + b"".join(lines[1:])))
+        for changes in (
+            {"eval": b"127"}, {"eval": b"129"}, {"eval": b"na"}, {"eval": b"0128"}, {"eval": b"-1"},
+            {"ne": b"129"}, {"ne": b"na"}, {"de": b"0"}, {"de": b"129"}, {"de": b"na"},
+            {"ns": b"absent"}, {"cap": b"0"}, {"reason": b"busy"}, {"sess": b"na"},
+            {"dom": b"not-observed"}, {"dom": b"error"}, {"dom": b"ready"}, {"sel": b"na"},
+            {"form": b"0"}, {"submit": b"0"}, {"enabled": b"na"}, {"enabled": b"1"},
+            {"help": b"1"}, {"guide": b"na"}, {"o": b"not-recorded"}, {"o": b"deadline"},
+            {"o": b"callback-shape"}, {"repo": b"owner/app"}, {"guide": b"false"},
+        ):
+            with self.subTest(changes=changes): self.assertIsNone(L._shell_label_pair(self.frame(**changes)))
+        for changes in ({"enabled": b"0", "help": b"0"}, {"enabled": b"1", "help": b"1"},
+                        {"enabled": b"1", "help": b"0", "de": b"127"}):
+            self.assertIsNone(L._shell_label_pair(self.frame(o=b"ready-refused", boundary=b"dom", dom=b"ready", **changes)))
+
+    def test_entry_maximum_legal_frame_fits_original_512_and_legacy_is_unchanged(self):
+        doms = (
+            dict(de=b"na", dom=b"not-observed", sel=b"na", form=b"na", submit=b"na", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"error", sel=b"na", form=b"na", submit=b"na", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"wait", sel=b"0", form=b"0", submit=b"0", enabled=b"na", help=b"na", repo=b"na", guide=b"na"),
+            dict(de=b"128", dom=b"ready", sel=b"1", form=b"1", submit=b"1", enabled=b"1", help=b"0", repo=b"na", guide=b"0"),
+        )
+        natives = (
+            dict(ne=b"na", ns=b"not-observed", cap=b"na", reason=b"na", sess=b"na"),
+            dict(ne=b"128", ns=b"absent", cap=b"na", reason=b"na", sess=b"na"),
+            dict(ne=b"128", ns=b"present", cap=b"0", reason=b"not-found-or-inaccessible", sess=b"0"),
+        )
+        # Maximal representatives: three-digit counts, longest reason, all
+        # legal nullable slots at na; 0 and 1 occupy the same one byte.
+        frames = []
+        for native in natives:
+            for dom in doms:
+                for origin, boundary in ((b"evaluation-budget", b"settlement"), (b"deadline", b"deadline"),
+                                         (b"callback-shape", b"dom"), (b"script-error", b"dom"), (b"ready-refused", b"dom")):
+                    frame = self.frame(o=origin, boundary=boundary, progress=b"app-info-returned-before-hold", **native, **dom)
+                    if L._shell_label_pair(frame) is not None: frames.append(frame)
+        self.assertEqual(max(map(len, frames)), 380)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        self.assertLessEqual(max(map(len, frames)), L.SHELL_FAILURE_LABEL_LIMIT)
+        longest = max(frames, key=len)
+        self.assertIn(b";repo=na;guide=na\n", longest)
+        for step in (b"PrepareSave", b"PathSettlement", b"Bootstrap"):
+            old = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\n"
+                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+            self.assertEqual(L._shell_label_pair(old), {"step": step.decode("ascii"), "boundary": "settlement", "bootstrapProgress": "advanced"})
+        session = (b"MRK_INSTALLED_SHELL_FAILURE_STEP=SessionReview\n"
+                   b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                   b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=29;evaluations=73;reject=native-readiness-invariant;wait=native-reply-pending\n")
+        self.assertNotIn("githubEntry", L._shell_label_pair(session))
+        path = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v1;index=0;reject=gtk-initial-folder\n"
+                b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\nMRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n"
+                b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        self.assertNotIn("githubEntry", L._shell_label_pair(path))
+        with patch.object(L, "SHELL_FAILURE_LABEL_LIMIT", len(longest) - 1):
+            self.assertIsNone(L._shell_label_pair(longest))
+
+
 class FailureLabelSinkContracts(unittest.TestCase):
     @staticmethod
     def metadata_open_frame(*, site=b"65535", origin=b"evaluation-budget", evaluations=b"128", index=b"1",
@@ -5281,7 +5511,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         report = source.split("fn report_failure(&self)", 1)[1].split("fn report_failure_handoff", 1)[0]
         self.assertLess(report.index("snapshot_failure_frame("), report.index("metadata_open_failure_frame("))
         self.assertIn("session.is_none() && path.is_none() && evidence.is_none()", report)
-        self.assertIn("self.failed.site(), r.metadata.open_failure)", report)
+        self.assertIn("self.failed.site(), r.metadata.open_failure, r.github_entry)", report)
         self.assertNotIn("r.metadata.open_sample", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
         self.assertLess(report.index("Err(_) => return"), report.index("metadata_open_failure_frame("))
@@ -5396,6 +5626,71 @@ class FailureLabelSinkContracts(unittest.TestCase):
             raw + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;eval=0;reject=not-recorded;wait=not-sampled\n",
         ):
             self.assertIsNone(L._shell_label_pair(bad), bad)
+
+    def test_path_v3_readiness_relations_are_closed_and_keep_original_callback_contract(self):
+        def frame(*, step=b"PathActivate", index=b"7", wait=b"selection-different", picker=b"4o"):
+            return (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index=" + index
+                    + b";reject=not-recorded;start=18000;now=45000;rsv=m;in=m;out=m;cb=returned;wait="
+                    + wait + b";h=" + picker + b"\nMRK_INSTALLED_SHELL_FAILURE_STEP=" + step
+                    + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\nMRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        good = frame()
+        self.assertEqual(L._shell_label_pair(good)["path"]["gtkPicker"],
+                         {"mapped": True, "folder": "target-parent", "selected": "other"})
+        for end in range(len(good)):
+            self.assertIsNone(L._shell_label_pair(good[:end]))
+        for state, (mapped, folder) in L.SHELL_SESSION_PICKER_FOLDERS.items():
+            for selected in (b"a", b"t", b"p", b"o"):
+                wait = b"selection-absent" if selected == b"a" else b"not-sampled" if selected == b"t" else b"selection-different"
+                parsed = L._shell_label_pair(frame(wait=wait, picker=state + selected))
+                self.assertEqual(parsed["path"]["gtkPicker"],
+                                 {"mapped": mapped, "folder": folder, "selected": L.SHELL_SESSION_PICKER_SELECTIONS[selected]})
+                set_wait = (b"unmapped" if not mapped else b"target-parent-absent" if folder == "absent"
+                            else b"target-parent-different" if folder == "other" else b"not-sampled")
+                self.assertIsNotNone(L._shell_label_pair(frame(step=b"PathSet", wait=set_wait, picker=state + selected)))
+        for index in (b"1", b"6", b"7", b"8"):
+            self.assertIsNotNone(L._shell_label_pair(frame(step=b"PathSet", index=index, wait=b"not-sampled", picker=b"4a")))
+        for index in (b"0", b"2", b"3", b"4", b"5", b"9", b"10"):
+            self.assertIsNone(L._shell_label_pair(frame(step=b"PathSet", index=index, wait=b"not-sampled", picker=b"4a")))
+        for index in (b"0", b"4"):
+            self.assertIsNone(L._shell_label_pair(frame(index=index)))
+            self.assertIsNotNone(L._shell_label_pair(frame(index=index, wait=b"response-insensitive", picker=b"na")))
+        for wait in (b"not-sampled", b"dialog-absent", b"initial-folder-absent"):
+            self.assertIsNone(L._shell_label_pair(frame(wait=wait)))
+            self.assertIsNotNone(L._shell_label_pair(frame(wait=wait, picker=b"na")))
+        bad = [
+            frame(wait=b"selection-different", picker=b"na"),
+            frame(step=b"PathSet", wait=b"unmapped", picker=b"na"),
+            frame(step=b"PathSet", wait=b"target-parent-different", picker=b"4o"),
+            frame(step=b"PathSet", wait=b"target-parent-absent", picker=b"0a"),
+            frame(step=b"PathSet", wait=b"not-sampled", picker=b"5o"),
+            frame(step=b"PathSet", wait=b"unmapped", picker=b"4o"),
+            frame(wait=b"unmapped", picker=b"0a"),
+            frame(step=b"PathBrowse", wait=b"not-sampled", picker=b"4t"),
+            frame(wait=b"response-insensitive", picker=b"na"),
+            frame(wait=b"selection-absent", picker=b"4t"),
+            frame(wait=b"response-insensitive", picker=b"4o"),
+            frame(wait=b"selection-different", picker=b"4a"),
+            frame(wait=b"not-sampled", picker=b"4p"),
+            frame(wait=b"selection-different", picker=b"4t"),
+        ]
+        ready = frame(wait=b"not-sampled", picker=b"4t")
+        bad += [ready.replace(b"rsv=m;in=m;out=m;cb=returned", callbacks) for callbacks in (
+            b"rsv=0;in=0;out=0;cb=idle", b"rsv=1;in=0;out=0;cb=reserved")]
+        bad += [good.replace(before, after) for before, after in (
+            (b";h=4o", b";h=4o;h=4o"), (b";h=4o", b""), (b"=v3;", b"=v2;"),
+            (b"=v3;", b"=v1;"), (b"=v3;", b"=v4;"))]
+        for raw in bad:
+            self.assertIsNone(L._shell_label_pair(raw))
+        for picker in (b"4f", b"0f", b"6t", b"4x", b"n", b"nat", b"/private/path", b"4o;h=4o"):
+            self.assertIsNone(L._shell_label_pair(frame(picker=picker)))
+        for raw in (good + b"\n", good + good, good.replace(b"\n", b"\r\n"), good.replace(b"now=45000", b"now=1")):
+            self.assertIsNone(L._shell_label_pair(raw))
+        largest = frame(step=b"PathSet", wait=b"target-parent-different", picker=b"5o").replace(
+            b"start=18000;now=45000", b"start=999999;now=999999").replace(b"reject=not-recorded", b"reject=gtk-fixture-transition")
+        self.assertIsNotNone(L._shell_label_pair(largest))
+        self.assertLessEqual(len(largest), L.SHELL_PATH_FAILURE_V3_FRAME_BOUND)
+        with patch.object(L, "SHELL_PATH_FAILURE_V3_FRAME_BOUND", len(good) - 1):
+            self.assertIsNone(L._shell_label_pair(good))
 
     def test_path_v2_timing_callback_wait_preserves_closed_prefix_contract(self):
         good = (b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=8;reject=not-recorded;start=43000;now=45000;"
@@ -6014,7 +6309,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("r.held", outstanding)
         report = source.split("fn report_failure(&self)", 1)[1].split("pub(super) fn attach", 1)[0]
         self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,", report)
-        self.assertIn("r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure)", report)
+        self.assertIn("r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure, r.github_entry)", report)
         self.assertIn("snapshot_failure_frame(trace, progress, site, snapshot)", report)
         self.assertIn("failure_frame(trace, progress, session, path, evidence)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
@@ -6047,9 +6342,15 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("PathDiagnostic::sample_trace(&mut r.trace,step,self.start.elapsed().as_millis(),previous)", sampler)
         self.assertIn("if matches!(step,Step::Paths(_)) || matches!(trace.0,Step::Paths(_)) || previous.is_some() { trace.0 = step; }", diagnostic)
         self.assertIn("} else { false }", sampler)
-        for name, write in (("path_callback", "diagnostic.mark(callback)"), ("path_wait", "diagnostic.wait = wait")):
-            marker = body(source, name)
-            self.assertIn("if self.path_sample(&mut r) {\n            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { " + write + "; }\n        }", marker)
+        marker = body(source, "path_callback")
+        self.assertIn("if self.path_sample(&mut r) {\n            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { diagnostic.mark(callback); }\n        }", marker)
+        self.assertIn("self.path_file_wait(wait,SessionPickerReadiness::NotSampled);", body(source, "path_wait"))
+        wait = body(source, "path_file_wait")
+        self.assertEqual(wait.count("self.record()"), 1)
+        self.assertLess(wait.index("self.failed.load"), wait.index("d.file_wait(wait,picker)"))
+        self.assertIn("self.path_sample(&mut r)", wait)
+        self.assertIn("self.wait = wait; self.gtk_picker = picker; true", diagnostic)
+        self.assertIn("if !picker.valid_path(self.step,wait) { return false; }", diagnostic)
         latch = source.split("fn latch_path_diagnostic(", 1)[1].split("const PROJECT_SOURCE", 1)[0]
         self.assertIn("if failed.mark_unknown() { *diagnostic = Some(next); }", latch)
         helper = body(source, "path_fail")
@@ -6078,18 +6379,28 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("let Some(folder) = dialog.current_folder() else { q.path_wait(installed_observation::PathWait::InitialFolderAbsent); return Ok(None); };", admitting)
         self.assertIn("if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }", admitting)
         selecting = body(shell, "select_observed_path"); activating = body(shell, "activate_observed_path")
-        self.assertEqual(selecting.count("dialog.set_filename(path)"), 1)
+        self.assertNotIn("dialog.set_filename(", selecting)
         self.assertEqual(selecting.count("dialog.set_current_folder(path)"), 1)
-        self.assertLess(selecting.index("q.path_selection(id,index)?"), selecting.index("let selected = match"))
+        self.assertEqual(selecting.count("dialog.set_current_folder(parent)"), 1)
+        self.assertEqual(selecting.count("dialog.select_file(&target_file).is_err()"), 1)
         self.assertIn('match dialog.property::<gtk::FileChooserAction>("action")', selecting)
-        self.assertIn("gtk::FileChooserAction::SelectFolder => dialog.set_current_folder(path)", selecting)
-        self.assertIn("gtk::FileChooserAction::Open => dialog.set_filename(path)", selecting)
+        folder, opened = selecting.split("gtk::FileChooserAction::Open =>", 1)
+        self.assertLess(folder.index("q.path_selection(id,index)?"), folder.index("dialog.set_current_folder(path)"))
+        navigation, passive = opened.split("let target_file =", 1)
+        self.assertIn("if !parent_navigation_reserved {", navigation)
+        self.assertLess(navigation.index("q.path_parent_navigation(id,index)?"), navigation.index("dialog.set_current_folder(parent)"))
+        self.assertIn("return Ok(false);", navigation)
+        self.assertNotIn("set_current_folder", passive)
+        guards = ["dialog.is_mapped()", "dialog.current_folder_file()", "dialog.file()", "if !mapped",
+                  "if current_folder.is_none() { q.path_file_wait", "if !parent_ready", "q.path_selection(id,index)?", "dialog.select_file(&target_file).is_err()"]
+        self.assertEqual([passive.index(guard) for guard in guards], sorted(passive.index(guard) for guard in guards))
+        self.assertIn("file.equal(&parent_file)", passive)
         self.assertIn("_ => { q.path_failed(R::GtkDialogProperties); return Err(()); }", selecting)
-        self.assertIn("if !selected { q.path_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
-        self.assertLess(activating.index("if !button.is_sensitive() { q.path_wait(W::ResponseInsensitive); return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
+        self.assertEqual(selecting.count("q.path_failed(R::GtkSelectionSetter)"), 3)
+        self.assertLess(activating.index("if !button.is_sensitive() { q.path_file_wait(W::ResponseInsensitive,picker); return Ok(false); }"), activating.index("q.path_activation(id,index)?"))
         self.assertEqual(activating.count("dialog.file()"), 1)
-        self.assertIn("q.path_wait(W::SelectionAbsent); return Ok(false)", activating)
-        self.assertIn("q.path_wait(W::SelectionDifferent); return Ok(false)", activating)
+        self.assertIn("q.path_file_wait(W::SelectionAbsent,picker); return Ok(false)", activating)
+        self.assertIn("q.path_file_wait(W::SelectionDifferent,picker); return Ok(false)", activating)
         self.assertLess(activating.index("q.path_activation(id,index)?"), activating.index("button.emit_clicked()"))
         self.assertEqual(activating.count("button.emit_clicked()"), 1)
         for forbidden in (".filename(", ".response(", ".begin_response(", "Instant::", "sleep"):
@@ -6097,18 +6408,38 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertNotIn("set_current_folder", admitting + activating)
         self.assertNotIn("set_filename", activating)
         self.assertEqual(shell.count("dialog.filename()"), 1)
-        for name in ("path_failed", "path_dialog", "path_selection", "path_activation", "path_filename", "path_response", "path_gtk_returned"):
+        for name in ("path_failed", "path_dialog", "path_parent_navigation", "path_selection", "path_activation", "path_filename", "path_response", "path_gtk_returned"):
             callback = body(source, name)
             self.assertEqual(callback.count("self.record_at(Boundary::Gtk)"), 1)
             self.assertIn("self.path_fail(&mut r,", callback)
             self.assertNotIn("self.path_failed(", callback); self.assertNotIn("self.record()", callback)
         for name, guards in (("path_dialog", ("PATH_CASES.get", "self.failed.load", "Instant::now()", "self.case !=")),
-                             ("path_selection", ("self.case !=", "Instant::now()", "self.failed.load", "id !=")),
+                             ("path_parent_navigation", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !=")),
+                             ("path_selection", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !=")),
                              ("path_activation", ("PATH_CASES.get", "self.case !=", "Instant::now()", "self.failed.load", "id !="))):
             callback = body(source, name)
             self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
             self.assertEqual(callback.count("Instant::now()"), 1)
             self.assertIn("PathRejection::GtkObserverEndpoint", callback)
+        for name, reserve in (("path_parent_navigation", "reserve_parent_navigation(case)"), ("path_selection", "reserve_selection(case)")):
+            callback = body(source, name)
+            guards = ["PATH_CASES.get(index as usize)", "Instant::now() >= self.end", "self.failed.load",
+                      "id != u32::from(index)+3", "r.step != Step::Paths(PathStep::Set(index))",
+                      "r.pending != Some(Pending::Path(PathStep::Set(index)))", reserve]
+            self.assertEqual([callback.index(guard) for guard in guards], sorted(callback.index(guard) for guard in guards))
+            self.assertNotIn("self.end =", callback)
+            self.assertEqual(callback.count(reserve), 1)
+        operation = source.split("impl PathOperation {", 1)[1].split("struct Paths", 1)[0]
+        self.assertEqual(operation.count("self.parent_navigation_reserved = true"), 1)
+        self.assertIn("!self.requested || !self.picker.created", operation)
+        self.assertIn("self.parent_navigation_reserved == case.selects_open()", operation)
+        self.assertIn("|| self.picker.selected || self.picker.activated", operation)
+        self.assertIn("case.path.is_none()", operation)
+        self.assertIn("!self.navigation_matches(case)", operation)
+        self.assertIn("!op.picker.selected && !op.parent_navigation_reserved", body(source, "path_dialog"))
+        self.assertIn("!op.navigation_matches(case)", body(source, "path_activation"))
+        self.assertIn("op.navigation_matches(&PATH_CASES[i]) && op.picker.settled", source)
+        self.assertIn("assert_eq!(open,vec![1,6,7,8]);", source)
         filename = body(source, "path_filename")
         guards = ["id.checked_sub", "self.case !=", "self.failed.load", "Instant::now()", "PATH_CASES[index].field != field",
                   "path.is_none()", "path != self.path_target", "!r.paths.operations[index].picker.activated", "fixture.transition(id)"]
@@ -6378,6 +6709,1085 @@ class FailureLabelSinkContracts(unittest.TestCase):
                 self.assertEqual(closing.call_count, int(synthetic)); reading.assert_not_called()
                 self.assertEqual([call.args[1] for call in retained.call_args_list], [b"unchanged stdout", b"unchanged stderr"])
                 self.assertEqual(stream.getvalue(), "")
+
+
+
+# Deliberately fictional DATA below: no fixture construction, native execution,
+# listener, archive import or runtime observation is performed by these tests.
+GITHUB_FICTIONAL_CASES = {
+    "github-connect-refresh": ("G-connect-refresh", 8, "none"),
+    "github-real-ca-refusal": ("T2-root", 1, "tls-failed"),
+    "github-wrong-name": ("T2-name", 1, "tls-failed"),
+    "github-expired": ("T2-expired", 1, "tls-failed"),
+    "github-ragged": ("T3-ragged", 1, "tls-failed"),
+    "github-length": ("T3-length", 1, "response-invalid"),
+    "github-chunk": ("T3-chunk", 1, "response-invalid"),
+    "github-header-limit": ("T6-header", 1, "response-limit"),
+    "github-body-limit": ("T6-body", 1, "response-limit"),
+    "github-chunk-limit": ("T6-chunk-metadata", 1, "response-limit"),
+    "github-unauthorized": ("T6-unauthorized", 1, "unauthorized"),
+    "github-rate": ("T6-rate-expiry", 1, "response-invalid"),
+    "github-identity": ("T6-target", 4, "target-changed"),
+    "github-redirect": ("T6-redirect", 1, "response-invalid"),
+    "github-ambient-fixed": ("T4-ambient-fixed", 4, "none"),
+    "github-ambient-no-rescue": ("T4-ambient-no-rescue", 1, "tls-failed"),
+    "github-handshake-deadline": ("T5-handshake", 1, "query_timeout"),
+    "github-header-deadline": ("G-header-withhold", 1, "query_timeout"),
+    "github-body-deadline": ("T5-read", 1, "query_timeout"),
+    "github-cancel": ("T5-read", 1, "cancelled"),
+    "github-quit": ("T5-read", 1, "cancelled"),
+    "github-unknown": ("T5-read", 1, "cleanup_unknown"),
+}
+
+
+def github_handoff_data():
+    value = installed_handoff()
+    installed = value.pop("installed")
+    value["shell"] = {"githubReadOnly": L.shell_github_selection(),
+                      "rosterSha256": "d" * 64, "producerAttempt": "1", "artifactId": "17",
+                      "acceptedU": installed["acceptedU"]}
+    return value
+
+
+def github_map_data():
+    """Synthetic distinct private inodes, unchanged synthetic OS map aliases."""
+    maps = {}
+    roles = ("python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6")
+    for profile_index, profile in enumerate(("N", "D-R", "D-S")):
+        maps[profile] = {}
+        for index, name in enumerate(roles):
+            private = name in roles[:3]
+            relative = "python/bin/python3" if name == "python" else "python/lib/" + name
+            paths = [str(L.PREFIX / L.SHELL_GITHUB_PAYLOADS[profile]["manifestSha256"] / relative)] if private else sorted(
+                [directory + "/" + name for directory in L.DEFAULT_LIBRARY_DIRS[:2]]
+                + (["/lib64/" + name] if name == "ld-linux-x86-64.so.2" else []))
+            maps[profile][name] = {"paths": paths, "deviceMajor": 8, "deviceMinor": 2,
+                                   "inode": 1000 + 100 * profile_index + index if private else 100 + index}
+    return maps
+
+
+def github_fixture_data(value):
+    namespace = fixture_namespace_data(value)
+    namespace["children"] = ["github-project"]
+    namespace["identity"][5] = 3
+    nodes = {}
+    for index, (name, mode, owners, body) in enumerate((
+        (".", stat.S_IFDIR | 0o700, (1001, 1001), None),
+        ("app", stat.S_IFDIR | 0o555, (0, 0), None),
+        ("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), L.SHELL_PROJECT_SOURCE),
+        ("version.properties", stat.S_IFREG | 0o600, (1001, 1001), L.SHELL_PROJECT_VERSION),
+    )):
+        nodes[name] = {"identity": [1, 30 + index, mode, *owners,
+                                   3 if name == "." else 2 if body is None else 1,
+                                   4096 if body is None else len(body), 11, 11]}
+        if body is not None:
+            nodes[name].update(size=len(body), sha256=hashlib.sha256(body).hexdigest())
+    return {"schema": "installed-github-project-v1", "sourceSha": value["sourceSha"],
+            "runId": value["runId"], "attempt": value["attempt"],
+            "project": str(L.shell_fixture_root(value) / "github-project"), "namespace": namespace, "nodes": nodes}
+
+
+def github_receipt_data(case, expected=None):
+    expected = github_map_data() if expected is None else expected
+    script, connections, reason = GITHUB_FICTIONAL_CASES[case]
+    role = "D-R" if case in ("github-real-ca-refusal", "github-ambient-no-rescue") else "D-S"
+    manifest = L.SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+    active = case in ("github-cancel", "github-quit", "github-unknown")
+    deadline = case in ("github-handshake-deadline", "github-header-deadline", "github-body-deadline")
+    ambient = case in ("github-ambient-fixed", "github-ambient-no-rescue")
+    refused = case in ("github-real-ca-refusal", "github-wrong-name", "github-expired", "github-ambient-no-rescue")
+    handshake = case == "github-handshake-deadline"
+    requests = 0 if refused or handshake else connections
+    reads = 2 if case == "github-connect-refresh" else 1
+    streaming = {
+        "github-header-limit": [40630], "github-body-limit": [262215], "github-chunk-limit": [35803],
+        "github-unauthorized": [99], "github-rate": [175], "github-identity": [95, 222, 102, 222],
+        "github-redirect": [136],
+    }
+    reply = streaming.get(case, [0 if refused or handshake or case == "github-header-deadline" else 128] * connections)
+    notify = connections if case in streaming or case in (
+        "github-connect-refresh", "github-length", "github-chunk", "github-ambient-fixed") else 0
+    completion = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True,
+                  "primaryUnexpected": 0, "primaryClosed": True}
+    terminal = {"schemaVersion": 1, "scope": "github-installed-tls-peer-v1", "case": script,
+        "installedCase": case, "ownerTag": "0123456789abcdef", "manifestSha256": manifest,
+        "peerSha256": L.SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1], "primaryPort": 18443,
+        "state": "finished", "status": "passed", "code": None, "connections": connections,
+        "handshakes": requests, "requests": requests, "decryptedBytes": requests * 180,
+        "authBytes": requests * len(b"Bearer INERT_NOT_A_CREDENTIAL"), "closeNotify": notify,
+        "tlsRefused": refused, "wireReadBytes": [512] * connections,
+        "wireWriteBytes": [0 if handshake else max(512, count) for count in reply],
+        "replyBytes": reply, "allSocketsClosed": True, "completion": completion}
+    if active or deadline or ambient:
+        terminal.update(sni=connections, phase="handshake" if handshake else "headers" if case == "github-header-deadline"
+                        else "read" if active or deadline else "finished", withheldWireBytes=512 if handshake else 0,
+                        bodyBytes=7 if case == "github-body-deadline" else 1 if active else 0,
+                        incompleteBody=active or case == "github-body-deadline",
+                        clientStop="tcp-eof" if active or deadline else None,
+                        progressCount=2 if active or deadline else 0, dnsQuestions=0, dnsA=0, dnsAAAA=0, dnsReplies=0)
+        completion.update(proxy={"empty": True, "unexpected": 0, "closed": True} if ambient else None,
+                          dnsEmpty=None, dnsClosed=None)
+    else:
+        terminal["replyStops"] = ["none"] * connections
+        completion["redirect"] = {"empty": True, "unexpected": 0, "closed": True} if case == "github-redirect" else None
+    peer = {key: True for key in ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                                  "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")}
+    peer.update({key: False for key in ("stopAttempted", "stdoutOverflow", "stderrOverflow")})
+    peer.update(exitCode=0, stdoutBytes=8192, stderrBytes=0, terminal=terminal,
+                control={**{key: True for key in ("acquired", "started", "joined", "writeComplete", "shutdownComplete",
+                                                  "productSettled", "withinEndpoint", "released")}, "failed": False})
+    outcomes = []
+    for index in range(0 if active else reads):
+        positive = reason == "none"
+        outcomes.append({"revision": index + 1, "sessionId": "github-session-1", "projectId": "fictional-project",
+            "target": "owner/app", "sessionState": "connected" if positive else "failed",
+            "kind": "connect" if index == 0 else "refresh", "phase": "settled",
+            "reason": "network-unavailable" if deadline else reason,
+            "facts": ["observed" if positive else "unavailable"] * 3, "accountId": "11" if positive else None,
+            "repositoryId": "22" if positive else None, "workflowRows": 4 if positive else 0})
+    rows = [{"role": name, "path": row["paths"][0],
+             **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+            for name, row in sorted(expected[role].items())]
+    originals = [{"operationId": "github-read-" + str(index + 1), "manifestSha256": manifest,
+                  "receiptKind": "native-error" if active or deadline else "typed-outcome", "reason": reason,
+                  "terminal": True, "unknownLatched": case == "github-unknown",
+                  "firstError": reason if active or deadline else None, "originalObserverJoined": True,
+                  "nativeSettled": True, "environmentClear": True, "maps": deepcopy(rows),
+                  "cleanupWithinOriginalEndpoint": True, "elapsedMs": 10500 if deadline else 100}
+                 for index in range(reads)]
+    return {"schemaVersion": 1, "fixture": "github-readonly-installed-v1", "case": case, "sourceCommit": "a" * 40,
+            "normalManifestSha256": L.M, "productManifestSha256": manifest, "protocolSha256": L.Q,
+            "peerSha256": L.SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1],
+            "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+            "nativeSession": {"connect": 1, "refresh": reads - 1,
+                "disconnect": 0 if case in ("github-quit", "github-unknown") else 1,
+                "retainedStatus": not active, "runningObserved": active, "outcomes": outcomes,
+                "cleared": case not in ("github-quit", "github-unknown"),
+                "unknownRetained": case == "github-unknown", "tokenFieldCleared": True},
+            "originals": originals, "peer": peer,
+            "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+            "notProven": ["normal-resolver-withholding", "real-stalled-tcp-connect"]}
+
+
+def github_capture_data(case, receipt):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_GITHUB_READONLY=" + L.canonical(receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n")
+
+
+def github_data_set(value, path, replacement):
+    for name in path[:-1]:
+        value = value[name]
+    value[path[-1]] = replacement
+
+
+def github_closed_observation_data():
+    value, maps = github_handoff_data(), github_map_data()
+    cases = {case: {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                    "maps": [], "githubReadOnly": github_receipt_data(case, maps)} for case in GITHUB_FICTIONAL_CASES}
+    project = github_fixture_data(value)
+    def pin(raw):
+        return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    # The CI parser consumes export pins after lifecycle finality, not material
+    # bytes. These fictional pins do not claim to pass the lifecycle producer.
+    material_pin, fixture_pin = pin(b"fictional material capture\n"), pin(L.canonical(project))
+    fixture = {"project": project["project"], "namespace": project["namespace"], "unchanged": True,
+               "sourceSha256": hashlib.sha256(L.SHELL_PROJECT_SOURCE).hexdigest(),
+               "versionSha256": hashlib.sha256(L.SHELL_PROJECT_VERSION).hexdigest(),
+               "releaseConfigCreated": False, "sourceSha": value["sourceSha"],
+               "before": fixture_pin, "after": deepcopy(fixture_pin)}
+    github = {"selection": L.shell_github_selection(), "expectedMaps": maps,
+              "materials": {"before": material_pin, "after": deepcopy(material_pin)}, "fixture": fixture,
+              "casesCapture": pin(L.canonical(cases)), "normalDestinationAction": False, "normalTransportPositive": False,
+              "remainingCoverage": ["normal-resolver-withholding", "real-stalled-tcp-connect",
+                                    "separately-approved-normal-destination-negative"]}
+    captures = {"shell-cases.json": github["casesCapture"]}
+    for phase in ("before", "after"):
+        captures["shell-github-materials-" + phase + ".json"] = material_pin
+        captures["shell-github-project-" + phase + ".json"] = fixture_pin
+    files = [{"path": "lifecycle-" + name, **captures.get(name, pin(b"fictional export\n"))}
+             for name in sorted(L.public_files(value) | {"client.stdout", "client.stderr"})]
+    return {"state": "installed-github-readonly-synthetic-observed", "productQualified": False,
+            "packageLifecycleQualified": False, "shellPackageBuilt": False, "sourceSha": value["sourceSha"],
+            "consumerAttempt": value["attempt"], "unit": L.root_path(value).name + ".service",
+            "githubReadOnly": github, "cases": cases, "files": files}
+
+
+class InstalledGitHubReadOnlyDataContracts(unittest.TestCase):
+    """Closed fictional records exercise parsers, not TLS/GTK/process finality."""
+
+    def test_exact_selection_keeps_legacy_twenty_and_normal_action_separate(self):
+        value = github_handoff_data()
+        self.assertEqual(L.shell_cases(value), tuple(GITHUB_FICTIONAL_CASES))
+        self.assertEqual(L.SHELL_GITHUB_CASE_DATA, GITHUB_FICTIONAL_CASES)
+        self.assertEqual(len(L.shell_cases(value)), 22)
+        self.assertEqual(L.shell_observers(value), L.shell_cases(value))
+        self.assertEqual({name for name in L.shell_cases(value) if L.shell_github_role(name) == "D-R"},
+                         {"github-real-ca-refusal", "github-ambient-no-rescue"})
+        legacy = deepcopy(value); legacy["shell"].pop("githubReadOnly")
+        self.assertEqual(L.shell_cases(legacy), L.SHELL_CASES)
+        self.assertEqual(len(L.shell_cases(legacy)), 20)
+        self.assertEqual(L.shell_public_limit(legacy), 165)
+        self.assertEqual(L.shell_fixture_children(value), ("github-project",))
+        for case in ("normal", "github-normal-negative", "github-other"):
+            with self.subTest(case=case), self.assertRaises(L.Refused):
+                L.shell_github_role(case)
+        changes = (
+            (("normalDestinationAction",), True), (("normalDestinationAction",), 0),
+            (("cases",), list(GITHUB_FICTIONAL_CASES) + ["github-normal-negative"]),
+            (("payloads", "D-S", "manifestSha256"), L.M),
+            (("peerSources", 0, "size"), True), (("profile",), "caller-profile"),
+            (("endpoint",), "https://example.invalid"),
+        )
+        for path, replacement in changes:
+            bad = deepcopy(value); github_data_set(bad["shell"]["githubReadOnly"], path, replacement)
+            with self.subTest(path=path), self.assertRaises(L.Refused):
+                L.shell_cases(bad)
+        first = L.shell_github_selection(); first["payloads"]["N"]["manifestSha256"] = "f" * 64
+        self.assertEqual(L.shell_github_selection()["payloads"]["N"]["manifestSha256"], L.M)
+
+    def test_public_roster_argv_and_only_two_ambient_decoy_environments(self):
+        value = github_handoff_data()
+        files = L.public_files(value)
+        self.assertEqual(len(files), 135)
+        self.assertEqual(L.shell_public_limit(value), 135)
+        self.assertEqual(len(files | {"client.stdout", "client.stderr"}), 137)
+        self.assertTrue({"shell-github-materials-before.json", "shell-github-materials-after.json",
+                         "shell-github-project-before.json", "shell-github-project-after.json",
+                         "shell-cases.json"} <= files)
+        self.assertNotIn("shell-normal-control.json", files)
+        self.assertFalse(any(name.startswith(("shell-positive", "shell-tools", "shell-offline")) for name in files))
+        self.assertEqual([phase for phase in L.root_phases(value) if phase.startswith("shell-")],
+                         ["shell-" + name for name in GITHUB_FICTIONAL_CASES])
+        proxy = {"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"}
+        trust = {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"}
+        decoys = proxy | trust | {"SSLKEYLOGFILE"}
+        baseline = L.shell_environment(value, "github-connect-refresh")
+        self.assertTrue(set(baseline).isdisjoint(decoys | {"GH_TOKEN", "GITHUB_TOKEN", "PYTHONPATH"}))
+        for case in GITHUB_FICTIONAL_CASES:
+            with self.subTest(case=case):
+                environment = L.shell_environment(value, case)
+                self.assertEqual(L.shell_argv(value, case)[-2:], [str(L.root_path(value) / "shell-observer"), case])
+                ambient = case in ("github-ambient-fixed", "github-ambient-no-rescue")
+                self.assertEqual(set(environment), set(baseline) | (decoys if ambient else set()))
+                if ambient:
+                    self.assertEqual({environment[key] for key in proxy}, {"http://127.0.0.1:18888"})
+                    self.assertEqual({environment[key] for key in trust},
+                                     {str(L.root_path(value) / "github-peer/github_tls/root-ca.pem")})
+                    self.assertEqual(environment["SSLKEYLOGFILE"], str(L.root_path(value) / ("shell-" + case + "-keylog.log")))
+        with self.assertRaises(L.Refused):
+            L.shell_argv(value, "github-normal-negative")
+
+    def test_fixture_closed_four_node_data_rejects_drift_aliases_and_release_outputs(self):
+        value = github_handoff_data()
+        data = github_fixture_data(value); raw = L.canonical(data)
+        result = L.shell_github_fixture(value, raw, raw)
+        self.assertTrue(result["unchanged"]); self.assertFalse(result["releaseConfigCreated"])
+        changes = (
+            (("sourceSha",), "b" * 40), (("namespace", "children"), ["github-project", "release"]),
+            (("nodes", ".", "identity", 3), 0), (("nodes", "app", "identity", 2), stat.S_IFLNK | 0o555),
+            (("nodes", "app", "identity", 1), data["namespace"]["identity"][1]),
+            (("nodes", "version.properties", "identity", 5), 2),
+            (("nodes", "version.properties", "identity", 6), True),
+            (("nodes", "version.properties", "size"), True),
+            (("nodes", "app/build.gradle.kts", "sha256"), "f" * 64),
+            (("nodes", "release-config.json"), {"identity": [1] * 9}),
+        )
+        for path, replacement in changes:
+            bad = deepcopy(data); github_data_set(bad, path, replacement); encoded = L.canonical(bad)
+            with self.subTest(path=path), self.assertRaises(L.Refused):
+                L.shell_github_fixture(value, encoded, encoded)
+        after = deepcopy(data); after["nodes"]["version.properties"]["identity"][8] += 1
+        for before_raw, after_raw in ((raw, L.canonical(after)), (raw, raw + b"\n"), (raw.decode(), raw)):
+            with self.subTest(after=type(after_raw)), self.assertRaises(L.Refused):
+                L.shell_github_fixture(value, before_raw, after_raw)
+
+    def test_three_map_roles_keep_n_d_originals_distinct_and_os_aliases_unchanged(self):
+        maps = github_map_data()
+        self.assertIs(L.shell_github_maps(maps), maps)
+        mutations = (
+            (("D-S", "python", "paths"), maps["N"]["python"]["paths"]),
+            (("D-S", "python", "inode"), maps["N"]["python"]["inode"]),
+            (("D-R", "libssl.so.3", "inode"), True),
+            (("D-R", "libc.so.6", "inode"), 999999),
+            (("N", "libm.so.6", "paths"), ["/caller/libm.so.6"]),
+        )
+        for path, replacement in mutations:
+            bad = deepcopy(maps); github_data_set(bad, path, replacement)
+            with self.subTest(path=path), self.assertRaises(L.Refused):
+                L.shell_github_maps(bad)
+        bad = deepcopy(maps); bad["normal"] = bad.pop("N")
+        with self.assertRaises(L.Refused):
+            L.shell_github_maps(bad)
+
+    def test_final_loader_correlates_full9_with_the_original_seven_field_layout(self):
+        material, final = {"payloads": {}}, {"bindings": {}, "entryObjects": ["libssl.so.3", "libcrypto.so.3", "libc.so.6"]}
+        for index, role in enumerate(("D-R", "D-S")):
+            root = L.PREFIX / L.SHELL_GITHUB_PAYLOADS[role]["manifestSha256"]
+            tree = {}
+            for offset, name in enumerate(("", "python", "python/bin", "python/lib")):
+                tree[name] = {"identity": [1, 100 + index * 100 + offset, stat.S_IFDIR | 0o555, 0, 0, 2, 4096, 17, 18]}
+            present = ("python/bin/python3", "python/lib/libssl.so.3", "python/lib/libcrypto.so.3")
+            absent = ("python/lib/glibc-hwcaps", "python/lib/libc.so.6",
+                      *(prefix + name for prefix in ("", "python/", "python/bin/")
+                        for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt")))
+            for offset, name in enumerate(present):
+                tree[name] = {"identity": [1, 150 + index * 100 + offset, stat.S_IFREG | 0o444, 0, 0, 1, 16, 17, 18],
+                              "size": 16, "sha256": "b" * 64}
+            material["payloads"][role] = tree
+            for name in (*present, *absent):
+                path = str(root / name)
+                row = {"path": path, "selectedPath": path, "links": [],
+                       "ancestry": {str(root / ("" if str(parent) == "." else parent.as_posix())):
+                                    tree["" if str(parent) == "." else parent.as_posix()]["identity"][:5]
+                                    for parent in Path(name).parents}}
+                if name in present:
+                    row.update(identity=[tree[name]["identity"][position] for position in (0, 1, 2, 5, 6, 7, 8)],
+                               size=16, sha256="b" * 64)
+                else:
+                    row.update(absent=True, absentAt=path)
+                final["bindings"][path] = row
+        self.assertIsNone(L._shell_github_closed_loader(material, final))
+        path = str(L.PREFIX / L.SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"] / "python/bin/python3")
+        for replacement in (material["payloads"]["D-S"]["python/bin/python3"]["identity"],
+                            [1, 999, stat.S_IFREG | 0o444, 1, 16, 17, 18]):
+            bad = deepcopy(final); bad["bindings"][path]["identity"] = replacement
+            with self.subTest(identity=replacement), self.assertRaises(L.Refused):
+                L._shell_github_closed_loader(material, bad)
+        bad = deepcopy(final); bad["bindings"][path]["links"] = [{"path": path, "target": "/replacement"}]
+        with self.assertRaises(L.Refused):
+            L._shell_github_closed_loader(material, bad)
+
+    def test_all_twenty_two_fictional_native_receipts_and_marker_records_parse(self):
+        maps = github_map_data()
+        for case in GITHUB_FICTIONAL_CASES:
+            with self.subTest(case=case):
+                receipt = github_receipt_data(case, maps)
+                self.assertEqual(L.shell_github_receipt(L.canonical(receipt), case, maps), receipt)
+                result = L.shell_github_result(github_capture_data(case, receipt), b"", case, 0, maps)
+                self.assertEqual(result["githubReadOnly"], receipt)
+                self.assertEqual(result["maps"], [])  # D maps stay nested under each original.
+                self.assertNotIn("qualified", result)
+
+    def test_native_receipt_rejects_relabelled_maps_errors_ui_and_unjoined_originals(self):
+        variants = (
+            ("github-connect-refresh", ("schemaVersion",), True),
+            ("github-connect-refresh", ("endpoint",), "https://example.invalid"),
+            ("github-connect-refresh", ("productManifestSha256",), L.M),
+            ("github-connect-refresh", ("protocolSha256",), "f" * 64),
+            ("github-connect-refresh", ("peerSha256",), "f" * 64),
+            ("github-connect-refresh", ("project", "registered"), False),
+            ("github-connect-refresh", ("quit", "relayJoined"), False),
+            ("github-connect-refresh", ("originals", 1, "operationId"), "github-read-1"),
+            ("github-connect-refresh", ("originals", 0, "operationId"), "github-read-18446744073709551616"),
+            ("github-connect-refresh", ("originals", 0, "originalObserverJoined"), False),
+            ("github-connect-refresh", ("originals", 0, "nativeSettled"), False),
+            ("github-connect-refresh", ("originals", 0, "environmentClear"), False),
+            ("github-connect-refresh", ("originals", 0, "firstError"), "cancelled"),
+            ("github-connect-refresh", ("originals", 0, "elapsedMs"), True),
+            ("github-connect-refresh", ("originals", 0, "maps", 0, "inode"), True),
+            ("github-connect-refresh", ("nativeSession", "outcomes", 1, "sessionId"), "github-session-2"),
+            ("github-connect-refresh", ("nativeSession", "outcomes", 1, "revision"), 1),
+            ("github-identity", ("nativeSession", "outcomes", 0, "facts"), ["observed", "unavailable", "unavailable"]),
+            ("github-identity", ("nativeSession", "outcomes", 0, "accountId"), "11"),
+            ("github-unknown", ("nativeSession", "unknownRetained"), False),
+            ("github-unknown", ("originals", 0, "unknownLatched"), False),
+            ("github-unknown", ("originals", 0, "reason"), "none"),
+            ("github-cancel", ("originals", 0, "receiptKind"), "typed-outcome"),
+            ("github-quit", ("originals", 0, "firstError"), None),
+            ("github-body-deadline", ("originals", 0, "cleanupWithinOriginalEndpoint"), False),
+        )
+        maps = github_map_data()
+        for case, path, replacement in variants:
+            bad = github_receipt_data(case, maps); github_data_set(bad, path, replacement)
+            with self.subTest(case=case, path=path), self.assertRaises(L.Refused):
+                L.shell_github_receipt(L.canonical(bad), case, maps)
+        receipt = github_receipt_data("github-real-ca-refusal", maps)
+        for row in receipt["originals"][0]["maps"]:
+            if row["role"] == "python":
+                normal = maps["N"]["python"]
+                row.update(path=normal["paths"][0], inode=normal["inode"])
+        with self.assertRaises(L.Refused):
+            L.shell_github_receipt(L.canonical(receipt), "github-real-ca-refusal", maps)
+
+    def test_original_deadline_is_ten_seconds_with_only_its_two_second_cleanup(self):
+        maps = github_map_data()
+        for case in ("github-handshake-deadline", "github-header-deadline", "github-body-deadline"):
+            for elapsed in (10000, 11999, 9999, 12000, True):
+                receipt = github_receipt_data(case, maps); receipt["originals"][0]["elapsedMs"] = elapsed
+                with self.subTest(case=case, elapsed=elapsed):
+                    if type(elapsed) is int and 10000 <= elapsed < 12000:
+                        L.shell_github_receipt(L.canonical(receipt), case, maps)
+                    else:
+                        with self.assertRaises(L.Refused):
+                            L.shell_github_receipt(L.canonical(receipt), case, maps)
+
+    def test_peer_requires_original_wait_eofs_control_and_real_case_counters(self):
+        variants = (
+            ("github-connect-refresh", ("waited",), False),
+            ("github-connect-refresh", ("stdoutEof",), False),
+            ("github-connect-refresh", ("stderrJoined",), False),
+            ("github-connect-refresh", ("withinEndpoint",), False),
+            ("github-connect-refresh", ("protocolChecked",), 1),
+            ("github-connect-refresh", ("stopAttempted",), True),
+            ("github-connect-refresh", ("stdoutBytes",), 8193),
+            ("github-connect-refresh", ("stderrBytes",), 1),
+            ("github-connect-refresh", ("control", "joined"), False),
+            ("github-connect-refresh", ("control", "productSettled"), False),
+            ("github-connect-refresh", ("control", "released"), False),
+            ("github-connect-refresh", ("control", "failed"), True),
+            ("github-connect-refresh", ("terminal", "authBytes"), 8 * 27),
+            ("github-connect-refresh", ("terminal", "requests"), True),
+            ("github-connect-refresh", ("terminal", "completion", "eof"), False),
+            ("github-real-ca-refusal", ("terminal", "authBytes"), 1),
+            ("github-redirect", ("terminal", "completion", "redirect", "unexpected"), 1),
+            ("github-ambient-fixed", ("terminal", "completion", "proxy", "empty"), False),
+            ("github-ambient-no-rescue", ("terminal", "dnsQuestions"), 1),
+            ("github-handshake-deadline", ("terminal", "wireWriteBytes"), [1]),
+            ("github-header-deadline", ("terminal", "phase"), "header"),
+            ("github-body-deadline", ("terminal", "bodyBytes"), 6),
+            ("github-cancel", ("terminal", "clientStop"), None),
+            ("github-quit", ("terminal", "progressCount"), 1),
+        )
+        for case, path, replacement in variants:
+            peer = github_receipt_data(case)["peer"]; github_data_set(peer, path, replacement)
+            with self.subTest(case=case, path=path), self.assertRaises(L.Refused):
+                L.shell_github_peer_receipt(peer, case)
+        peer = github_receipt_data("github-connect-refresh")["peer"]
+        peer["terminal"]["ownerTag"] = "fedcba9876543210"
+        self.assertIs(L.shell_github_peer_receipt(peer, "github-connect-refresh"), peer)
+        # A different valid correlation tag is not another authority or owner.
+
+    def test_streaming_stop_cannot_claim_a_response_boundary_it_did_not_reach(self):
+        for case, minimum in (("github-header-limit", 32768), ("github-chunk-limit", 33143),
+                              ("github-unauthorized", 80), ("github-rate", 156), ("github-redirect", 117)):
+            peer = github_receipt_data(case)["peer"]
+            peer["terminal"].update(replyStops=["reply:broken-pipe"], closeNotify=0,
+                                    replyBytes=[minimum], wireWriteBytes=[minimum])
+            self.assertIs(L.shell_github_peer_receipt(peer, case), peer)
+            peer["terminal"]["replyBytes"][0] -= 1
+            with self.subTest(case=case), self.assertRaises(L.Refused):
+                L.shell_github_peer_receipt(peer, case)
+        peer = github_receipt_data("github-identity")["peer"]
+        peer["terminal"]["replyStops"][0] = "notify:broken-pipe"
+        with self.assertRaises(L.Refused):
+            L.shell_github_peer_receipt(peer, "github-identity")
+
+    def test_stdout_requires_order_one_receipt_no_separate_d_maps_and_integer_exit(self):
+        case, maps = "github-connect-refresh", github_map_data()
+        raw = github_capture_data(case, github_receipt_data(case, maps))
+        lines = raw.splitlines(keepends=True)
+        bad_outputs = (b"".join(lines[:3] + lines[4:]), raw + lines[3],
+                       b"".join([lines[1], lines[0], *lines[2:]]), raw.rstrip(b"\n"),
+                       raw + b"MRK_INSTALLED_NATIVE_CHILD=[]\n")
+        for stdout, stderr, code in [(value, b"", 0) for value in bad_outputs] + [
+                (raw, b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", 0), (raw, b"", False), (raw, b"", 1)]:
+            with self.subTest(code=code, length=len(stdout)), self.assertRaises(L.Refused):
+                L.shell_github_result(stdout, stderr, case, code, maps)
+        receipt = github_receipt_data(case, maps)
+        for encoded in (L.canonical(receipt) + b"\n", json.dumps(receipt, indent=2).encode(), b"{}"):
+            with self.subTest(raw=encoded[:20]), self.assertRaises(L.Refused):
+                L.shell_github_receipt(encoded, case, maps)
+
+
+class InstalledGitHubClosedExportDataContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Import at test execution only; no verifier, command or host observer is called.
+        spec = importlib.util.spec_from_file_location(
+            "github_closed_export_data", SOURCE / "desktop/tools/ci_ubuntu_publication.py")
+        cls.CI = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.CI)
+
+    def test_exact_137_fictional_export_records_bind_case_capture_and_fixture_pins(self):
+        observed = github_closed_observation_data()
+        self.assertEqual(len(observed["files"]), 137)
+        self.assertIs(self.CI.shell_github_observation(observed, L), observed["githubReadOnly"])
+        self.assertFalse(observed["productQualified"])
+        self.assertFalse(observed["githubReadOnly"]["normalDestinationAction"])
+        self.assertFalse(observed["githubReadOnly"]["normalTransportPositive"])
+
+    def test_missing_duplicate_changed_or_qualified_copies_refuse(self):
+        variants = (
+            (("state",), "qualified"), (("productQualified",), True),
+            (("packageLifecycleQualified",), True), (("shellPackageBuilt",), True),
+            (("sourceSha",), "b" * 40), (("consumerAttempt",), 2),
+            (("unit",), "mrk-ubuntu-native-10-3.service"),
+            (("githubReadOnly", "normalDestinationAction"), 0),
+            (("githubReadOnly", "normalTransportPositive"), True),
+            (("githubReadOnly", "remainingCoverage"), []),
+            (("githubReadOnly", "materials", "before", "sha256"), "f" * 64),
+            (("githubReadOnly", "fixture", "releaseConfigCreated"), True),
+            (("githubReadOnly", "fixture", "sourceSha256"), "f" * 64),
+            (("githubReadOnly", "fixture", "project"), "/unbound/github-project"),
+            (("githubReadOnly", "casesCapture", "sha256"), "f" * 64),
+            (("files", 0, "path"), "lifecycle-unrelated.json"),
+            (("files", 0, "size"), True),
+            (("cases", "github-normal-negative"), {}),
+            (("cases", "github-connect-refresh", "githubReadOnly", "sourceCommit"), "c" * 40),
+        )
+        for path, replacement in variants:
+            observed = github_closed_observation_data(); github_data_set(observed, path, replacement)
+            with self.subTest(path=path), self.assertRaises((L.Refused, self.CI.D.Refused)):
+                self.CI.shell_github_observation(observed, L)
+        for duplicate in (False, True):
+            observed = github_closed_observation_data()
+            if duplicate:
+                observed["files"][-1] = deepcopy(observed["files"][0])
+            else:
+                observed["files"].pop()
+            with self.subTest(duplicate=duplicate), self.assertRaises(self.CI.D.Refused):
+                self.CI.shell_github_observation(observed, L)
+
+    def test_canonical_case_copy_must_match_the_original_export_even_if_both_summary_pins_change(self):
+        observed = github_closed_observation_data()
+        capture = observed["githubReadOnly"]["casesCapture"]
+        capture["sha256"] = "f" * 64
+        row = next(row for row in observed["files"] if row["path"] == "lifecycle-shell-cases.json")
+        row["sha256"] = capture["sha256"]
+        with self.assertRaises(self.CI.D.Refused):
+            self.CI.shell_github_observation(observed, L)
+
+# Fictional DATA only. None of these helpers starts nft, a socket, a service,
+# a product Child, or a compiler; they are not hosted boundary evidence.
+GITHUB_BOUNDARY_FICTIONAL_CASES = ("github-dns-deadline", "github-connect-deadline")
+GITHUB_BOUNDARY_FICTIONAL_META = {"version": "fictional", "release_name": "fictional", "json_schema_version": 1}
+
+
+def github_boundary_handoff_data():
+    value = github_handoff_data()
+    value["shell"]["githubReadOnly"] = L.shell_github_selection("github-readonly-installed-normal-boundaries-v1")
+    return value
+
+
+def github_boundary_receipt_data(case, *, unconnected=False, ipv6=False):
+    assert case in GITHUB_BOUNDARY_FICTIONAL_CASES
+    maps, value = github_map_data(), github_boundary_handoff_data()
+    receipt = github_receipt_data("github-handshake-deadline", maps)
+    dns = case == "github-dns-deadline"
+    receipt.update(case=case, productManifestSha256=L.M,
+                   notProven=["real-stalled-tcp-connect"] if dns else ["normal-resolver-withholding"])
+    original = receipt["originals"][0]
+    original["manifestSha256"] = L.M
+    original["maps"] = [{"role": name, "path": row["paths"][0],
+                          **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+                         for name, row in sorted(maps["N"].items())]
+    source = {"address": "127.0.0.2", "port": 40001, "questionId": 123, "questionType": 1}
+    original["boundary"] = {
+        "kind": "normal-dns" if dns else "normal-connect", "childPid": 42, "fd": 7,
+        "inode": "7001", "uid": value["runnerUid"], "family": "ipv6" if ipv6 else "ipv4",
+        "protocol": "udp" if dns else "tcp", "localAddress": source["address"] if dns else "10.0.0.2",
+        "localPort": source["port"] if dns else 40002,
+        "remoteAddress": ("0.0.0.0" if unconnected else "127.0.0.53") if dns else "140.82.112.3",
+        "remotePort": (0 if unconnected else 53) if dns else 443, "state": ("07" if unconnected else "01") if dns else "02",
+        "originalFdStable": True, "observedBeforeDeadline": True, "peerSource": deepcopy(source) if dns else None}
+    if ipv6:
+        original["boundary"].update(localAddress="2606:4700::1111", remoteAddress="2606:50c0:8000::154")
+    if dns:
+        terminal = receipt["peer"]["terminal"]
+        terminal.update(case="G-dns-withhold", installedCase=case, manifestSha256=L.M, primaryPort=18553,
+                        connections=0, handshakes=0, requests=0, decryptedBytes=0, authBytes=0, closeNotify=0,
+                        tlsRefused=False, wireReadBytes=[], wireWriteBytes=[], replyBytes=[], sni=0, phase="dns",
+                        withheldWireBytes=0, bodyBytes=0, incompleteBody=False, clientStop=None,
+                        progressCount=2, dnsQuestions=2, dnsA=1, dnsAAAA=1, dnsReplies=0, dnsSource=source)
+        terminal["completion"] = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": None, "primaryUnexpected": 0,
+                                  "primaryClosed": None, "proxy": None, "dnsEmpty": True, "dnsClosed": True}
+    else:
+        receipt.update(peer=None, peerSha256=None)
+    return receipt
+
+
+def github_boundary_objects_data(value, case, *, post=False):
+    """Independently specified fictional nft dialect/handles, never live output."""
+    dns = case == "github-dns-deadline"
+    table = "mrk_gnb_" + value["runId"] + "_" + value["attempt"] + ("_dns" if dns else "_connect")
+    unit = "system.slice/mrk-ubuntu-native-" + value["runId"] + "-" + value["attempt"] + ".service"
+    def equal(left, right):
+        return {"match": {"op": "==", "left": left, "right": right}}
+    def payload(protocol, field):
+        return {"payload": {"protocol": protocol, "field": field}}
+    scope = [equal({"meta": {"key": "skuid"}}, value["runnerUid"]),
+             equal({"socket": {"key": "cgroupv2", "level": 2}}, unit)]
+    rows = [{"table": {"family": "inet", "name": table}}]
+    for name in (("dns_queries", "https_syns") if dns else ("https_syns",)):
+        packets = 2 if post and (name == "dns_queries" or not dns) else 0
+        rows.append({"counter": {"family": "inet", "table": table, "name": name,
+                                  "packets": packets, "bytes": packets * (80 if dns else 60)}})
+    rows.append({"chain": {"family": "inet", "table": table, "name": "output", "type": "route",
+                           "hook": "output", "prio": -300, "policy": "accept"}})
+    if dns:
+        rows.append({"rule": {"family": "inet", "table": table, "chain": "output", "expr": deepcopy(scope) + [
+            equal({"meta": {"key": "nfproto"}}, "ipv4"), equal(payload("ip", "daddr"), "127.0.0.53"),
+            equal(payload("udp", "dport"), 53), {"counter": "dns_queries"},
+            {"mangle": {"key": payload("udp", "dport"), "value": 18553}}]}})
+    rows.append({"rule": {"family": "inet", "table": table, "chain": "output", "expr": deepcopy(scope) + [
+        equal({"meta": {"key": "l4proto"}}, "tcp"), equal(payload("tcp", "dport"), 443),
+        equal({"&": [payload("tcp", "flags"), ["fin", "syn", "rst", "ack"]]}, "syn"),
+        {"counter": "https_syns"}, {"drop": None}]}})
+    for handle, row in enumerate(rows, 1):
+        next(iter(row.values()))["handle"] = handle
+    return rows
+
+
+def github_boundary_policy_data_fixture(value, case):
+    receipt = github_boundary_receipt_data(case)
+    installed = L._github_boundary_policy_objects(value, case, github_boundary_objects_data(value, case))
+    post = L._github_boundary_policy_objects(value, case, github_boundary_objects_data(value, case, post=True))
+    prefix = "github-boundary-" + ("dns" if case == "github-dns-deadline" else "connect")
+    unit = L.root_path(value).name + ".service"
+    domain = {"sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": value["attempt"],
+              "runnerUid": value["runnerUid"], "invocationId": "1" * 32, "unit": unit,
+              "cgroupPath": "/sys/fs/cgroup/system.slice/" + unit,
+              "cgroupIdentity": [1, 321, stat.S_IFDIR | 0o755, 0, 0, 2],
+              "namespaces": {name: [4, index] for index, name in enumerate(("user", "pid", "net", "mnt"), 1)},
+              "bootId": "11111111-2222-3333-4444-555555555555"}
+    def protected(suffix, inode):
+        return {"path": str(L.root_path(value) / "private" / (prefix + "-" + suffix)), "size": 1, "sha256": "e" * 64,
+                "identity": [1, inode, stat.S_IFREG | 0o400, 0, 0, 1, 1, 10, 10]}
+    absence = L._shell_github_pin(L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}]}))
+    return {"schema": "installed-github-normal-boundary-policy-v1", "case": case,
+            "profile": "github-readonly-installed-normal-boundaries-v1", "sourceSha": value["sourceSha"], "domain": domain,
+            "intent": protected("intent.json", 501), "owned": protected("owned.json", 502),
+            "installed": installed, "post": post,
+            "productCommand": {"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0, "timeoutSeconds": 60},
+            "nativeBoundary": deepcopy(receipt["originals"][0]["boundary"]), "state": "removed-and-observed",
+            "productOriginalsFinal": True, "noPriorWorkers": True, "absence": absence,
+            "policySha256": hashlib.sha256(L.shell_github_boundary_policy(value, case)).hexdigest(),
+            "faultHeldThroughOriginalFinality": True, "normalHttpRequests": False}
+
+
+def github_boundary_closed_observation_data():
+    """Fictional CI export shape; DOES NOT pass the root host/admission producer."""
+    value, observed = github_boundary_handoff_data(), github_closed_observation_data()
+    cases = {case: {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
+                    "githubReadOnly": github_boundary_receipt_data(case)} for case in GITHUB_BOUNDARY_FICTIONAL_CASES}
+    github = observed["githubReadOnly"]
+    host = L._shell_github_pin(b"fictional host DATA, not admission\n")
+    policies = {}
+    captures = {"shell-cases.json": L._shell_github_pin(L.canonical(cases))}
+    for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+        proof = github_boundary_policy_data_fixture(value, case)
+        pin = L._shell_github_pin(L.canonical(proof))
+        policies[case] = {"capture": pin, "evidence": proof}
+        prefix = "github-boundary-" + ("dns" if case == "github-dns-deadline" else "connect")
+        captures[prefix + "-policy.json"] = pin
+        captures[prefix + "-absence.stdout"] = proof["absence"]
+    for phase in ("before", "after"):
+        captures["shell-github-materials-" + phase + ".json"] = github["materials"][phase]
+        captures["shell-github-project-" + phase + ".json"] = github["fixture"][phase]
+        captures["github-boundary-host-" + phase + ".json"] = host
+    github.update(selection=value["shell"]["githubReadOnly"], casesCapture=captures["shell-cases.json"],
+                  normalDestinationAction=True, normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
+                  normalHttpRequests=False,
+                  remainingCoverage=["current-twenty-two-synthetic-regressions", "separately-approved-normal-destination-negative"],
+                  boundaries={"host": {"before": host, "after": deepcopy(host)}, "policies": policies,
+                              "normalResolverWithholdingObserved": True, "realStalledTcpConnectObserved": True,
+                              "rootUidAndCgroupScoped": True, "normalHttpRequests": False})
+    files = [{"path": "lifecycle-" + name, **captures.get(name, L._shell_github_pin(b"fictional export\n"))}
+             for name in sorted(L.public_files(value) | {"client.stdout", "client.stderr"})]
+    observed.update(state="installed-github-normal-boundaries-observed", invocationId="1" * 32, cases=cases, files=files)
+    return observed
+
+
+class InstalledGitHubNormalBoundaryDataContracts(unittest.TestCase):
+    """Fixed two-case inert DATA contracts, not native or kernel qualification."""
+
+    def test_pair_is_separate_and_never_silently_runs_twenty_two_or_normal_http(self):
+        value = github_boundary_handoff_data()
+        self.assertEqual(L.shell_cases(value), GITHUB_BOUNDARY_FICTIONAL_CASES)
+        self.assertEqual(L.shell_github_selection()["cases"], list(GITHUB_FICTIONAL_CASES))
+        self.assertEqual(L.SHELL_GITHUB_CASE_DATA, GITHUB_FICTIONAL_CASES)
+        self.assertTrue(value["shell"]["githubReadOnly"]["normalDestinationAction"])
+        self.assertFalse(value["shell"]["githubReadOnly"]["normalHttpRequests"])
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            self.assertEqual(L.shell_github_role(case), "N")
+            self.assertEqual(L.shell_argv(value, case)[-2:], [str(L.root_path(value) / "shell-observer"), case])
+        files = L.public_files(value)
+        self.assertLessEqual(len(files), 135)
+        self.assertFalse(any(name.startswith("shell-github-connect-refresh") for name in files))
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            prefix = L._github_boundary_prefix(case)
+            self.assertIn(prefix + "-policy.json", files)
+            self.assertIn(prefix + "-absence.stdout", files)
+            phases = L.root_phases(value)
+            self.assertLess(phases.index(prefix + "-installed"), phases.index("shell-" + case))
+            self.assertLess(phases.index("shell-" + case), phases.index(prefix + "-post"))
+            self.assertLess(phases.index(prefix + "-delete"), phases.index(prefix + "-absence"))
+        for case in ("github-normal-negative", "github-connect-refresh"):
+            bad = deepcopy(value)
+            bad["shell"]["githubReadOnly"]["cases"].append(case)
+            with self.subTest(case=case), self.assertRaises(L.Refused):
+                L.shell_cases(bad)
+
+    def test_real_boundary_shapes_require_n_maps_and_connected_or_unconnected_dns(self):
+        maps = github_map_data()
+        for case, options in (("github-dns-deadline", {}), ("github-dns-deadline", {"unconnected": True}),
+                              ("github-connect-deadline", {}), ("github-connect-deadline", {"ipv6": True})):
+            receipt = github_boundary_receipt_data(case, **options)
+            with self.subTest(case=case, options=options):
+                self.assertEqual(L.shell_github_receipt(L.canonical(receipt), case, maps), receipt)
+                result = L.shell_github_result(github_capture_data(case, receipt), b"", case, 0, maps)
+                self.assertEqual(result["githubReadOnly"], receipt)
+                self.assertEqual(result["maps"], [])
+                self.assertEqual(receipt["productManifestSha256"], L.M)
+                if case == "github-connect-deadline":
+                    self.assertIsNone(receipt["peer"])
+                    self.assertIsNone(receipt["peerSha256"])
+                bad = deepcopy(receipt)
+                bad["originals"][0]["maps"] = github_receipt_data("github-handshake-deadline")["originals"][0]["maps"]
+                with self.assertRaises(L.Refused):
+                    L.shell_github_receipt(L.canonical(bad), case, maps)
+
+    def test_boundary_refuses_wrong_socket_phase_source_timing_and_normal_http(self):
+        changes = [
+            ("github-dns-deadline", ("originals", 0, "boundary", key), replacement)
+            for key, replacement in (("childPid", 0), ("fd", -1), ("inode", 7001), ("inode", "07001"),
+                                     ("inode", "18446744073709551616"), ("uid", True), ("state", "02"),
+                                     ("localAddress", "0.0.0.0"), ("localAddress", "not-an-ip"),
+                                     ("remotePort", 18553), ("originalFdStable", False), ("observedBeforeDeadline", False))]
+        changes += [
+            ("github-dns-deadline", ("originals", 0, "boundary", "peerSource", "port"), 40003),
+            ("github-dns-deadline", ("peer", "terminal", "dnsSource", "questionId"), 999),
+            ("github-dns-deadline", ("peer", "terminal", "dnsQuestions"), 0),
+            ("github-dns-deadline", ("peer", "terminal", "dnsReplies"), 1),
+            ("github-dns-deadline", ("peer", "terminal", "requests"), 1),
+            ("github-dns-deadline", ("peer", "terminal", "authBytes"), 1),
+            ("github-dns-deadline", ("peer", "terminal", "completion", "dnsClosed"), False),
+            ("github-connect-deadline", ("originals", 0, "boundary", "state"), "01"),
+            ("github-connect-deadline", ("originals", 0, "boundary", "remoteAddress"), "127.0.0.1"),
+            ("github-connect-deadline", ("originals", 0, "boundary", "remoteAddress"), "10.0.0.1"),
+            ("github-connect-deadline", ("originals", 0, "boundary", "remotePort"), 18443),
+            ("github-connect-deadline", ("peer",), {}),
+            ("github-connect-deadline", ("peerSha256",), L.SHELL_GITHUB_PEER_PINS["github_tls_peer.py"][1]),
+        ]
+        for case, path, replacement in changes:
+            receipt = github_boundary_receipt_data(case)
+            github_data_set(receipt, path, replacement)
+            with self.subTest(case=case, path=path, replacement=replacement), self.assertRaises(L.Refused):
+                L.shell_github_receipt(L.canonical(receipt), case, github_map_data())
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            for elapsed in (9999, 12000, True):
+                receipt = github_boundary_receipt_data(case)
+                receipt["originals"][0]["elapsedMs"] = elapsed
+                with self.subTest(case=case, elapsed=elapsed), self.assertRaises(L.Refused):
+                    L.shell_github_receipt(L.canonical(receipt), case, github_map_data())
+
+    def test_no_runtime_host_tuple_self_admission_or_resolver_shortcut(self):
+        self.assertIsNone(L.SHELL_GITHUB_BOUNDARY_HOST_PROFILE)
+        with self.assertRaisesRegex(L.Refused, "not yet independently SOURCE-admitted"):
+            L._github_boundary_host_admit({"runtimeSelfAdmission": True})
+        nss, hosts = b"hosts: files dns\n", b"127.0.0.1 localhost\n"
+        resolver = b"nameserver 127.0.0.53\noptions timeout:7 attempts:2 ndots:1 edns0 trust-ad\n"
+        shape = L._github_boundary_resolver_shape(nss, hosts, resolver)
+        self.assertEqual((shape["timeoutSeconds"], shape["attempts"], shape["maximumQuestions"]), (7, 2, 4))
+        for changed in ((b"hosts: files resolve dns\n", hosts, resolver),
+                        (b"hosts: files [NOTFOUND=return] dns\n", hosts, resolver),
+                        (nss, b"127.0.0.1 API.GITHUB.COM.\n", resolver),
+                        (nss, hosts, b"nameserver 127.0.0.53\n"),
+                        (nss, hosts, resolver + b"nameserver 127.0.0.54\n"),
+                        (nss, hosts, resolver + b"options rotate\n"),
+                        (nss, hosts, resolver.replace(b"ndots:1", b"ndots:2"))):
+            with self.subTest(changed=changed), self.assertRaises(L.Refused):
+                L._github_boundary_resolver_shape(*changed)
+        body = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text().split(
+            "def shell_github_boundary_host_materials():", 1)[1].split("\ndef ", 1)[0]
+        for forbidden in (".run_owned(", "command(", "socket.socket(", "getaddrinfo(", ".write(", "Popen("):
+            self.assertNotIn(forbidden, body)
+
+    def test_policy_is_atomic_stateless_port_only_and_every_effect_has_uid_and_cgroup(self):
+        value = github_boundary_handoff_data()
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            raw = L.shell_github_boundary_policy(value, case)
+            lines = raw.decode("ascii").splitlines()
+            table = "mrk_gnb_" + value["runId"] + "_" + value["attempt"] + (
+                "_dns" if case == "github-dns-deadline" else "_connect")
+            self.assertEqual(lines[0], "create table inet " + table)
+            self.assertIn("add chain inet " + table + " output { type route hook output priority -300; policy accept; }", lines)
+            rules = [line for line in lines if line.startswith("add rule ")]
+            self.assertEqual(len(rules), 2 if case == "github-dns-deadline" else 1)
+            scope = 'meta skuid ' + str(value["runnerUid"]) + ' socket cgroupv2 level 2 "system.slice/' + L.root_path(value).name + '.service"'
+            self.assertTrue(all(scope in rule for rule in rules))
+            self.assertTrue(rules[-1].endswith(
+                "meta l4proto tcp tcp dport 443 tcp flags & (fin | syn | rst | ack) == syn counter name https_syns drop"))
+            if case == "github-dns-deadline":
+                self.assertTrue(rules[0].endswith(
+                    "meta nfproto ipv4 ip daddr 127.0.0.53 udp dport 53 counter name dns_queries udp dport set 18553"))
+            for forbidden in ("redirect", "dnat", "snat", "notrack", "flow", "offload", " mark ", "flush", "type nat", "ip daddr set"):
+                self.assertNotIn(forbidden, raw.decode())
+        for bad_uid in (0, True, -1):
+            bad = deepcopy(value); bad["runnerUid"] = bad_uid
+            with self.assertRaises(L.Refused):
+                L.shell_github_boundary_policy(bad, "github-dns-deadline")
+        with self.assertRaises(L.Refused):
+            L.shell_github_boundary_policy(github_handoff_data(), "github-dns-deadline")
+
+    def test_actual_object_parser_rejects_uid_only_wrong_handles_predicates_and_dialect(self):
+        value = github_boundary_handoff_data()
+        profile = {"materials": {}, "nftMetainfo": GITHUB_BOUNDARY_FICTIONAL_META}
+        with patch.object(L, "SHELL_GITHUB_BOUNDARY_HOST_PROFILE", profile):
+            for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+                objects = github_boundary_objects_data(value, case)
+                raw = L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}, *objects]})
+                observed = L.shell_github_boundary_policy_readback(value, case, raw)
+                self.assertEqual(L._github_boundary_policy_evidence(value, case, observed), observed)
+                variants = []
+                for key in ("uid-only", "wrong-uid", "wrong-cgroup", "wrong-hook", "wrong-handle", "extra", "wrong-effect"):
+                    bad = deepcopy(objects)
+                    rule = next(row["rule"] for row in bad if "rule" in row)
+                    chain = next(row["chain"] for row in bad if "chain" in row)
+                    if key == "uid-only": del rule["expr"][1]
+                    elif key == "wrong-uid": rule["expr"][0]["match"]["right"] += 1
+                    elif key == "wrong-cgroup": rule["expr"][1]["match"]["right"] += ".foreign"
+                    elif key == "wrong-hook": chain["hook"] = "input"
+                    elif key == "wrong-handle": bad[0]["table"]["handle"] = True
+                    elif key == "extra": bad.append(deepcopy(bad[-1]))
+                    else: rule["expr"][-1] = {"accept": None}
+                    variants.append((key, bad))
+                for key, bad in variants:
+                    changed = L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}, *bad]})
+                    with self.subTest(case=case, key=key), self.assertRaises(L.Refused):
+                        L.shell_github_boundary_policy_readback(value, case, changed)
+                bad_meta = {"nftables": [{"metainfo": {**GITHUB_BOUNDARY_FICTIONAL_META, "json_schema_version": 2}}, *objects]}
+                with self.assertRaises(L.Refused):
+                    L.shell_github_boundary_policy_readback(value, case, L.canonical(bad_meta))
+
+    def test_closed_policy_rejects_matching_but_unscoped_summaries_and_changed_finality(self):
+        value = github_boundary_handoff_data()
+        for case in GITHUB_BOUNDARY_FICTIONAL_CASES:
+            receipt = github_boundary_receipt_data(case)
+            proof = github_boundary_policy_data_fixture(value, case)
+            self.assertIs(L.shell_github_boundary_policy_data(value, case, proof, receipt), proof)
+            for path, replacement in ((("productOriginalsFinal",), False), (("faultHeldThroughOriginalFinality",), False),
+                                      (("noPriorWorkers",), False), (("normalHttpRequests",), True),
+                                      (("domain", "runnerUid"), value["runnerUid"] + 1),
+                                      (("domain", "cgroupIdentity", 3), value["runnerUid"]),
+                                      (("domain", "namespaces", "net"), [0, 1]),
+                                      (("productCommand", "exitCode"), 1), (("absence", "size"), True)):
+                bad = deepcopy(proof); github_data_set(bad, path, replacement)
+                with self.subTest(case=case, path=path), self.assertRaises(L.Refused):
+                    L.shell_github_boundary_policy_data(value, case, bad, receipt)
+            bad = deepcopy(proof)
+            for phase in ("installed", "post"):
+                rule = next(row["rule"] for row in bad[phase]["immutable"] if "rule" in row)
+                del rule["expr"][1]
+            with self.assertRaises(L.Refused):
+                L.shell_github_boundary_policy_data(value, case, bad, receipt)
+            bad = deepcopy(proof)
+            if case == "github-dns-deadline":
+                bad["post"]["counters"]["https_syns"] = {"packets": 1, "bytes": 60}
+            else:
+                bad["post"]["counters"]["https_syns"] = {"packets": 0, "bytes": 0}
+            with self.assertRaises(L.Refused):
+                L.shell_github_boundary_policy_data(value, case, bad, receipt)
+
+    def test_reservations_precede_create_and_uncertain_capture_burns_its_finite_slot(self):
+        case = "github-dns-deadline"
+        slots = {}
+        with patch.multiple(L, _GITHUB_BOUNDARY_SLOTS=slots, _TOTAL=0, _FILES=[], _ROOT=Path("/inert"),
+                            _D=SimpleNamespace(write=Mock(side_effect=OSError("uncertain write")))):
+            roster = L._github_boundary_reserve(case)
+            self.assertTrue(any(name.startswith("stop-") for name in roster))
+            self.assertTrue(set(roster) == set(slots))
+            with self.assertRaises(L.Refused):
+                L._github_boundary_reserve(case)
+            name = "github-boundary-dns-create.stdout"
+            with self.assertRaises(OSError):
+                L._retain(name, b"not a creation authority")
+            self.assertTrue(slots[name]["entered"])
+            self.assertFalse(slots[name]["retained"])
+            self.assertEqual(L._TOTAL, 0)
+            with self.assertRaises(L.Refused):
+                L._retain(name, b"retry")
+            L._D.write.assert_called_once()
+        with patch.multiple(L, _GITHUB_BOUNDARY_SLOTS={}, _TOTAL=L.TOTAL_LIMIT, _FILES=[]):
+            with self.assertRaises(L.Refused):
+                L._github_boundary_reserve(case)
+
+    def test_collision_or_unknown_create_never_obtains_delete_authority(self):
+        value, case = github_boundary_handoff_data(), "github-dns-deadline"
+        empty = L.canonical({"nftables": [{"metainfo": GITHUB_BOUNDARY_FICTIONAL_META}]})
+        for failure in (FileExistsError("collision"), RuntimeError("unknown creation owner")):
+            events, state = [], {"domain": {}, "cgroupFd": 123}
+            def reserve(*args, **kwargs):
+                events.append("reserve"); return {}
+            def private(which, suffix, raw):
+                events.append(suffix); return {"path": suffix}
+            def command(current, action):
+                events.append(action)
+                if action == "before":
+                    return subprocess.CompletedProcess([], 0, empty, b"")
+                raise failure
+            with patch.multiple(L, _FAILED=False, _GITHUB_BOUNDARY_COMMAND_FINAL=True,
+                                SHELL_GITHUB_BOUNDARY_HOST_PROFILE={"materials": {}, "nftMetainfo": GITHUB_BOUNDARY_FICTIONAL_META}), \
+                 patch.object(L, "_github_boundary_host_check"), patch.object(L, "_github_boundary_domain", return_value=state), \
+                 patch.object(L, "_github_boundary_reserve", side_effect=reserve), \
+                 patch.object(L, "_github_boundary_private_write", side_effect=private), \
+                 patch.object(L, "_github_boundary_body_command", side_effect=command), \
+                 patch.object(L, "_github_boundary_close_after") as close:
+                with self.assertRaises(type(failure)):
+                    L._github_boundary_prepare(value, case, {"namespaces": {}}, {})
+                close.assert_called_once_with(state)
+            self.assertLess(events.index("reserve"), events.index("create"))
+            self.assertLess(events.index("intent.json"), events.index("create"))
+            self.assertNotIn("owned.json", events)
+            self.assertNotIn("delete", events)
+
+    def test_stoppost_capture_failure_preserves_first_latch_but_unknown_owner_closes_next_launch(self):
+        value, case = github_boundary_handoff_data(), "github-connect-deadline"
+        proof = github_boundary_policy_data_fixture(value, case)
+        for unknown in (False, True):
+            def run(argv, **kwargs):
+                if unknown:
+                    raise RuntimeError("unknown original wait")
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            owner = SimpleNamespace(run_owned=Mock(side_effect=run))
+            state = {"value": value, "case": case, "owned": {"installed": proof["installed"]}, "ownedRecord": {},
+                     "owner": owner, "next": "delete"}
+            controller = {"owner": owner, "endpoint": 100.0, "launchesClosed": False, "errors": [], "context": None}
+            with patch.multiple(L, _OWNER=owner, _END=100.0, _FAILED=True, _PHASE="inert",
+                                _GITHUB_BOUNDARY_COMMAND_FINAL=True), \
+                 patch.object(L.time, "monotonic", return_value=90.0), patch.object(L, "_environment", return_value={}), \
+                 patch.object(L, "_github_boundary_owned_admit"), patch.object(L, "_github_boundary_domain_check"), \
+                 patch.object(L, "_command_capture", side_effect=OSError("capture refusal")):
+                result = L._github_boundary_dispose_command(controller, state, "delete")
+                self.assertTrue(L._FAILED)
+                self.assertEqual(L._END, 100.0)
+                self.assertEqual(controller["launchesClosed"], unknown)
+                self.assertEqual(L._GITHUB_BOUNDARY_COMMAND_FINAL, not unknown)
+                self.assertEqual(result is None, unknown)
+                self.assertEqual(len(controller["errors"]), 1)
+                self.assertTrue(controller["errors"][0]["stage"].endswith("-owner" if unknown else "-capture"))
+                kwargs = owner.run_owned.call_args.kwargs
+                self.assertIs(kwargs["cleanup"], False)
+                self.assertEqual(kwargs["timeout"], 2)
+                state["next"] = "absence"
+                if unknown:
+                    with self.assertRaises(L.Refused):
+                        L._github_boundary_dispose_command(controller, state, "absence")
+                    owner.run_owned.assert_called_once()
+                else:
+                    L._github_boundary_dispose_command(controller, state, "absence")
+                    self.assertEqual(owner.run_owned.call_count, 2)
+                    self.assertEqual(controller["errors"][0]["stage"], "stop-github-boundary-connect-delete-capture")
+                    self.assertTrue(L._FAILED)
+
+    def test_stoppost_disposition_is_before_completion_missing_result_and_denial_success_gates(self):
+        value = github_boundary_handoff_data()
+        for fault in ("completion", "missing-result", "denial"):
+            events = []
+            def disposition(current):
+                events.append("dispose")
+                return {}, {"errors": [], "allOwnedPoliciesAbsent": True, "laterLaunchesClosed": False, "cases": {}}
+            def record(path, *args):
+                events.append(path.name)
+                if fault == "missing-result":
+                    raise FileNotFoundError("unit-result is missing")
+                return {"size": 1, "sha256": "e" * 64}
+            def denial(observation):
+                events.append("denial"); raise L.Refused("resource denial")
+            env = {} if fault == "completion" else {"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"}
+            with patch.multiple(L, _ROOT=Path("/inert"), _END=0.0), patch.object(L.time, "monotonic", return_value=90.0), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_context", return_value=(value, "e" * 64)), \
+                 patch.object(L, "_github_boundary_stop", side_effect=disposition), patch.dict(L.os.environ, env, clear=True), \
+                 patch.object(L, "read", return_value=b"{}\n"), patch.object(L, "record", side_effect=record), \
+                 patch.object(L, "_domain_events", side_effect=denial):
+                with self.assertRaises((L.Refused, FileNotFoundError)):
+                    L.unit_stop()
+                self.assertEqual(L._END, 99.0)
+            self.assertEqual(events[0], "dispose")
+            self.assertEqual("denial" in events, fault == "denial")
+
+    def test_same_cgroup_contains_only_retained_self_no_uid_or_root_worker_exemption(self):
+        value = github_boundary_handoff_data()
+        domain = github_boundary_policy_data_fixture(value, "github-connect-deadline")["domain"]
+        current = needrestart_stat(stat.S_IFDIR | 0o755, ino=321, nlink=2, size=4096)
+        owner, me = object(), {"pid": 42, "startTicks": 1}
+        state = {"value": value, "domain": domain, "cgroupFd": 123, "owner": owner, "endpoint": 100.0, "self": me}
+        for workers in ("42\n", "42\n99\n", "99\n", ""):
+            def kernel(path, cap=None):
+                path = str(path)
+                if path == "/proc/self/cgroup": return "0::/system.slice/" + domain["unit"] + "\n"
+                if path.endswith("/boot_id"): return domain["bootId"] + "\n"
+                if path.endswith("/cgroup.type"): return "domain\n"
+                if path.endswith(("/cgroup.procs", "/cgroup.threads")): return workers
+                raise AssertionError("unreviewed mock kernel path")
+            with patch.multiple(L, _OWNER=owner, _END=100.0), patch.object(L.time, "monotonic", return_value=90.0), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_kernel", side_effect=kernel), \
+                 patch.object(L, "_github_boundary_namespaces", return_value=domain["namespaces"]), \
+                 patch.object(L, "_github_boundary_self", return_value=me), \
+                 patch.dict(L.os.environ, {"INVOCATION_ID": domain["invocationId"]}, clear=True), \
+                 patch.object(L.os, "fstat", return_value=current), patch.object(Path, "lstat", return_value=current), \
+                 patch.object(L.os, "listdir", return_value=["cgroup.procs", "cgroup.threads"]), \
+                 patch.object(L.os, "stat", return_value=needrestart_stat(stat.S_IFREG | 0o644)):
+                if workers == "42\n":
+                    self.assertIs(L._github_boundary_domain_check(state, no_workers=True), domain)
+                else:
+                    with self.subTest(workers=workers), self.assertRaises(L.Refused):
+                        L._github_boundary_domain_check(state, no_workers=True)
+
+    def test_original_close_error_does_not_replace_body_first_failure(self):
+        first = RuntimeError("first body failure")
+        with patch.multiple(L, _FAILED=False, _GITHUB_BOUNDARY_BODY_ERRORS=[]), \
+             patch.object(L, "_github_boundary_close_domain", side_effect=OSError("cgroup close")):
+            try:
+                try:
+                    raise first
+                finally:
+                    L._github_boundary_close_after({})
+            except RuntimeError as error:
+                self.assertIs(error, first)
+            self.assertTrue(L._FAILED)
+            self.assertEqual(L._GITHUB_BOUNDARY_BODY_ERRORS, [{"stage": "original-cgroup-close", "errorType": "OSError"}])
+
+
+class InstalledGitHubNormalBoundaryClosedExportDataContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "github_boundary_closed_export_data", SOURCE / "desktop/tools/ci_ubuntu_publication.py")
+        cls.CI = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.CI)
+
+    def validate(self, observed):
+        value = github_boundary_handoff_data()
+        return self.CI.shell_github_observation(observed, L, "github-readonly-installed-normal-boundaries-v1",
+                                               runner_uid=value["runnerUid"], runner_gid=value["runnerGid"])
+
+    def test_pair_has_distinct_root_policy_and_export_pins_not_just_native_flags(self):
+        observed = github_boundary_closed_observation_data()
+        self.assertIs(self.validate(observed), observed["githubReadOnly"])
+        self.assertEqual(set(observed["cases"]), set(GITHUB_BOUNDARY_FICTIONAL_CASES))
+        self.assertFalse(observed["githubReadOnly"]["normalHttpRequests"])
+        self.assertIn("current-twenty-two-synthetic-regressions", observed["githubReadOnly"]["remainingCoverage"])
+        with self.assertRaises(self.CI.D.Refused):
+            self.CI.shell_github_observation(observed, L)  # Legacy profile never adopts the new pair.
+        with self.assertRaises(self.CI.D.Refused):
+            self.CI.shell_github_observation(observed, L, "github-readonly-installed-normal-boundaries-v1")
+
+    def test_missing_or_forged_root_policy_uid_invocation_scope_and_capture_refuse(self):
+        root = ("githubReadOnly", "boundaries")
+        changes = [(("invocationId",), "2" * 32), (("githubReadOnly", "normalDestinationAction"), False),
+                   (("githubReadOnly", "normalHttpRequests"), True), (("githubReadOnly", "remainingCoverage"), []),
+                   (root + ("rootUidAndCgroupScoped",), False),
+                   (root + ("host", "after", "sha256"), "f" * 64),
+                   (root + ("policies", "github-connect-deadline", "capture", "sha256"), "f" * 64),
+                   (root + ("policies", "github-connect-deadline", "evidence", "domain", "runnerUid"), 555),
+                   (root + ("policies", "github-connect-deadline", "evidence", "faultHeldThroughOriginalFinality"), False)]
+        for path, replacement in changes:
+            observed = github_boundary_closed_observation_data(); github_data_set(observed, path, replacement)
+            with self.subTest(path=path), self.assertRaises((L.Refused, self.CI.D.Refused)):
+                self.validate(observed)
+        observed = github_boundary_closed_observation_data()
+        row = observed["githubReadOnly"]["boundaries"]["policies"]["github-dns-deadline"]
+        for phase in ("installed", "post"):
+            rule = next(item["rule"] for item in row["evidence"][phase]["immutable"] if "rule" in item)
+            del rule["expr"][1]
+        row["capture"] = L._shell_github_pin(L.canonical(row["evidence"]))
+        exported = next(item for item in observed["files"] if item["path"] == "lifecycle-github-boundary-dns-policy.json")
+        exported.update(row["capture"])
+        with self.assertRaises(L.Refused):
+            self.validate(observed)  # Matching altered pins cannot legitimize an unscoped policy.
 
 
 if __name__ == "__main__":

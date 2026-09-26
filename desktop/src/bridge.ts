@@ -145,7 +145,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
   const connectionCall = (command: 'github_connection_status' | 'github_connection_connect_token' | 'github_connection_refresh' | 'github_connection_disconnect', args: Record<string, unknown>): Promise<GitHubConnectionStatus> => {
     // Deliberately not async and not the generic call/apiError route. Start one
     // invoke synchronously; its callbacks do not close over the token arguments.
-    // The false compiled gate is independent of renderer/native capability DATA.
+    // The compiled UI gate is not native capability. The original document
+    // checks its sealed runtime/lifecycle gate again BEFORE copying a token.
     if (mode !== 'native') return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
     if ((command === 'github_connection_connect_token' || command === 'github_connection_refresh') && !GITHUB_CONNECTION_ENTRY_AVAILABLE)
       return Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));

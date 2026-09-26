@@ -201,7 +201,7 @@ CONFIG = b'''{
 '''
 OWNER_PINS = {
     "owned_process.py": "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02",
-    "_command_process.py": "075fa6e9838017feb6a1716ab3a75074e3a65dffe8b217613aff7e87c0201f68",
+    "_command_process.py": "803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b",
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "cancellation.py": "1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78",
 }
@@ -266,10 +266,11 @@ def expected_result(binding, case):
     binding.checked()
     need(case in CASES, "case-binding")
     first, stale, lost = case == "first-save", case == "noop-stale", case in ("picker-loss", "save-loss")
+    initial_ignore, saved_ignore = len(IGNORE_PREFIX), len(IGNORE_PREFIX + IGNORE_RULES)
     plans = {
-        "create": [("release/mobile-release.json", "create", None, 684), (".gitignore", "append", 40, 248)],
-        "preserve": [("release/mobile-release.json", "preserve", 684, 684), (".gitignore", "preserve", 248, 248)],
-        "replace": [("release/mobile-release.json", "replace", 684, 690), (".gitignore", "preserve", 248, 248)],
+        "create": [("release/mobile-release.json", "create", None, 684), (".gitignore", "append", initial_ignore, saved_ignore)],
+        "preserve": [("release/mobile-release.json", "preserve", 684, 684), (".gitignore", "preserve", saved_ignore, saved_ignore)],
+        "replace": [("release/mobile-release.json", "replace", 684, 690), (".gitignore", "preserve", saved_ignore, saved_ignore)],
     }
     rows = {
         "first-save": [(1, 1, "create", 2, True, "committed", "clean", "none", "none"),
@@ -333,19 +334,65 @@ def _pairs(items):
     return result
 
 
-def _exact(actual, expected):
+# Public schema vocabulary only. Unknown future keys lose diagnostic detail,
+# never validation. Neither report values nor unexpected keys enter this set.
+RESULT_LOCATION_KEYS = frozenset((
+    "accessibilityTrustedWithoutPrompt accessorReturned acknowledged action actionsAvailable active actualExit admitted "
+    "afterBytes applicationPresent apply attempted axError barrierRetired baselineGeneration beforeBytes binding "
+    "bodyEntered bodyReturned callbackEntered callbackReturned calls case cfSlots cfSlotsRetired checks children "
+    "cleanupReturned configuration confirmationsOpened controlReturns createReleaseDirectory custodyKnown "
+    "dispatchAttempted dispatchReturned distributionQualified draftRevision duplicate effect error expired facts files "
+    "final freshCoreReadback id initial initialDirectorySetterEntered initialDirectorySetterReturned initialNodesExamined "
+    "initialOriginalProof instrumentedEngineeringApp journal kind lastDepth lastRole mainPresent mechanism methods "
+    "native nativeEntered nativeFinality nativeReason nativeReturned nativeUnknown navigationDenied noAttachedSheet "
+    "ordinaryWindow originalDocumentAndQuitSettled originalLossSettled originalMain originalProof originalRelayJoined "
+    "originalWindow originals originalsJoined outcome panel panelAttachments parent parentSetterEntered parentSetterReturned "
+    "path pollResult pollReturned prepared pressReturned projectCancelSettled projectCompletionSelection projectOpenBinding "
+    "projectOpenInput prompt promptButton promptChecks promptSetterEntered promptSetterReturned quitCancelKeptOriginalReview "
+    "reason receiptJoined recheckNodesExamined rechecksSettled reload requested resources response result returned reviewMatched "
+    "runAttempt runId saveSessions schemaVersion scope secondStarted selectedPathMatched selection shippingBinaryQualified "
+    "site sourceCommit staleMarkerWriterReturnedAndClosed start state stdoutFrames step syntheticFileReadback timely triggered "
+    "urlsReadEntered urlsReadReturned webProcessCrashTested workerJoined workerRegistered writerFrames"
+).split()) | frozenset(ACCESSIBILITY_PROOF_CHECKS) | frozenset(ACCESSIBILITY_BUTTON_CHECKS)
+
+
+def _result_location(parts):
+    if type(parts) is not tuple or not 1 <= len(parts) <= 12 or type(parts[0]) is not str:
+        return None
+    result = ""
+    for part in parts:
+        if type(part) is str and part in RESULT_LOCATION_KEYS:
+            result += ("." if result else "") + part
+        elif type(part) is int and 0 <= part < 64:
+            result += f"[{part}]"
+        else:
+            return None
+    return result if len(result) <= 256 else None
+
+
+def _result_need(condition, label, location):
+    if not condition:
+        error = Refused(label)
+        try:
+            error.result_location = location
+        except BaseException:
+            pass  # Diagnostic attachment cannot replace the original refusal.
+        raise error
+
+
+def _exact(actual, expected, location=()):
     # Python's True == 1 (and 1.0 == 1) must not accept substituted evidence.
-    need(type(actual) is type(expected), "result-type")
+    _result_need(type(actual) is type(expected), "result-type", location)
     if type(expected) is dict:
-        need(actual.keys() == expected.keys(), "result-keys")
+        _result_need(actual.keys() == expected.keys(), "result-keys", location)
         for key in expected:
-            _exact(actual[key], expected[key])
+            _exact(actual[key], expected[key], location + (key,))
     elif type(expected) is list:
-        need(len(actual) == len(expected), "result-count")
-        for left, right in zip(actual, expected):
-            _exact(left, right)
+        _result_need(len(actual) == len(expected), "result-count", location)
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            _exact(left, right, location + (index,))
     else:
-        need(actual == expected, "result-value")
+        _result_need(actual == expected, "result-value", location)
 
 
 def parse_result(stdout, stderr, binding, case):
@@ -1397,7 +1444,7 @@ def diagnostic(error, owner, fixtures):
     label = str(error) if type(error) is Refused else "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "helper-or-owner-error"
     if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", label) is None:
         label = "helper-refused"
-    return {"schemaVersion": 1, "type": "macos-aqua-failure", "status": "failed", "reason": label,
+    result = {"schemaVersion": 1, "type": "macos-aqua-failure", "status": "failed", "reason": label,
             "case": fixtures.case if fixtures else None, "stage": fixtures.stage if fixtures else "admission-or-source",
             "originalCallReturned": fixtures.last_returned if fixtures else False,
             "appReturncode": fixtures.app_returncode if fixtures else None,
@@ -1411,6 +1458,13 @@ def diagnostic(error, owner, fixtures):
             "typedLifetimeFacts": facts, "exceptionChainTruncated": bool(pending),
             "fixtureCloseErrors": fixtures.close_errors if fixtures else 0,
             "fixturesPreserved": True, "laterCasesStopped": True}
+    try:
+        location = _result_location(getattr(error, "result_location", None)) if type(error) is Refused else None
+        if location is not None:
+            result["resultLocation"] = location
+    except BaseException:
+        pass  # Keep the original refusal/lifetime facts if optional detail fails.
+    return result
 
 
 def emit_record(value, stream):

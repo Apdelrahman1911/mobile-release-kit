@@ -13,9 +13,11 @@ use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, I
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), SettledFailure }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), GitHub(github::Case), SettledFailure }
 #[path = "installed_tools_observation.rs"]
 pub(crate) mod commands;
+#[path = "installed_shell_github_observation.rs"]
+pub(crate) mod github;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline }
 impl SessionCase {
@@ -25,6 +27,7 @@ impl SessionCase {
 impl Case {
     fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } }
     fn commands(self) -> Option<commands::Case> { match self { Self::Commands(case) => Some(case), _ => None } }
+    fn github(self) -> Option<github::Case> { match self { Self::GitHub(case) => Some(case), _ => None } }
 }
 // A moved, private, one-use setup token, never renderer/environment authority.
 pub(crate) struct SessionAdmission { original: std::sync::Weak<Observation>, case: SessionCase }
@@ -49,7 +52,7 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step), GitHubReadOnly(github::Step),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -142,6 +145,7 @@ impl Step {
             Self::MetadataSave(step) => step.failure_line(),
             Self::VersionSave(step) => step.failure_line(),
             Self::Commands(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+            Self::GitHubReadOnly(step) => step.failure_line(),
         }
     }
 }
@@ -1251,6 +1255,7 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::MetadataSave => "shell-metadata-save-failure.labels",
         Case::VersionSave => "shell-version-save-failure.labels",
         Case::Commands(case) => case.failure_leaf(),
+        Case::GitHub(case) => case.failure_leaf(),
         Case::SettledFailure => "shell-settled-failure-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
@@ -1271,8 +1276,8 @@ const FAILURE_PAIR_LIMIT: usize = 512;
 // Never omit/truncate a field to fit the unchanged 512B sink.
 // v7 adds exactly ;h= plus two closed bytes: 507 + 5 = 512.
 const SESSION_FAILURE_FRAME_BOUND: usize = 512;
-// Path v2 retains the three lines and adds bounded timing/callback/wait DATA.
-// The historical v1 reader keeps its 256B bound; the common sink is unchanged.
+// Path v3 adds five bytes of passive chooser DATA to v2. Both fit 384B;
+// historical v1/v2 reader bounds and the common 512B sink stay unchanged.
 const PATH_FAILURE_FRAME_BOUND: usize = 384;
 fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
     path: Option<PathDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
@@ -1299,10 +1304,11 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
     let mut length = 0;
     match (trace.0, path) {
         (Step::Paths(step), Some(diagnostic)) if diagnostic.step == step && session.is_none() => {
-            if step.recipe_index().is_some_and(|index| index > 10) { return None; }
+            if step.recipe_index().is_some_and(|index| index > 10)
+                || !diagnostic.gtk_picker.valid_path(step,diagnostic.wait) { return None; }
             // Prefix first: a short write must not look like a complete legacy
             // three-line Path frame with its new diagnostic silently omitted.
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=")?;
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
@@ -1320,6 +1326,8 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             append(&mut bytes,&mut length,diagnostic.callback.token())?;
             append(&mut bytes,&mut length,b";wait=")?;
             append(&mut bytes,&mut length,diagnostic.wait.token())?;
+            append(&mut bytes,&mut length,b";h=")?;
+            append(&mut bytes,&mut length,&diagnostic.gtk_picker.token())?;
             append(&mut bytes, &mut length, b"\n")?;
         },
         (Step::Paths(_), _) | (_, Some(_)) => return None,
@@ -1383,7 +1391,7 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
 }
 
 #[test]
-fn session_failure_frame_contract_is_inert() { assert_failure_pair_contract(); }
+fn session_failure_frame_contract_is_inert() { assert_failure_pair_contract(); assert_picker_activation_return_contract(); }
 
 fn failure_frame(trace: (Step, Boundary), progress: BootstrapProgress, session: Option<SessionDiagnostic>,
     path: Option<PathDiagnostic>, evidence: Option<EvidenceDiagnostic>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
@@ -1788,7 +1796,7 @@ fn assert_failure_pair_contract() {
             assert_eq!(step.recipe_index(),Some(index));
             let diagnostic = PathDiagnostic::sample(Step::Paths(step),0,None).unwrap();
             let callback = if matches!(step,PathStep::Set(_) | PathStep::Activate(_)) { "idle" } else { "na" };
-            let prefix = format!("MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index={index};reject=not-recorded;start=0;now=0;rsv=0;in=0;out=0;cb={callback};wait=not-sampled\n");
+            let prefix = format!("MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index={index};reject=not-recorded;start=0;now=0;rsv=0;in=0;out=0;cb={callback};wait=not-sampled;h=na\n");
             let expected = [prefix.as_bytes(),step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line()].concat();
             assert!(failure_pair((Step::Paths(step),Boundary::Gtk),BootstrapProgress::Advanced,None,Some(diagnostic))
                 .is_some_and(|(bytes,length)|length <= PATH_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
@@ -1799,16 +1807,16 @@ fn assert_failure_pair_contract() {
         PathStep::Settings,PathStep::General,PathStep::FinalIos] {
         assert_eq!(step.recipe_index(),None);
         let diagnostic = PathDiagnostic::sample(Step::Paths(step),0,None).unwrap();
-        let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=none;reject=not-recorded;start=0;now=0;rsv=0;in=0;out=0;cb=na;wait=not-sampled\n".as_slice(),step.failure_line(),
+        let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index=none;reject=not-recorded;start=0;now=0;rsv=0;in=0;out=0;cb=na;wait=not-sampled;h=na\n".as_slice(),step.failure_line(),
             Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line()].concat();
         assert!(failure_pair((Step::Paths(step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,None,Some(diagnostic))
             .is_some_and(|(bytes,length)|length <= PATH_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
     }
-    let path_step = PathStep::Activate(0);
+    let path_step = PathStep::Activate(1);
     let path_trace = (Step::Paths(path_step),Boundary::Gtk);
     let path_plain = PathDiagnostic::sample(path_trace.0,0,None).unwrap();
     let path_gtk = PathDiagnostic { rejection:PathRejection::GtkInitialFolder,..path_plain };
-    let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index=0;reject=gtk-initial-folder;start=0;now=0;rsv=0;in=0;out=0;cb=idle;wait=not-sampled\n".as_slice(),
+    let expected = [b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index=1;reject=gtk-initial-folder;start=0;now=0;rsv=0;in=0;out=0;cb=idle;wait=not-sampled;h=na\n".as_slice(),
         path_step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line()].concat();
     assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,Some(path_gtk))
         .is_some_and(|(bytes,length)|bytes.get(..length) == Some(expected.as_slice()) && bytes[..length].is_ascii()
@@ -1817,7 +1825,7 @@ fn assert_failure_pair_contract() {
     assert!(failure_pair(path_trace,BootstrapProgress::Advanced,Some(first),Some(path_gtk)).is_none());
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),Some(path_gtk)).is_none());
     assert!(failure_pair((Step::Close,Boundary::Gtk),BootstrapProgress::Advanced,None,Some(path_gtk)).is_none());
-    for step in [PathStep::Set(0),PathStep::Activate(1)] {
+    for step in [PathStep::Set(0),PathStep::Activate(2)] {
         assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,Some(PathDiagnostic { step,..path_gtk })).is_none());
     }
     for index in [11,255] {
@@ -1827,25 +1835,59 @@ fn assert_failure_pair_contract() {
         }
     }
     assert!(PathDiagnostic::sample(Step::Close,0,None).is_none());
-    let extension = b";start=999999;now=999999;rsv=m;in=m;out=m;cb=reserved;wait=initial-folder-absent";
+    let extension = b";start=999999;now=999999;rsv=m;in=m;out=m;cb=reserved;wait=target-parent-different;h=5o";
     assert!(174 + 77 + extension.len() <= PATH_FAILURE_FRAME_BOUND && PATH_FAILURE_FRAME_BOUND < FAILURE_PAIR_LIMIT);
+    // The actual shared codec has 24 Path samples; FirebasePeer belongs only to
+    // Session and cannot enter Path v3. Closed DATA is not readiness authority.
+    let mut count = 0;
+    for mapped in [false,true] {
+        for folder in [PF::Absent,PF::TargetParent,PF::Other] {
+            for selected in [PS::Absent,PS::Target,PS::TargetParent,PS::Other] {
+                let picker = PR::Sampled { mapped,folder,selected }; count += 1;
+                let wait = match selected { PS::Absent => PathWait::SelectionAbsent, PS::Target => PathWait::NotSampled,
+                    _ => PathWait::SelectionDifferent };
+                let mut sample = path_plain;
+                sample.mark(PathCallback::Reserved); sample.mark(PathCallback::Entered);
+                assert!(sample.file_wait(wait,picker));
+                assert!(sample.gtk_picker == picker && sample.wait == wait);
+                assert!(failure_pair(path_trace,BootstrapProgress::Advanced,None,Some(sample))
+                    .is_some_and(|(_,length)|length <= PATH_FAILURE_FRAME_BOUND));
+                let set_step = PathStep::Set(1);
+                let set_wait = if !mapped { PathWait::Unmapped } else { match folder {
+                    PF::Absent => PathWait::TargetParentAbsent, PF::Other => PathWait::TargetParentDifferent,
+                    PF::TargetParent => PathWait::NotSampled } };
+                assert!(picker.valid_path(set_step,set_wait));
+                for wrong in [PathStep::Set(0),PathStep::Set(2),PathStep::Activate(0),PathStep::ReadField(1)] {
+                    assert!(!picker.valid_path(wrong,set_wait));
+                }
+                assert!(!(PR::Sampled { mapped,folder,selected:PS::FirebasePeer }).valid_path(path_step,PathWait::SelectionDifferent));
+            }
+        }
+    }
+    assert_eq!(count,24);
+    let path_other = PR::Sampled { mapped:true,folder:PF::TargetParent,selected:PS::Other };
+    let mut invalid_sample = path_plain;
+    assert!(!invalid_sample.file_wait(PathWait::SelectionDifferent,PR::NotSampled) && invalid_sample == path_plain);
+    assert!(!invalid_sample.file_wait(PathWait::SelectionAbsent,path_other) && invalid_sample == path_plain);
     let mut timed = PathDiagnostic::sample(path_trace.0,43_000,None).unwrap();
     for round in 0..3 {
         timed.mark(PathCallback::Reserved);
         assert!(timed.callback == PathCallback::Reserved && timed.reservations == if round == 0 { PathCount::One } else { PathCount::Many });
-        timed.mark(PathCallback::Entered); timed.wait = PathWait::SelectionDifferent;
+        timed.mark(PathCallback::Entered); assert!(timed.file_wait(PathWait::SelectionDifferent,path_other));
         timed.mark(PathCallback::Returned);
         timed = PathDiagnostic::sample(path_trace.0,44_000 + round,Some(timed)).unwrap();
     }
     assert!(timed.step_entry_ms == 43_000 && timed.sample_ms == 44_002 && timed.wait == PathWait::SelectionDifferent
         && timed.entries == PathCount::Many && timed.returns == PathCount::Many && timed.callback == PathCallback::Returned);
-    let reset = PathDiagnostic::sample(Step::Paths(PathStep::Activate(1)),44_010,Some(timed)).unwrap();
+    let reset = PathDiagnostic::sample(Step::Paths(PathStep::Activate(2)),44_010,Some(timed)).unwrap();
     assert!(reset.step_entry_ms == 44_010 && reset.sample_ms == 44_010 && reset.wait == PathWait::NotSampled
-        && reset.reservations == PathCount::Zero && reset.entries == PathCount::Zero && reset.returns == PathCount::Zero);
+        && reset.reservations == PathCount::Zero && reset.entries == PathCount::Zero && reset.returns == PathCount::Zero
+        && reset.gtk_picker == PR::NotSampled);
     for time in [999_999,1_000_000,u128::MAX] {
-        let maximal = PathDiagnostic { step_entry_ms:time,sample_ms:time,wait:PathWait::InitialFolderAbsent,
+        let maximal = PathDiagnostic { step:PathStep::Set(1),step_entry_ms:time,sample_ms:time,wait:PathWait::TargetParentDifferent,
+            gtk_picker:PR::Sampled { mapped:true,folder:PF::Other,selected:PS::Other },
             rejection:PathRejection::GtkFixtureTransition,..timed };
-        let (bytes,length) = failure_pair(path_trace,BootstrapProgress::AppInfoReturnedBeforeHold,None,Some(maximal)).unwrap();
+        let (bytes,length) = failure_pair((Step::Paths(maximal.step),Boundary::Gtk),BootstrapProgress::AppInfoReturnedBeforeHold,None,Some(maximal)).unwrap();
         let text = std::str::from_utf8(&bytes[..length]).unwrap();
         assert!(length <= PATH_FAILURE_FRAME_BOUND && text.contains(if time == 999_999 { ";start=999999;now=999999;" } else { ";start=over;now=over;" }));
     }
@@ -1853,13 +1895,13 @@ fn assert_failure_pair_contract() {
     latch_path_diagnostic(&frozen,&mut retained,PathDiagnostic { rejection:PathRejection::GtkDispatch,..timed });
     let first_timed = retained;
     latch_path_diagnostic(&frozen,&mut retained,reset);
-    assert!(retained == first_timed && retained.unwrap().step_entry_ms == 43_000);
+    assert!(retained == first_timed && retained.unwrap().step_entry_ms == 43_000 && retained.unwrap().gtk_picker == path_other);
     // A generic failure can arrive immediately after a step transition, before
     // record_at runs again. Its complete frame must use the actual new step.
     let mut transition_trace = path_trace;
-    let next = PathDiagnostic::sample_trace(&mut transition_trace,Step::Paths(PathStep::Activate(1)),44_010,Some(timed));
+    let next = PathDiagnostic::sample_trace(&mut transition_trace,Step::Paths(PathStep::Activate(2)),44_010,Some(timed));
     let generic_failure = FailureLatch::new(false); generic_failure.mark_unknown();
-    assert!(generic_failure.load(Ordering::SeqCst) && transition_trace == (Step::Paths(PathStep::Activate(1)),Boundary::Gtk)
+    assert!(generic_failure.load(Ordering::SeqCst) && transition_trace == (Step::Paths(PathStep::Activate(2)),Boundary::Gtk)
         && next == Some(reset) && failure_pair(transition_trace,BootstrapProgress::Advanced,None,next).is_some());
     let leaving = PathDiagnostic::sample_trace(&mut transition_trace,Step::Close,44_020,next);
     assert!(leaving.is_none() && transition_trace == (Step::Close,Boundary::Gtk)
@@ -1982,6 +2024,36 @@ fn assert_picker_activation_return_contract() {
         let mut p = Picker { created, activated, ..Picker::default() };
         assert!(!p.activation_returned(Ok(true))); assert!(!p.returned);
     }
+    // Exercise the actual per-operation reservations, not a second GTK model.
+    // Endpoint/id/pending guards remain in the original Record transaction.
+    let mut open = Vec::new();
+    for (index,case) in PATH_CASES.iter().enumerate() {
+        let fresh = || PathOperation { requested:true,picker:Picker { created:true,..Picker::default() },..PathOperation::default() };
+        let mut op = fresh();
+        if case.selects_open() {
+            open.push(index);
+            assert!(!op.reserve_selection(case) && !op.picker.selected);
+            assert!(op.reserve_parent_navigation(case) && op.parent_navigation_reserved && !op.picker.selected);
+            // Any number of existing passive Set waits cannot permit a replay.
+            for _ in 0..3 { assert!(!op.reserve_parent_navigation(case) && !op.picker.selected); }
+            assert!(op.reserve_selection(case) && op.picker.selected && op.navigation_matches(case));
+            assert!(!op.reserve_parent_navigation(case) && !op.reserve_selection(case));
+        } else {
+            assert!(!op.reserve_parent_navigation(case) && !op.parent_navigation_reserved);
+            assert_eq!(op.reserve_selection(case),case.path.is_some());
+            assert!(op.navigation_matches(case));
+            let mut corrupt = PathOperation { parent_navigation_reserved:true,..fresh() };
+            assert!(!corrupt.navigation_matches(case) && !corrupt.reserve_selection(case));
+        }
+        for mut invalid in [PathOperation { requested:false,..fresh() },
+            PathOperation { picker:Picker::default(),..fresh() },
+            PathOperation { picker:Picker { created:true,selected:true,..Picker::default() },..fresh() },
+            PathOperation { picker:Picker { created:true,activated:true,..Picker::default() },..fresh() }] {
+            assert!(!invalid.reserve_parent_navigation(case) && !invalid.parent_navigation_reserved);
+            assert!(!invalid.reserve_selection(case));
+        }
+    }
+    assert_eq!(open,vec![1,6,7,8]);
 }
 
 // One closed native path case. Operation indices refer only to this fixed
@@ -2053,7 +2125,8 @@ impl PathRejection {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PathDiagnostic { step: PathStep, rejection: PathRejection, step_entry_ms: u128, sample_ms: u128,
-    reservations: PathCount, entries: PathCount, returns: PathCount, callback: PathCallback, wait: PathWait }
+    reservations: PathCount, entries: PathCount, returns: PathCount, callback: PathCallback, wait: PathWait,
+    gtk_picker: SessionPickerReadiness }
 impl PathDiagnostic {
     fn sample_trace(trace: &mut (Step,Boundary), step: Step, elapsed_ms: u128, previous: Option<Self>) -> Option<Self> {
         // A real Path transition changes the diagnostic context in this same
@@ -2069,7 +2142,11 @@ impl PathDiagnostic {
         Some(Self { step, rejection: PathRejection::NotRecorded, step_entry_ms: elapsed_ms, sample_ms: elapsed_ms,
             reservations: PathCount::Zero, entries: PathCount::Zero, returns: PathCount::Zero,
             callback: if matches!(step,PathStep::Set(_) | PathStep::Activate(_)) { PathCallback::Idle } else { PathCallback::NotApplicable },
-            wait: PathWait::NotSampled })
+            wait: PathWait::NotSampled, gtk_picker: SessionPickerReadiness::NotSampled })
+    }
+    fn file_wait(&mut self, wait: PathWait, picker: SessionPickerReadiness) -> bool {
+        if !picker.valid_path(self.step,wait) { return false; }
+        self.wait = wait; self.gtk_picker = picker; true
     }
     fn mark(&mut self, callback: PathCallback) {
         match callback {
@@ -2094,16 +2171,54 @@ impl PathCallback {
         Self::Reserved => b"reserved", Self::Entered => b"entered", Self::Returned => b"returned" } }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum PathWait { NotSampled, DialogAbsent, InitialFolderAbsent, SelectionAbsent, SelectionDifferent, ResponseInsensitive }
+pub(super) enum PathWait { NotSampled, DialogAbsent, InitialFolderAbsent, Unmapped, TargetParentAbsent, TargetParentDifferent,
+    SelectionAbsent, SelectionDifferent, ResponseInsensitive }
 impl PathWait {
     fn token(self) -> &'static [u8] { match self { Self::NotSampled => b"not-sampled", Self::DialogAbsent => b"dialog-absent",
-        Self::InitialFolderAbsent => b"initial-folder-absent", Self::SelectionAbsent => b"selection-absent",
-        Self::SelectionDifferent => b"selection-different", Self::ResponseInsensitive => b"response-insensitive" } }
+        Self::InitialFolderAbsent => b"initial-folder-absent", Self::Unmapped => b"unmapped",
+        Self::TargetParentAbsent => b"target-parent-absent", Self::TargetParentDifferent => b"target-parent-different",
+        Self::SelectionAbsent => b"selection-absent", Self::SelectionDifferent => b"selection-different",
+        Self::ResponseInsensitive => b"response-insensitive" } }
+}
+impl SessionPickerReadiness {
+    fn valid_path(self, step: PathStep, wait: PathWait) -> bool {
+        use SessionPickerFolder as F;
+        use SessionPickerSelection as S;
+        use PathWait as W;
+        let case = step.recipe_index().and_then(|i| PATH_CASES.get(i as usize));
+        let Self::Sampled { mapped, folder, selected } = self else {
+            return wait == W::NotSampled
+                || matches!(step,PathStep::Set(_) | PathStep::Activate(_))
+                    && matches!(wait,W::DialogAbsent | W::InitialFolderAbsent)
+                || matches!(step,PathStep::Activate(_)) && case.is_some_and(|c| c.path.is_none())
+                    && wait == W::ResponseInsensitive;
+        };
+        if selected == S::FirebasePeer { return false; }
+        match step {
+            PathStep::Set(_) if case.is_some_and(PathCase::selects_open) => match wait {
+                W::Unmapped => !mapped,
+                W::TargetParentAbsent => mapped && folder == F::Absent,
+                W::TargetParentDifferent => mapped && folder == F::Other,
+                W::NotSampled => mapped && folder == F::TargetParent,
+                _ => false,
+            },
+            PathStep::Activate(_) if case.is_some_and(|c| c.path.is_some()) => match selected {
+                S::Absent => wait == W::SelectionAbsent,
+                S::Target => matches!(wait,W::NotSampled | W::ResponseInsensitive),
+                S::TargetParent | S::Other => wait == W::SelectionDifferent,
+                S::FirebasePeer => false,
+            },
+            _ => false,
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct PathCase { field: crate::asset_commands::ProjectPathField, name: &'static str, label: &'static str,
     path: Option<&'static str>, relative: Option<&'static str>, reason: crate::asset_commands::Reason }
 use crate::asset_commands::{ProjectPathField as PF, Reason as PR};
+impl PathCase {
+    fn selects_open(&self) -> bool { self.path.is_some() && !self.field.directory() }
+}
 const PATH_CASES: [PathCase; 11] = [
     PathCase { field: PF::VersionSource, name:"version.source", label:"Committed version file", path:None, relative:None, reason:PR::UserCancelled },
     PathCase { field: PF::VersionSource, name:"version.source", label:"Committed version file", path:Some("path-project/inputs/VERSION"), relative:Some("inputs/VERSION"), reason:PR::None },
@@ -2118,7 +2233,21 @@ const PATH_CASES: [PathCase; 11] = [
     PathCase { field: PF::IosWorkspace, name:"ios.workspace", label:"Xcode workspace", path:Some("path-project/ios/Example.xcworkspace"), relative:None, reason:PR::SourceChanged },
 ];
 #[derive(Default)]
-struct PathOperation { picker: Picker, requested: bool, returned: bool, settled: bool, visible: bool }
+struct PathOperation { picker: Picker, requested: bool, returned: bool, settled: bool, visible: bool,
+    parent_navigation_reserved: bool }
+impl PathOperation {
+    fn navigation_matches(&self, case: &PathCase) -> bool { self.parent_navigation_reserved == case.selects_open() }
+    fn reserve_parent_navigation(&mut self, case: &PathCase) -> bool {
+        if !case.selects_open() || !self.requested || !self.picker.created || self.parent_navigation_reserved
+            || self.picker.selected || self.picker.activated { return false; }
+        self.parent_navigation_reserved = true; true
+    }
+    fn reserve_selection(&mut self, case: &PathCase) -> bool {
+        if case.path.is_none() || !self.requested || !self.picker.created || self.picker.selected || self.picker.activated
+            || !self.navigation_matches(case) { return false; }
+        self.picker.selected = true; true
+    }
+}
 struct Paths {
     diagnostic: Option<PathDiagnostic>,
     operations: [PathOperation; 11], base: Option<Value>, draft: Option<Value>, patched: Option<Value>,
@@ -2133,7 +2262,7 @@ impl Paths {
     }
     fn complete(&self) -> bool {
         self.operations.iter().enumerate().all(|(i, op)| op.requested && op.returned && op.settled && op.visible
-            && op.picker.settled(PATH_CASES[i].path.is_some())) && self.base.is_some() && self.draft.is_some() && self.patched.is_some()
+            && op.navigation_matches(&PATH_CASES[i]) && op.picker.settled(PATH_CASES[i].path.is_some())) && self.base.is_some() && self.draft.is_some() && self.patched.is_some()
             && self.previews_requested == 3 && self.previews_visible == 3 && self.previews.iter().all(Option::is_some)
             && self.draft_visible && self.pair_visible && self.final_pair_visible
             && self.fixture.as_ref().is_some_and(|f| f.mutations == 4)
@@ -3984,7 +4113,7 @@ struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
     project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord, version: VersionRecord,
-    session: SessionRecord,
+    session: SessionRecord, github_entry: github::EntryDiagnostic, github_guidance: github::GuidanceReload,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
     capability: bool, generation: Option<String>, native_revision: Option<u32>, sessions: Vec<SaveSession>, requests: [u8; 4],
@@ -4027,7 +4156,7 @@ fn saved_read_context(r: &Record) -> bool {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, start: Instant, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: FailureLatch,
-    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>,
+    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>, github: Option<Arc<github::Control>>,
 }
 impl Observation {
     fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
@@ -4037,6 +4166,7 @@ impl Observation {
                 Case::WorkflowApply => path.with_file_name("workflow-project"),
                 Case::Session(case) => path.with_file_name(case.name()).join("project"),
                 Case::Commands(case) => path.with_file_name(case.name()).join("project"),
+                Case::GitHub(_) => path.with_file_name("github-project"),
                 Case::MetadataSave => path.with_file_name("metadata-project"),
                 Case::VersionSave => path.with_file_name("version-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
@@ -4044,13 +4174,13 @@ impl Observation {
         Self { case, main: std::thread::current().id(), start, end,
             failed: FailureLatch::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
-            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), record: Mutex::new(Record {
+            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), github: case.github().map(github::Control::new), record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled, evidence_diagnostic: None, snapshot_diagnostic: None,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
                 project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
-                session: SessionRecord::new(case.session()),
+                session: SessionRecord::new(case.session()), github_entry: github::EntryDiagnostic::default(), github_guidance: github::GuidanceReload::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
                 capability: false, generation: None, native_revision: None, sessions: Vec::new(), requests: [0; 4],
@@ -4075,6 +4205,12 @@ impl Observation {
             self.path_sample(&mut r);
         }
         Some(r)
+    }
+    fn github_entry_fail(&self, r: &mut Record, origin: github::EntryOrigin) {
+        if r.step == Step::GitHubReadOnly(github::Step::Entry) && r.trace.0 == r.step {
+            let evaluations = r.evaluations;
+            github::latch_entry_diagnostic(&self.failed, &mut r.github_entry, evaluations, origin);
+        } else { self.fail(); }
     }
     fn session_wait(&self, r: &mut Record, wait: SessionWait) {
         if !self.failed.load(Ordering::SeqCst) {
@@ -4121,12 +4257,15 @@ impl Observation {
         }
     }
     pub(super) fn path_wait(&self, wait: PathWait) {
-        // Call only after leaving DIALOG/GuiFacts borrows. This is cached DATA,
-        // never a reason to skip the original helper or return bookkeeping.
+        self.path_file_wait(wait,SessionPickerReadiness::NotSampled);
+    }
+    pub(super) fn path_file_wait(&self, wait: PathWait, picker: SessionPickerReadiness) {
+        // Call only after leaving DIALOG/GuiFacts borrows. The same Record
+        // transaction replaces both fields; no stale sample labels a new wait.
         let Some(mut r) = self.record() else { return; };
         if self.failed.load(Ordering::SeqCst) { return; }
-        if self.path_sample(&mut r) {
-            if let Some(diagnostic) = r.paths.diagnostic.as_mut() { diagnostic.wait = wait; }
+        if self.path_sample(&mut r) && !r.paths.diagnostic.as_mut().is_some_and(|d| d.file_wait(wait,picker)) {
+            self.path_fail(&mut r,PathRejection::GtkSelectionState);
         }
     }
     fn evidence_fail(&self, r: &mut Record, callback: EvidenceCallback, check: EvidenceCheck,
@@ -4139,9 +4278,9 @@ impl Observation {
     }
     fn report_failure(&self) {
         if !self.failed.load(Ordering::SeqCst) || self.failure_reported.load(Ordering::SeqCst) { return; }
-        let (trace, progress, session, path, evidence, snapshot, site, metadata) = match self.record.try_lock() {
+        let (trace, progress, session, path, evidence, snapshot, site, metadata, github_entry) = match self.record.try_lock() {
             Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,
-                r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure), Err(_) => return };
+                r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure, r.github_entry), Err(_) => return };
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed enums and bounded cached counters/recipe indices, outside every
         // record/GTK lock. No identifiers, DTOs, inputs or exception bodies.
@@ -4151,6 +4290,8 @@ impl Observation {
             snapshot_failure_frame(trace, progress, site, snapshot)
         } else if matches!(trace.0, Step::MetadataSave(MetadataStep::OpenText(_))) && session.is_none() && path.is_none() && evidence.is_none() {
             metadata_open_failure_frame(trace, progress, site, metadata)
+        } else if trace.0 == Step::GitHubReadOnly(github::Step::Entry) {
+            github::entry_failure_pair(trace, progress, github_entry)
         } else { failure_frame(trace, progress, session, path, evidence) };
         if let Some((bytes, length)) = frame {
             if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
@@ -4193,11 +4334,31 @@ impl Observation {
             },
         }
     }
-    pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
+    pub(super) fn build_bridge(&self, resources: PathBuf) -> Result<crate::bridge::DesktopBridge, BridgeError> {
+        if self.failed.load(Ordering::SeqCst) || !route() { return Err(BridgeError::invalid()); }
+        match &self.github {
+            Some(control) => crate::bridge::DesktopBridge::for_installed_github_observation(resources, control.profile()),
+            None => Ok(crate::bridge::DesktopBridge::new(resources)),
+        }
+    }
+    pub(super) fn github_result(&self, command: github::Command, result: &Result<crate::github_connection_protocol::Status, BridgeError>) {
+        if let Some(control) = &self.github { control.result(command, result); }
+    }
+    pub(super) fn github_status(&self, status: &crate::github_connection_protocol::Status) {
+        if let Some(control) = &self.github { control.status(status); }
+    }
+    pub(super) async fn github_relay(&self, app: &tauri::AppHandle) {
+        if let Some(control) = &self.github { control.relay(app).await; }
+    }
+    pub(super) async fn github_exit(&self, app: &tauri::AppHandle) -> bool {
+        match &self.github { Some(control) => control.settle_for_exit(app).await, None => true }
+    }
+    pub(super) fn attach(self: &Arc<Self>, supervisor: &Supervisor) -> Result<(), BridgeError> {
         if std::thread::current().id() != self.main { self.fail(); return Err(BridgeError::invalid()); }
         // This is the supervisor just created by DesktopBridge::new in setup,
         // before the real window/bootstrap. Positive leaves all hooks unarmed.
         if self.case == Case::Outstanding { supervisor.arm_initial_app_info_shutdown()?; }
+        if let Some(control) = &self.github { control.attach(self, supervisor)?; }
         let mut record = self.record_at(Boundary::Bootstrap).ok_or_else(BridgeError::cleanup_unknown)?;
         if record.attached { self.fail(); return Err(BridgeError::invalid()); }
         record.attached = true;
@@ -4253,8 +4414,17 @@ impl Observation {
             && methods.iter().all(|m| m.get("available").and_then(Value::as_bool).is_some())
             && actions.iter().all(|a| a.get("available").and_then(Value::as_bool) == Some(false));
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        if !valid || r.info { self.fail(); return; }
+        if !valid { self.fail(); return; }
+        if r.info {
+            let scope = self.github_guidance_scope(&r);
+            if !r.github_guidance.app_info(scope) { self.fail(); }
+            return;
+        }
         r.info = true; r.methods = methods.len();
+    }
+    fn github_guidance_scope(&self, r: &Record) -> github::GuidanceReloadScope {
+        github::guidance_reload_scope(r.step, r.pending, self.github.is_some()
+            && !self.failed.load(Ordering::SeqCst) && Instant::now() < self.end)
     }
     pub(super) fn unexpected(&self) { self.fail(); }
     pub(super) fn catalog(&self, result: &Result<Value, BridgeError>) {
@@ -4269,7 +4439,12 @@ impl Observation {
                         field[*key].as_str().is_some_and(|text| !text.is_empty() && text.len() <= 16384 && text.encode_utf16().count() <= 4096))
             });
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        if self.case == Case::Outstanding || !r.info || r.catalog || !valid { self.fail(); return; }
+        if self.case == Case::Outstanding || !r.info || !valid { self.fail(); return; }
+        if r.catalog {
+            let scope = self.github_guidance_scope(&r);
+            if !r.github_guidance.catalog(scope) { self.fail(); }
+            return;
+        }
         if self.case == Case::ProjectPaths && !result.as_ref().is_ok_and(|value| PATH_CASES.iter().all(|case|
             value["fields"].as_array().is_some_and(|fields| fields.iter().filter(|field| field["path"].as_str() == Some(case.name)
                 && field["label"].as_str() == Some(case.label) && field["input"].as_str() == Some("text")).count() == 1))) { self.fail(); return; }
@@ -4285,7 +4460,7 @@ impl Observation {
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
                 && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project",
-                    Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project",
+                    Case::Session(_) | Case::Commands(_) => "project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
                     Case::VersionSave => "version-project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
@@ -5630,34 +5805,54 @@ impl Observation {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         self.path_fail(&mut r,rejection);
     }
-    pub(super) fn path_dialog(&self, id: u32, index: u8) -> Result<(PF,bool),()> {
+    pub(super) fn path_dialog(&self, id: u32, index: u8) -> Result<(PF,bool,bool),()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
         let Some(case) = PATH_CASES.get(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
         if self.failed.load(Ordering::SeqCst) { return Err(()); }
         if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
-        if self.case != Case::ProjectPaths || id != u32::from(index)+3 || !r.paths.operations[index as usize].requested
-            || !r.paths.operations[index as usize].picker.created
-            || !matches!(r.pending,Some(Pending::Path(PathStep::Set(i) | PathStep::Activate(i))) if i == index) {
+        let op = &r.paths.operations[index as usize];
+        if self.case != Case::ProjectPaths || id != u32::from(index)+3 || !op.requested || !op.picker.created
+            || op.picker.activated || op.parent_navigation_reserved && !case.selects_open()
+            || !matches!(r.pending,Some(Pending::Path(step)) if r.step == Step::Paths(step)
+                && matches!(step,PathStep::Set(i) | PathStep::Activate(i) if i == index)) {
             self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
         }
-        Ok((case.field,!r.paths.operations[index as usize].picker.selected))
+        Ok((case.field,!op.picker.selected && !op.parent_navigation_reserved,op.parent_navigation_reserved))
     }
     pub(super) fn path_target(&self, index: u8) -> Option<PathBuf> {
         if self.case != Case::ProjectPaths { return None; }
         let path = PATH_CASES.get(index as usize)?.path?;
         Some(self.project_path()?.parent()?.join(path))
     }
-    pub(super) fn path_selection(&self, id: u32, index: u8) -> Result<(),()> {
+    pub(super) fn path_parent_navigation(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
+        let Some(case) = PATH_CASES.get(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
         if self.case != Case::ProjectPaths { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); }
         if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
         if self.failed.load(Ordering::SeqCst) { return Err(()); }
-        if id != u32::from(index)+3 || r.pending != Some(Pending::Path(PathStep::Set(index))) {
+        if id != u32::from(index)+3 || r.step != Step::Paths(PathStep::Set(index))
+            || r.pending != Some(Pending::Path(PathStep::Set(index))) {
             self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
         }
-        let Some(op) = r.paths.operations.get_mut(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
-        if !op.picker.created || op.picker.selected || op.picker.activated { self.path_fail(&mut r,PathRejection::GtkSelectionState); return Err(()); }
-        op.picker.selected = true; Ok(())
+        if !r.paths.operations[index as usize].reserve_parent_navigation(case) {
+            self.path_fail(&mut r,PathRejection::GtkSelectionState); return Err(());
+        }
+        Ok(())
+    }
+    pub(super) fn path_selection(&self, id: u32, index: u8) -> Result<(),()> {
+        let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
+        let Some(case) = PATH_CASES.get(index as usize) else { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); };
+        if self.case != Case::ProjectPaths { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); }
+        if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
+        if self.failed.load(Ordering::SeqCst) { return Err(()); }
+        if id != u32::from(index)+3 || r.step != Step::Paths(PathStep::Set(index))
+            || r.pending != Some(Pending::Path(PathStep::Set(index))) {
+            self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
+        }
+        if !r.paths.operations[index as usize].reserve_selection(case) {
+            self.path_fail(&mut r,PathRejection::GtkSelectionState); return Err(());
+        }
+        Ok(())
     }
     pub(super) fn path_activation(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
@@ -5665,11 +5860,13 @@ impl Observation {
         if self.case != Case::ProjectPaths { self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(()); }
         if Instant::now() >= self.end { self.path_fail(&mut r,PathRejection::GtkObserverEndpoint); return Err(()); }
         if self.failed.load(Ordering::SeqCst) { return Err(()); }
-        if id != u32::from(index)+3 || r.pending != Some(Pending::Path(PathStep::Activate(index))) {
+        if id != u32::from(index)+3 || r.step != Step::Paths(PathStep::Activate(index))
+            || r.pending != Some(Pending::Path(PathStep::Activate(index))) {
             self.path_fail(&mut r,PathRejection::GtkDialogRecord); return Err(());
         }
         let op = &mut r.paths.operations[index as usize];
-        if !op.picker.created || op.picker.activated || op.picker.selected != case.path.is_some() { self.path_fail(&mut r,PathRejection::GtkActivationState); return Err(()); }
+        if !op.requested || !op.picker.created || op.picker.activated || op.picker.selected != case.path.is_some()
+            || !op.navigation_matches(case) { self.path_fail(&mut r,PathRejection::GtkActivationState); return Err(()); }
         op.picker.activated = true; Ok(())
     }
     pub(super) fn path_filename(&self, id: u32, field: PF, path: Option<&Path>) {
@@ -5704,10 +5901,12 @@ impl Observation {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         if r.pending.take() != Some(Pending::Path(path)) || r.step != Step::Paths(path) { self.path_fail(&mut r,PathRejection::GtkReturnState); return; }
         let (index,selecting) = match path { PathStep::Set(i) => (i,true), PathStep::Activate(i) => (i,false), _ => { self.path_fail(&mut r,PathRejection::GtkReturnState); return; } };
-        let Some(op) = r.paths.operations.get_mut(index as usize) else { self.path_fail(&mut r,PathRejection::GtkReturnState); return; };
+        let Some(case) = PATH_CASES.get(index as usize) else { self.path_fail(&mut r,PathRejection::GtkReturnState); return; };
+        let op = &mut r.paths.operations[index as usize];
+        if op.parent_navigation_reserved && !case.selects_open() { self.path_fail(&mut r,PathRejection::GtkReturnState); return; }
         match result {
             Ok(false) if !op.picker.activated && (!selecting || !op.picker.selected) => {},
-            Ok(true) if selecting && op.picker.selected && !op.picker.activated => r.step = Step::Paths(PathStep::Activate(index)),
+            Ok(true) if selecting && op.picker.selected && !op.picker.activated && op.navigation_matches(case) => r.step = Step::Paths(PathStep::Activate(index)),
             Ok(true) if !selecting => {
                 if !op.picker.activation_returned(result) { self.path_fail(&mut r,PathRejection::GtkReturnState); return; }
                 r.step = Step::Paths(PathStep::Settled(index));
@@ -5833,6 +6032,10 @@ impl Observation {
                     r.session.diagnostic = diagnostic;
                     r.paths.diagnostic = path_diagnostic;
                     r.metadata.open_failure = metadata_diagnostic;
+                    if r.step == Step::GitHubReadOnly(github::Step::Entry) {
+                        let evaluations = r.evaluations;
+                        r.github_entry.freeze(evaluations, github::EntryOrigin::Deadline);
+                    }
                 }
             }
             self.failure_tick(app); return;
@@ -5864,12 +6067,13 @@ impl Observation {
             }
             if r.step == Step::Bootstrap && self.case != Case::Outstanding {
                 if !r.info || !r.catalog { r.bootstrap = BootstrapProgress::AppInfoCatalog; return; }
-                r.step = if self.case.session().is_some() || self.commands.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
+                r.step = if self.case.session().is_some() || self.commands.is_some() || self.github.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
             }
             if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::HeldAppInfo; }
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
+                Step::GitHubReadOnly(github::Step::EnterRepository) => !r.github_guidance.complete(),
                 Step::VersionSave(VersionStep::ReadOpen(index)) => !r.version.sessions.get(usize::from(index))
                     .is_some_and(|s|s.open_returned && s.projection.phase == edit::Phase::Editing),
                 Step::VersionSave(VersionStep::ReadReview(index)) => !r.version.sessions.get(usize::from(index))
@@ -5999,6 +6203,10 @@ impl Observation {
             let Some(commands) = &self.commands else { self.fail(); return; };
             if !commands.tick(app, step) { return; }
         }
+        if let Step::GitHubReadOnly(step) = step {
+            let Some(control) = &self.github else { self.fail(); return; };
+            if !control.tick(app, step) { return; }
+        }
         {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             // A failed handoff cannot race a later recipe Close/GTK reservation.
@@ -6025,6 +6233,8 @@ impl Observation {
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4] || r.metadata.requests != [0;4]) { self.fail(); return; }
                     if self.commands.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
                         || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.github.as_ref().is_some_and(|c| !r.github_guidance.complete() || !c.ready_to_close() || r.requests != [0;4]
+                        || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
                 },
                 Step::Quit => { if !r.close_prevented { self.fail(); return; } Pending::Gtk },
@@ -6038,9 +6248,12 @@ impl Observation {
                                 r.metadata.open_failure = MetadataOpenFailure::sample(step,r.evaluations,
                                     MetadataOpenFailureOrigin::EvaluationBudget,r.metadata.open_sample);
                             }
+                        } else if step == Step::GitHubReadOnly(github::Step::Entry) {
+                            self.github_entry_fail(&mut r, github::EntryOrigin::EvaluationBudget);
                         } else { self.fail(); }
                         return;
                     }
+                    if step == Step::GitHubReadOnly(github::Step::ReloadGuidance) && !r.github_guidance.reserve() { self.fail(); return; }
                     r.evaluations += 1; Pending::Dom(step)
                 },
             });
@@ -6101,6 +6314,9 @@ impl Observation {
         if let Step::Commands(step) = step {
             if let Some(commands) = &self.commands { commands.dom(step, &value); } else { self.fail(); } return;
         }
+        if let Step::GitHubReadOnly(step) = step {
+            if let Some(control) = &self.github { control.dom(step, &value); } else { self.fail(); } return;
+        }
         if let Step::Session(session) = step { self.session_dom(session,&value); return; }
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
         if let Step::Workflow(workflow) = step { self.workflow_dom(workflow, &value); return; }
@@ -6145,7 +6361,7 @@ impl Observation {
                     else if self.case == Case::MetadataSave { "3 recognized files" }
                     else if self.case == Case::VersionSave { "1 recognized files" } else { "2 recognized files" })
                 && value["name"].as_str() == Some(match self.case { Case::ProjectPaths => "path-project",
-                    Case::WorkflowApply => "workflow-project", Case::MetadataSave => "metadata-project",
+                    Case::WorkflowApply => "workflow-project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
                     Case::VersionSave => "version-project", _ => "positive-project" }),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
             Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 5 && r.adopted && r.capability && source() && draft(false, true)
@@ -6239,7 +6455,8 @@ impl Observation {
             Step::ReadCancelled => Step::ChooseSelect,
             Step::ChooseSelect => Step::SetProject,
             Step::ReadSnapshot => { r.snapshot_visible = true;
-                if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
+                if self.github.is_some() { Step::GitHubReadOnly(github::Step::Navigate) }
+                else if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
                 else if self.case.session().is_some() { Step::Session(SessionStep::Navigate) }
                 else if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) }
                 else if self.case == Case::VersionSave { Step::VersionSave(VersionStep::Open(0)) } else { Step::Settings } },
@@ -6445,7 +6662,7 @@ impl Observation {
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
         }
         if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
-            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_)) && id != 3
+            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -6580,8 +6797,8 @@ impl Observation {
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
-            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_)) { r.project_witness.is_some()
-                && self.commands.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
+            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) { r.project_witness.is_some()
+                && self.commands.as_ref().is_none_or(|c| c.complete()) && self.github.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
             else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
                 && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
             else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
@@ -6616,7 +6833,7 @@ impl Observation {
             r.session.queries = Some(queries); r.session.r1_final = retired; retired
         } else { self.case.session().is_none() };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_), None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_), None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -6662,7 +6879,7 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
                 && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final
-                || self.commands.as_ref().is_some_and(|c| c.complete()) && r.info && r.catalog && !r.environment
+                || (self.commands.as_ref().is_some_and(|c| c.complete()) || self.github.as_ref().is_some_and(|c| c.complete() && r.github_guidance.complete())) && r.info && r.catalog && !r.environment
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
@@ -8214,11 +8431,12 @@ fn workflow_script(step: WorkflowStep) -> Option<String> {
 
 fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Commands(step) = step { return commands::script(step, case.commands()?); }
+    if let Step::GitHubReadOnly(step) = step { return github::script(step); }
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
     if let Step::MetadataSave(metadata) = step { return metadata_script(metadata); }
     if let Step::VersionSave(version) = step { return version_script(version); }
-    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::MetadataSave => "metadata-project",
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
         Case::VersionSave => "version-project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
@@ -8766,7 +8984,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
         Some(value) if value == OsStr::new("version-save") => Some(Case::VersionSave),
         Some(value) if cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure),
-        Some(value) => commands::Case::parse(value).map(Case::Commands),
+        Some(value) => commands::Case::parse(value).map(Case::Commands).or_else(|| github::Case::parse(value).map(Case::GitHub)),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -8838,6 +9056,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         assert_version_open_race_contract();
     }
     if case.commands().is_some() { commands::assert_contracts(); }
+    if case.github().is_some() { github::assert_contracts(); }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
     let returned = super::run_builder(super::builder().manage(q.clone()));
@@ -8859,12 +9078,18 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
         Case::VersionSave => b"MRK_INSTALLED_SHELL_OBSERVATION=version-save-verified\n",
         Case::Commands(case) => case.verified_line(),
+        Case::GitHub(case) => case.verified_line(),
         // A missing deliberate rejection must never become a positive receipt.
         Case::SettledFailure => return std::process::ExitCode::FAILURE,
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if let Some(control) = &q.github {
+                let report = control.report().ok_or_else(|| std::io::Error::other("GitHub receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_GITHUB_READONLY=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if let Some(commands) = &q.commands {
                 let report = commands.report().ok_or_else(|| std::io::Error::other("tools/offline receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=")?;

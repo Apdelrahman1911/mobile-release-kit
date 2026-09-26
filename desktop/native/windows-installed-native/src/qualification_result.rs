@@ -72,11 +72,536 @@ pub(super) struct InputFault {
     role: InputRole, slot: Option<u8>, check: InputCheck, status: Option<InputStatus>,
     control: Option<(u16, u16)>,
 }
+// Fixed prerequisite-only DATA. Default/legacy InputTrace owners stay disabled.
+// No native storage, output handle, path, account, SID or arbitrary text enters
+// this record. Expected-negative scopes have independent local staging.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteStage { Entry, ParentInput, AccountProfile, Launch, ChildOutput, Settlement, Retirement, Final, Escape }
+impl PrerequisiteStage {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::Entry => "entry",
+        Self::ParentInput => "parent-input",
+        Self::AccountProfile => "account-profile",
+        Self::Launch => "launch",
+        Self::ChildOutput => "child-output",
+        Self::Settlement => "settlement",
+        Self::Retirement => "retirement",
+        Self::Final => "final",
+        Self::Escape => "escape",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteCheck { E01, E02, E03, E04, P01, P02, P03, P04, P05, P06, A01, A02, A03, L01, L02, L03, L04, C01, C02, C03, S01, S02, R01, R02, Z01, Z02, U01, K01, K02, K03, B01, B02, B03, V01, V02, V03, V04, V05, V06, V07, V08, V09, V10, V11, F01, F02, F03, F04, F05, F06, F07, F08, F09, H01, Q01, Q02, Q03, Q04, Q05, G01, G02, N01, N02, N03, N04, N05, N06, N07, D01, D02, D03, D04, D05, D06, T01, O01, O02, O03, NB01, NB02, NB03, NB04, NB05, NB06, NB07, NB08, NB09, NB10, NB11, HT01 }
+impl PrerequisiteCheck {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::E01 => "e01",
+        Self::E02 => "e02",
+        Self::E03 => "e03",
+        Self::E04 => "e04",
+        Self::P01 => "p01",
+        Self::P02 => "p02",
+        Self::P03 => "p03",
+        Self::P04 => "p04",
+        Self::P05 => "p05",
+        Self::P06 => "p06",
+        Self::A01 => "a01",
+        Self::A02 => "a02",
+        Self::A03 => "a03",
+        Self::L01 => "l01",
+        Self::L02 => "l02",
+        Self::L03 => "l03",
+        Self::L04 => "l04",
+        Self::C01 => "c01",
+        Self::C02 => "c02",
+        Self::C03 => "c03",
+        Self::S01 => "s01",
+        Self::S02 => "s02",
+        Self::R01 => "r01",
+        Self::R02 => "r02",
+        Self::Z01 => "z01",
+        Self::Z02 => "z02",
+        Self::U01 => "u01",
+        Self::K01 => "k01",
+        Self::K02 => "k02",
+        Self::K03 => "k03",
+        Self::B01 => "b01",
+        Self::B02 => "b02",
+        Self::B03 => "b03",
+        Self::V01 => "v01",
+        Self::V02 => "v02",
+        Self::V03 => "v03",
+        Self::V04 => "v04",
+        Self::V05 => "v05",
+        Self::V06 => "v06",
+        Self::V07 => "v07",
+        Self::V08 => "v08",
+        Self::V09 => "v09",
+        Self::V10 => "v10",
+        Self::V11 => "v11",
+        Self::F01 => "f01",
+        Self::F02 => "f02",
+        Self::F03 => "f03",
+        Self::F04 => "f04",
+        Self::F05 => "f05",
+        Self::F06 => "f06",
+        Self::F07 => "f07",
+        Self::F08 => "f08",
+        Self::F09 => "f09",
+        Self::H01 => "h01",
+        Self::Q01 => "q01",
+        Self::Q02 => "q02",
+        Self::Q03 => "q03",
+        Self::Q04 => "q04",
+        Self::Q05 => "q05",
+        Self::G01 => "g01",
+        Self::G02 => "g02",
+        Self::N01 => "n01",
+        Self::N02 => "n02",
+        Self::N03 => "n03",
+        Self::N04 => "n04",
+        Self::N05 => "n05",
+        Self::N06 => "n06",
+        Self::N07 => "n07",
+        Self::D01 => "d01",
+        Self::D02 => "d02",
+        Self::D03 => "d03",
+        Self::D04 => "d04",
+        Self::D05 => "d05",
+        Self::D06 => "d06",
+        Self::T01 => "t01",
+        Self::O01 => "o01",
+        Self::O02 => "o02",
+        Self::O03 => "o03",
+        Self::NB01 => "nb01",
+        Self::NB02 => "nb02",
+        Self::NB03 => "nb03",
+        Self::NB04 => "nb04",
+        Self::NB05 => "nb05",
+        Self::NB06 => "nb06",
+        Self::NB07 => "nb07",
+        Self::NB08 => "nb08",
+        Self::NB09 => "nb09",
+        Self::NB10 => "nb10",
+        Self::NB11 => "nb11",
+        Self::HT01 => "ht01",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteClock { NotCreated, LastUnlatched, LastLatched }
+impl PrerequisiteClock {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::NotCreated => "not-created",
+        Self::LastUnlatched => "last-unlatched",
+        Self::LastLatched => "last-latched",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteApi { None, CurrentDir, CurrentExe, CreateFileW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW, ReadFile, WriteFile, GetKernelObjectSecurity, SetKernelObjectSecurity, InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SetSecurityDescriptorControl, BCryptHash, BCryptGenRandom, CreateDirectoryW, LookupAccountSidW, NetUserGetInfo, NetUserGetLocalGroups, NetApiBufferSize, NetApiBufferFree, NetUserAdd, NetLocalGroupAddMembers, NetUserDel, RegOpenKeyExW, RegQueryValueExW, RegCloseKey, NtCreateFile, GetProfilesDirectoryW, DeleteProfileW, CreateProcessWithLogonW, WaitForSingleObject, TerminateProcess, GetExitCodeProcess, CloseHandle, GetSystemWindowsDirectoryW, IsWow64Process2, OpenProcessToken, OpenThreadToken, GetHandleInformation, GetTokenInformation, LookupPrivilegeValueW, QueryDosDeviceW, GetVolumeInformationByHandleW, NtQueryVolumeInformationFile }
+impl PrerequisiteApi {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::None => "none",
+        Self::CurrentDir => "std-current-dir",
+        Self::CurrentExe => "std-current-exe",
+        Self::CreateFileW => "CreateFileW",
+        Self::GetFileInformationByHandleEx => "GetFileInformationByHandleEx",
+        Self::GetFinalPathNameByHandleW => "GetFinalPathNameByHandleW",
+        Self::ReadFile => "ReadFile",
+        Self::WriteFile => "WriteFile",
+        Self::GetKernelObjectSecurity => "GetKernelObjectSecurity",
+        Self::SetKernelObjectSecurity => "SetKernelObjectSecurity",
+        Self::InitializeSecurityDescriptor => "InitializeSecurityDescriptor",
+        Self::SetSecurityDescriptorDacl => "SetSecurityDescriptorDacl",
+        Self::SetSecurityDescriptorControl => "SetSecurityDescriptorControl",
+        Self::BCryptHash => "BCryptHash",
+        Self::BCryptGenRandom => "BCryptGenRandom",
+        Self::CreateDirectoryW => "CreateDirectoryW",
+        Self::LookupAccountSidW => "LookupAccountSidW",
+        Self::NetUserGetInfo => "NetUserGetInfo",
+        Self::NetUserGetLocalGroups => "NetUserGetLocalGroups",
+        Self::NetApiBufferSize => "NetApiBufferSize",
+        Self::NetApiBufferFree => "NetApiBufferFree",
+        Self::NetUserAdd => "NetUserAdd",
+        Self::NetLocalGroupAddMembers => "NetLocalGroupAddMembers",
+        Self::NetUserDel => "NetUserDel",
+        Self::RegOpenKeyExW => "RegOpenKeyExW",
+        Self::RegQueryValueExW => "RegQueryValueExW",
+        Self::RegCloseKey => "RegCloseKey",
+        Self::NtCreateFile => "NtCreateFile",
+        Self::GetProfilesDirectoryW => "GetProfilesDirectoryW",
+        Self::DeleteProfileW => "DeleteProfileW",
+        Self::CreateProcessWithLogonW => "CreateProcessWithLogonW",
+        Self::WaitForSingleObject => "WaitForSingleObject",
+        Self::TerminateProcess => "TerminateProcess",
+        Self::GetExitCodeProcess => "GetExitCodeProcess",
+        Self::CloseHandle => "CloseHandle",
+        Self::GetSystemWindowsDirectoryW => "GetSystemWindowsDirectoryW",
+        Self::IsWow64Process2 => "IsWow64Process2",
+        Self::OpenProcessToken => "OpenProcessToken",
+        Self::OpenThreadToken => "OpenThreadToken",
+        Self::GetHandleInformation => "GetHandleInformation",
+        Self::GetTokenInformation => "GetTokenInformation",
+        Self::LookupPrivilegeValueW => "LookupPrivilegeValueW",
+        Self::QueryDosDeviceW => "QueryDosDeviceW",
+        Self::GetVolumeInformationByHandleW => "GetVolumeInformationByHandleW",
+        Self::NtQueryVolumeInformationFile => "NtQueryVolumeInformationFile",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteSelector { None, FileBasicInfo, FileStandardInfo, FileAttributeTagInfo, FileIdInfo, FileCaseSensitiveInfo, FileIdExtdDirectoryInfo, FileFsDeviceInformation, TokenStatistics, TokenType, TokenElevation, TokenElevationType, TokenUIAccess, TokenVirtualizationEnabled, TokenUser, TokenIntegrityLevel, TokenGroups, TokenPrivileges, Lookup1, Lookup2, Lookup3, Lookup4, Lookup5, FirstWait, SettleWait, ThreadClose, ProcessClose, BeforeLogon, AfterDeletion, UserInfo23, LocalGroups0, UserAdd1, GroupAdd0, ProfileImagePath }
+impl PrerequisiteSelector {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::None => "none",
+        Self::FileBasicInfo => "FileBasicInfo",
+        Self::FileStandardInfo => "FileStandardInfo",
+        Self::FileAttributeTagInfo => "FileAttributeTagInfo",
+        Self::FileIdInfo => "FileIdInfo",
+        Self::FileCaseSensitiveInfo => "FileCaseSensitiveInfo",
+        Self::FileIdExtdDirectoryInfo => "FileIdExtdDirectoryInfo",
+        Self::FileFsDeviceInformation => "FileFsDeviceInformation",
+        Self::TokenStatistics => "TokenStatistics",
+        Self::TokenType => "TokenType",
+        Self::TokenElevation => "TokenElevation",
+        Self::TokenElevationType => "TokenElevationType",
+        Self::TokenUIAccess => "TokenUIAccess",
+        Self::TokenVirtualizationEnabled => "TokenVirtualizationEnabled",
+        Self::TokenUser => "TokenUser",
+        Self::TokenIntegrityLevel => "TokenIntegrityLevel",
+        Self::TokenGroups => "TokenGroups",
+        Self::TokenPrivileges => "TokenPrivileges",
+        Self::Lookup1 => "lookup-1",
+        Self::Lookup2 => "lookup-2",
+        Self::Lookup3 => "lookup-3",
+        Self::Lookup4 => "lookup-4",
+        Self::Lookup5 => "lookup-5",
+        Self::FirstWait => "first-wait",
+        Self::SettleWait => "settle-wait",
+        Self::ThreadClose => "thread-close",
+        Self::ProcessClose => "process-close",
+        Self::BeforeLogon => "before-logon",
+        Self::AfterDeletion => "after-deletion",
+        Self::UserInfo23 => "user-info-23",
+        Self::LocalGroups0 => "local-groups-0",
+        Self::UserAdd1 => "user-add-1",
+        Self::GroupAdd0 => "group-add-0",
+        Self::ProfileImagePath => "profile-image-path",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteKind { None, Bool, Count, Lstatus, Ntstatus, Netapi, Hresult, Wait, Exit }
+impl PrerequisiteKind {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::None => "none",
+        Self::Bool => "bool",
+        Self::Count => "count",
+        Self::Lstatus => "lstatus",
+        Self::Ntstatus => "ntstatus",
+        Self::Netapi => "netapi",
+        Self::Hresult => "hresult",
+        Self::Wait => "wait",
+        Self::Exit => "exit",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteStatus { None, Win32, Ntstatus, Netapi, Hresult, IoOs }
+impl PrerequisiteStatus {
+    pub(super) fn label(self) -> &'static str { match self {
+        Self::None => "none",
+        Self::Win32 => "win32",
+        Self::Ntstatus => "ntstatus",
+        Self::Netapi => "netapi",
+        Self::Hresult => "hresult",
+        Self::IoOs => "io-os",
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrerequisiteDetail { Input(InputCheck), Admission(AdmissionCheck) }
+impl PrerequisiteDetail {
+    pub(super) fn labels(self) -> (&'static str, &'static str) { match self {
+        Self::Admission(check) => ("admission.", check.label()),
+        Self::Input(check) => ("input.", match check {
+            InputCheck::AncestorCount => "AncestorCount",
+            InputCheck::FileCount => "FileCount",
+            InputCheck::PathText => "PathText",
+            InputCheck::PathUnits => "PathUnits",
+            InputCheck::OpenState => "OpenState",
+            InputCheck::OpenReturned => "OpenReturned",
+            InputCheck::InfoState => "InfoState",
+            InputCheck::InfoClass => "InfoClass",
+            InputCheck::BasicInfoReturned => "BasicInfoReturned",
+            InputCheck::StandardInfoReturned => "StandardInfoReturned",
+            InputCheck::TagInfoReturned => "TagInfoReturned",
+            InputCheck::IdInfoReturned => "IdInfoReturned",
+            InputCheck::StampDirectory => "StampDirectory",
+            InputCheck::StampDeletePending => "StampDeletePending",
+            InputCheck::StampSize => "StampSize",
+            InputCheck::StampAllocation => "StampAllocation",
+            InputCheck::StampLinks => "StampLinks",
+            InputCheck::StampAttributes => "StampAttributes",
+            InputCheck::StampReparse => "StampReparse",
+            InputCheck::StampIdentity => "StampIdentity",
+            InputCheck::NameText => "NameText",
+            InputCheck::NameState => "NameState",
+            InputCheck::NameReturned => "NameReturned",
+            InputCheck::NameCount => "NameCount",
+            InputCheck::NameUtf16 => "NameUtf16",
+            InputCheck::NameExact => "NameExact",
+            InputCheck::ReadFileKind => "ReadFileKind",
+            InputCheck::ReadSize => "ReadSize",
+            InputCheck::ReadLimit => "ReadLimit",
+            InputCheck::ReadReturned => "ReadReturned",
+            InputCheck::ReadCount => "ReadCount",
+            InputCheck::ReadStable => "ReadStable",
+            InputCheck::RequestEnvelope => "RequestEnvelope",
+            InputCheck::RequestUtf8 => "RequestUtf8",
+            InputCheck::RequestLines => "RequestLines",
+            InputCheck::RequestHeader => "RequestHeader",
+            InputCheck::RequestKey => "RequestKey",
+            InputCheck::RequestValue => "RequestValue",
+            InputCheck::RequestValues => "RequestValues",
+            InputCheck::RequestArtifactPath => "RequestArtifactPath",
+            InputCheck::RequestBytes => "RequestBytes",
+            InputCheck::RequestBytesRange => "RequestBytesRange",
+            InputCheck::RequestIdentity => "RequestIdentity",
+            InputCheck::BindingSourceAvailable => "BindingSourceAvailable",
+            InputCheck::BindingSource => "BindingSource",
+            InputCheck::BindingTree => "BindingTree",
+            InputCheck::BindingRun => "BindingRun",
+            InputCheck::BindingRuntimeRun => "BindingRuntimeRun",
+            InputCheck::BindingRuntimeTree => "BindingRuntimeTree",
+            InputCheck::BindingImage => "BindingImage",
+            InputCheck::CommandUnits => "CommandUnits",
+            InputCheck::CommandDigest => "CommandDigest",
+            InputCheck::HashLimit => "HashLimit",
+            InputCheck::HashReturned => "HashReturned",
+            InputCheck::ArtifactIdentity => "ArtifactIdentity",
+            InputCheck::ArtifactBytes => "ArtifactBytes",
+            InputCheck::ArtifactDigest => "ArtifactDigest",
+            InputCheck::ArtifactStable => "ArtifactStable",
+            InputCheck::OutputCreate => "OutputCreate",
+            InputCheck::DescriptorState => "DescriptorState",
+            InputCheck::DescriptorReturned => "DescriptorReturned",
+            InputCheck::DescriptorLength => "DescriptorLength",
+            InputCheck::AclLayout => "AclLayout",
+            InputCheck::AclOwner => "AclOwner",
+            InputCheck::AclGroup => "AclGroup",
+            InputCheck::AclAccount => "AclAccount",
+            InputCheck::AclMask => "AclMask",
+            InputCheck::AclMutation => "AclMutation",
+            InputCheck::AclCapacity => "AclCapacity",
+            InputCheck::AclInitialize => "AclInitialize",
+            InputCheck::AclDacl => "AclDacl",
+            InputCheck::AclControlInput => "AclControlInput",
+            InputCheck::AclSetState => "AclSetState",
+            InputCheck::AclSetReturned => "AclSetReturned",
+            InputCheck::AclStamp => "AclStamp",
+            InputCheck::AclControl => "AclControl",
+            InputCheck::AclOwnerEqual => "AclOwnerEqual",
+            InputCheck::AclGroupEqual => "AclGroupEqual",
+            InputCheck::AclRevision => "AclRevision",
+            InputCheck::AclAces => "AclAces",
+            InputCheck::AclChanged => "AclChanged",
+            InputCheck::AclDeadline => "AclDeadline",
+            InputCheck::AclTransitions => "AclTransitions",
+            InputCheck::ParentPrimary => "ParentPrimary",
+            InputCheck::ParentUser => "ParentUser",
+            InputCheck::ParentIdentity => "ParentIdentity",
+            InputCheck::ParentSettlement => "ParentSettlement",
+        }),
+    } }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PrerequisiteNative {
+    pub api: PrerequisiteApi, pub selector: PrerequisiteSelector,
+    pub kind: PrerequisiteKind, pub value: Option<i64>,
+    pub status: PrerequisiteStatus, pub code: Option<i64>,
+}
+impl PrerequisiteNative {
+    pub(super) fn boolean(api: PrerequisiteApi, selector: PrerequisiteSelector, value: i32, error: Option<u32>) -> Option<Self> {
+        (value == 0).then_some(Self { api, selector, kind: PrerequisiteKind::Bool, value: Some(i64::from(value)),
+            status: if error.is_some() { PrerequisiteStatus::Win32 } else { PrerequisiteStatus::None }, code: error.map(i64::from) })
+    }
+    pub(super) fn count(api: PrerequisiteApi, value: u32, error: u32) -> Option<Self> {
+        (value == 0).then_some(Self { api, selector: PrerequisiteSelector::None, kind: PrerequisiteKind::Count,
+            value: Some(i64::from(value)), status: PrerequisiteStatus::Win32, code: Some(i64::from(error)) })
+    }
+    pub(super) fn nt(api: PrerequisiteApi, selector: PrerequisiteSelector, value: i32) -> Option<Self> {
+        (value != 0).then_some(Self { api, selector, kind: PrerequisiteKind::Ntstatus, value: Some(i64::from(value)),
+            status: PrerequisiteStatus::Ntstatus, code: Some(i64::from(value)) })
+    }
+    pub(super) fn net(api: PrerequisiteApi, selector: PrerequisiteSelector, value: u32) -> Option<Self> {
+        (value != 0).then_some(Self { api, selector, kind: PrerequisiteKind::Netapi, value: Some(i64::from(value)),
+            status: PrerequisiteStatus::Netapi, code: Some(i64::from(value)) })
+    }
+    pub(super) fn registry(api: PrerequisiteApi, selector: PrerequisiteSelector, value: u32) -> Option<Self> {
+        (value != 0).then_some(Self { api, selector, kind: PrerequisiteKind::Lstatus, value: Some(i64::from(value)),
+            status: PrerequisiteStatus::Win32, code: Some(i64::from(value)) })
+    }
+    pub(super) fn wait(selector: PrerequisiteSelector, value: u32, error: u32) -> Option<Self> {
+        (value != F::WAIT_OBJECT_0).then_some(Self { api: PrerequisiteApi::WaitForSingleObject, selector,
+            kind: PrerequisiteKind::Wait, value: Some(i64::from(value)),
+            status: if value == F::WAIT_FAILED { PrerequisiteStatus::Win32 } else { PrerequisiteStatus::None },
+            code: (value == F::WAIT_FAILED).then_some(i64::from(error)) })
+    }
+    pub(super) fn exit(value: u32) -> Option<Self> {
+        (value != 0).then_some(Self { api: PrerequisiteApi::GetExitCodeProcess, selector: PrerequisiteSelector::None,
+            kind: PrerequisiteKind::Exit, value: Some(i64::from(value)), status: PrerequisiteStatus::None, code: None })
+    }
+    pub(super) fn file_open(error: u32) -> Option<Self> {
+        // CreateFileW returns a private HANDLE, never a Boolean or integer on this wire.
+        Some(Self { api: PrerequisiteApi::CreateFileW, selector: PrerequisiteSelector::None,
+            kind: PrerequisiteKind::None, value: None, status: PrerequisiteStatus::Win32, code: Some(i64::from(error)) })
+    }
+    pub(super) fn io(api: PrerequisiteApi, error: &std::io::Error) -> Option<Self> {
+        let code = error.raw_os_error().map(i64::from);
+        Some(Self { api, selector: PrerequisiteSelector::None, kind: PrerequisiteKind::None, value: None,
+            status: if code.is_some() { PrerequisiteStatus::IoOs } else { PrerequisiteStatus::None }, code })
+    }
+    pub(super) fn valid(self) -> bool {
+        use PrerequisiteApi as A; use PrerequisiteSelector as Q;
+        use PrerequisiteKind as K; use PrerequisiteStatus as D;
+        let uint = |value: Option<i64>| value.is_some_and(|v| (0..=i64::from(u32::MAX)).contains(&v));
+        let sint = |value: Option<i64>| value.is_some_and(|v| (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&v));
+        let selector = match self.api {
+            A::GetFileInformationByHandleEx => matches!(self.selector, Q::FileBasicInfo | Q::FileStandardInfo | Q::FileAttributeTagInfo
+                | Q::FileIdInfo | Q::FileCaseSensitiveInfo | Q::FileIdExtdDirectoryInfo),
+            A::NtQueryVolumeInformationFile => self.selector == Q::FileFsDeviceInformation,
+            A::GetTokenInformation => matches!(self.selector, Q::TokenStatistics | Q::TokenType | Q::TokenElevation | Q::TokenElevationType
+                | Q::TokenUIAccess | Q::TokenVirtualizationEnabled | Q::TokenUser | Q::TokenIntegrityLevel | Q::TokenGroups | Q::TokenPrivileges),
+            A::LookupPrivilegeValueW => matches!(self.selector, Q::Lookup1 | Q::Lookup2 | Q::Lookup3 | Q::Lookup4 | Q::Lookup5),
+            A::WaitForSingleObject => matches!(self.selector, Q::FirstWait | Q::SettleWait),
+            A::CloseHandle => matches!(self.selector, Q::None | Q::ThreadClose | Q::ProcessClose),
+            A::NtCreateFile => matches!(self.selector, Q::None | Q::BeforeLogon | Q::AfterDeletion),
+            A::NetUserGetInfo => self.selector == Q::UserInfo23,
+            A::NetUserGetLocalGroups => self.selector == Q::LocalGroups0,
+            A::NetUserAdd => self.selector == Q::UserAdd1,
+            A::NetLocalGroupAddMembers => self.selector == Q::GroupAdd0,
+            A::RegQueryValueExW => self.selector == Q::ProfileImagePath,
+            _ => self.selector == Q::None,
+        };
+        if !selector { return false; }
+        match self.kind {
+            K::None => self.value.is_none() && match self.api {
+                A::CurrentDir | A::CurrentExe => match self.status {
+                    D::IoOs => sint(self.code), D::None => self.code.is_none(), _ => false,
+                },
+                A::CreateFileW => self.status == D::Win32 && uint(self.code),
+                _ => false,
+            },
+            K::Bool => self.value == Some(0) && match self.api {
+                A::InitializeSecurityDescriptor | A::SetSecurityDescriptorDacl | A::SetSecurityDescriptorControl =>
+                    self.status == D::None && self.code.is_none(),
+                A::GetFileInformationByHandleEx | A::ReadFile | A::WriteFile | A::GetKernelObjectSecurity | A::SetKernelObjectSecurity
+                | A::CreateDirectoryW | A::LookupAccountSidW | A::GetProfilesDirectoryW | A::DeleteProfileW
+                | A::CreateProcessWithLogonW | A::TerminateProcess | A::GetExitCodeProcess | A::CloseHandle
+                | A::IsWow64Process2 | A::OpenProcessToken | A::OpenThreadToken | A::GetHandleInformation
+                | A::GetTokenInformation | A::LookupPrivilegeValueW | A::GetVolumeInformationByHandleW =>
+                    self.status == D::Win32 && uint(self.code),
+                _ => false,
+            },
+            K::Count => matches!(self.api, A::GetFinalPathNameByHandleW | A::GetSystemWindowsDirectoryW | A::QueryDosDeviceW)
+                && self.value == Some(0) && self.status == D::Win32 && uint(self.code),
+            K::Lstatus => matches!(self.api, A::RegOpenKeyExW | A::RegQueryValueExW | A::RegCloseKey)
+                && uint(self.value) && self.value != Some(0) && self.status == D::Win32 && self.code == self.value,
+            K::Ntstatus => matches!(self.api, A::BCryptHash | A::BCryptGenRandom | A::NtCreateFile | A::NtQueryVolumeInformationFile)
+                && sint(self.value) && self.value != Some(0) && self.status == D::Ntstatus && self.code == self.value,
+            K::Netapi => matches!(self.api, A::NetUserGetInfo | A::NetUserGetLocalGroups | A::NetApiBufferSize
+                | A::NetApiBufferFree | A::NetUserAdd | A::NetLocalGroupAddMembers | A::NetUserDel)
+                && uint(self.value) && self.value != Some(0) && self.status == D::Netapi && self.code == self.value,
+            K::Wait => self.api == A::WaitForSingleObject && uint(self.value) && self.value != Some(i64::from(F::WAIT_OBJECT_0))
+                && if self.value == Some(i64::from(F::WAIT_FAILED)) { self.status == D::Win32 && uint(self.code) }
+                   else { self.status == D::None && self.code.is_none() },
+            K::Exit => self.api == A::GetExitCodeProcess && uint(self.value) && self.value != Some(0)
+                && self.status == D::None && self.code.is_none(),
+            K::Hresult => false, // No prerequisite-path API supplies an HRESULT.
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PrerequisiteFault {
+    pub stage: PrerequisiteStage, pub check: PrerequisiteCheck, pub error: Error,
+    pub detail: Option<PrerequisiteDetail>, pub native: Option<PrerequisiteNative>,
+}
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PrerequisiteRecord {
+    pub stage: PrerequisiteStage, pub check: PrerequisiteCheck,
+    pub first: Option<PrerequisiteFault>, pub clock: PrerequisiteClock,
+}
+macro_rules! prerequisite_result {
+    ($trace:expr, $check:ident, $result:expr) => {{
+        let original = $result;
+        $trace.prerequisite_result(PrerequisiteCheck::$check, original)
+    }};
+}
+pub(super) use prerequisite_result;
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct InputTrace {
     role: Option<InputRole>, slot: Option<u8>, pub first: Option<InputFault>,
+    pub(super) prerequisite: Option<PrerequisiteRecord>,
 }
 impl InputTrace {
+    pub(super) fn prerequisite_only(enabled: bool) -> Self {
+        Self { prerequisite: enabled.then_some(PrerequisiteRecord { stage: PrerequisiteStage::Entry,
+            check: PrerequisiteCheck::E01, first: None, clock: PrerequisiteClock::NotCreated }), ..Self::default() }
+    }
+    pub(super) fn prerequisite_at(&mut self, stage: PrerequisiteStage, check: PrerequisiteCheck) {
+        if let Some(record) = self.prerequisite.as_mut() { record.stage = stage; record.check = check; }
+    }
+    pub(super) fn prerequisite_check(&mut self, check: PrerequisiteCheck) {
+        if let Some(record) = self.prerequisite.as_mut() { record.check = check; }
+    }
+    pub(super) fn prerequisite_clock(&mut self, latched: bool) {
+        if let Some(record) = self.prerequisite.as_mut() {
+            record.clock = if latched { PrerequisiteClock::LastLatched } else { PrerequisiteClock::LastUnlatched };
+        }
+    }
+    pub(super) fn prerequisite_fault(&mut self, check: PrerequisiteCheck, error: Error,
+        native: Option<PrerequisiteNative>, detail: Option<PrerequisiteDetail>) {
+        if let Some(record) = self.prerequisite.as_mut() {
+            if record.first.is_none() {
+                record.first = Some(PrerequisiteFault { stage: if check == PrerequisiteCheck::U01 { PrerequisiteStage::Escape } else { record.stage },
+                    check, error, detail, native });
+            }
+        }
+    }
+    pub(super) fn prerequisite_current<T>(&mut self, original: Result<T>) -> Result<T> {
+        if let Some(record) = self.prerequisite { self.prerequisite_result(record.check, original) } else { original }
+    }
+    pub(super) fn prerequisite_result<T>(&mut self, check: PrerequisiteCheck, original: Result<T>) -> Result<T> {
+        if let Err(error) = &original { self.prerequisite_fault(check, *error, None, None); }
+        original
+    }
+    pub(super) fn prerequisite_native_result<T>(&mut self, check: PrerequisiteCheck, original: Result<T>,
+        native: Option<PrerequisiteNative>, detail: Option<PrerequisiteDetail>) -> Result<T> {
+        if let Err(error) = &original { self.prerequisite_fault(check, *error, native, detail); }
+        original
+    }
+    pub(super) fn prerequisite_scope<T>(&mut self, check: PrerequisiteCheck,
+        observation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let previous = self.prerequisite.map(|record| record.check);
+        self.prerequisite_check(check);
+        let original = observation(self);
+        let original = self.prerequisite_current(original);
+        if let Some(previous) = previous { self.prerequisite_check(previous); }
+        original
+    }
+    pub(super) fn prerequisite_staged(&self) -> Self {
+        let mut local = *self;
+        local.first = None;
+        if let Some(record) = local.prerequisite.as_mut() { record.first = None; }
+        local
+    }
+    pub(super) fn prerequisite_expected<T>(&mut self, check: PrerequisiteCheck, original: Result<T>, expected: Error, local: Self) -> bool {
+        if matches!(&original, Err(error) if *error == expected) { return true; }
+        if let Some(fault) = local.prerequisite.and_then(|record| record.first) {
+            if let Some(record) = self.prerequisite.as_mut() {
+                if record.first.is_none() { record.first = Some(fault); }
+            }
+        } else {
+            self.prerequisite_fault(check, original.err().unwrap_or(Error::Unsafe), None, None);
+        }
+        false
+    }
     pub fn at(&mut self, role: InputRole, slot: Option<u8>) {
         self.role = Some(role); self.slot = slot.filter(|value| *value < 40);
     }
@@ -86,7 +611,12 @@ impl InputTrace {
         }
     }
     pub(super) fn observed<T>(&mut self, result: Result<T>, check: InputCheck) -> Result<T> {
-        if result.is_err() { self.record(check, None); }
+        if let Err(error) = &result {
+            self.record(check, None);
+            if let Some(record) = self.prerequisite {
+                self.prerequisite_fault(record.check, *error, None, Some(PrerequisiteDetail::Input(check)));
+            }
+        }
         result
     }
     pub fn need(&mut self, value: bool, check: InputCheck) -> Result<()> { self.observed(need(value), check) }
@@ -124,27 +654,37 @@ pub(super) fn digest_app_traced(raw: &[u8], trace: &mut InputTrace) -> Result<St
     digest_bounded(raw, APP_ARTIFACT_LIMIT, trace)
 }
 fn digest_bounded(raw: &[u8], ceiling: usize, trace: &mut InputTrace) -> Result<String> {
-    trace.need(matches!(ceiling, ORDINARY_ARTIFACT_LIMIT | APP_ARTIFACT_LIMIT)
-        && raw.len() <= ceiling, InputCheck::HashLimit)?;
-    let mut output = [0u8; 32];
-    // Documented CNG pseudo-handle: borrowed, never closed. No provider/import,
-    // key, random fallback, package dependency or hand-written hash algorithm.
-    let status = unsafe { BC::BCryptHash(BC::BCRYPT_SHA256_ALG_HANDLE, null(), 0,
-        raw.as_ptr(), raw.len() as u32, output.as_mut_ptr(), output.len() as u32) };
-    if status != 0 { trace.record(InputCheck::HashReturned, Some(InputStatus::NtStatus(status))); }
-    need(status == 0)?;
-    Ok(hex(&output))
+    trace.prerequisite_scope(PrerequisiteCheck::H01, |trace| {
+        trace.need(matches!(ceiling, ORDINARY_ARTIFACT_LIMIT | APP_ARTIFACT_LIMIT)
+            && raw.len() <= ceiling, InputCheck::HashLimit)?;
+        let mut output = [0u8; 32];
+        // Documented CNG pseudo-handle: borrowed, never closed. No provider/import,
+        // key, random fallback, package dependency or hand-written hash algorithm.
+        let status = unsafe { BC::BCryptHash(BC::BCRYPT_SHA256_ALG_HANDLE, null(), 0,
+            raw.as_ptr(), raw.len() as u32, output.as_mut_ptr(), output.len() as u32) };
+        if status != 0 {
+            trace.record(InputCheck::HashReturned, Some(InputStatus::NtStatus(status)));
+            trace.prerequisite_fault(PrerequisiteCheck::H01, Error::Unsafe,
+                PrerequisiteNative::nt(PrerequisiteApi::BCryptHash, PrerequisiteSelector::None, status),
+                Some(PrerequisiteDetail::Input(InputCheck::HashReturned)));
+        }
+        need(status == 0)?;
+        Ok(hex(&output))
+    })
 }
 
-pub(super) fn fixed_path(value: &str) -> Result<PathBuf> {
-    need(value.len() <= 1024 && value.is_ascii() && !value.bytes().any(|b| b < 32 || matches!(b, b'"' | b'%' | b'=')))?;
-    let path = PathBuf::from(value);
-    need(path.is_absolute() && value.as_bytes().get(1) == Some(&b':')
-        && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        && value.as_bytes().get(2) == Some(&b'\\')
-        && !value.contains('/') && !value.starts_with("\\\\")
-        && value.split('\\').skip(1).all(|part| decode::component(part)))?;
-    Ok(path)
+pub(super) fn fixed_path(value: &str) -> Result<PathBuf> { fixed_path_traced(value, &mut InputTrace::default()) }
+pub(super) fn fixed_path_traced(value: &str, trace: &mut InputTrace) -> Result<PathBuf> {
+    trace.prerequisite_scope(PrerequisiteCheck::F03, |trace| {
+        need(value.len() <= 1024 && value.is_ascii() && !value.bytes().any(|b| b < 32 || matches!(b, b'"' | b'%' | b'=')))?;
+        let path = PathBuf::from(value);
+        need(path.is_absolute() && value.as_bytes().get(1) == Some(&b':')
+            && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && value.as_bytes().get(2) == Some(&b'\\')
+            && !value.contains('/') && !value.starts_with("\\\\")
+            && value.split('\\').skip(1).all(|part| decode::component(part)))?;
+        Ok(path)
+    })
 }
 pub(super) fn fixed_directories(root: &Path) -> [(&'static str, PathBuf); 4] {
     let target = root.join("target");
@@ -212,39 +752,50 @@ pub(super) struct FileBody {
     final_name: Vec<u16>, _pin: PhantomPinned,
 }
 impl FileBody {
-    fn timely(&mut self) -> Result<()> {
-        match self.end {
+    fn timely(&mut self) -> Result<()> { self.timely_traced(&mut InputTrace::default()) }
+    fn timely_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        let original = match self.end {
             Some(end) => reporting_effect(Instant::now(), end, &mut self.deadline_latched),
             None => Ok(()), // Ordinary owner semantics and its existing clock are unchanged.
-        }
+        };
+        trace.prerequisite_result(PrerequisiteCheck::F04, original)
     }
 }
 pub(super) struct OriginalFile { body: Held<FileBody>, pub(super) directory: bool }
 impl OriginalFile {
     pub(super) fn is_closed(&self) -> bool { self.body.state == SlotState::Closed && !self.body.active }
     fn new_until(path: &Path, directory: bool, end: Instant) -> Result<Self> {
-        let mut file = Self::new(path, directory)?;
+        Self::new_until_traced(path, directory, end, &mut InputTrace::default())
+    }
+    fn new_until_traced(path: &Path, directory: bool, end: Instant, trace: &mut InputTrace) -> Result<Self> {
+        let mut file = Self::new_traced(path, directory, trace)?;
         file.body().end = Some(end);
         Ok(file)
     }
     #[cfg(test)]
     pub(super) fn fixture_new(path: &Path, directory: bool, end: Instant) -> Result<Self> {
-        Self::new_until(path, directory, end)
+        Self::fixture_new_traced(path, directory, end, &mut InputTrace::default())
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_new_traced(path: &Path, directory: bool, end: Instant, trace: &mut InputTrace) -> Result<Self> {
+        Self::new_until_traced(path, directory, end, trace)
     }
     pub(super) fn new(path: &Path, directory: bool) -> Result<Self> {
         Self::new_traced(path, directory, &mut InputTrace::default())
     }
     pub(super) fn new_traced(path: &Path, directory: bool, trace: &mut InputTrace) -> Result<Self> {
-        let value = trace.observed(path.to_str().ok_or(Error::Unsafe), InputCheck::PathText)?;
-        trace.need(value.encode_utf16().count() <= 1024, InputCheck::PathUnits)?;
-        Ok(Self { body: ManuallyDrop::new(Box::pin(FileBody {
-            path: wide(value), handle: null_mut(), state: SlotState::Reserved, active: false,
-            error: 0, count: 0, raw: Vec::new(), security: Box::new(Aligned([0; BUFFER])),
-            end: None, deadline_latched: false,
-            basic: FS::FILE_BASIC_INFO::default(), standard: FS::FILE_STANDARD_INFO::default(),
-            tag: FS::FILE_ATTRIBUTE_TAG_INFO::default(), id: FS::FILE_ID_INFO::default(),
-            final_name: vec![0; 32768], _pin: PhantomPinned,
-        })), directory })
+        trace.prerequisite_scope(PrerequisiteCheck::F04, |trace| {
+            let value = trace.observed(path.to_str().ok_or(Error::Unsafe), InputCheck::PathText)?;
+            trace.need(value.encode_utf16().count() <= 1024, InputCheck::PathUnits)?;
+            Ok(Self { body: ManuallyDrop::new(Box::pin(FileBody {
+                path: wide(value), handle: null_mut(), state: SlotState::Reserved, active: false,
+                error: 0, count: 0, raw: Vec::new(), security: Box::new(Aligned([0; BUFFER])),
+                end: None, deadline_latched: false,
+                basic: FS::FILE_BASIC_INFO::default(), standard: FS::FILE_STANDARD_INFO::default(),
+                tag: FS::FILE_ATTRIBUTE_TAG_INFO::default(), id: FS::FILE_ID_INFO::default(),
+                final_name: vec![0; 32768], _pin: PhantomPinned,
+            })), directory })
+        })
     }
     pub(super) fn body(&mut self) -> &mut FileBody {
         // No movement of the pinned body; all native pointers refer to this
@@ -255,79 +806,108 @@ impl OriginalFile {
         self.open_traced(access, create, security, &mut InputTrace::default())
     }
     pub(super) fn open_traced(&mut self, access: u32, create: bool, security: *const S::SECURITY_ATTRIBUTES, trace: &mut InputTrace) -> Result<()> {
-        let directory = self.directory; let b = self.body();
-        if b.state != SlotState::Reserved { return trace.observed(Err(Error::State), InputCheck::OpenState); }
-        b.timely()?;
-        b.state = SlotState::Acquiring; b.active = true;
-        b.handle = unsafe { FS::CreateFileW(b.path.as_ptr(), access,
-            FS::FILE_SHARE_READ | if directory { FS::FILE_SHARE_WRITE } else { 0 },
-            security, if create { FS::CREATE_NEW } else { FS::OPEN_EXISTING },
-            FS::FILE_FLAG_OPEN_REPARSE_POINT | if directory { FS::FILE_FLAG_BACKUP_SEMANTICS } else { 0 }, null_mut()) };
-        b.error = if valid_handle(b.handle) { 0 } else { unsafe { F::GetLastError() } };
-        if !valid_handle(b.handle) { trace.record(InputCheck::OpenReturned, Some(InputStatus::Win32(b.error))); }
-        if valid_handle(b.handle) { b.active = false; b.state = SlotState::Owned; b.timely() }
-        else if b.error != 0 && b.error != F::ERROR_IO_PENDING && b.handle == F::INVALID_HANDLE_VALUE {
-            b.active = false; b.state = SlotState::NoHandle; b.timely()?; Err(Error::Unavailable)
-        } else { b.state = SlotState::Unknown; Err(Error::Unknown) }
+        trace.prerequisite_scope(PrerequisiteCheck::F04, |trace| {
+            let directory = self.directory; let b = self.body();
+            if b.state != SlotState::Reserved { return trace.observed(Err(Error::State), InputCheck::OpenState); }
+            b.timely_traced(trace)?;
+            b.state = SlotState::Acquiring; b.active = true;
+            b.handle = unsafe { FS::CreateFileW(b.path.as_ptr(), access,
+                FS::FILE_SHARE_READ | if directory { FS::FILE_SHARE_WRITE } else { 0 },
+                security, if create { FS::CREATE_NEW } else { FS::OPEN_EXISTING },
+                FS::FILE_FLAG_OPEN_REPARSE_POINT | if directory { FS::FILE_FLAG_BACKUP_SEMANTICS } else { 0 }, null_mut()) };
+            b.error = if valid_handle(b.handle) { 0 } else { unsafe { F::GetLastError() } };
+            if !valid_handle(b.handle) {
+                trace.record(InputCheck::OpenReturned, Some(InputStatus::Win32(b.error)));
+                let error = if b.error != 0 && b.error != F::ERROR_IO_PENDING && b.handle == F::INVALID_HANDLE_VALUE { Error::Unavailable } else { Error::Unknown };
+                trace.prerequisite_fault(PrerequisiteCheck::F04, error, PrerequisiteNative::file_open(b.error),
+                    Some(PrerequisiteDetail::Input(InputCheck::OpenReturned)));
+            }
+            if valid_handle(b.handle) { b.active = false; b.state = SlotState::Owned; b.timely_traced(trace) }
+            else if b.error != 0 && b.error != F::ERROR_IO_PENDING && b.handle == F::INVALID_HANDLE_VALUE {
+                b.active = false; b.state = SlotState::NoHandle; b.timely_traced(trace)?; Err(Error::Unavailable)
+            } else { b.state = SlotState::Unknown; Err(Error::Unknown) }
+        })
     }
     fn info(&mut self, which: u8, trace: &mut InputTrace) -> Result<()> {
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::InfoState); }
-        let (class, output, size, check) = match which {
-            0 => (FS::FileBasicInfo, (&mut b.basic as *mut FS::FILE_BASIC_INFO).cast(), size_of::<FS::FILE_BASIC_INFO>(), InputCheck::BasicInfoReturned),
-            1 => (FS::FileStandardInfo, (&mut b.standard as *mut FS::FILE_STANDARD_INFO).cast(), size_of::<FS::FILE_STANDARD_INFO>(), InputCheck::StandardInfoReturned),
-            2 => (FS::FileAttributeTagInfo, (&mut b.tag as *mut FS::FILE_ATTRIBUTE_TAG_INFO).cast(), size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), InputCheck::TagInfoReturned),
-            3 => (FS::FileIdInfo, (&mut b.id as *mut FS::FILE_ID_INFO).cast(), size_of::<FS::FILE_ID_INFO>(), InputCheck::IdInfoReturned),
-            _ => return trace.observed(Err(Error::State), InputCheck::InfoClass),
-        };
-        b.timely()?;
-        b.active = true;
-        let ok = unsafe { FS::GetFileInformationByHandleEx(b.handle, class, output, size as u32) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if ok == 0 { trace.record(check, Some(InputStatus::Win32(b.error))); }
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        b.timely()?;
-        need(ok != 0)
+        trace.prerequisite_scope(PrerequisiteCheck::F04, |trace| {
+            let b = self.body();
+            if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::InfoState); }
+            let (class, output, size, check) = match which {
+                0 => (FS::FileBasicInfo, (&mut b.basic as *mut FS::FILE_BASIC_INFO).cast(), size_of::<FS::FILE_BASIC_INFO>(), InputCheck::BasicInfoReturned),
+                1 => (FS::FileStandardInfo, (&mut b.standard as *mut FS::FILE_STANDARD_INFO).cast(), size_of::<FS::FILE_STANDARD_INFO>(), InputCheck::StandardInfoReturned),
+                2 => (FS::FileAttributeTagInfo, (&mut b.tag as *mut FS::FILE_ATTRIBUTE_TAG_INFO).cast(), size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>(), InputCheck::TagInfoReturned),
+                3 => (FS::FileIdInfo, (&mut b.id as *mut FS::FILE_ID_INFO).cast(), size_of::<FS::FILE_ID_INFO>(), InputCheck::IdInfoReturned),
+                _ => return trace.observed(Err(Error::State), InputCheck::InfoClass),
+            };
+            b.timely_traced(trace)?;
+            b.active = true;
+            let ok = unsafe { FS::GetFileInformationByHandleEx(b.handle, class, output, size as u32) };
+            b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+            if ok == 0 { trace.record(check, Some(InputStatus::Win32(b.error))); }
+            b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+            let native = PrerequisiteNative::boolean(PrerequisiteApi::GetFileInformationByHandleEx,
+                match which { 0 => PrerequisiteSelector::FileBasicInfo, 1 => PrerequisiteSelector::FileStandardInfo,
+                    2 => PrerequisiteSelector::FileAttributeTagInfo, 3 => PrerequisiteSelector::FileIdInfo, _ => PrerequisiteSelector::None },
+                ok, Some(b.error));
+            if b.active {
+                trace.prerequisite_fault(PrerequisiteCheck::F04, Error::Unknown, native, Some(PrerequisiteDetail::Input(check)));
+                b.state = SlotState::Unknown; return Err(Error::Unknown);
+            }
+            // This original file deadline precedes the non-ambiguous BOOL check.
+            // A saved scalar is staged DATA until that check actually rejects.
+            b.timely_traced(trace)?;
+            trace.prerequisite_native_result(PrerequisiteCheck::F04, need(ok != 0), native, Some(PrerequisiteDetail::Input(check)))
+        })
     }
     pub(super) fn stamp(&mut self) -> Result<Stamp> {
         self.stamp_traced(&mut InputTrace::default())
     }
     pub(super) fn stamp_traced(&mut self, trace: &mut InputTrace) -> Result<Stamp> {
-        for which in 0..4 { self.info(which, trace)?; }
-        let directory = self.directory; let b = self.body();
-        trace.need(b.standard.Directory == directory, InputCheck::StampDirectory)?;
-        trace.need(!b.standard.DeletePending, InputCheck::StampDeletePending)?;
-        trace.need(b.standard.EndOfFile >= 0, InputCheck::StampSize)?;
-        trace.need(b.standard.AllocationSize >= 0, InputCheck::StampAllocation)?;
-        trace.need(b.standard.NumberOfLinks == 1, InputCheck::StampLinks)?;
-        trace.need(b.tag.FileAttributes == b.basic.FileAttributes, InputCheck::StampAttributes)?;
-        trace.need(b.basic.FileAttributes & FS::FILE_ATTRIBUTE_REPARSE_POINT == 0, InputCheck::StampReparse)?;
-        trace.need(b.id.FileId.Identifier != [0; 16], InputCheck::StampIdentity)?;
-        Ok(Stamp { volume: b.id.VolumeSerialNumber, id: b.id.FileId.Identifier,
-            creation: b.basic.CreationTime, write: b.basic.LastWriteTime, change: b.basic.ChangeTime,
-            size: b.standard.EndOfFile, allocation: b.standard.AllocationSize,
-            links: b.standard.NumberOfLinks, attributes: b.basic.FileAttributes })
+        trace.prerequisite_scope(PrerequisiteCheck::F04, |trace| {
+            for which in 0..4 { self.info(which, trace)?; }
+            let directory = self.directory; let b = self.body();
+            trace.need(b.standard.Directory == directory, InputCheck::StampDirectory)?;
+            trace.need(!b.standard.DeletePending, InputCheck::StampDeletePending)?;
+            trace.need(b.standard.EndOfFile >= 0, InputCheck::StampSize)?;
+            trace.need(b.standard.AllocationSize >= 0, InputCheck::StampAllocation)?;
+            trace.need(b.standard.NumberOfLinks == 1, InputCheck::StampLinks)?;
+            trace.need(b.tag.FileAttributes == b.basic.FileAttributes, InputCheck::StampAttributes)?;
+            trace.need(b.basic.FileAttributes & FS::FILE_ATTRIBUTE_REPARSE_POINT == 0, InputCheck::StampReparse)?;
+            trace.need(b.id.FileId.Identifier != [0; 16], InputCheck::StampIdentity)?;
+            Ok(Stamp { volume: b.id.VolumeSerialNumber, id: b.id.FileId.Identifier,
+                creation: b.basic.CreationTime, write: b.basic.LastWriteTime, change: b.basic.ChangeTime,
+                size: b.standard.EndOfFile, allocation: b.standard.AllocationSize,
+                links: b.standard.NumberOfLinks, attributes: b.basic.FileAttributes })
+        })
     }
     pub(super) fn named(&mut self, expected: &Path) -> Result<()> {
         self.named_traced(expected, &mut InputTrace::default())
     }
     pub(super) fn named_traced(&mut self, expected: &Path, trace: &mut InputTrace) -> Result<()> {
-        let text = trace.observed(expected.to_str().ok_or(Error::Unsafe), InputCheck::NameText)?;
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::NameState); }
-        b.timely()?;
-        b.active = true;
-        b.count = unsafe { FS::GetFinalPathNameByHandleW(b.handle, b.final_name.as_mut_ptr(),
-            b.final_name.len() as u32, FS::FILE_NAME_NORMALIZED | FS::VOLUME_NAME_DOS) };
-        b.error = if b.count != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if b.count == 0 { trace.record(InputCheck::NameReturned, Some(InputStatus::Win32(b.error))); }
-        b.active = b.count == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        b.timely()?;
-        trace.need(b.count > 0 && (b.count as usize) < b.final_name.len(), InputCheck::NameCount)?;
-        let actual = trace.observed(String::from_utf16(&b.final_name[..b.count as usize]).map_err(|_| Error::Unsafe), InputCheck::NameUtf16)?;
-        trace.need(actual.strip_prefix("\\\\?\\") == Some(text), InputCheck::NameExact)
+        trace.prerequisite_scope(PrerequisiteCheck::F05, |trace| {
+            let text = trace.observed(expected.to_str().ok_or(Error::Unsafe), InputCheck::NameText)?;
+            let b = self.body();
+            if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::NameState); }
+            b.timely_traced(trace)?;
+            b.active = true;
+            b.count = unsafe { FS::GetFinalPathNameByHandleW(b.handle, b.final_name.as_mut_ptr(),
+                b.final_name.len() as u32, FS::FILE_NAME_NORMALIZED | FS::VOLUME_NAME_DOS) };
+            b.error = if b.count != 0 { 0 } else { unsafe { F::GetLastError() } };
+            if b.count == 0 { trace.record(InputCheck::NameReturned, Some(InputStatus::Win32(b.error))); }
+            b.active = b.count == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+            let native = PrerequisiteNative::count(PrerequisiteApi::GetFinalPathNameByHandleW, b.count, b.error);
+            if b.active {
+                trace.prerequisite_fault(PrerequisiteCheck::F05, Error::Unknown, native, Some(PrerequisiteDetail::Input(InputCheck::NameReturned)));
+                b.state = SlotState::Unknown; return Err(Error::Unknown);
+            }
+            b.timely_traced(trace)?;
+            let original = need(b.count > 0 && (b.count as usize) < b.final_name.len());
+            let detail = if native.is_some() { InputCheck::NameReturned } else { InputCheck::NameCount };
+            let original = trace.prerequisite_native_result(PrerequisiteCheck::F05, original, native, Some(PrerequisiteDetail::Input(detail)));
+            trace.observed(original, InputCheck::NameCount)?;
+            let actual = trace.observed(String::from_utf16(&b.final_name[..b.count as usize]).map_err(|_| Error::Unsafe), InputCheck::NameUtf16)?;
+            trace.need(actual.strip_prefix("\\\\?\\") == Some(text), InputCheck::NameExact)
+        })
     }
     pub(super) fn read(&mut self, limit: usize) -> Result<Vec<u8>> {
         self.read_traced(limit, &mut InputTrace::default())
@@ -341,49 +921,68 @@ impl OriginalFile {
         self.read_bounded(APP_ARTIFACT_LIMIT, APP_ARTIFACT_LIMIT, trace)
     }
     fn read_bounded(&mut self, limit: usize, ceiling: usize, trace: &mut InputTrace) -> Result<Vec<u8>> {
-        let before = self.stamp_traced(trace)?;
-        trace.need(!self.directory, InputCheck::ReadFileKind)?;
-        trace.need(before.size >= 0 && before.size as usize <= limit, InputCheck::ReadSize)?;
-        trace.need(matches!(ceiling, ORDINARY_ARTIFACT_LIMIT | APP_ARTIFACT_LIMIT) && limit <= ceiling, InputCheck::ReadLimit)?;
-        let b = self.body();
-        b.raw = vec![0; before.size as usize + 1]; b.count = 0;
-        b.timely()?;
-        b.active = true;
-        let ok = unsafe { FS::ReadFile(b.handle, b.raw.as_mut_ptr(), b.raw.len() as u32, &mut b.count, null_mut()) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if ok == 0 { trace.record(InputCheck::ReadReturned, Some(InputStatus::Win32(b.error))); }
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        b.timely()?;
-        trace.need(ok != 0 && b.count as i64 == before.size, InputCheck::ReadCount)?;
-        let value = b.raw[..b.count as usize].to_vec();
-        let after = self.stamp_traced(trace)?;
-        trace.need(after == before, InputCheck::ReadStable)?;
-        Ok(value)
+        trace.prerequisite_scope(PrerequisiteCheck::F05, |trace| {
+            let before = self.stamp_traced(trace)?;
+            trace.need(!self.directory, InputCheck::ReadFileKind)?;
+            trace.need(before.size >= 0 && before.size as usize <= limit, InputCheck::ReadSize)?;
+            trace.need(matches!(ceiling, ORDINARY_ARTIFACT_LIMIT | APP_ARTIFACT_LIMIT) && limit <= ceiling, InputCheck::ReadLimit)?;
+            let b = self.body();
+            b.raw = vec![0; before.size as usize + 1]; b.count = 0;
+            b.timely_traced(trace)?;
+            b.active = true;
+            let ok = unsafe { FS::ReadFile(b.handle, b.raw.as_mut_ptr(), b.raw.len() as u32, &mut b.count, null_mut()) };
+            b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+            if ok == 0 { trace.record(InputCheck::ReadReturned, Some(InputStatus::Win32(b.error))); }
+            b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+            let native = PrerequisiteNative::boolean(PrerequisiteApi::ReadFile, PrerequisiteSelector::None, ok, Some(b.error));
+            if b.active {
+                trace.prerequisite_fault(PrerequisiteCheck::F05, Error::Unknown, native, Some(PrerequisiteDetail::Input(InputCheck::ReadReturned)));
+                b.state = SlotState::Unknown; return Err(Error::Unknown);
+            }
+            b.timely_traced(trace)?;
+            let original = need(ok != 0 && b.count as i64 == before.size);
+            let detail = if native.is_some() { InputCheck::ReadReturned } else { InputCheck::ReadCount };
+            let original = trace.prerequisite_native_result(PrerequisiteCheck::F05, original, native, Some(PrerequisiteDetail::Input(detail)));
+            trace.observed(original, InputCheck::ReadCount)?;
+            let value = b.raw[..b.count as usize].to_vec();
+            let after = self.stamp_traced(trace)?;
+            trace.need(after == before, InputCheck::ReadStable)?;
+            Ok(value)
+        })
     }
     pub(super) fn descriptor(&mut self) -> Result<Vec<u8>> {
         self.descriptor_traced(&mut InputTrace::default())
     }
     pub(super) fn descriptor_traced(&mut self, trace: &mut InputTrace) -> Result<Vec<u8>> {
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::DescriptorState); }
-        b.timely()?;
-        b.count = 0; b.active = true;
-        let ok = unsafe { S::GetKernelObjectSecurity(b.handle,
-            S::OWNER_SECURITY_INFORMATION | S::GROUP_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
-            b.security.0.as_mut_ptr().cast(), BUFFER as u32, &mut b.count) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        if ok == 0 { trace.record(InputCheck::DescriptorReturned, Some(InputStatus::Win32(b.error))); }
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        b.timely()?;
-        need(ok != 0)?;
-        trace.need(b.count as usize <= BUFFER && b.count >= 20, InputCheck::DescriptorLength)?;
-        Ok(b.security.0[..b.count as usize].to_vec())
+        trace.prerequisite_scope(PrerequisiteCheck::F06, |trace| {
+            let b = self.body();
+            if b.state != SlotState::Owned || b.active { return trace.observed(Err(Error::State), InputCheck::DescriptorState); }
+            b.timely_traced(trace)?;
+            b.count = 0; b.active = true;
+            let ok = unsafe { S::GetKernelObjectSecurity(b.handle,
+                S::OWNER_SECURITY_INFORMATION | S::GROUP_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
+                b.security.0.as_mut_ptr().cast(), BUFFER as u32, &mut b.count) };
+            b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+            if ok == 0 { trace.record(InputCheck::DescriptorReturned, Some(InputStatus::Win32(b.error))); }
+            b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+            let native = PrerequisiteNative::boolean(PrerequisiteApi::GetKernelObjectSecurity, PrerequisiteSelector::None, ok, Some(b.error));
+            if b.active {
+                trace.prerequisite_fault(PrerequisiteCheck::F06, Error::Unknown, native, Some(PrerequisiteDetail::Input(InputCheck::DescriptorReturned)));
+                b.state = SlotState::Unknown; return Err(Error::Unknown);
+            }
+            b.timely_traced(trace)?;
+            trace.prerequisite_native_result(PrerequisiteCheck::F06, need(ok != 0), native,
+                Some(PrerequisiteDetail::Input(InputCheck::DescriptorReturned)))?;
+            trace.need(b.count as usize <= BUFFER && b.count >= 20, InputCheck::DescriptorLength)?;
+            Ok(b.security.0[..b.count as usize].to_vec())
+        })
     }
     fn write(&mut self, value: &[u8], limit: usize) -> Result<()> {
-        need(limit <= OWNER_LIMIT)?;
-        self.write_bounded(value, limit)
+        self.write_traced(value, limit, &mut InputTrace::default())
+    }
+    fn write_traced(&mut self, value: &[u8], limit: usize, trace: &mut InputTrace) -> Result<()> {
+        prerequisite_result!(trace, F07, need(limit <= OWNER_LIMIT))?;
+        self.write_bounded_traced(value, limit, trace)
     }
     // Only the closed cfg(test) fixture publisher can request payload writes.
     // The app-safe/result entry above retains its original64KiB bound.
@@ -392,33 +991,52 @@ impl OriginalFile {
         self.write_bounded(value, ORDINARY_ARTIFACT_LIMIT)
     }
     fn write_bounded(&mut self, value: &[u8], limit: usize) -> Result<()> {
-        need(!value.is_empty() && value.len() <= limit && limit <= ORDINARY_ARTIFACT_LIMIT)?;
-        let b = self.body();
-        if b.state != SlotState::Owned || b.active || !b.raw.is_empty() { return Err(Error::State); }
-        b.raw = value.to_vec(); b.count = 0;
-        b.timely()?;
-        b.active = true;
-        let ok = unsafe { FS::WriteFile(b.handle, b.raw.as_ptr(), b.raw.len() as u32, &mut b.count, null_mut()) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
-        if b.active { b.state = SlotState::Unknown; return Err(Error::Unknown); }
-        b.timely()?;
-        // Exactly one attempt. An ordinary short write is still failure; the
-        // caller must then explicitly close the same original, not retry it.
-        need(complete_write_bounded(ok != 0, b.count, value.len(), true, limit))
+        self.write_bounded_traced(value, limit, &mut InputTrace::default())
+    }
+    fn write_bounded_traced(&mut self, value: &[u8], limit: usize, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::F07, |trace| {
+            need(!value.is_empty() && value.len() <= limit && limit <= ORDINARY_ARTIFACT_LIMIT)?;
+            let b = self.body();
+            if b.state != SlotState::Owned || b.active || !b.raw.is_empty() { return Err(Error::State); }
+            b.raw = value.to_vec(); b.count = 0;
+            b.timely_traced(trace)?;
+            b.active = true;
+            let ok = unsafe { FS::WriteFile(b.handle, b.raw.as_ptr(), b.raw.len() as u32, &mut b.count, null_mut()) };
+            b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+            b.active = ok == 0 && (b.error == 0 || b.error == F::ERROR_IO_PENDING);
+            let native = PrerequisiteNative::boolean(PrerequisiteApi::WriteFile, PrerequisiteSelector::None, ok, Some(b.error));
+            if b.active {
+                trace.prerequisite_fault(PrerequisiteCheck::F07, Error::Unknown, native, None);
+                b.state = SlotState::Unknown; return Err(Error::Unknown);
+            }
+            b.timely_traced(trace)?;
+            // Exactly one attempt. An ordinary short write is still failure; the
+            // caller must then explicitly close the same original, not retry it.
+            trace.prerequisite_native_result(PrerequisiteCheck::F07,
+                need(complete_write_bounded(ok != 0, b.count, value.len(), true, limit)), native, None)
+        })
     }
     pub(super) fn close(&mut self) -> Result<()> {
-        let b = self.body();
-        match b.state {
-            SlotState::Reserved | SlotState::NoHandle | SlotState::Closed => return Ok(()),
-            SlotState::Owned if !b.active => (),
-            _ => return Err(Error::Unknown),
-        }
-        b.state = SlotState::Closing;
-        let ok = unsafe { F::CloseHandle(b.handle) };
-        b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
-        b.state = if ok != 0 { SlotState::Closed } else { SlotState::Unknown };
-        if ok != 0 { Ok(()) } else { Err(Error::Unknown) }
+        self.close_traced(&mut InputTrace::default())
+    }
+    pub(super) fn close_traced(&mut self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::F08, |trace| {
+            let b = self.body();
+            match b.state {
+                SlotState::Reserved | SlotState::NoHandle | SlotState::Closed => return Ok(()),
+                SlotState::Owned if !b.active => (),
+                _ => return Err(Error::Unknown),
+            }
+            b.state = SlotState::Closing;
+            let ok = unsafe { F::CloseHandle(b.handle) };
+            b.error = if ok != 0 { 0 } else { unsafe { F::GetLastError() } };
+            if ok == 0 {
+                trace.prerequisite_fault(PrerequisiteCheck::F08, Error::Unknown,
+                    PrerequisiteNative::boolean(PrerequisiteApi::CloseHandle, PrerequisiteSelector::None, ok, Some(b.error)), None);
+            }
+            b.state = if ok != 0 { SlotState::Closed } else { SlotState::Unknown };
+            if ok != 0 { Ok(()) } else { Err(Error::Unknown) }
+        })
     }
 }
 impl Drop for OriginalFile {
@@ -431,10 +1049,13 @@ impl Drop for OriginalFile {
     }
 }
 pub(super) fn close_files(files: &mut [OriginalFile]) -> bool {
+    close_files_traced(files, &mut InputTrace::default())
+}
+pub(super) fn close_files_traced(files: &mut [OriginalFile], trace: &mut InputTrace) -> bool {
     // A later original can be a child of any earlier directory. On the first
     // uncertain close stop, retaining every remaining ancestor without retry.
     for file in files.iter_mut().rev() {
-        if file.close().is_err() { return false; }
+        if file.close_traced(trace).is_err() { return false; }
     }
     true
 }
@@ -449,10 +1070,13 @@ pub(super) fn owned_file_traced(files: &mut Vec<OriginalFile>, path: &Path, dire
     Ok(index)
 }
 
-pub(super) fn args_are(target: &str, image: &Path) -> Result<()> {
-    let args: Vec<_> = std::env::args().collect();
-    need(args.len() == 6 && Path::new(&args[0]) == image && args[1] == target
-        && args[2..].iter().map(String::as_str).eq(FLAGS))
+pub(super) fn args_are(target: &str, image: &Path) -> Result<()> { args_are_traced(target, image, &mut InputTrace::default()) }
+pub(super) fn args_are_traced(target: &str, image: &Path, trace: &mut InputTrace) -> Result<()> {
+    trace.prerequisite_scope(PrerequisiteCheck::F03, |trace| {
+        let args: Vec<_> = std::env::args().collect();
+        need(args.len() == 6 && Path::new(&args[0]) == image && args[1] == target
+            && args[2..].iter().map(String::as_str).eq(FLAGS))
+    })
 }
 
 pub(super) fn write_one(path: &Path, raw: &[u8], limit: usize, security: *const S::SECURITY_ATTRIBUTES) -> Result<()> {
@@ -460,27 +1084,36 @@ pub(super) fn write_one(path: &Path, raw: &[u8], limit: usize, security: *const 
 }
 #[cfg(test)]
 pub(super) fn write_fixture_record(path: &Path, raw: &[u8], limit: usize, end: Instant) -> Result<()> {
-    need(limit <= OWNER_LIMIT)?;
-    write_one_until(path, raw, limit, null(), Some(end))
+    write_fixture_record_traced(path, raw, limit, end, &mut InputTrace::default())
+}
+#[cfg(test)]
+pub(super) fn write_fixture_record_traced(path: &Path, raw: &[u8], limit: usize, end: Instant, trace: &mut InputTrace) -> Result<()> {
+    prerequisite_result!(trace, F09, need(limit <= OWNER_LIMIT))?;
+    write_one_until_traced(path, raw, limit, null(), Some(end), trace)
 }
 fn write_one_until(path: &Path, raw: &[u8], limit: usize, security: *const S::SECURITY_ATTRIBUTES, end: Option<Instant>) -> Result<()> {
-    let mut file = OriginalFile::new(path, false)?;
+    write_one_until_traced(path, raw, limit, security, end, &mut InputTrace::default())
+}
+fn write_one_until_traced(path: &Path, raw: &[u8], limit: usize, security: *const S::SECURITY_ATTRIBUTES,
+    end: Option<Instant>, trace: &mut InputTrace) -> Result<()> {
+    let mut file = prerequisite_result!(trace, F09, OriginalFile::new_traced(path, false, trace))?;
     file.body().end = end;
     let observation = (|| -> Result<()> {
-        file.open(FS::FILE_GENERIC_WRITE | FS::FILE_READ_ATTRIBUTES, true, security)?;
-        file.named(path)?; file.stamp()?;
-        file.write(raw, limit)
+        file.open_traced(FS::FILE_GENERIC_WRITE | FS::FILE_READ_ATTRIBUTES, true, security, trace)?;
+        file.named_traced(path, trace)?; file.stamp_traced(trace)?;
+        file.write_traced(raw, limit, trace)
     })();
+    let observation = trace.prerequisite_result(PrerequisiteCheck::F09, observation);
     if matches!(observation, Err(Error::Unknown)) {
         diagnostic_data("result-original-operation", None, true, None);
         loop { std::thread::park(); std::hint::black_box((&mut file, security)); }
     }
-    let closed = file.close();
+    let closed = file.close_traced(trace);
     if closed.is_err() {
         diagnostic_data("result-original-close", None, true, None);
         loop { std::thread::park(); std::hint::black_box((&mut file, security)); }
     }
-    let timely = file.body().timely(); // close is permitted late; reporting success is not
+    let timely = file.body().timely_traced(trace); // close is permitted late; reporting success is not
     observation?;
     timely
 }
@@ -992,7 +1625,10 @@ impl UiRole {
         _ => &[],
     } }
     pub(super) fn process_args(self, artifact: &Path, owner: bool) -> Result<()> {
-        if owner || self == Self::Prerequisite { args_are(if owner { self.owner() } else { self.entry() }, artifact) }
+        self.process_args_traced(artifact, owner, &mut InputTrace::default())
+    }
+    pub(super) fn process_args_traced(self, artifact: &Path, owner: bool, trace: &mut InputTrace) -> Result<()> {
+        if owner || self == Self::Prerequisite { args_are_traced(if owner { self.owner() } else { self.entry() }, artifact, trace) }
         else {
             let args: Vec<_> = std::env::args_os().collect();
             need(args.len() == 1 && args[0] == artifact.as_os_str())
@@ -1025,98 +1661,115 @@ fn ui_version(value: &str) -> bool {
 }
 #[cfg(feature = "desktop-ui")]
 impl UiRequest {
-    pub fn parse(raw: &[u8]) -> Result<Self> {
-        need(!raw.is_empty() && raw.len() <= LIMIT && raw.is_ascii() && raw.ends_with(b"\n") && !raw.contains(&b'\r'))?;
-        let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
-        let lines: Vec<_> = text.lines().collect();
-        need(lines.len() == 36 && lines[0] == "MRK_WINDOWS_NORMAL_UI_REQUEST_V1")?;
-        let mut v = Vec::with_capacity(UI_REQUEST_FIELDS.len());
-        for (line, key) in lines[1..].iter().zip(UI_REQUEST_FIELDS) {
-            let (name, value) = line.split_once('=').ok_or(Error::Unsafe)?;
-            need(name == key && !value.is_empty())?; v.push(value);
-        }
-        let role = UiRole::parse(v[0])?;
-        need(v[1] == role.entry() && is_hex(v[2], 40) && v[2] != "0".repeat(40)
-            && is_hex(v[3], 40) && v[3] != "0".repeat(40) && decimal(v[4]) && v[4].parse::<u64>().is_ok()
-            && v[5] == "1" && ui_version(v[34]))?;
-        let artifact = |offset: usize, limit| -> Result<FullwalkArtifact> {
-            fixed_path(v[offset])?; artifact_identity(v[offset + 3])?;
-            need([2, 4, 6, 7].into_iter().all(|i| is_hex(v[offset + i], 64)))?;
-            Ok(FullwalkArtifact { path: v[offset].to_owned(), bytes: positive_size(v[offset + 1], limit)?,
-                sha: v[offset + 2].to_owned(), identity: v[offset + 3].to_owned(), command_sha: v[offset + 4].to_owned(),
-                messages_bytes: positive_size(v[offset + 5], 16 << 20)?, messages_sha: v[offset + 6].to_owned(),
-                argv_sha: v[offset + 7].to_owned() })
-        };
-        let app = artifact(6, if role == UiRole::Prerequisite { ORDINARY_ARTIFACT_LIMIT } else { APP_ARTIFACT_LIMIT })?;
-        let owner = artifact(14, ORDINARY_ARTIFACT_LIMIT)?;
-        let runtime = if role == UiRole::Prerequisite {
-            need(v[22..34].iter().all(|value| *value == "-") && app.path == owner.path && app.bytes == owner.bytes
-                && app.sha == owner.sha && app.identity == owner.identity && app.messages_bytes == owner.messages_bytes
-                && app.messages_sha == owner.messages_sha && app.argv_sha == owner.argv_sha)?;
-            None
-        } else {
-            need(v[22..26].iter().all(|value| is_hex(value, 64)) && is_hex(v[29], 64))?;
-            let version = fullwalk_identity(v[30])?;
-            let selected = [fullwalk_identity(v[31])?, fullwalk_identity(v[32])?, fullwalk_identity(v[33])?];
-            fullwalk_identities(version, &selected)?;
-            Some(FullwalkRequest { role: ResultRole::Passive, source: v[2].to_owned(), tree: v[3].to_owned(), run: v[4].to_owned(),
-                app: app.clone(), owner: owner.clone(), manifest_sha: v[22].to_owned(), protocol_sha: v[23].to_owned(),
-                inventory_sha: v[24].to_owned(), core_sha: v[25].to_owned(), files: positive_size(v[26], MAX_FILES - 1)?,
-                payload_bytes: positive_size(v[27], MAX_TOTAL_BYTES as usize)? as u64,
-                publication_bytes: positive_size(v[28], OWNER_LIMIT)?, publication_sha: v[29].to_owned(), version, selected })
-        };
-        let result = Self { role, source: v[2].to_owned(), tree: v[3].to_owned(), run: v[4].to_owned(), app, owner,
-            runtime, app_version: v[34].to_owned() };
-        for (path, expected, owner) in [(&result.app.path, &result.app.command_sha, false),
-            (&result.owner.path, &result.owner.command_sha, true)] {
-            let command = role.command(path, owner);
-            need(command.encode_utf16().count() <= 1023
-                && digest(&command.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())? == *expected)?;
-        }
-        Ok(result)
+    pub fn parse(raw: &[u8]) -> Result<Self> { Self::parse_traced(raw, &mut InputTrace::default()) }
+    pub fn parse_traced(raw: &[u8], trace: &mut InputTrace) -> Result<Self> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q01, |trace| {
+            need(!raw.is_empty() && raw.len() <= LIMIT && raw.is_ascii() && raw.ends_with(b"\n") && !raw.contains(&b'\r'))?;
+            let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
+            let lines: Vec<_> = text.lines().collect();
+            need(lines.len() == 36 && lines[0] == "MRK_WINDOWS_NORMAL_UI_REQUEST_V1")?;
+            let mut v = Vec::with_capacity(UI_REQUEST_FIELDS.len());
+            for (line, key) in lines[1..].iter().zip(UI_REQUEST_FIELDS) {
+                let (name, value) = line.split_once('=').ok_or(Error::Unsafe)?;
+                need(name == key && !value.is_empty())?; v.push(value);
+            }
+            let role = UiRole::parse(v[0])?;
+            need(v[1] == role.entry() && is_hex(v[2], 40) && v[2] != "0".repeat(40)
+                && is_hex(v[3], 40) && v[3] != "0".repeat(40) && decimal(v[4]) && v[4].parse::<u64>().is_ok()
+                && v[5] == "1" && ui_version(v[34]))?;
+            let artifact = |offset: usize, limit, trace: &mut InputTrace| -> Result<FullwalkArtifact> {
+                fixed_path_traced(v[offset], trace)?; artifact_identity(v[offset + 3])?;
+                need([2, 4, 6, 7].into_iter().all(|i| is_hex(v[offset + i], 64)))?;
+                Ok(FullwalkArtifact { path: v[offset].to_owned(), bytes: positive_size(v[offset + 1], limit)?,
+                    sha: v[offset + 2].to_owned(), identity: v[offset + 3].to_owned(), command_sha: v[offset + 4].to_owned(),
+                    messages_bytes: positive_size(v[offset + 5], 16 << 20)?, messages_sha: v[offset + 6].to_owned(),
+                    argv_sha: v[offset + 7].to_owned() })
+            };
+            trace.prerequisite_check(PrerequisiteCheck::Q02);
+            let app = artifact(6, if role == UiRole::Prerequisite { ORDINARY_ARTIFACT_LIMIT } else { APP_ARTIFACT_LIMIT }, trace)?;
+            let owner = artifact(14, ORDINARY_ARTIFACT_LIMIT, trace)?;
+            let runtime = if role == UiRole::Prerequisite {
+                need(v[22..34].iter().all(|value| *value == "-") && app.path == owner.path && app.bytes == owner.bytes
+                    && app.sha == owner.sha && app.identity == owner.identity && app.messages_bytes == owner.messages_bytes
+                    && app.messages_sha == owner.messages_sha && app.argv_sha == owner.argv_sha)?;
+                None
+            } else {
+                need(v[22..26].iter().all(|value| is_hex(value, 64)) && is_hex(v[29], 64))?;
+                let version = fullwalk_identity(v[30])?;
+                let selected = [fullwalk_identity(v[31])?, fullwalk_identity(v[32])?, fullwalk_identity(v[33])?];
+                fullwalk_identities(version, &selected)?;
+                Some(FullwalkRequest { role: ResultRole::Passive, source: v[2].to_owned(), tree: v[3].to_owned(), run: v[4].to_owned(),
+                    app: app.clone(), owner: owner.clone(), manifest_sha: v[22].to_owned(), protocol_sha: v[23].to_owned(),
+                    inventory_sha: v[24].to_owned(), core_sha: v[25].to_owned(), files: positive_size(v[26], MAX_FILES - 1)?,
+                    payload_bytes: positive_size(v[27], MAX_TOTAL_BYTES as usize)? as u64,
+                    publication_bytes: positive_size(v[28], OWNER_LIMIT)?, publication_sha: v[29].to_owned(), version, selected })
+            };
+            let result = Self { role, source: v[2].to_owned(), tree: v[3].to_owned(), run: v[4].to_owned(), app, owner,
+                runtime, app_version: v[34].to_owned() };
+            trace.prerequisite_check(PrerequisiteCheck::Q03);
+            for (path, expected, owner) in [(&result.app.path, &result.app.command_sha, false),
+                (&result.owner.path, &result.owner.command_sha, true)] {
+                let command = role.command(path, owner);
+                need(command.encode_utf16().count() <= 1023
+                    && digest_traced(&command.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>(), trace)? == *expected)?;
+            }
+            Ok(result)
+        })
     }
-    pub fn compiled(&self) -> Result<()> {
-        need(option_env!("GITHUB_SHA") == Some(self.source.as_str())
-            && option_env!("MRK_WINDOWS_SOURCE_TREE") == Some(self.tree.as_str())
-            && option_env!("GITHUB_RUN_ID") == Some(self.run.as_str())
-            && option_env!("MRK_WINDOWS_UI_APP_VERSION") == Some(self.app_version.as_str()))?;
-        for (name, expected) in [
-            ("MRK_DESKTOP_HOSTED_CHECKS", "windows-installed-native-v1"), ("GITHUB_ACTIONS", "true"),
-            ("RUNNER_ENVIRONMENT", "github-hosted"), ("RUNNER_OS", "Windows"), ("RUNNER_ARCH", "X64"),
-            ("ImageOS", "win25-vs2026"), ("GITHUB_RUN_ATTEMPT", "1"), ("GITHUB_SHA", self.source.as_str()),
-            ("GITHUB_RUN_ID", self.run.as_str()), ("MRK_WINDOWS_SOURCE_TREE", self.tree.as_str()),
-            ("MRK_DESKTOP_DISPATCH_SCOPE", "windows-normal-project-ui"),
-            ("GITHUB_REF", "refs/heads/verify/desktop-windows-normal-project-ui"), ("GITHUB_EVENT_NAME", "workflow_dispatch"),
-        ] { need(std::env::var(name).as_deref() == Ok(expected))?; }
-        Ok(())
+    pub fn compiled(&self) -> Result<()> { self.compiled_traced(&mut InputTrace::default()) }
+    pub fn compiled_traced(&self, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q03, |trace| {
+            need(option_env!("GITHUB_SHA") == Some(self.source.as_str())
+                && option_env!("MRK_WINDOWS_SOURCE_TREE") == Some(self.tree.as_str())
+                && option_env!("GITHUB_RUN_ID") == Some(self.run.as_str())
+                && option_env!("MRK_WINDOWS_UI_APP_VERSION") == Some(self.app_version.as_str()))?;
+            for (name, expected) in [
+                ("MRK_DESKTOP_HOSTED_CHECKS", "windows-installed-native-v1"), ("GITHUB_ACTIONS", "true"),
+                ("RUNNER_ENVIRONMENT", "github-hosted"), ("RUNNER_OS", "Windows"), ("RUNNER_ARCH", "X64"),
+                ("ImageOS", "win25-vs2026"), ("GITHUB_RUN_ATTEMPT", "1"), ("GITHUB_SHA", self.source.as_str()),
+                ("GITHUB_RUN_ID", self.run.as_str()), ("MRK_WINDOWS_SOURCE_TREE", self.tree.as_str()),
+                ("MRK_DESKTOP_DISPATCH_SCOPE", "windows-normal-project-ui"),
+                ("GITHUB_REF", "refs/heads/verify/desktop-windows-normal-project-ui"), ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+            ] { need(std::env::var(name).as_deref() == Ok(expected))?; }
+            Ok(())
+        })
     }
-    pub fn at_root(&self, root: &Path) -> Result<()> {
-        need(root.file_name().and_then(|name| name.to_str()) == Some(format!("mrk-windows-installed-native-{}-1", self.run).as_str()))?;
-        let debug = root.join("target/x86_64-pc-windows-msvc/debug");
-        let fixed_exe = |value: &str, prefix: &str| -> Result<()> {
-            let path = fixed_path(value)?;
-            let name = path.file_name().and_then(|value| value.to_str()).ok_or(Error::Unsafe)?;
-            let hash = name.strip_prefix(prefix).and_then(|value| value.strip_suffix(".exe")).ok_or(Error::Unsafe)?;
-            need(path.parent() == Some(debug.join("deps").as_path()) && is_hex(hash, 16))
-        };
-        fixed_exe(&self.owner.path, "mrk_windows_installed_native-")?;
-        match self.role {
-            UiRole::Prerequisite => need(self.app.path == self.owner.path),
-            UiRole::NormalSmoke => need(Path::new(&self.app.path) == root.join("mobile-release-kit-desktop.exe")),
-            _ => fixed_exe(&self.app.path, "installed_shell_observation-"),
-        }
+    pub fn at_root(&self, root: &Path) -> Result<()> { self.at_root_traced(root, &mut InputTrace::default()) }
+    pub fn at_root_traced(&self, root: &Path, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q04, |trace| {
+            need(root.file_name().and_then(|name| name.to_str()) == Some(format!("mrk-windows-installed-native-{}-1", self.run).as_str()))?;
+            let debug = root.join("target/x86_64-pc-windows-msvc/debug");
+            let fixed_exe = |value: &str, prefix: &str, trace: &mut InputTrace| -> Result<()> {
+                let path = fixed_path_traced(value, trace)?;
+                let name = path.file_name().and_then(|value| value.to_str()).ok_or(Error::Unsafe)?;
+                let hash = name.strip_prefix(prefix).and_then(|value| value.strip_suffix(".exe")).ok_or(Error::Unsafe)?;
+                need(path.parent() == Some(debug.join("deps").as_path()) && is_hex(hash, 16))
+            };
+            fixed_exe(&self.owner.path, "mrk_windows_installed_native-", trace)?;
+            match self.role {
+                UiRole::Prerequisite => need(self.app.path == self.owner.path),
+                UiRole::NormalSmoke => need(Path::new(&self.app.path) == root.join("mobile-release-kit-desktop.exe")),
+                _ => fixed_exe(&self.app.path, "installed_shell_observation-", trace),
+            }
+        })
     }
-    pub fn app_after(&self, identity: &str) -> Result<()> {
-        artifact_identity(identity)?;
-        let before: Vec<_> = self.app.identity.split(':').collect(); let after: Vec<_> = identity.split(':').collect();
-        need([0, 1, 2, 3, 5].into_iter().all(|index| before[index] == after[index])
-            && after[4].parse::<i64>().map_err(|_| Error::Unsafe)? >= before[4].parse::<i64>().map_err(|_| Error::Unsafe)?)
+    pub fn app_after(&self, identity: &str) -> Result<()> { self.app_after_traced(identity, &mut InputTrace::default()) }
+    pub fn app_after_traced(&self, identity: &str, trace: &mut InputTrace) -> Result<()> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q04, |trace| {
+            artifact_identity(identity)?;
+            let before: Vec<_> = self.app.identity.split(':').collect(); let after: Vec<_> = identity.split(':').collect();
+            need([0, 1, 2, 3, 5].into_iter().all(|index| before[index] == after[index])
+                && after[4].parse::<i64>().map_err(|_| Error::Unsafe)? >= before[4].parse::<i64>().map_err(|_| Error::Unsafe)?)
+        })
     }
-    fn envelope(&self, request_sha: &str, account_sha: &str, observation: &str) -> Result<String> {
-        need(is_hex(request_sha, 64) && is_hex(account_sha, 64))?;
-        let text = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"role\":\"{}\",\"requestSha256\":\"{request_sha}\",\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"accountSidSha256\":\"{account_sha}\",\"observation\":{observation},\"resultFile\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-child-exit-zero-required\"}}}}\n",
-            self.source, self.tree, self.run, self.role.label(), self.app.bytes, self.app.sha, self.app.command_sha);
-        need(text.len() <= LIMIT)?; Ok(text)
+    fn envelope(&self, request_sha: &str, account_sha: &str, observation: &str) -> Result<String> { self.envelope_traced(request_sha, account_sha, observation, &mut InputTrace::default()) }
+    fn envelope_traced(&self, request_sha: &str, account_sha: &str, observation: &str, trace: &mut InputTrace) -> Result<String> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q05, |trace| {
+            need(is_hex(request_sha, 64) && is_hex(account_sha, 64))?;
+            let text = format!("{{\"schemaVersion\":1,\"sourceSha\":\"{}\",\"sourceTree\":\"{}\",\"runId\":\"{}\",\"attempt\":1,\"role\":\"{}\",\"requestSha256\":\"{request_sha}\",\"artifactBytes\":{},\"artifactSha256\":\"{}\",\"commandSha256\":\"{}\",\"accountSidSha256\":\"{account_sha}\",\"observation\":{observation},\"resultFile\":{{\"createNew\":true,\"writeCalls\":1,\"closeGate\":\"original-child-exit-zero-required\"}}}}\n",
+                self.source, self.tree, self.run, self.role.label(), self.app.bytes, self.app.sha, self.app.command_sha);
+            need(text.len() <= LIMIT)?; Ok(text)
+        })
     }
     fn case_observation(&self) -> Result<String> {
         need(!self.role.checks().is_empty())?;
@@ -1125,37 +1778,44 @@ impl UiRequest {
             if self.role == UiRole::ProjectDraft { 6 } else { 0 }))
     }
     pub fn probe_result(&self, request_sha: &str, account_sha: &str, reason: Option<&str>, version: Option<&str>,
-        refusal: Option<&super::ui::ManagedRuntimeRefusal>) -> Result<String> {
-        need(self.role == UiRole::Prerequisite)?;
-        let available = reason.is_none();
-        need((reason == Some("managed-webview2")) == refusal.is_some())?;
-        let diagnostic = refusal.map(|value| value.json()).transpose()?.unwrap_or_else(|| "null".to_owned());
-        let (reason, version) = match (reason, version) {
-            (None, Some(version)) if ui_version(version) => ("null".to_owned(), format!("\"{version}\"")),
-            (Some(reason), None) if UI_PROBE_REASONS.contains(&reason) => (format!("\"{reason}\""), "null".to_owned()),
-            _ => return Err(Error::Unsafe),
-        };
-        self.envelope(request_sha, account_sha, &format!("{{\"available\":{available},\"reason\":{reason},\"ordinaryAccountMatched\":true,\"ordinaryContext\":{available},\"interactiveDesktop\":{available},\"managedRuntime\":{available},\"overrideFree\":{available},\"privateParent\":{available},\"runtimeVersion\":{version},\"managedRuntimeRefusal\":{diagnostic},\"originalsSettled\":true,\"noWebviewCreated\":true}}"))
+        refusal: Option<&super::ui::ManagedRuntimeRefusal>) -> Result<String> { self.probe_result_traced(request_sha, account_sha, reason, version, refusal, &mut InputTrace::default()) }
+    pub fn probe_result_traced(&self, request_sha: &str, account_sha: &str, reason: Option<&str>, version: Option<&str>,
+        refusal: Option<&super::ui::ManagedRuntimeRefusal>, trace: &mut InputTrace) -> Result<String> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q05, |trace| {
+            need(self.role == UiRole::Prerequisite)?;
+            let available = reason.is_none();
+            need((reason == Some("managed-webview2")) == refusal.is_some())?;
+            let diagnostic = refusal.map(|value| value.json()).transpose()?.unwrap_or_else(|| "null".to_owned());
+            let (reason, version) = match (reason, version) {
+                (None, Some(version)) if ui_version(version) => ("null".to_owned(), format!("\"{version}\"")),
+                (Some(reason), None) if UI_PROBE_REASONS.contains(&reason) => (format!("\"{reason}\""), "null".to_owned()),
+                _ => return Err(Error::Unsafe),
+            };
+            self.envelope_traced(request_sha, account_sha, &format!("{{\"available\":{available},\"reason\":{reason},\"ordinaryAccountMatched\":true,\"ordinaryContext\":{available},\"interactiveDesktop\":{available},\"managedRuntime\":{available},\"overrideFree\":{available},\"privateParent\":{available},\"runtimeVersion\":{version},\"managedRuntimeRefusal\":{diagnostic},\"originalsSettled\":true,\"noWebviewCreated\":true}}"), trace)
+        })
     }
-    pub fn accept_child(&self, raw: &[u8], request_sha: &str, account_sha: &str) -> Result<bool> {
-        need(raw.len() <= LIMIT && raw.is_ascii())?;
-        if self.role != UiRole::Prerequisite {
-            need(raw == self.envelope(request_sha, account_sha, &self.case_observation()?)?.as_bytes())?; return Ok(true);
-        }
-        let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
-        let diagnostic = text.split_once(",\"managedRuntimeRefusal\":").and_then(|(_, tail)|
-            tail.split_once(",\"originalsSettled\":")).map(|(value, _)| value).ok_or(Error::Unsafe)?;
-        let refusal = if diagnostic == "null" { None } else {
-            Some(super::ui::ManagedRuntimeRefusal::parse(diagnostic).ok_or(Error::Unsafe)?)
-        };
-        for reason in UI_PROBE_REASONS {
-            if (reason == "managed-webview2") != refusal.is_some() { continue; }
-            if raw == self.probe_result(request_sha, account_sha, Some(reason), None, refusal.as_ref())?.as_bytes() { return Ok(false); }
-        }
-        let version = text.split_once("\"runtimeVersion\":\"").and_then(|(_, tail)| tail.split_once('"'))
-            .map(|(value, _)| value).ok_or(Error::Unsafe)?;
-        need(raw == self.probe_result(request_sha, account_sha, None, Some(version), refusal.as_ref())?.as_bytes())?;
-        Ok(true)
+    pub fn accept_child(&self, raw: &[u8], request_sha: &str, account_sha: &str) -> Result<bool> { self.accept_child_traced(raw, request_sha, account_sha, &mut InputTrace::default()) }
+    pub fn accept_child_traced(&self, raw: &[u8], request_sha: &str, account_sha: &str, trace: &mut InputTrace) -> Result<bool> {
+        trace.prerequisite_scope(PrerequisiteCheck::Q05, |trace| {
+            need(raw.len() <= LIMIT && raw.is_ascii())?;
+            if self.role != UiRole::Prerequisite {
+                need(raw == self.envelope_traced(request_sha, account_sha, &self.case_observation()?, trace)?.as_bytes())?; return Ok(true);
+            }
+            let text = std::str::from_utf8(raw).map_err(|_| Error::Unsafe)?;
+            let diagnostic = text.split_once(",\"managedRuntimeRefusal\":").and_then(|(_, tail)|
+                tail.split_once(",\"originalsSettled\":")).map(|(value, _)| value).ok_or(Error::Unsafe)?;
+            let refusal = if diagnostic == "null" { None } else {
+                Some(super::ui::ManagedRuntimeRefusal::parse(diagnostic).ok_or(Error::Unsafe)?)
+            };
+            for reason in UI_PROBE_REASONS {
+                if (reason == "managed-webview2") != refusal.is_some() { continue; }
+                if raw == self.probe_result_traced(request_sha, account_sha, Some(reason), None, refusal.as_ref(), trace)?.as_bytes() { return Ok(false); }
+            }
+            let version = text.split_once("\"runtimeVersion\":\"").and_then(|(_, tail)| tail.split_once('"'))
+                .map(|(value, _)| value).ok_or(Error::Unsafe)?;
+            need(raw == self.probe_result_traced(request_sha, account_sha, None, Some(version), refusal.as_ref(), trace)?.as_bytes())?;
+            Ok(true)
+        })
     }
 }
 #[cfg(feature = "desktop-ui")]

@@ -9,7 +9,7 @@ import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
 function helpContent(entry: GitHubConnectionHelpEntry & { requiredness?: 'required' | 'conditional' }): HelpContent {
-  return { label: entry.label, requiredness: entry.requiredness ?? 'conditional', requiredWhen: 'Before a separately qualified GitHub connection.',
+  return { label: entry.label, requiredness: entry.requiredness ?? 'conditional', requiredWhen: 'When connecting GitHub for read-only observations.',
     what: entry.what, why: entry.why, where: entry.where, format: entry.format, failure: entry.failure };
 }
 function FactLabel({ fact, retained }: { fact: GitHubFact<unknown>; retained: boolean }) {
@@ -51,13 +51,13 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
         <Icon name="github" size={24} />
       </SectionHeading>
       <div className="notice notice-info" role="status"><Icon name="shield" size={18} /><div>
-        <strong>{entryReady ? 'Advanced, read-only GitHub connection' : 'Credential entry is not available now'}</strong>
+        <strong>{entryReady ? 'Session-only, read-only GitHub connection' : 'Credential entry is not available now'}</strong>
         <p id={reasonId}>{!GITHUB_CONNECTION_ENTRY_AVAILABLE ? 'Advanced token entry is not qualified for this build. Safe Status and original-session retirement do not enable it.' :
           !projectSelected ? 'Select your application project first.' : !state.context ? 'Enter the explicit application repository below.' :
           state.helpState !== 'current' ? 'Reload current core guidance before entering a token.' :
           state.status && !state.status.capability.readOnlySessionAvailable ? GITHUB_CONNECTION_REASON_HELP[state.status.capability.reason] :
           entryReady ? 'Only account, repository and bounded Actions metadata are read. No Store access, repository writes or workflow dispatch.' :
-          'An original session or uncertain operation is retained. Read its Status; retire it before making a new connection.'} Preferred App/device login remains separately unavailable. No project credential asset is reused.</p>
+          'An original session or uncertain operation is retained. Read its Status; retire it before making a new connection.'} No GitHub App registration is needed for a session-only token. App/device login remains separately unavailable. No project credential asset is reused.</p>
       </div></div>
       <div className="field-label-row"><label htmlFor={repositoryId}>{repositoryHelp?.label ?? 'Explicit application repository'}</label><Badge>Required for connection</Badge>
         {repositoryHelp && <HelpButton content={helpContent(repositoryHelp)} onHelp={onHelp} />}</div>

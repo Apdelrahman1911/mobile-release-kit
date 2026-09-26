@@ -677,6 +677,23 @@ jobs:
             $path = [System.IO.Path]::Combine($expectedRoot, 'normal-ui-prerequisite-owner-exit.private.json')
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            # Independent original-return DATA, only after all existing receipt calls returned.
+            # No private read; encoding/delivery never changes the original exit guard below.
+            $prerequisiteReturnLine = $null
+            try {
+              $returnSource = if ($env:GITHUB_SHA -cmatch '\A[0-9a-f]{40}\z' -and $env:GITHUB_SHA -cne '0000000000000000000000000000000000000000') { $env:GITHUB_SHA } else { 'unavailable' }
+              $returnTree = if ($env:MRK_WINDOWS_SOURCE_TREE -cmatch '\A[0-9a-f]{40}\z' -and $env:MRK_WINDOWS_SOURCE_TREE -cne '0000000000000000000000000000000000000000') { $env:MRK_WINDOWS_SOURCE_TREE } else { 'unavailable' }
+              $returnRun = if ($env:GITHUB_RUN_ID -cmatch '\A[1-9][0-9]{0,19}\z') { $env:GITHUB_RUN_ID } else { 'unavailable' }
+              $returnExit = $originalExitCode.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+              $prerequisiteReturnLine = "`nMRK_WINDOWS_UI_PREREQUISITE_RETURN_V1=source=$returnSource;tree=$returnTree;run=$returnRun;attempt=1;owner=ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract;exit=$returnExit;wait=returned;receipt=write-flush-dispose-returned;end=1`n"
+              if ($prerequisiteReturnLine.Length -gt 319 -or $prerequisiteReturnLine.Length -gt 512) { $prerequisiteReturnLine = $null }
+            } catch { $prerequisiteReturnLine = $null }
+            if ($null -ne $prerequisiteReturnLine) {
+              $prerequisiteReturnWriteReturned = $false
+              $prerequisiteReturnFlushReturned = $false
+              try { [Console]::Out.Write($prerequisiteReturnLine); $prerequisiteReturnWriteReturned = $true } catch { }
+              try { [Console]::Out.Flush(); $prerequisiteReturnFlushReturned = $true } catch { }
+            }
             $phase = 'expected-exit'
             if ($originalExitCode -ne 0) { throw 'expected-original-exit' }
             exit 0

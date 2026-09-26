@@ -2,7 +2,7 @@ name: Installed production shell verification
 
 on:
   push:
-    branches: [verify/desktop-installed-shell, verify/desktop-shell-host-metadata]
+    branches: [verify/desktop-installed-shell, verify/desktop-installed-github-readonly, verify/desktop-installed-github-normal-boundaries, verify/desktop-shell-host-metadata]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -36,7 +36,7 @@ jobs:
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
           case "$GITHUB_REF:$MRK_INSTALLED_SHELL_CASE" in
-            refs/heads/verify/desktop-installed-shell:compile|refs/heads/verify/desktop-shell-host-metadata:host-metadata-only) ;;
+            refs/heads/verify/desktop-installed-shell:compile|refs/heads/verify/desktop-installed-github-readonly:compile|refs/heads/verify/desktop-installed-github-normal-boundaries:compile|refs/heads/verify/desktop-shell-host-metadata:host-metadata-only) ;;
             *) exit 70 ;;
           esac
       - name: Check out exact reviewed source without credentials
@@ -45,7 +45,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Select the fixed frontend compiler
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
@@ -482,7 +482,7 @@ jobs:
       # this is forward-only disposable-host preparation, not native qualification.
       - name: Establish only the reviewed forward glibc tuple set
         id: glibc
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
         timeout-minutes: 8
         shell: bash
         env:
@@ -540,14 +540,14 @@ jobs:
             MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" MRK_INSTALLED_SHELL_CASE="$MRK_INSTALLED_SHELL_CASE" \
             ImageOS="$ImageOS" ImageVersion="$ImageVersion" /usr/bin/python3.12 -I -S -B desktop/tools/observe_hosted_python.py
       - name: Prepare a fresh bounded compiler owner
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
         id: prepare
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       - name: Download the exact accepted A runtime as DATA
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
@@ -556,8 +556,11 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
+      # The fixed normal-boundaries ref first retains read-only host material in
+      # this SAME consumer. Its SOURCE host tuple gate is closed until reviewed;
+      # no runtime hashes, nft installation, DNS warm-up or normal HTTP opens it.
       - name: Compile the normal shell and separate observer once without executing either
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
         id: compile
         shell: bash
         env:
@@ -566,11 +569,11 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a0d77a66f50766b53981d7b4591baa382ad0109fc0f2cc045cd2d0f260b3f4bb'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'f86e48c327ba760735d372bae860b6b1b786fe3efc6e3ce96776286ae10087bc'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
-        if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare.outputs.root != ''
+        if: always() && (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-installed-shell-compile-${{ github.run_id }}-${{ github.run_attempt }}
@@ -580,7 +583,7 @@ jobs:
           compression-level: 1
 
       - name: Require the fixed disposable native route
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         shell: bash
         env:
           MRK_INSTALLED_SHELL_CASE: observe
@@ -591,7 +594,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell || "$GITHUB_REF" == refs/heads/verify/desktop-installed-github-readonly || "$GITHUB_REF" == refs/heads/verify/desktop-installed-github-normal-boundaries ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
           [[ "$MRK_INSTALLED_SHELL_CASE" == observe ]]
           /usr/bin/python3.12 -I -S -B - <<'PY'
@@ -604,7 +607,7 @@ jobs:
               raise SystemExit('Original compiler roster/producer attempt differs')
           PY
       - name: Observe only the hosted Python body as public DATA
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         timeout-minutes: 1
         shell: bash
         env:
@@ -622,7 +625,7 @@ jobs:
             MRK_PUSH_EVENT_AFTER="$MRK_PUSH_EVENT_AFTER" MRK_INSTALLED_SHELL_CASE="$MRK_INSTALLED_SHELL_CASE" \
             ImageOS="$ImageOS" ImageVersion="$ImageVersion" /usr/bin/python3.12 -I -S -B desktop/tools/observe_hosted_python.py
       - name: Prepare a fresh bounded native owner
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         id: prepare_native
         shell: bash
         env:
@@ -630,7 +633,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       - name: Download this run's exact original compiled shell outputs
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
@@ -640,7 +643,7 @@ jobs:
           path: ${{ steps.prepare_native.outputs.root }}/work/admitted-shell
           merge-multiple: true
       - name: Download independently accepted U packages and original evidence
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
@@ -651,7 +654,7 @@ jobs:
           path: ${{ steps.prepare_native.outputs.root }}/work/admitted-u
           merge-multiple: true
       - name: Observe only the fixed installed shell route with original finality
-        if: github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
+        if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'
         shell: bash
         env:
           MRK_INSTALLED_SHELL_CASE: observe
@@ -663,7 +666,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a0d77a66f50766b53981d7b4591baa382ad0109fc0f2cc045cd2d0f260b3f4bb'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'f86e48c327ba760735d372bae860b6b1b786fe3efc6e3ce96776286ae10087bc'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
@@ -707,7 +710,7 @@ jobs:
             os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','-B',str(r/'entry.py'),'unit-start'])
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell
       - name: Retain only original public evidence for this shell observation
-        if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare_native.outputs.root != ''
+        if: always() && (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries') && steps.prepare_native.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-installed-shell-native-${{ github.run_id }}-${{ github.run_attempt }}

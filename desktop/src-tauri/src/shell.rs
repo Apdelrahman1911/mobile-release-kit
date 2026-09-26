@@ -697,24 +697,36 @@ async fn github_connection_status(webview: Webview, request: tauri::ipc::Request
     let body = github_connection_body(&webview, &request)?;
     github_connection_wire::decode_command_value("github_connection_status", body)
         .map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))?;
-    Ok(state.document.github_connection_status())
+    let result = Ok(state.document.github_connection_status());
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Status, &result); }
+    result
 }
 #[tauri::command]
 async fn github_connection_connect_token(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
     // No await before native synchronous registration. Qualification/admission
     // is checked by that SAME document gate before its decoder copies a token.
-    state.document.github_connection_connect_token(github_connection_body(&webview, &request)?)
+    let result = state.document.github_connection_connect_token(github_connection_body(&webview, &request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Connect, &result); }
+    result
 }
 #[tauri::command]
 async fn github_connection_refresh(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
-    state.document.github_connection_refresh(github_connection_body(&webview, &request)?)
+    let result = state.document.github_connection_refresh(github_connection_body(&webview, &request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Refresh, &result); }
+    result
 }
 #[tauri::command]
 async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
-    state.document.github_connection_disconnect(github_connection_body(&webview, &request)?)
+    let result = state.document.github_connection_disconnect(github_connection_body(&webview, &request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Disconnect, &result); }
+    result
 }
 
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
@@ -986,6 +998,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             let status = document.status();
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
             let status = document.github_connection_status();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
             let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
             if let Ok(status) = document.environment_diagnostics_status() {
                 if diagnostics_revision != Some(status.status_revision) {
@@ -1062,6 +1076,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
             // business operation. Windows extends this SAME finality path with
             // retained original-STA controller/browser/UDF cleanup below.
             if document.can_exit() {
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() {
+                    if !q.github_exit(&app).await || !document.can_exit() { return; }
+                }
                 if !settle_relay(&app).await || !document.can_exit() { return; }
                 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
                 if !owned_windows::settle_for_exit(&app, &document).await || !document.can_exit() { return; }
@@ -1523,7 +1541,7 @@ mod owned_gtk {
 
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    fn observed_path_dialog(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<Option<(u32,gtk::FileChooserDialog)>,()> {
+    fn observed_path_dialog(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<Option<(u32,gtk::FileChooserDialog,bool)>,()> {
         use installed_observation::PathRejection as R;
         if !gtk::is_initialized_main_thread() { q.path_failed(R::GtkThread); return Err(()); }
         let original = DIALOG.with(|book| {
@@ -1548,7 +1566,7 @@ mod owned_gtk {
         let original_facts = call.facts().is_some_and(|f| f.created && f.showing && !f.constructing && !f.not_created
             && !f.response && !f.destroyed && !f.released && f.refusal.is_none());
         if !original_facts { q.path_failed(R::GtkOwnerFacts); return Err(()); }
-        let (field,initial) = q.path_dialog(id,index)?;
+        let (field,initial,parent_navigation_reserved) = q.path_dialog(id,index)?;
         let title = match field {
             asset_commands::ProjectPathField::VersionSource => "Choose an existing version source inside the project",
             asset_commands::ProjectPathField::IosProject => "Choose an existing Xcode project directory",
@@ -1569,36 +1587,83 @@ mod owned_gtk {
             let Some(folder) = dialog.current_folder() else { q.path_wait(installed_observation::PathWait::InitialFolderAbsent); return Ok(None); };
             if Some(folder.as_path()) != q.project_path() { q.path_failed(R::GtkInitialFolder); return Err(()); }
         }
-        Ok(Some((id,dialog)))
+        Ok(Some((id,dialog,parent_navigation_reserved)))
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn select_observed_path(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool,()> {
-        use installed_observation::PathRejection as R;
-        let Some((id,dialog)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
+        use installed_observation::{PathRejection as R, PathWait as W, SessionPickerReadiness as P,
+            SessionPickerFolder as F, SessionPickerSelection as S};
+        let Some((id,dialog,parent_navigation_reserved)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
         let Some(path) = q.path_target(index) else { q.path_failed(R::GtkTarget); return Err(()); };
-        q.path_selection(id,index)?;
-        // Navigate into directory targets, as for the original folder picker.
-        // A setter return still cannot replace the activation's exact GFile check.
-        let selected = match dialog.property::<gtk::FileChooserAction>("action") {
-            gtk::FileChooserAction::SelectFolder => dialog.set_current_folder(path),
-            gtk::FileChooserAction::Open => dialog.set_filename(path),
+        match dialog.property::<gtk::FileChooserAction>("action") {
+            gtk::FileChooserAction::SelectFolder => {
+                q.path_selection(id,index)?;
+                if !dialog.set_current_folder(path) { q.path_failed(R::GtkSelectionSetter); return Err(()); }
+            },
+            gtk::FileChooserAction::Open => {
+                let Some(parent) = path.parent() else { q.path_failed(R::GtkTarget); return Err(()); };
+                if !parent_navigation_reserved {
+                    // One reserved navigation, outside every observer/GUI lock.
+                    // Later Set callbacks only wait; they never replay this setter.
+                    q.path_parent_navigation(id,index)?;
+                    if !dialog.set_current_folder(parent) { q.path_failed(R::GtkSelectionSetter); return Err(()); }
+                    return Ok(false);
+                }
+                let target_file = gtk::gio::File::for_path(&path);
+                let parent_file = gtk::gio::File::for_path(parent);
+                let mapped = dialog.is_mapped();
+                let current_folder = dialog.current_folder_file();
+                let parent_ready = current_folder.as_ref().is_some_and(|file| file.equal(&parent_file));
+                let folder = if parent_ready { F::TargetParent } else if current_folder.is_none() { F::Absent } else { F::Other };
+                let selected = match dialog.file() {
+                    None => S::Absent,
+                    Some(file) if file.equal(&target_file) => S::Target,
+                    Some(file) if file.equal(&parent_file) => S::TargetParent,
+                    Some(_) => S::Other,
+                };
+                let picker = P::Sampled { mapped, folder, selected };
+                // These raw GTK predicates authorize selection, never its DATA token.
+                if !mapped { q.path_file_wait(W::Unmapped,picker); return Ok(false); }
+                if current_folder.is_none() { q.path_file_wait(W::TargetParentAbsent,picker); return Ok(false); }
+                if !parent_ready { q.path_file_wait(W::TargetParentDifferent,picker); return Ok(false); }
+                q.path_file_wait(W::NotSampled,picker);
+                q.path_selection(id,index)?;
+                if dialog.select_file(&target_file).is_err() { q.path_failed(R::GtkSelectionSetter); return Err(()); }
+            },
             _ => { q.path_failed(R::GtkDialogProperties); return Err(()); },
-        };
-        if !selected { q.path_failed(R::GtkSelectionSetter); return Err(()); }
+        }
+        // Neither setter success substitutes for activation's exact GFile check.
         Ok(true)
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn activate_observed_path(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool,()> {
-        use installed_observation::PathRejection as R;
-        use installed_observation::PathWait as W;
-        let Some((id,dialog)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
+        use installed_observation::{PathRejection as R, PathWait as W, SessionPickerReadiness as P,
+            SessionPickerFolder as F, SessionPickerSelection as S};
+        let Some((id,dialog,_)) = observed_path_dialog(app,q,index)? else { return Ok(false); };
         let target = q.path_target(index);
         let select = target.is_some();
+        let mut picker = P::NotSampled;
         if let Some(path) = target {
-            // Observer-only readiness, not a filename transfer or identity proof.
-            // A setter return or sensitive button can precede GTK's selection.
-            let Some(file) = dialog.file() else { q.path_wait(W::SelectionAbsent); return Ok(false); };
-            if !file.equal(&gtk::gio::File::for_path(&path)) { q.path_wait(W::SelectionDifferent); return Ok(false); }
+            // Ordered passive getters, not a filename transfer or identity proof.
+            // Keep the original selected-GFile predicate as activation authority.
+            let mapped = dialog.is_mapped();
+            let parent = path.parent().map(gtk::gio::File::for_path);
+            let folder = match dialog.current_folder_file() {
+                None => F::Absent,
+                Some(file) if parent.as_ref().is_some_and(|target| file.equal(target)) => F::TargetParent,
+                Some(_) => F::Other,
+            };
+            let Some(file) = dialog.file() else {
+                picker = P::Sampled { mapped, folder, selected:S::Absent };
+                q.path_file_wait(W::SelectionAbsent,picker); return Ok(false);
+            };
+            if !file.equal(&gtk::gio::File::for_path(&path)) {
+                let selected = if parent.as_ref().is_some_and(|target| file.equal(target)) { S::TargetParent } else { S::Other };
+                picker = P::Sampled { mapped, folder, selected };
+                q.path_file_wait(W::SelectionDifferent,picker); return Ok(false);
+            }
+            picker = P::Sampled { mapped, folder, selected:S::Target };
+            q.path_file_wait(W::NotSampled,picker);
         }
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
         let button = match dialog.widget_for_response(response).and_then(|widget| widget.downcast::<gtk::Button>().ok()) {
@@ -1607,7 +1672,7 @@ mod owned_gtk {
         };
         if !button.is_visible() || dialog.response_for_widget(&button) != response
             || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { q.path_failed(R::GtkActionWidget); return Err(()); }
-        if !button.is_sensitive() { q.path_wait(W::ResponseInsensitive); return Ok(false); }
+        if !button.is_sensitive() { q.path_file_wait(W::ResponseInsensitive,picker); return Ok(false); }
         q.path_activation(id,index)?;
         button.emit_clicked(); Ok(true)
     }
@@ -2063,9 +2128,12 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         .setup(move |app| {
             diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n");
             let resources = app.path().resource_dir()?;
-            let bridge = Arc::new(DesktopBridge::new(resources));
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             let observation = app.try_state::<Arc<installed_observation::Observation>>().map(|q| q.inner().clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let bridge = Arc::new(match &observation { Some(q) => q.build_bridge(resources)?, None => DesktopBridge::new(resources) });
+            #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            let bridge = Arc::new(DesktopBridge::new(resources));
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             if let Some(q) = &observation { q.attach(&bridge.supervisor)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

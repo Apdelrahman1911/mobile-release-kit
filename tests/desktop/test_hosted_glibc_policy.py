@@ -108,6 +108,8 @@ class HostedGlibcPolicyContracts(unittest.TestCase):
                   "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": repository,
                   "GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40,
                   "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1"}
+        self.assertEqual({row for row in S.ROUTES if row[0] == "refs/heads/verify/desktop-installed-github-readonly"},
+                         {("refs/heads/verify/desktop-installed-github-readonly", "compile", "compile")})
         for ref, job, case in S.ROUTES:
             env = {**common, "GITHUB_REF": ref, "GITHUB_JOB": job,
                    "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref}
@@ -158,13 +160,15 @@ class HostedGlibcPolicyContracts(unittest.TestCase):
                "GITHUB_JOB": "compile", "ImageOS": "ubuntu24",
                "ImageVersion": "20260920.314.1",
                "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref}
-        for case in ("compile", "observe"):
-            env["MRK_INSTALLED_SHELL_CASE"] = case
-            self.assertEqual(observer.context(env)["GITHUB_JOB"], env["GITHUB_JOB"])
-            for change in ({"GITHUB_JOB": "native"}, {"GITHUB_REF": "refs/heads/main"},
-                           {"GITHUB_WORKFLOW_SHA": "b" * 40}, {"RUNNER_ENVIRONMENT": "self-hosted"}):
-                with self.subTest(change=change), self.assertRaises(observer.Refused):
-                    observer.context({**env, **change})
+        for ref in ("refs/heads/verify/desktop-installed-shell", "refs/heads/verify/desktop-installed-github-readonly"):
+            env.update(GITHUB_REF=ref, GITHUB_WORKFLOW_REF=repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref)
+            for case in ("compile", "observe"):
+                env["MRK_INSTALLED_SHELL_CASE"] = case
+                self.assertEqual(observer.context(env)["GITHUB_JOB"], env["GITHUB_JOB"])
+                for change in ({"GITHUB_JOB": "native"}, {"GITHUB_REF": "refs/heads/main"},
+                               {"GITHUB_WORKFLOW_SHA": "b" * 40}, {"RUNNER_ENVIRONMENT": "self-hosted"}):
+                    with self.subTest(ref=ref, case=case, change=change), self.assertRaises(observer.Refused):
+                        observer.context({**env, **change})
         # A genuine U context, with or without a supplied shell case, is refused.
         u_ref = "refs/heads/verify/desktop-ubuntu-publication"
         u_env = {**env, "GITHUB_REF": u_ref, "GITHUB_JOB": "publisher-helpers",

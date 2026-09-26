@@ -44,6 +44,10 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
     passive_installed: PassiveInstalledSelection,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_session: InstalledSessionSelection,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_observation: Option<GitHubReadOnlyObservationProfile>,
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
     windows_passive: windows_version::Selection,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -246,6 +250,64 @@ impl GitHubWorkflowInstalledProfile {
         let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
             .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Separate session-only GitHub selection DATA. The normal installed selector
+// binds the unchanged core/bootstrap/real CA; workflow, passive, development TLS
+// or credential-asset qualification never grants this network-read domain.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubReadOnlyInstalledProfile {
+    _private: (),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<GitHubReadOnlyObservationProfile>,
+}
+
+// Private installed-observer DATA only, never a renderer/argv/environment
+// endpoint, trust or enable switch. Each D manifest is independently inventoried;
+// ordinary configurations always select N even in an observation binary.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubReadOnlyObservationProfile { Normal, DialRealCa, DialSyntheticCa }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReadOnlyObservationProfile {
+    pub(crate) fn manifest_sha256(self) -> &'static str {
+        match self {
+            Self::Normal => PassiveInstalledProfile::MANIFEST,
+            Self::DialRealCa => "5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90",
+            Self::DialSyntheticCa => "fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359",
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReadOnlyInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol) // Exact normal payload DATA only.
+    }
+    pub(crate) fn manifest_anchor(&self) -> Result<&'static str, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.observation { return Ok(profile.manifest_sha256()); }
+        Ok(PassiveInstalledProfile::MANIFEST)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        let manifest = self.manifest_anchor()?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_connection_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
@@ -570,6 +632,10 @@ impl RuntimeConfig {
         },
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         installed_session: InstalledSessionSelection::new(),
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        github_observation: None,
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         environment_fixture_core: None,
@@ -801,6 +867,45 @@ impl RuntimeConfig {
         // The registered original worker borrows its domain-bound slots. The
         // returned paths are DATA; they cannot carry the ledger or spawn.
         originals.inspect_once(self.github_workflow_installed_profile()?, end, stop)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn select_github_readonly_observation(&mut self, profile: GitHubReadOnlyObservationProfile) -> Result<(), BridgeError> {
+        // Setup DATA before this config is moved into the original Supervisor.
+        // Keep normal N discovery/catalogue/project registration unchanged.
+        self.github_readonly_installed_profile()?;
+        if self.github_observation.is_some() { return Err(unavailable()); }
+        self.github_observation = Some(profile);
+        Ok(())
+    }
+    /// Session-only GitHub uses the SAME sealed selector for UI capability and
+    /// original Supervisor admission. No asset-vault or publisher registration.
+    pub(crate) fn github_readonly_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.github_readonly_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_readonly_installed_profile(&self) -> Result<GitHubReadOnlyInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubReadOnlyInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubReadOnlyInstalledProfile { _private: (),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: self.github_observation,
+            });
+        }
+        Err(BridgeError::unavailable("The installed GitHub read-only runtime and TLS profile are not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_readonly_installed(&self, originals: &mut crate::installed_runtime::GitHubReadOnlyRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // Original inspection worker only. Paths are DATA, never native custody.
+        originals.inspect_once(self.github_readonly_installed_profile()?, end, stop)
     }
     /// SAME sealed metadata selector for capability and original-owner admission.
     /// Neither another edit profile nor a feature-off native test can select it.
@@ -1295,6 +1400,71 @@ mod tests {
     fn production_gate_does_not_open_even_a_missing_bundle() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/this-path-must-not-be-opened"));
         assert_eq!(runtime.resolve(Instant::now() + std::time::Duration::from_secs(1)).err().map(|error| error.code), Some("runtime_unavailable".into()));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_installed_selection_is_exact_normal_data_not_the_development_tls_gate() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-installed-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && GitHubReadOnlyInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        assert_eq!(runtime.github_readonly_installed_profile_available(), expected);
+        let profile = runtime.github_readonly_installed_profile();
+        assert_eq!(profile.is_ok(), expected);
+        assert!(GitHubReadOnlyInstalledProfile::bindings_match(PassiveInstalledProfile::TARGET,
+            Some(PassiveInstalledProfile::MANIFEST), Some(PassiveInstalledProfile::PROTOCOL)));
+        for (target, manifest, protocol) in [
+            ("aarch64-apple-darwin", Some(PassiveInstalledProfile::MANIFEST), Some(PassiveInstalledProfile::PROTOCOL)),
+            (PassiveInstalledProfile::TARGET, Some("0000000000000000000000000000000000000000000000000000000000000000"), Some(PassiveInstalledProfile::PROTOCOL)),
+            (PassiveInstalledProfile::TARGET, Some(PassiveInstalledProfile::MANIFEST), None),
+        ] { assert!(!GitHubReadOnlyInstalledProfile::bindings_match(target, manifest, protocol)); }
+        if let Ok(profile) = profile {
+            let selected = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
+                .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(selected.bootstrap, root.join("github_connection_bootstrap.py"));
+            assert_eq!(selected.python, root.join("python/bin/python3"));
+            assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        } else {
+            // Closed selection performs no native inspection, and cannot mint a
+            // capability from a path, passive profile, or the legacy TLS flag.
+            let mut slots = crate::installed_runtime::GitHubReadOnlyRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_readonly_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_installed_observation_keeps_normal_discovery_and_rejects_derivatives_in_normal_selection() {
+        for selected in [GitHubReadOnlyObservationProfile::Normal, GitHubReadOnlyObservationProfile::DialRealCa,
+            GitHubReadOnlyObservationProfile::DialSyntheticCa] {
+            let mut runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-observation-data-only"));
+            let normal = RuntimeConfig::packaged(PathBuf::from("/inert-normal-github-data-only"));
+            if !GitHubReadOnlyInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+                assert!(runtime.select_github_readonly_observation(selected).is_err());
+                assert!(!runtime.github_readonly_installed_profile_available());
+                continue;
+            }
+            assert!(runtime.select_github_readonly_observation(selected).is_ok());
+            assert!(runtime.select_github_readonly_observation(selected).is_err());
+            let profile = runtime.github_readonly_installed_profile().unwrap();
+            assert_eq!(profile.manifest_anchor().unwrap(), selected.manifest_sha256());
+            assert_eq!(profile.selection().unwrap().cwd, PathBuf::from("/var/lib/mobile-release-kit/versions")
+                .join(PassiveInstalledProfile::TARGET).join(selected.manifest_sha256()));
+            assert_eq!(normal.github_readonly_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+            assert_eq!(runtime.passive_installed_profile().unwrap().selection().unwrap().cwd,
+                normal.passive_installed_profile().unwrap().selection().unwrap().cwd);
+        }
+        for selected in [GitHubReadOnlyObservationProfile::DialRealCa, GitHubReadOnlyObservationProfile::DialSyntheticCa] {
+            assert!(!GitHubReadOnlyInstalledProfile::bindings_match(PassiveInstalledProfile::TARGET,
+                Some(selected.manifest_sha256()), Some(PassiveInstalledProfile::PROTOCOL)));
+        }
     }
     #[test]
     fn github_profile_gate_refuses_before_inventory_or_development_selection() {

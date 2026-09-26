@@ -80,6 +80,8 @@ pub struct Dialog {
     title: Vec<u16>, instruction: Vec<u16>, content: Vec<u16>,
     #[cfg(feature = "windows-installed-observation")]
     folder: FolderAction,
+    #[cfg(feature = "windows-installed-observation")]
+    quit_action: QuitAction,
 }
 impl Dialog {
     pub fn new(kind: DialogKind, control: Arc<DialogControl>, on_event: Box<dyn Fn(DialogEvent)>) -> Self {
@@ -97,6 +99,8 @@ impl Dialog {
             content: wide("Unsaved in-memory changes will be lost. Choose Cancel to keep working, or OK to stop this application's operations and wait for cleanup before quitting. Quitting does not undo completed file changes."),
             #[cfg(feature = "windows-installed-observation")]
             folder: FolderAction::new(),
+            #[cfg(feature = "windows-installed-observation")]
+            quit_action: QuitAction::new(),
         }
     }
     fn event(&self, event: DialogEvent) {
@@ -366,6 +370,7 @@ impl Dialog {
     #[cfg(feature = "windows-installed-observation")]
     pub fn installed_action(&self, action: DialogAction<'_>) -> UiResult<bool> {
         self.check()?;
+        if self.kind == DialogKind::Quit { self.quit_action.check()?; }
         if !self.created.get() || !self.showing.get() || self.show_returned.get() || self.response.get().is_some()
             || self.control.stopped.load(Ordering::SeqCst) || self.close_entered.get() || self.settled.get() {
             return Err(UiError::State);
@@ -395,6 +400,24 @@ impl Dialog {
             self.folder_readback(0)?; return Ok(true);
         }
         let accept = matches!(action, DialogAction::Accept);
+        if self.kind == DialogKind::Quit {
+            // TDN_CREATED's original TaskDialog owns logical common-button
+            // IDs. This path never guesses its private native child layout.
+            self.check()?;
+            if self.native_window()? != Some(window) || self.task.get() != window
+                || unsafe { W::IsWindowVisible(window) } == 0 { return Err(UiError::State); }
+            self.check()?;
+            if !self.created.get() || self.task_destroyed.get() || !self.showing.get() || self.show_returned.get()
+                || self.response.get().is_some() || self.control.stopped.load(Ordering::SeqCst)
+                || self.close_entered.get() || self.settled.get() { return Err(UiError::State); }
+            return self.quit_action.request(|| {
+                // Entry consumes the one-shot latch before any reentrant call.
+                // The send result is not a response, Show-return or finality fact.
+                unsafe { W::SendMessageW(window, C::TDM_CLICK_BUTTON as u32,
+                    if accept { W::IDOK as usize } else { W::IDCANCEL as usize }, 0); }
+                self.check()
+            });
+        }
         if accept && self.kind == DialogKind::Project { self.folder_readback(1)?; }
         let button = unsafe { W::GetDlgItem(window, if accept { W::IDOK } else { W::IDCANCEL }) };
         let mut process = 0;

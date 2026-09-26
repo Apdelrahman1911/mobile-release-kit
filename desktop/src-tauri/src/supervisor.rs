@@ -22,6 +22,8 @@ use crate::{error::BridgeError, github_connection_protocol::{self as github_prot
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{AdmissionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::installed_runtime::GitHubReadOnlyRuntimeSlots;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 
@@ -36,6 +38,12 @@ const ACTIVE_LIMIT: usize = 2;
 #[cfg(all(test, feature = "development-runtime"))]
 #[path = "hosted_tests.rs"]
 mod hosted_tests;
+#[cfg(all(test, debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    any(feature = "development-runtime", all(feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
+#[path = "github_tls_peer_owner.rs"]
+pub(crate) mod github_tls_peer_owner;
+
 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitHubDocumentFixturePermit, GitHubFixtureRuntime};
 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -379,6 +387,8 @@ struct Resources {
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_readonly: Option<Arc<Mutex<GitHubReadOnlyRuntimeSlots>>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
@@ -565,6 +575,7 @@ impl Supervisor {
     }
     pub fn runtime_mode(&self) -> &'static str { self.inner.runtime.mode() }
     pub(crate) fn passive_method_available(&self, name: &str) -> bool { self.inner.runtime.passive_method_available(name) }
+    pub(crate) fn github_readonly_profile_available(&self) -> bool { self.inner.runtime.github_readonly_installed_profile_available() }
     pub(crate) fn bind_original_session_document(&self, identity: &Arc<()>) { self.inner.runtime.bind_original_session_document(identity); }
     pub(crate) fn installed_session_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_session_available(identity) }
     pub fn disabled(&self) -> bool { self.inner.disabled.load(Ordering::SeqCst) }
@@ -623,6 +634,10 @@ impl Supervisor {
                 passive: if passive_selected(profile) {
                     Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())))
                 } else { None },
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                github_readonly: if github_installed_selected(profile) {
+                    Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())))
+                } else { None },
                 ..Resources::default()
             }), stop, changed: Notify::new(),
             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -641,6 +656,12 @@ impl Supervisor {
             if self.stopping() { return Err(BridgeError::shutdown()); }
             if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
             owners.insert(key, owner.clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if matches!(owner.profile, Profile::GitHubReadOnly) {
+                if let Some(witness) = lock(&self.inner.native_test.github).as_ref() { witness.register(&owner); }
+            }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
                 target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
                 not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
@@ -908,6 +929,16 @@ fn passive_selected(profile: Profile) -> bool {
     cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")), not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::Passive(_))
 }
+fn github_installed_selected(profile: Profile) -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(all(feature = "development-runtime", debug_assertions))))
+        && matches!(profile, Profile::GitHubReadOnly)
+}
+fn github_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
+    stopping: bool, disabled: bool, stop: bool) -> bool {
+    original && matches!(profile, Profile::GitHubReadOnly) && !state.terminal && !state.unknown && state.error.is_none()
+        && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+}
 fn passive_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
     stopping: bool, disabled: bool, stop: bool) -> bool {
     original && matches!(profile, Profile::Passive(_)) && !state.terminal && !state.unknown && state.error.is_none()
@@ -933,6 +964,10 @@ fn passive_worker_lost(resources: &Resources) {
     // Only called AFTER this original inspection/acquisition/settlement worker
     // returned JoinError. Never race a pending borrower because a clock expired.
     if let Some(native) = &resources.passive {
+        match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(native) = &resources.github_readonly {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
 }
@@ -1052,28 +1087,136 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     result // Never discard a returned original Child because restoration failed.
 }
 
-async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
+// Closed dispatch over the same registered originals, NOT another owner or
+// settlement task. The passive and GitHub books cannot stand in for each other.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+enum InstalledSettlementSlots {
+    Passive(Arc<Mutex<PassiveRuntimeSlots>>),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    GitHubReadOnly(Arc<Mutex<GitHubReadOnlyRuntimeSlots>>),
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        if github_installed_selected(profile) {
+            if resources.passive.is_some() { return Err(BridgeError::cleanup_unknown()); }
+            return resources.github_readonly.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubReadOnly(slots.clone())))
+                .ok_or_else(BridgeError::cleanup_unknown);
+        }
+        if resources.github_readonly.is_some() { return Err(BridgeError::cleanup_unknown()); }
+    }
+    if passive_selected(profile) {
+        return resources.passive.as_ref().map(|slots| Some(InstalledSettlementSlots::Passive(slots.clone())))
+            .ok_or_else(BridgeError::cleanup_unknown);
+    }
+    if resources.passive.is_some() { return Err(BridgeError::cleanup_unknown()); }
+    Ok(None) // Explicitly unselected domain; never a missing required book.
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+impl InstalledSettlementSlots {
+    fn no_child_state(&self) -> Option<(bool, bool)> {
+        match self {
+            Self::Passive(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubReadOnly(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+        }
+    }
+    fn settle_originals(&self) -> CloseOutcome {
+        match self {
+            Self::Passive(native) => match native.lock() {
+                Ok(mut slots) => slots.settle_originals(),
+                Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+            },
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubReadOnly(native) => match native.lock() {
+                Ok(mut slots) => slots.settle_originals(),
+                Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+            },
+        }
+    }
+    fn settled(&self) -> bool {
+        match self {
+            Self::Passive(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubReadOnly(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+        }
+    }
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
+    match installed_settlement_slots(resources, owner.profile)? {
+        Some(InstalledSettlementSlots::Passive(_)) => transfer_passive(resources, inner, owner),
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Some(InstalledSettlementSlots::GitHubReadOnly(native)) => {
+            let (inspection, acquisition) = passive_borrows(resources);
+            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
+                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
+            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let owners = lock(&inner.owners); let state = lock(&owner.state);
+            if !github_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+            }
+            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+        },
+        None => Ok(()),
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    // THIS retained original acquisition borrows the domain-fixed book. Nothing
+    // takes caller-supplied Command/path data or transfers custody to a new task.
+    let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub read-only original custody is unavailable"))?;
+    let runtime = slots.capability().map_err(AcquisitionError::capability)?;
+    let stop = owner.stop.subscribe();
+    let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let owners = lock(&inner.owners); let state = lock(&owner.state);
+    if !github_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        return Err(AcquisitionError::unsupported("GitHub read-only original claim is no longer available"));
+    }
+    runtime.claim_once().map_err(AcquisitionError::final_claim)?;
+    drop(state); drop(owners);
+    // No await/callback/IO between the final one-use claim and creation. An
+    // opaque spawn error is NOT proof no child/pipe existed: retain Unknown.
+    command.spawn().map_err(AcquisitionError::returned_spawn)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
+fn acquire_github_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    Err(AcquisitionError::unsupported("The installed GitHub read-only runtime is unavailable in this profile"))
+}
+
+async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
     { let _ = (resources, inner, owner); true }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     {
         #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if resources.native_observation.is_some() { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
-        let Some(native) = resources.passive.clone() else {
-            if passive_selected(owner.profile) { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
-            return true; // Explicitly unselected domain/profile, never a missing required book.
+        let native = match installed_settlement_slots(resources, owner.profile) {
+            Ok(Some(native)) => native, Ok(None) => return true,
+            Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
         };
         let (inspection, acquisition) = passive_borrows(resources);
         if !inspection.returned() || !acquisition.returned() { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
         if !resources.native_started {
             let no_child = {
-                let slots = match native.try_lock() { Ok(slots) => slots, Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; } };
+                let Some((never_started, no_child)) = native.no_child_state() else {
+                    owner_unknown!(owner, inner, Some(&*resources), Settlement); return false;
+                };
                 // Closed profile, or STOP before any worker was created: actual
                 // original-return/no-worker records AND a never-started empty book.
-                if passive_never_started_clear(inspection, acquisition, slots.never_started()) {
+                if passive_never_started_clear(inspection, acquisition, never_started) {
                     return true;
                 }
-                slots.no_child_effect()
+                no_child
             };
             let consumers_returned = if resources.child.is_none() { no_child } else {
                 resources.waited.is_some() && resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
@@ -1082,15 +1225,14 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
                     && resources.err_end.as_ref().is_some_and(|end| end.eof)
             };
             if !consumers_returned { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; }
-            let closing = native.clone();
+            let closing = match installed_settlement_slots(resources, owner.profile) {
+                Ok(Some(slots)) => slots, _ => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
+            };
             let (release, enter) = oneshot::channel();
             resources.native_started = true;
             resources.native_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
-                match closing.lock() {
-                    Ok(mut slots) => slots.settle_originals(),
-                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
-                }
+                closing.settle_originals()
             }));
             let _ = release.send(()); // The original close handle is registered before its first effect.
         }
@@ -1103,7 +1245,7 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
         let positive = passive_completion_clear(inspection, acquisition, resources.native_started,
             resources.native_return.as_ref().is_some_and(Result::is_ok), resources.native_settlement.is_some(),
             matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled))),
-            native.try_lock().is_ok_and(|slots| slots.settled()));
+            native.settled());
         if !positive { owner_unknown!(owner, inner, Some(&*resources), Settlement); }
         positive
     }
@@ -1111,7 +1253,70 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
 
 async fn ready_after_custody(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>,
     result: Result<ReadOutcome, BridgeError>) -> DriverEnd {
-    if settle_passive(resources, inner, owner).await { DriverEnd::Ready(result) } else { DriverEnd::RetainedUnknown }
+    if settle_installed(resources, inner, owner).await { DriverEnd::Ready(result) } else { DriverEnd::RetainedUnknown }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+async fn join_installed_observation<T>(original: &mut Option<JoinHandle<T>>,
+    mut faults: Option<(&mut mpsc::Receiver<BridgeError>, &mut bool)>, mut fail: impl FnMut(BridgeError))
+    -> Result<T, tokio::task::JoinError> {
+    loop {
+        let Some((receiver, open)) = faults.as_mut() else { return join_slot(original).await; };
+        if !**open { return join_slot(original).await; }
+        tokio::select! {
+            // Service original I/O failures before a simultaneous observer
+            // completion. This cancels only a borrow, never the original task.
+            biased;
+            fault = receiver.recv() => match fault {
+                Some(error) => fail(error),
+                None => **open = false,
+            },
+            result = join_slot(original) => return result,
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+async fn observe_installed_original(resources: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Owner>,
+    observed_case: installed_native_fixture::Case,
+    faults: Option<(&mut mpsc::Receiver<BridgeError>, &mut bool)>) -> bool {
+    // One original observation slot and one checked join. Passive children are
+    // observed before I/O; GitHub needs its original request before ssl loads.
+    // Both calls precede every wait/reap of this exact retained Child.
+    let Some(id) = resources.child.as_ref().and_then(Child::id) else {
+        resources.native_observation_failure = Some(installed_native_fixture::ObservationFailure::ChildId);
+        owner_unknown!(owner, inner, Some(&*resources), NativeObserve); return false;
+    };
+    let observing_inner = inner.clone();
+    let observing_key = owner.key;
+    let observing_stop = owner.stop.subscribe();
+    let endpoint = owner.endpoint();
+    let observing_payload_history = resources.passive.as_ref().and_then(|native|
+        native.try_lock().ok().and_then(|slots| slots.historical_payload_snapshot()));
+    let (release, enter) = oneshot::channel();
+    resources.native_observation_return = Some(ManagementJoin::Pending);
+    resources.native_observation = Some(tokio::task::spawn_blocking(move || {
+        enter.blocking_recv().map_err(|_| installed_native_fixture::ObservationFailure::Entry)?;
+        installed_native_fixture::observe_original_child(id, observing_key, endpoint, observing_stop,
+            &observing_inner, observed_case, observing_payload_history)
+    }));
+    let _ = release.send(());
+    let result = join_installed_observation(&mut resources.native_observation, faults, |error| owner.fail(error)).await;
+    resources.native_observation_return = Some(match &result {
+        Ok(_) => ManagementJoin::Returned, Err(error) => ManagementJoin::error(error),
+    });
+    match result {
+        Ok(Ok(snapshots)) => { resources.native_observation.take(); resources.native_snapshots = snapshots; },
+        Ok(Err(failure)) => {
+            resources.native_observation_failure = Some(failure);
+            owner_unknown!(owner, inner, Some(&*resources), NativeObserve); return false;
+        },
+        Err(_) => { owner_unknown!(owner, inner, Some(&*resources), NativeObserve); return false; },
+    }
+    if Instant::now() >= endpoint { owner.fail(BridgeError::timeout()); }
+    true
 }
 
 enum Event { Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
@@ -1127,6 +1332,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let profile = owner.profile;
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_native = resources.passive.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let inspection_github = resources.github_readonly.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
@@ -1154,6 +1361,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 config.resolve(endpoint)?
             },
             Profile::GitHubReadOnly => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if github_installed_selected(profile) {
+                    let native = inspection_github.ok_or_else(BridgeError::cleanup_unknown)?;
+                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return config.resolve_github_readonly_installed(&mut originals, endpoint, &inspection_stop);
+                }
                 // The same original inspection and endpoint. This private
                 // test-only value exists only after the fixed hosted Case has
                 // bound its inputs; ordinary development retains the TLS gate.
@@ -1198,7 +1411,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             passive_worker_lost(&resources);
             owner_unknown!(owner, &inner, Some(&resources), Inspection);
-            let _ = settle_passive(&mut resources, &inner, &owner).await;
+            let _ = settle_installed(&mut resources, &inner, &owner).await;
             return DriverEnd::RetainedUnknown;
         }
     };
@@ -1207,7 +1420,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
     }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
-    if let Err(error) = transfer_passive(&resources, &inner, &owner) {
+    if let Err(error) = transfer_installed(&resources, &inner, &owner) {
         if error.code == "cleanup_unknown" { owner_unknown!(owner, &inner, Some(&resources), Transfer); }
         owner.fail(error.clone());
         return ready_after_custody(&mut resources, &inner, &owner, Err(error)).await;
@@ -1219,6 +1432,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let acquiring_inner = inner.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let acquisition_native = resources.passive.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let acquisition_github = resources.github_readonly.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
     let (acquire_start, acquire_enter) = oneshot::channel();
@@ -1245,6 +1460,14 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             };
             return acquire_passive_original(&acquiring_inner, &acquiring_owner, &native);
         }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if github_installed_selected(acquiring_owner.profile) {
+            let Some(native) = acquisition_github else {
+                owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
+                return Err(AcquisitionError::unsupported("original GitHub read-only custody is missing"));
+            };
+            return acquire_github_original(&acquiring_inner, &acquiring_owner, &native);
+        }
         spawn_original(runtime, acquiring_owner).map_err(AcquisitionError::from)
     }));
     let _ = acquire_start.send(());
@@ -1265,7 +1488,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             passive_worker_lost(&resources);
             owner_unknown!(owner, &inner, Some(&resources), Acquisition);
-            let _ = settle_passive(&mut resources, &inner, &owner).await;
+            let _ = settle_installed(&mut resources, &inner, &owner).await;
             return DriverEnd::RetainedUnknown;
         }
     };
@@ -1274,43 +1497,13 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     { lock(&owner.observation).spawned = true; }
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
-    if let Some(observed_case) = if passive_selected(profile) { inner.native_test.child_case(&owner) } else { None } {
-        // Same original Child, retained before the reader starts, and not yet
-        // offered to any wait/reaper. A lost read/close/join retains this slot.
-        let Some(id) = resources.child.as_ref().and_then(Child::id) else {
-            resources.native_observation_failure = Some(installed_native_fixture::ObservationFailure::ChildId);
-            owner_unknown!(owner, &inner, Some(&resources), NativeObserve); return DriverEnd::RetainedUnknown;
-        };
-        let observing_inner = inner.clone();
-        let observing_key = owner.key;
-        let observing_stop = owner.stop.subscribe();
-        // Same joined acquisition and retained Child. A failed nonblocking
-        // projection leaves only generic diagnostics, never a new authority.
-        let observing_payload_history = resources.passive.as_ref().and_then(|native|
-            native.try_lock().ok().and_then(|slots| slots.historical_payload_snapshot()));
-        let (release, enter) = oneshot::channel();
-        resources.native_observation_return = Some(ManagementJoin::Pending);
-        resources.native_observation = Some(tokio::task::spawn_blocking(move || {
-            enter.blocking_recv().map_err(|_| installed_native_fixture::ObservationFailure::Entry)?;
-            installed_native_fixture::observe_original_child(id, observing_key, endpoint, observing_stop, &observing_inner, observed_case, observing_payload_history)
-        }));
-        let _ = release.send(());
-        let result = join_slot(&mut resources.native_observation).await;
-        resources.native_observation_return = Some(match &result {
-            Ok(_) => ManagementJoin::Returned, Err(error) => ManagementJoin::error(error),
-        });
-        match result {
-            Ok(Ok(snapshots)) => { resources.native_observation.take(); resources.native_snapshots = snapshots; },
-            Ok(Err(failure)) => {
-                // Preserve only the formerly erased returned refusal, under
-                // this SAME already-held resource guard. Original handle,
-                // Unknown policy and subsequent settlement gates are unchanged.
-                resources.native_observation_failure = Some(failure);
-                owner_unknown!(owner, &inner, Some(&resources), NativeObserve); return DriverEnd::RetainedUnknown;
-            },
-            Err(_) => { owner_unknown!(owner, &inner, Some(&resources), NativeObserve); return DriverEnd::RetainedUnknown; },
+    let observed_case = inner.native_test.child_case(&owner); // Consume the original hook once.
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    if let Some(case) = observed_case.filter(|case| !case.after_io()) {
+        if !observe_installed_original(&mut resources, &inner, &owner, case, None).await {
+            return DriverEnd::RetainedUnknown;
         }
-        if Instant::now() >= endpoint { owner.fail(BridgeError::timeout()); }
     }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if matches!(profile, Profile::GitHubReadOnly) && inner.test.github_observe_environment.load(Ordering::SeqCst) {
@@ -1375,6 +1568,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let mut stop = owner.stop.subscribe();
     let mut stopped = false;
     let mut faults_open = true;
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    if let Some(case) = observed_case.filter(|case| case.after_io()) {
+        if !observe_installed_original(&mut resources, &inner, &owner, case,
+            Some((&mut fault_rx, &mut faults_open))).await { return DriverEnd::RetainedUnknown; }
+    }
     loop {
         if Instant::now() >= owner.endpoint() && !owner.failed() { owner.fail(BridgeError::timeout()); }
         if owner.failed() && !resources.kill_attempted && resources.waited.is_none() {
@@ -1467,13 +1666,18 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     }
     // Original child wait and IO/EOF evidence are still in Resources here.
     // Keep custody through them, then join its one explicit native settlement.
-    if !settle_passive(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+    if !settle_installed(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_passive_tests::observe_settled_io(&inner, &resources);
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
         target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_shell_observation::settled_io(&inner, &owner, &resources);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux",
+        target_arch = "x86_64", target_env = "gnu", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    if matches!(profile, Profile::GitHubReadOnly) {
+        if let Some(witness) = lock(&inner.native_test.github).as_ref() { witness.observe_settled_io(&owner, &resources); }
+    }
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {
@@ -1486,6 +1690,51 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let result = match output { Some(output) => profile.decode(&output.bytes, &owner.id), None => Err(BridgeError::protocol()) };
     if let Err(error) = &result { owner.fail(error.clone()); }
     DriverEnd::Ready(result)
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod github_installed_contract_tests {
+    use super::*;
+    #[test]
+    fn github_final_claim_never_accepts_passive_or_late_failed_stopping_owner() {
+        let now = Instant::now();
+        let mut state = OwnerState::new(now + OPERATION_TIME, None);
+        let clear = |state: &OwnerState, original, profile, at, stopping, disabled, stop|
+            github_claim_clear(original, profile, state, at, stopping, disabled, stop);
+        assert!(clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
+        assert!(!clear(&state, true, Profile::Passive(Method::Capabilities), now, false, false, false));
+        assert!(!passive_claim_clear(true, Profile::GitHubReadOnly, &state, now, false, false, false));
+        assert!(!clear(&state, false, Profile::GitHubReadOnly, now, false, false, false));
+        assert!(!clear(&state, true, Profile::GitHubReadOnly, state.endpoint, false, false, false));
+        for (stopping, disabled, stop) in [(true, false, false), (false, true, false), (false, false, true)] {
+            assert!(!clear(&state, true, Profile::GitHubReadOnly, now, stopping, disabled, stop));
+        }
+        state.fail_at(BridgeError::timeout(), now);
+        assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
+        state.error = None; // Negative data only: a cleanup endpoint is still disqualifying.
+        assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
+        state.cleanup_endpoint = None; state.unknown = true;
+        assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
+        state.unknown = false; state.terminal = true;
+        assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
+    }
+    #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+    #[test]
+    fn github_settlement_requires_exactly_its_original_book_not_a_passive_substitute() {
+        let mut resources = Resources::default();
+        assert!(installed_settlement_slots(&resources, Profile::GitHubReadOnly).is_err());
+        resources.passive = Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())));
+        assert!(installed_settlement_slots(&resources, Profile::GitHubReadOnly).is_err());
+        resources.github_readonly = Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())));
+        assert!(installed_settlement_slots(&resources, Profile::GitHubReadOnly).is_err());
+        assert!(installed_settlement_slots(&resources, Profile::Passive(Method::Capabilities)).is_err());
+        resources.passive = None;
+        assert!(matches!(installed_settlement_slots(&resources, Profile::GitHubReadOnly), Ok(Some(InstalledSettlementSlots::GitHubReadOnly(_)))));
+        assert!(installed_settlement_slots(&resources, Profile::Passive(Method::Capabilities)).is_err());
+        passive_worker_lost(&resources); // Original returned error only; no worker/native effect here.
+        let slots = resources.github_readonly.as_ref().unwrap().lock().unwrap();
+        assert!(!slots.never_started() && !slots.settled());
+    }
 }
 
 // Finite hosted fixtures only. Nothing in this module selects a runtime, grants
@@ -1501,6 +1750,8 @@ mod installed_native_fixture {
     const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417";
     #[derive(Clone, Copy, Default, Eq, PartialEq)]
     pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+        GitHub(crate::runtime::GitHubReadOnlyObservationProfile),
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionObserve,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionLoss,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionDeadline,
@@ -1520,10 +1771,17 @@ mod installed_native_fixture {
         pub shell_token_issued: AtomicBool,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
         pub session: Mutex<shell_shutdown_observation::SessionQueryBook>,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+        pub github: Mutex<Option<Arc<github_tls_peer_owner::installed::ProductWitness>>>,
     }
     impl Hooks {
         fn case(&self) -> Case { *lock(&self.case) }
         pub(super) fn child_case(&self, _owner: &Arc<Owner>) -> Option<Case> {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if matches!(_owner.profile, Profile::GitHubReadOnly) {
+                return lock(&self.github).as_ref().and_then(|witness| witness.original_profile(_owner)).map(Case::GitHub);
+            }
+            if !passive_selected(_owner.profile) { return None; }
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             if let Some(case) = shell_shutdown_observation::session_child_case(self, _owner) { return Some(case); }
             let case = self.case();
@@ -1582,6 +1840,29 @@ mod installed_native_fixture {
     pub(super) struct Mapping { role: String, path: String, device_major: u64, device_minor: u64, inode: u64 }
     #[derive(Debug, Eq, PartialEq)]
     pub(super) struct ChildObservation { maps: Vec<Mapping>, environment_clear: bool }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn snapshot_value(snapshot: &ChildObservation) -> Value { serde_json::json!(&snapshot.maps) }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn snapshot_clear(snapshot: &ChildObservation) -> bool { snapshot.environment_clear && snapshot.maps.len() == 6 }
+    impl Case {
+        pub(super) fn after_io(self) -> bool {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if matches!(self, Self::GitHub(_)) { return true; }
+            false
+        }
+        fn version(self) -> &'static str {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if let Self::GitHub(profile) = self {
+                use crate::runtime::GitHubReadOnlyObservationProfile as P;
+                return match profile {
+                    P::Normal => VERSION,
+                    P::DialRealCa => "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/5d72219627418eff823c05dd3cd0dafab809e3eabb7b36fceae6af6a70546e90",
+                    P::DialSyntheticCa => "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/fee9dc0ae76dbcd35065cc08c887477ee69f1d5b28aea4250531b59773209359",
+                };
+            }
+            VERSION
+        }
+    }
     // Frozen public ELF spellings: diagnostic-only, never an acceptance list.
     // Compiler inventory SHA-256: 1f859cd512392dbd471081f5f1a7dc2d94aef7eba75698a62e2335542df52fcb
     // Runtime manifest SHA-256: e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801
@@ -2467,9 +2748,12 @@ mod installed_native_fixture {
         MapRefusal::ExecutableHostedFile { spelling, relation }
     }
     fn role(path: &str) -> Option<MapRole> {
+        role_for_case(path, Case::Observe)
+    }
+    fn role_for_case(path: &str, case: Case) -> Option<MapRole> {
         for (role, suffix) in [(MapRole::Python, "/python/bin/python3"), (MapRole::Ssl, "/python/lib/libssl.so.3"),
             (MapRole::Crypto, "/python/lib/libcrypto.so.3")] {
-            if path.strip_prefix(VERSION) == Some(suffix) { return Some(role); }
+            if path.strip_prefix(case.version()) == Some(suffix) { return Some(role); }
         }
         for role in [MapRole::Loader, MapRole::Libc, MapRole::Libm] {
             let name = role.name();
@@ -2478,6 +2762,27 @@ mod installed_native_fixture {
                 || name == "ld-linux-x86-64.so.2" && path == "/lib64/ld-linux-x86-64.so.2" { return Some(role); }
         }
         None
+    }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn assert_github_observation_roles() {
+        use crate::runtime::GitHubReadOnlyObservationProfile as P;
+        let profiles=[P::Normal,P::DialRealCa,P::DialSyntheticCa];
+        for profile in profiles {
+            let case=Case::GitHub(profile);
+            assert!(case.after_io());
+            for (suffix,expected) in [("/python/bin/python3",MapRole::Python),
+                ("/python/lib/libssl.so.3",MapRole::Ssl),("/python/lib/libcrypto.so.3",MapRole::Crypto)] {
+                let path=format!("{}{suffix}",case.version());
+                for other in profiles {
+                    assert_eq!(role_for_case(&path,Case::GitHub(other)),(profile==other).then_some(expected));
+                }
+                assert_eq!(role(&path),(profile==P::Normal).then_some(expected));
+                assert_eq!(role_for_case(&format!("{path} (deleted)"),case),None);
+            }
+            assert_eq!(role_for_case("/lib/x86_64-linux-gnu/libc.so.6",case),Some(MapRole::Libc));
+        }
+        for case in [Case::None,Case::Observe,Case::Deadline,Case::Shutdown,Case::Emfile,Case::Overlap,
+            Case::SessionObserve,Case::SessionLoss,Case::SessionDeadline] {assert!(!case.after_io());}
     }
     #[derive(Clone, Copy)]
     struct MapMetadata { regular: bool, uid: u32, gid: u32, links: u64, mode: u32, inode: u64, major: u64, minor: u64 }
@@ -2502,6 +2807,9 @@ mod installed_native_fixture {
         if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None }
     }
     fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {
+        mappings_for_case(raw, historical, Case::Observe)
+    }
+    fn mappings_for_case(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>, case: Case) -> Result<Option<Vec<Mapping>>, MapRefusal> {
         let text = std::str::from_utf8(raw).map_err(|_| MapRefusal::Utf8)?;
         need(text.is_empty() || text.ends_with('\n')).map_err(|_| MapRefusal::Newline)?;
         let mut found = BTreeMap::new();
@@ -2531,7 +2839,7 @@ mod installed_native_fixture {
                     if path.is_empty() { MapRefusal::ExecutableAnonymous } else { MapRefusal::ExecutablePseudo })?;
                 continue;
             }
-            let Some(role) = role(path) else { need(!executable).map_err(|_| hosted_executable_file_refusal(generic_executable_file_refusal(historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()), path, historical, major, minor, inode))?; continue; };
+            let Some(role) = role_for_case(path, case) else { need(!executable).map_err(|_| hosted_executable_file_refusal(generic_executable_file_refusal(historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()), path, historical, major, minor, inode))?; continue; };
             let st = fs::metadata(path).map_err(|_| MapRefusal::Metadata(role, MapMetadataRefusal::Stat))?;
             check_map_metadata(MapMetadata { regular: st.is_file(), uid: st.uid(), gid: st.gid(), links: st.nlink(), mode: st.mode(),
                 inode: st.ino(), major: nix::sys::stat::major(st.dev()), minor: nix::sys::stat::minor(st.dev()) }, inode, major, minor)
@@ -2894,7 +3202,7 @@ mod installed_native_fixture {
         assert_mappings_diagnostic_contract();
     }
     fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>, historical: Option<HistoricalPayloadSnapshot>,
-        python: &ExecOriginal, parent: &ExecOriginal, phase: &mut ExecPhase) -> Result<Option<ChildObservation>, ObservationFailure> {
+        python: &ExecOriginal, parent: &ExecOriginal, phase: &mut ExecPhase, case: Case) -> Result<Option<ChildObservation>, ObservationFailure> {
         need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
         while live(end, stop) {
             match exec_checkpoint(id, end, stop, python, parent, phase)? {
@@ -2904,7 +3212,7 @@ mod installed_native_fixture {
             }
             if !live(end, stop) { return Ok(None); }
             let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false).map_err(|_| ObservationFailure::MapsRead)?;
-            if let Some(maps) = mappings(&raw, historical).map_err(ObservationFailure::MapsCheck)? {
+            if let Some(maps) = mappings_for_case(&raw, historical, case).map_err(ObservationFailure::MapsCheck)? {
                 if !live(end, stop) { return Ok(None); }
                 let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)
                     .map_err(|_| ObservationFailure::EnvironmentRead)?;
@@ -3003,9 +3311,9 @@ mod installed_native_fixture {
             },
         }
     }
-    fn current_python_original(end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ExecOriginal>, ObservationFailure> {
+    fn current_python_original(end: Instant, stop: &watch::Receiver<bool>, case: Case) -> Result<Option<ExecOriginal>, ObservationFailure> {
         if !live(end, stop) { return Ok(None); }
-        let path = Path::new(VERSION).join("python/bin/python3");
+        let path = Path::new(case.version()).join("python/bin/python3");
         protected_exec_name(&path)?;
         if !live(end, stop) { return Ok(None); }
         let file = fs::OpenOptions::new().read(true).custom_flags(flags()).open(&path).map_err(|_| ObservationFailure::ExecRead)?;
@@ -3203,7 +3511,7 @@ mod installed_native_fixture {
         historical: Option<HistoricalPayloadSnapshot>)
         -> Result<Vec<ChildObservation>, ObservationFailure> {
         need(id > 0).map_err(|_| ObservationFailure::ChildId)?;
-        let Some(python) = current_python_original(end, &stop)? else { return Ok(Vec::new()); };
+        let Some(python) = current_python_original(end, &stop, case)? else { return Ok(Vec::new()); };
         let observed = (|| {
             let Some(parent) = proc_exec_original(Path::new("/proc/self/exe"), end, &stop)? else { return Ok(Vec::new()); };
             let returned = (|| {
@@ -3215,9 +3523,14 @@ mod installed_native_fixture {
                 // including both initial and Overlap snapshots below.
                 let mut phase = ExecPhase::BeforeExec;
                 let mut snapshots = Vec::new();
-                let Some(first) = child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase)? else { return Ok(snapshots); };
+                let Some(first) = child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase, case)? else { return Ok(snapshots); };
                 snapshots.push(first);
                 match case {
+                    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+                    Case::GitHub(profile) => {
+                        let witness=lock(&inner.native_test.github).clone().ok_or(ObservationFailure::Entry)?;
+                        witness.observe_boundary(id,_key,profile,end,&stop).map_err(|_|ObservationFailure::HoldRefused)?;
+                    },
                     #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
                     Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
                         // Same original child/IO checkpoint, no new owner or clock.
@@ -3233,7 +3546,7 @@ mod installed_native_fixture {
                         while live(end, &stop) {
                             let value = original_bytes(&release, 32, true).map_err(|_| ObservationFailure::HoldRefused)?;
                             if value.as_slice() == b"release\n" {
-                                if let Some(second) = child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase)? { snapshots.push(second); }
+                                if let Some(second) = child_snapshot(id, end, &stop, historical, &python, &parent, &mut phase, case)? { snapshots.push(second); }
                                 return Ok(snapshots);
                             }
                             need(value.as_slice() == b"pending\n").map_err(|_| ObservationFailure::HoldRefused)?;
@@ -3388,6 +3701,36 @@ mod tests {
         let state = lock(&owner.state);
         assert_eq!(state.cleanup_endpoint, first);
         assert_eq!(state.error.as_ref().map(|error| error.code.as_str()), Some("query_timeout"));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn installed_observer_join_prioritizes_original_faults_and_channel_closure() {
+        // Memory-only tasks/channels; no Child, native pipe, filesystem or
+        // observer is created. Exercise the exact production join arbitration.
+        for channel_closed in [false,true] {
+            let owner=inert_owner();let endpoint=owner.endpoint();
+            let (sender,mut receiver)=mpsc::channel(4);
+            sender.try_send(BridgeError::new("io_error","Original writer failed.")).unwrap();
+            sender.try_send(BridgeError::timeout()).unwrap();
+            let mut sender=Some(sender);if channel_closed {sender.take();}
+            let (entered,entry)=oneshot::channel();
+            let mut original=Some(tokio::spawn(async move {let _=entered.send(());17u8}));
+            entry.await.unwrap();
+            let mut open=true;let mut first_allowances=Vec::new();
+            let returned=join_installed_observation(&mut original,Some((&mut receiver,&mut open)),|error|{
+                owner.fail(error);first_allowances.push(lock(&owner.state).cleanup_endpoint);
+            }).await;
+            assert_eq!(returned.unwrap(),17);
+            assert!(original.take().is_some()); // Original return; no replacement joiner.
+            assert_eq!(open,!channel_closed);
+            assert_eq!(first_allowances.len(),2);
+            assert!(first_allowances[0].is_some());assert_eq!(first_allowances[0],first_allowances[1]);
+            assert_eq!(owner.endpoint(),endpoint);
+            assert_eq!(lock(&owner.state).error.as_ref().map(|e|e.code.as_str()),Some("io_error"));
+            assert!(*owner.stop.subscribe().borrow());
+            drop(sender);
+        }
     }
     #[test]
     fn closed_profile_changes_only_the_private_channel_bound() {

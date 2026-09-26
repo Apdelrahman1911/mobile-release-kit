@@ -23,6 +23,159 @@ pub use dialog::{Dialog, DialogControl, DialogEvent, DialogResult, DialogRespons
 #[cfg(feature = "windows-installed-observation")]
 pub use dialog::{DialogAction, DialogObservation};
 
+// Qualification-only supporting HWND containment, not native button selection.
+// HWND 0 and shared containers are valid logical-control representations. The
+// native-only owner must not acquire Common Controls/dialog dependencies here.
+#[cfg(any(test, feature = "windows-installed-observation"))]
+pub(crate) mod quit_native {
+    use windows_sys::Win32::{Foundation as F, UI::WindowsAndMessaging as W};
+    use std::ptr::null_mut;
+
+    const PARENTS: usize = 32;
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum Failure { State, Bounds, Process, Thread, Descendant, Lineage, Style, Changed }
+    type Result<T> = std::result::Result<T, Failure>;
+    fn require(ok: bool, error: Failure) -> Result<()> { if ok { Ok(()) } else { Err(error) } }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct Link { handle: F::HWND, process: u32, thread: u32, child: bool, style: isize, parent: Option<F::HWND> }
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) struct Container { handle: F::HWND, links: Vec<Link> }
+    impl Container {
+        pub(crate) fn windowless() -> Self { Self { handle: null_mut(), links: Vec::new() } }
+        fn new(handle: F::HWND) -> Self { Self { handle, links: Vec::with_capacity(PARENTS + 1) } }
+        fn push(&mut self, link: Link, dialog: F::HWND, process: u32, thread: u32) -> Result<bool> {
+            require(!dialog.is_null() && process != 0 && thread != 0 && !self.handle.is_null(), Failure::State)?;
+            require(self.links.len() <= PARENTS, Failure::Bounds)?;
+            require(!link.handle.is_null() && !self.links.iter().any(|old| old.handle == link.handle), Failure::Lineage)?;
+            let expected = self.links.last().map_or(Some(self.handle), |old| old.parent);
+            require(expected == Some(link.handle), Failure::Lineage)?;
+            require(link.process == process, Failure::Process)?; require(link.thread == thread, Failure::Thread)?;
+            let root = link.handle == dialog;
+            if root { require(link.parent.is_none(), Failure::Lineage)?; }
+            else {
+                require(self.links.len() < PARENTS, Failure::Bounds)?;
+                // GetParent alone may return a top-level owner. Both independent
+                // descendant evidence and WS_CHILD are mandatory at every link.
+                require(link.child && link.style & W::WS_CHILD as isize != 0, Failure::Descendant)?;
+                require(link.parent.is_some_and(|parent| !parent.is_null() && parent != link.handle), Failure::Lineage)?;
+            }
+            self.links.push(link); Ok(root)
+        }
+        fn complete(&self, dialog: F::HWND, process: u32, thread: u32) -> Result<()> {
+            require(!dialog.is_null() && process != 0 && thread != 0, Failure::State)?;
+            if self.handle.is_null() { return require(self.links.is_empty(), Failure::Lineage); }
+            require(!self.links.is_empty() && self.links.len() <= PARENTS + 1, Failure::Bounds)?;
+            let mut checked = Self::new(self.handle);
+            for (index, link) in self.links.iter().copied().enumerate() {
+                let ended = checked.push(link, dialog, process, thread)?;
+                require(ended == (index + 1 == self.links.len()), Failure::Lineage)?;
+            }
+            Ok(())
+        }
+        pub(crate) fn same(&self, current: &Self) -> Result<()> { require(self == current, Failure::Changed) }
+    }
+    fn style(window: F::HWND) -> Result<isize> {
+        unsafe { F::SetLastError(F::ERROR_SUCCESS) };
+        let value = unsafe { W::GetWindowLongPtrW(window, W::GWL_STYLE) };
+        let error = if value == 0 { unsafe { F::GetLastError() } } else { 0 };
+        require(error == 0, Failure::Style)?; Ok(value)
+    }
+    pub(crate) fn observe(handle: F::HWND, dialog: F::HWND, process: u32, thread: u32) -> Result<Container> {
+        require(!dialog.is_null() && process != 0 && thread != 0, Failure::State)?;
+        if handle.is_null() { return Ok(Container::windowless()); }
+        let mut container = Container::new(handle); let mut current = handle;
+        loop {
+            require(container.links.len() <= PARENTS, Failure::Bounds)?;
+            require(!current.is_null() && !container.links.iter().any(|link| link.handle == current), Failure::Lineage)?;
+            let mut actual_process = 0;
+            let actual_thread = unsafe { W::GetWindowThreadProcessId(current, &mut actual_process) };
+            let child = unsafe { W::IsChild(dialog, current) } != 0;
+            let style = style(current)?;
+            let parent = if current == dialog { None } else { Some(unsafe { W::GetParent(current) }) };
+            if container.push(Link { handle: current, process: actual_process, thread: actual_thread, child, style, parent },
+                dialog, process, thread)? { break; }
+            current = parent.ok_or(Failure::Lineage)?;
+        }
+        container.complete(dialog, process, thread)?; Ok(container)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contract() -> [Container; 4] {
+        // The actual bounded predicates, inert borrowed handles only. No native
+        // query, release, message, provider or synthetic response is entered.
+        let dialog = 1usize as F::HWND; let child = 2usize as F::HWND; let middle = 3usize as F::HWND;
+        let process = 17; let thread = 19;
+        let root = Link { handle: dialog, process, thread, child: false, style: 0, parent: None };
+        let leaf = Link { handle: child, process, thread, child: true, style: W::WS_CHILD as isize, parent: Some(dialog) };
+        let mut direct = Container::new(child); assert_eq!(direct.push(leaf, dialog, process, thread), Ok(false));
+        assert_eq!(direct.push(root, dialog, process, thread), Ok(true)); assert_eq!(direct.complete(dialog, process, thread), Ok(()));
+        let mut nested = Container::new(child);
+        assert_eq!(nested.push(Link { parent: Some(middle), ..leaf }, dialog, process, thread), Ok(false));
+        assert_eq!(nested.push(Link { handle: middle, ..leaf }, dialog, process, thread), Ok(false));
+        assert_eq!(nested.push(root, dialog, process, thread), Ok(true)); assert_eq!(nested.complete(dialog, process, thread), Ok(()));
+        let mut shared = Container::new(dialog); assert_eq!(shared.push(root, dialog, process, thread), Ok(true));
+        let windowless = Container::windowless(); assert_eq!(windowless.complete(dialog, process, thread), Ok(()));
+        for original in [&direct, &nested, &shared, &windowless] { assert_eq!(original.same(original), Ok(())); }
+        assert_eq!(direct.same(&nested), Err(Failure::Changed)); assert_eq!(windowless.same(&shared), Err(Failure::Changed));
+        for (link, error) in [
+            (Link { process: process + 1, ..leaf }, Failure::Process),
+            (Link { thread: thread + 1, ..leaf }, Failure::Thread),
+            (Link { child: false, ..leaf }, Failure::Descendant),
+            (Link { style: 0, ..leaf }, Failure::Descendant),
+            (Link { parent: Some(child), ..leaf }, Failure::Lineage),
+            (Link { parent: Some(null_mut()), ..leaf }, Failure::Lineage),
+            (Link { handle: middle, ..leaf }, Failure::Lineage),
+        ] {
+            let mut candidate = Container::new(child); let mut effects = 0;
+            let result = (|| { candidate.push(link, dialog, process, thread)?; effects += 1; Ok(()) })();
+            assert_eq!(result, Err(error)); assert_eq!(effects, 0);
+        }
+        let mut incomplete = Container::new(child); incomplete.links.push(leaf);
+        assert_eq!(incomplete.complete(dialog, process, thread), Err(Failure::Lineage));
+        let mut cycle = Container::new(child);
+        assert_eq!(cycle.push(Link { parent: Some(middle), ..leaf }, dialog, process, thread), Ok(false));
+        assert_eq!(cycle.push(Link { handle: middle, parent: Some(child), ..leaf }, dialog, process, thread), Ok(false));
+        assert_eq!(cycle.push(leaf, dialog, process, thread), Err(Failure::Lineage));
+        let mut bounded = Container::new(100usize as F::HWND);
+        for offset in 0..PARENTS {
+            let handle = (100 + offset) as F::HWND; let parent = (101 + offset) as F::HWND;
+            assert_eq!(bounded.push(Link { handle, parent: Some(parent), ..leaf }, dialog, process, thread), Ok(false));
+        }
+        assert_eq!(bounded.push(Link { handle: (100 + PARENTS) as F::HWND, ..leaf }, dialog, process, thread), Err(Failure::Bounds));
+        [windowless, shared, direct, nested]
+    }
+}
+
+// Separate from STOP/close ownership. A qualification action may become
+// not-ready only before this latch; entry consumes it even when the postcheck
+// fails. This helper neither invents a dialog response nor grants finality.
+#[cfg(any(test, feature = "windows-installed-observation"))]
+pub(crate) struct QuitAction { entered: Cell<bool> }
+#[cfg(any(test, feature = "windows-installed-observation"))]
+impl QuitAction {
+    pub(crate) fn new() -> Self { Self { entered: Cell::new(false) } }
+    pub(crate) fn check(&self) -> UiResult<()> { if self.entered.get() { Err(UiError::State) } else { Ok(()) } }
+    pub(crate) fn request(&self, effect: impl FnOnce() -> UiResult<()>) -> UiResult<bool> {
+        self.check()?; self.entered.set(true); effect()?; Ok(true)
+    }
+    #[cfg(test)]
+    pub(crate) fn contract() {
+        for result in [Ok(()), Err(UiError::State), Err(UiError::CleanupUnknown)] {
+            let action = Self::new(); let effects = Cell::new(0);
+            assert_eq!(action.check(), Ok(())); assert!(!action.entered.get());
+            assert_eq!(action.request(|| {
+                assert!(action.entered.get()); effects.set(effects.get() + 1);
+                assert_eq!(action.request(|| { effects.set(effects.get() + 1); Ok(()) }), Err(UiError::State));
+                result
+            }), result.map(|_| true)); // Never false after effect entry.
+            assert_eq!(action.check(), Err(UiError::State));
+            assert_eq!(action.request(|| { effects.set(effects.get() + 1); Ok(()) }), Err(UiError::State));
+            assert_eq!(effects.get(), 1);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogKind { Project, Quit }
 
@@ -861,13 +1014,14 @@ fn object_name(handle: F::HANDLE) -> UiResult<String> {
 
 // The default/null-folder loader has documented environment and policy lookup
 // surfaces. Refuse the complete WebView2 namespaces rather than guessing app-ID
-// precedence or accepting unknown per-app values. This system-Evergreen-only slice
-// refuses the full per-user EdgeUpdate Clients container, not updater-root presence.
+// precedence, plus the full per-user EdgeUpdate Clients registration container.
+// Generic EdgeWebView registry-root presence alone does not establish a documented
+// override or installation. Admission still requires the actual protected system
+// image, matching runtime version/user-data folder and original browser binding.
 const OVERRIDE_KEYS: &[(&str, bool)] = &[
     ("SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", false),
     ("SOFTWARE\\Microsoft\\Edge\\WebView2", false),
     ("SOFTWARE\\Microsoft\\EdgeUpdate\\Clients", true),
-    ("SOFTWARE\\Microsoft\\EdgeWebView", true),
 ];
 struct RegistryOriginal {
     name: Vec<u16>, value: UnsafeCell<R::HKEY>, entered: bool, returned: bool, close_entered: bool, settled: bool,

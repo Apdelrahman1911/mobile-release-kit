@@ -1393,7 +1393,7 @@ impl DocumentBinding {
         self.inner.github_fixture.as_ref().is_some_and(|binding| binding.permits(&self.inner.bridge.supervisor))
     }
     fn github_qualified(&self) -> bool {
-        if github_session::qualified() { return true; }
+        if github_session::qualified_for(&self.inner.bridge.supervisor) { return true; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.github_fixture_permitted() { return true; }
         false

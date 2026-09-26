@@ -541,7 +541,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                      and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
         names = ast.literal_eval(paths)
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(len(names), 42)
+        self.assertEqual(len(names), 59)
         self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
             "edit_owner", "release_version_edit_commands", "release_version_edit_protocol", "runtime", "bridge", "asset_session", "asset_source", "shell", "installed_shell_observation",
             "supervisor", "installed_shell_shutdown_observation", "error", "protocol", "installed_runtime",
@@ -551,6 +551,14 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertTrue({"desktop/src/components/EnvironmentDiagnostics.tsx", "desktop/tests/environment-diagnostics.test.mjs",
                          "desktop/src/components/ReleaseVersionEditor.tsx", "desktop/src/releaseVersionEdit.ts",
                          "desktop/src/releaseVersionEditController.ts"} <= set(names))
+        self.assertTrue({"desktop/src-tauri/src/" + name + ".rs" for name in (
+            "github_connection_session", "github_tls_peer_owner", "installed_shell_github_observation", "hosted_tests")} <= set(names))
+        self.assertTrue({"desktop/src/githubConnectionProtocol.ts", "desktop/src/bridge.ts",
+                         "desktop/src/components/GitHubConnection.tsx", "desktop/tests/github-connection.test.mjs",
+                         "desktop/src-tauri/tests/fixtures/github_tls_peer.py", "desktop/tools/hosted_glibc_policy.py",
+                         "desktop/tools/observe_hosted_python.py"} <= set(names))
+        self.assertTrue({"desktop/src-tauri/tests/fixtures/github_tls/" + name for name in (
+            "api-expired.pem", "api-valid.pem", "other-root-ca.pem", "root-ca.pem", "server-key.pem", "wrong-san.pem")} <= set(names))
 
     def test_observer_module_roster_matches_production_supported_platforms(self):
         # The actual-main observer has its own crate root. Library compilation
@@ -2858,6 +2866,127 @@ class InstalledToolsNamespaceContracts(unittest.TestCase):
             namespace.assert_not_called()
 
 
+
+class InstalledGitHubEntryDiagnosticSourceContracts(unittest.TestCase):
+    def test_guidance_reload_is_one_current_ui_action_with_closed_bootstrap_replies(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        github = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        app = (SOURCE / "desktop/src/App.tsx").read_text()
+        component = (SOURCE / "desktop/src/components/GitHubConnection.tsx").read_text()
+        self.assertIn("Step::Navigate=>Step::ReadGuidanceReload", github)
+        self.assertIn("Step::ReadGuidanceReload=>Step::ReloadGuidance", github)
+        self.assertIn("Step::ReloadGuidance=>Step::EnterRepository", github)
+        self.assertIn("!shell.info || !shell.catalog || !shell.selected || !shell.snapshot", github)
+        self.assertIn("!shell.snapshot_visible || shell.project_witness.is_none()", github)
+        self.assertEqual(source.count("r.github_guidance.reserve()"), 1)
+        self.assertIn("Step::GitHubReadOnly(github::Step::EnterRepository) => !r.github_guidance.complete()", source)
+        scope = source.split("    fn github_guidance_scope(", 1)[1].split("    pub(super) fn unexpected(", 1)[0]
+        self.assertIn("self.github.is_some()", scope)
+        self.assertIn("!self.failed.load(Ordering::SeqCst) && Instant::now() < self.end", scope)
+        route = github.split("pub(super) fn guidance_reload_scope(", 1)[1].split("pub(super) struct GuidanceReload", 1)[0]
+        self.assertIn("Some(Pending::Dom(ShellStep::GitHubReadOnly(Step::ReloadGuidance)))", route)
+        self.assertIn("(ShellStep::GitHubReadOnly(Step::EnterRepository), None)", route)
+        self.assertIn("_ => GuidanceReloadScope::Outside", route)
+        self.assertEqual(source.count("r.info = true; r.methods = methods.len();"), 1)
+        self.assertEqual(source.count("r.catalog = true;"), 1)
+        self.assertIn("if !r.github_guidance.app_info(scope) { self.fail(); }", source)
+        self.assertIn("if !r.github_guidance.catalog(scope) { self.fail(); }", source)
+        self.assertIn("!r.github_guidance.complete() || !c.ready_to_close()", source)
+        self.assertIn("c.complete() && r.github_guidance.complete()", source)
+        self.assertIn("!shell.relay_joined||!shell.github_guidance.complete()", github)
+        dom = github.split("    pub(super) fn dom(", 1)[1].split("    pub(super) fn ready_to_close(", 1)[0]
+        self.assertLess(dom.index("!shell.github_guidance.click_returned(value)"),
+                        dom.index('if value["state"]=="wait"&&object.len()==1{return;}'))
+        script = github.split("pub(super) fn script(step:Step)", 1)[1]
+        effect = script.split('Step::ReloadGuidance=>r#"', 1)[1].split('Step::EnterRepository=>r#"', 1)[0]
+        self.assertEqual(effect.count(".click()"), 1)
+        self.assertIn("original.card!==current.card||original.button!==current.button||current.button.disabled", effect)
+        self.assertLess(effect.index("delete window.__mrkInstalledGitHubGuidanceReload"), effect.index(".click()"))
+        for forbidden in ("state:'wait'", "setTimeout", "setInterval", "fetch(", "invoke("):
+            self.assertNotIn(forbidden, effect)
+        self.assertIn("Previously loaded help is retained for reading only; it does not enable entry.", script)
+        self.assertIn("if(c.querySelector('form.github-form'))throw 0;", script)
+        self.assertIn("state.helpState === 'current'", component)
+        self.assertIn("connectionControllerRef.current?.setHelp(null);", app)
+        self.assertIn("githubConnection.setHelp(result.githubConnection); syncConnectionContext();", app)
+        self.assertIn("    assert_guidance_reload_contracts();", github)
+        # The Rust inert contracts and original native UI still need execution.
+
+    def test_entry_samples_existing_tick_and_wait_without_a_new_nested_record_lock(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        tick = source.split("    pub(super) fn tick(", 1)[1].split("    pub(super) fn dom(", 1)[0]
+        entry = tick.split("        if step == Step::Entry {", 1)[1].split("        let Some(status)", 1)[0]
+        self.assertLess(entry.index("EntryNative::sample(r.latest.as_ref())"), entry.index("drop(r);"))
+        self.assertLess(entry.index("drop(r);"), entry.index("q.record()"))
+        self.assertIn("shell.step == ShellStep::GitHubReadOnly(Step::Entry) && !q.failed.load(Ordering::SeqCst)", entry)
+        self.assertIn("let evaluations = shell.evaluations;", entry)
+        self.assertIn("shell.github_entry.native(sample, evaluations);", entry)
+        self.assertIn("return ready;", entry)
+        dom = source.split("    pub(super) fn dom(", 1)[1].split("    pub(super) fn ready_to_close(", 1)[0]
+        capture = dom.split("        if step == Step::Entry {", 1)[1].split("        let Some(object)", 1)[0]
+        self.assertNotIn("self.record()", capture)
+        self.assertNotIn("r.latest", capture)
+        self.assertIn("EntryDom::parse(value)", capture)
+        self.assertLess(capture.index("shell.github_entry.dom(sample, evaluations);"),
+                        capture.index("if sample.state == EntryDomState::Wait { return; }"))
+        self.assertLess(dom.index("EntryDom::parse(value)"), dom.index('if value["state"]=="wait"&&object.len()==1{return;}'))
+        self.assertIn('Step::Entry=>object.len()==9&&value["entryAvailable"]==true&&value["helpPresent"]==true,', dom)
+        self.assertIn("Step::Entry=>{r.entry=true;Step::EnterToken}", dom)
+
+    def test_entry_first_winner_uses_original_budget_deadline_and_single_frame_write(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        github = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        self.assertIn("fn fail(&self) { self.failed.mark_caller(); }", source)
+        self.assertIn("let end = start + Duration::from_secs(45);", source)
+        helper = source.split("    fn github_entry_fail(", 1)[1].split("    fn session_wait(", 1)[0]
+        self.assertIn("r.step == Step::GitHubReadOnly(github::Step::Entry) && r.trace.0 == r.step", helper)
+        self.assertIn("github::latch_entry_diagnostic(&self.failed, &mut r.github_entry, evaluations, origin);", helper)
+        budget = source.split("                    if r.evaluations >= 128 {", 1)[1].split("Pending::Dom(step)", 1)[0]
+        self.assertIn("if step == Step::GitHubReadOnly(github::Step::Entry)", budget)
+        self.assertIn("self.github_entry_fail(&mut r, github::EntryOrigin::EvaluationBudget);", budget)
+        self.assertIn("} else { self.fail(); }", budget)
+        self.assertIn("r.evaluations += 1;", budget)
+        report = source.split("    fn report_failure(&self)", 1)[1].split("    fn report_failure_handoff(", 1)[0]
+        self.assertIn("self.record.try_lock()", report)
+        self.assertIn("r.metadata.open_failure, r.github_entry), Err(_) => return", report)
+        self.assertLess(report.index("Err(_) => return"), report.index("github::entry_failure_pair("))
+        self.assertEqual(report.count("rustix::io::write(&self.failure_sink, pair)"), 1)
+        self.assertIn("} else { failure_frame(trace, progress, session, path, evidence) };", report)
+        self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
+        latch = github.split("pub(super) fn latch_entry_diagnostic(", 1)[1].split("fn entry_bool(", 1)[0]
+        self.assertIn("failed: &super::FailureLatch", latch)
+        self.assertEqual(latch.count("failed.mark_unknown()"), 1)
+        self.assertIn("if failed.mark_unknown() { diagnostic.freeze(evaluations, origin); }", latch)
+        frame = github.split("pub(super) fn entry_failure_pair(", 1)[1].split("fn assert_entry_diagnostic_contracts(", 1)[0]
+        self.assertIn("let first = diagnostic.frozen;", frame)
+        self.assertNotIn("diagnostic.cache", frame)
+        self.assertNotIn("serde_json", frame)
+        self.assertNotIn("format!", frame)
+        self.assertIn('unwrap_or("not-recorded")', frame)
+        self.assertIn("first.map(|first| first.samples).unwrap_or_default()", frame)
+        self.assertIn("assert_eq!(maximum, 380); assert!(maximum <= super::FAILURE_PAIR_LIMIT);", github)
+        self.assertIn("    assert_entry_diagnostic_contracts();", github)
+
+    def test_entry_script_adds_only_boolean_bits_on_the_same_wait_ready_callback(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
+        script = source.split("pub(super) fn script(step:Step)", 1)[1]
+        entry = script.split('Step::Entry=>r#"', 1)[1].split('        Step::EnterToken=>r#"', 1)[0]
+        self.assertIn("const input=c?.querySelector('input[placeholder=\"OWNER/REPO\"]');", entry)
+        self.assertIn("repositoryExpected:input?input.value==='owner/app':null", entry)
+        self.assertIn("helpContainerPresent:c?!!c.querySelector('[aria-label=\"Core GitHub connection help\"]'):null", entry)
+        self.assertIn("entryAvailable:s&&!!form&&!!b&&!b.disabled,helpPresent:null", entry)
+        self.assertIn("submitEnabled:b?!b.disabled:null", entry)
+        self.assertIn("if(!s||!form||!b||b.disabled)return {state:'wait',...sample};show(form);", entry)
+        self.assertIn("return {state:'ready',...sample,helpPresent:!!c.querySelector(", entry)
+        for forbidden in ("password", "setTimeout", "setInterval", "fetch(", "invoke(", "console.", "token", "input.value,"):
+            self.assertNotIn(forbidden, entry)
+        diagnostic = source.split("// Closed diagnostic DATA", 1)[1].split("fn assert_entry_diagnostic_contracts(", 1)[0]
+        self.assertIn('const KEYS: [&str; 9]', diagnostic)
+        self.assertIn("EntryPresence::NotObserved | EntryPresence::Absent", diagnostic)
+        self.assertIn("self.help.is_none()", diagnostic)
+        # Source correspondence is not Rust execution or installed GTK evidence.
+
+
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_evidence_result_diagnostics_keep_closed_tokens_first_fault_and_original_status_order(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -2991,7 +3120,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("InspectionOutcome::Unknown => Err(passive_inspection_unknown(original.observation().failure()))", installed)
         for label in ("SelectionProfileClosed", "SelectionCompileBinding", "SelectionMethodOutsideProfile"):
             self.assertIn("LinuxPassiveCause::" + label, runtime)
-        acquisition = supervisor.split("fn acquire_passive_original(", 1)[1].split("async fn settle_passive(", 1)[0]
+        acquisition = supervisor.split("fn acquire_passive_original(", 1)[1].split("// Closed dispatch over the same registered originals", 1)[0]
         self.assertIn("slots.capability().map_err(AcquisitionError::capability)?", acquisition)
         self.assertIn("LinuxPassiveCause::FinalClaimOwnerGate", acquisition)
         after_claim = acquisition.split("prepared.runtime.claim_once().map_err(AcquisitionError::final_claim)?;", 1)[1]
@@ -3052,11 +3181,16 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         v2_bound = path_bound + len(b";start=999999;now=999999;rsv=m;in=m;out=m;cb=reserved;wait=initial-folder-absent")
         self.assertLessEqual(v2_bound, lifecycle.SHELL_PATH_FAILURE_V2_FRAME_BOUND)
         self.assertEqual(lifecycle.SHELL_PATH_FAILURE_V2_FRAME_BOUND, 384)
+        v3_bound = path_bound + len(b";start=999999;now=999999;rsv=m;in=m;out=m;cb=reserved;wait=target-parent-different;h=5o")
+        self.assertLessEqual(v3_bound, lifecycle.SHELL_PATH_FAILURE_V3_FRAME_BOUND)
+        self.assertEqual(lifecycle.SHELL_PATH_FAILURE_V3_FRAME_BOUND, 384)
         self.assertIn("const PATH_FAILURE_FRAME_BOUND: usize = 384;", source)
         encoder = source.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
-        self.assertLess(encoder.index('b"MRK_INSTALLED_SHELL_PATH_FAILURE=v2;index="'), encoder.index("trace.0.failure_line()"))
+        self.assertLess(encoder.index('b"MRK_INSTALLED_SHELL_PATH_FAILURE=v3;index="'), encoder.index("trace.0.failure_line()"))
         self.assertIn("diagnostic.step == step && session.is_none()", encoder)
         self.assertIn("step.recipe_index().is_some_and(|index| index > 10)", encoder)
+        self.assertIn("!diagnostic.gtk_picker.valid_path(step,diagnostic.wait)", encoder)
+        self.assertIn('append(&mut bytes,&mut length,b";h=")?;', encoder)
         self.assertIn("(Step::Paths(_), _) | (_, Some(_)) => return None", encoder)
         self.assertIn("if path.is_some() && length > PATH_FAILURE_FRAME_BOUND { return None; }", encoder)
         rejections = source.split("impl SessionRejection {", 1)[1].split("enum SessionWait", 1)[0]
@@ -3798,7 +3932,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
             with self.subTest(role=role):
                 selecting = source.split("    pub(super) fn select_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
                 activating = source.split("    pub(super) fn activate_observed_" + role + "(", 1)[1].split("    #[cfg(", 1)[0]
-                self.assertEqual(selecting.count("dialog.set_filename("), 1)
+                self.assertEqual(selecting.count("dialog.set_filename("), 1 if role == "session_file" else 0)
                 self.assertEqual(activating.count("dialog.file()"), 1)
                 readiness = "let Some(file) = dialog.file() else"
                 self.assertIn(readiness, activating)
@@ -3828,16 +3962,27 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     self.assertLess(activating.index("q.session_file_target(index)"), activating.index(readiness))
                 else:
                     self.assertIn('match dialog.property::<gtk::FileChooserAction>("action")', selecting)
-                    self.assertIn("gtk::FileChooserAction::SelectFolder => dialog.set_current_folder(path)", selecting)
-                    self.assertIn("gtk::FileChooserAction::Open => dialog.set_filename(path)", selecting)
+                    self.assertIn("gtk::FileChooserAction::SelectFolder => {", selecting)
+                    self.assertIn("gtk::FileChooserAction::Open => {", selecting)
                     self.assertEqual(selecting.count("dialog.set_current_folder(path)"), 1)
+                    self.assertEqual(selecting.count("dialog.set_current_folder(parent)"), 1)
+                    self.assertEqual(selecting.count("dialog.select_file(&target_file).is_err()"), 1)
+                    self.assertLess(selecting.index("q.path_parent_navigation(id,index)?"), selecting.index("dialog.set_current_folder(parent)"))
+                    passive = selecting.split("let target_file =", 1)[1]
+                    self.assertNotIn("set_current_folder", passive)
+                    self.assertLess(passive.index("if !mapped"), passive.index("q.path_selection(id,index)?"))
+                    self.assertLess(passive.index("if !parent_ready"), passive.index("q.path_selection(id,index)?"))
                     self.assertNotIn("set_current_folder", activating)
+                    self.assertEqual(activating.count("dialog.is_mapped()"), 1)
+                    self.assertEqual(activating.count("dialog.current_folder_file()"), 1)
+                    self.assertLess(activating.index("observed_path_dialog(app,q,index)?"), activating.index("dialog.is_mapped()"))
+                    self.assertLess(activating.index("dialog.current_folder_file()"), activating.index(readiness))
                     different = "if !file.equal(&gtk::gio::File::for_path(&path))"
-                    self.assertEqual(activating.count("file.equal("), 1)
+                    self.assertEqual(activating.count("file.equal("), 3)  # Original predicate plus two passive parent comparisons.
                     self.assertIn("W::SelectionAbsent", wait)
                     self.assertLess(activating.index(readiness), activating.index(different))
                     self.assertLess(activating.index(different), activating.index("dialog.widget_for_response(response)"))
-                    other_wait = activating.split(different, 1)[1].split("}", 1)[0]
+                    other_wait = activating.split(different, 1)[1].split("picker = P::Sampled { mapped, folder, selected:S::Target };", 1)[0]
                     self.assertIn("W::SelectionDifferent", other_wait)
                     self.assertIn("return Ok(false)", other_wait)
                 self.assertLess(activating.index(readiness), activating.index("dialog.widget_for_response(response)"))
@@ -3862,7 +4007,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
 
     def test_picker_return_latch_keeps_response_and_original_finality_independent(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
-        latch = source.split("    fn activation_returned(", 1)[1].split("    fn settled(", 1)[0]
+        latch = source.split("impl Picker {", 1)[1].split("\n}\n", 1)[0].split("    fn activation_returned(", 1)[1].split("    fn settled(", 1)[0]
         self.assertIn("result != Ok(true) || !self.created || !self.activated || self.returned", latch)
         self.assertEqual(latch.count("self.returned = true"), 1)
         self.assertNotIn("self.responded", latch)
@@ -3926,7 +4071,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertLess(deadline.index("SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic)"), deadline.index(winner))
         self.assertLess(deadline.index("PathDiagnostic::sample(r.step,self.start.elapsed().as_millis(),r.paths.diagnostic)"), deadline.index(winner))
         self.assertIn(winner + "\n                    r.session.diagnostic = diagnostic;\n                    r.paths.diagnostic = path_diagnostic;"
-                      "\n                    r.metadata.open_failure = metadata_diagnostic;\n                }", deadline)
+                      "\n                    r.metadata.open_failure = metadata_diagnostic;"
+                      "\n                    if r.step == Step::GitHubReadOnly(github::Step::Entry) {", deadline)
+        self.assertIn("r.github_entry.freeze(evaluations, github::EntryOrigin::Deadline);", deadline)
         latch = source.split("fn latch_failure(", 1)[1].split("fn latch_session_diagnostic(", 1)[0]
         self.assertEqual(latch.count("failed.mark_unknown()"), 1)
         self.assertIn("if failed.mark_unknown() { *trace = next_trace; *progress = next_progress; true } else { false }", latch)
@@ -4124,6 +4271,103 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn('target_os = "linux"', entry)
         # The source contract is not a substitute for the next actual shared
         # normal/observer compiler gate or runtime FD behavior on the host.
+
+
+
+class InstalledGitHubReadOnlyRouteContracts(unittest.TestCase):
+    def test_both_fixed_shell_refs_use_only_compile_and_observe_in_the_same_job(self):
+        common = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                  "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_JOB": "compile",
+                  "MRK_UBUNTU_PUBLICATION_VERIFY": "1", "GITHUB_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40,
+                  "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2",
+                  "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit"}
+        for ref in (S.SHELL_REF, S.SHELL_GITHUB_REF):
+            for case in ("compile", "observe"):
+                env = {**common, "GITHUB_REF": ref, "MRK_INSTALLED_SHELL_CASE": case}
+                self.assertEqual(S.route(env), "a" * 40)
+                for change in ({"GITHUB_JOB": "native"}, {"MRK_INSTALLED_CASE": "positive"},
+                               {"MRK_INSTALLED_SHELL_CASE": "github-normal-negative"},
+                               {"MRK_INSTALLED_SHELL_CASE": True}, {"GITHUB_REF": "refs/heads/main"},
+                               {"RUNNER_ENVIRONMENT": "self-hosted"}, {"MRK_UBUNTU_PUBLICATION_VERIFY": False}):
+                    with self.subTest(ref=ref, case=case, change=change), self.assertRaises(S.D.Refused):
+                        S.route({**env, **change})
+
+    def test_github_branch_uses_the_same_compiler_and_one_service_without_tools_preparation(self):
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        compile_body = source.split("def verify_installed_shell_compile():", 1)[1].split("\ndef ", 1)[0]
+        self.assertEqual(compile_body.count("shell_compile_argv("), 1)
+        argv = S.shell_compile_argv("/compiler", Path("/source"), Path("/target"))
+        self.assertEqual(argv[:2], ["/compiler", "build"])
+        self.assertEqual(S.SHELL_FEATURES, ["custom-protocol", "desktop-shell"])
+        self.assertEqual(argv[argv.index("--features") + 1], "desktop-shell,custom-protocol")
+        self.assertIn("--no-default-features", argv)
+        body = source.split("def verify_installed_shell():", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)', body)
+        self.assertIn("tools_inputs = None if github else shell_tools_inputs_for_observation()", body)
+        self.assertEqual(body.count('check.command("root-shell-connection"'), 1)
+        self.assertEqual(body.count("lifecycle.verify_service_result("), 1)
+        self.assertLess(body.index("lifecycle.verify_service_result("), body.index("shell_github_observation("))
+        branch = body.split("        if github:\n            github_readonly =", 1)[1].split("\n        project_draft =", 1)[0]
+        for forbidden in ("shell_tools_inputs_for_observation(", "shell_project_draft_observation(", "shell_compile_argv("):
+            self.assertNotIn(forbidden, branch)
+        self.assertIn('"normalDestinationAction": normal_boundaries', branch)
+        self.assertIn('"normalTransportPositive": False', branch)
+        self.assertIn('"compilerRerun": False', branch)
+        self.assertTrue(branch.rstrip().endswith("return"))
+
+
+class InstalledGitHubNormalBoundaryRouteContracts(unittest.TestCase):
+    def test_read_only_host_material_refusal_precedes_package_and_compiler_work_in_same_consumer(self):
+        source = (SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text()
+        body = source.split("def verify_installed_shell_compile():", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('if os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF:', body)
+        collect = body.index("lifecycle.shell_github_boundary_host_materials()")
+        retained = body.index('D.write(public / "github-boundary-host-materials.json"')
+        admitted = body.index("lifecycle._github_boundary_host_admit(materials)")
+        self.assertLess(body.index("check_source_pins(source)"), collect)
+        self.assertLess(collect, retained)
+        self.assertLess(retained, admitted)
+        self.assertLess(admitted, body.index("prepared = package_inputs("))
+        self.assertLess(admitted, body.index('check.command("rust-acquire"'))
+        self.assertEqual(body.count("shell_compile_argv("), 1)
+        interval = body[collect:admitted]
+        self.assertIn('"compilerStarted": False', interval)
+        self.assertIn('"runtimeSelfAdmission": False', interval)
+        for forbidden in ("run_owned(", "check.command(", "Popen(", "getaddrinfo(", "nft --check"):
+            self.assertNotIn(forbidden, interval)
+        consumer = source.split("def verify_installed_shell():", 1)[1].split("\ndef ", 1)[0]
+        self.assertEqual(consumer.count('check.command("root-shell-connection"'), 1)
+        self.assertIn('shell["githubReadOnly"] = lifecycle.shell_github_selection(github_profile)', consumer)
+        self.assertIn("runner_uid=os.getuid(), runner_gid=os.getgid()", consumer)
+
+    def test_fixed_new_ref_has_only_existing_compile_observe_and_material_helper_routes(self):
+        repository, ref, sha = "Apdelrahman1911/mobile-release-kit", S.SHELL_GITHUB_BOUNDARY_REF, "a" * 40
+        common = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                  "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_JOB": "compile",
+                  "MRK_UBUNTU_PUBLICATION_VERIFY": "1", "GITHUB_SHA": sha, "MRK_PUSH_EVENT_AFTER": sha,
+                  "GITHUB_WORKFLOW_SHA": sha, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2",
+                  "GITHUB_REPOSITORY": repository, "GITHUB_REF": ref,
+                  "GITHUB_WORKFLOW_REF": repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref,
+                  "ImageOS": "ubuntu24", "ImageVersion": "20260922.1.1"}
+        policy, python_data = S.local("hosted_glibc_policy"), S.local("observe_hosted_python")
+        for case in ("compile", "observe"):
+            env = {**common, "MRK_INSTALLED_SHELL_CASE": case}
+            self.assertEqual(S.route(env), sha)
+            self.assertEqual(python_data.context(env)["GITHUB_REF"], ref)
+            if case == "compile":
+                self.assertEqual(policy.context(env)["GITHUB_REF"], ref)
+            else:
+                with self.assertRaises(policy.Refused):
+                    policy.context(env)
+            for change in ({"GITHUB_REF": ref + "-arbitrary"}, {"MRK_INSTALLED_SHELL_CASE": "github-normal-negative"},
+                           {"GITHUB_JOB": "boundary"}, {"GITHUB_EVENT_NAME": "workflow_dispatch"},
+                           {"MRK_INSTALLED_SHELL_CASE": True}):
+                with self.subTest(case=case, change=change), self.assertRaises((S.D.Refused, KeyError)):
+                    S.route({**env, **change})
+                with self.assertRaises(python_data.Refused):
+                    python_data.context({**env, **change})
+                with self.assertRaises(policy.Refused):
+                    policy.context({**env, **change})
 
 
 if __name__ == "__main__":

@@ -7,15 +7,22 @@ use crate::{error::BridgeError, github_connection_protocol::{self as wire, Accou
     GitHubReadOutcome, Operation, OperationKind, Phase, Reason, Repository, Session, SessionState,
     Status, UnobservedFacts}, supervisor::{GitHubReadReceipt, GitHubReadTicket, Supervisor}};
 
-// Independently qualified document/picker/quit AND original runtime/TLS custody
-// are required. Neither the asset gate, a renderer flag nor a bundle inspection
-// can enable credential collection or this latent owner route.
+// Historical development entry stays closed. The separate normal installed
+// selector below supplies capability DATA, not a substitute for original
+// document/project registration, per-request runtime custody or finality.
 const GITHUB_CONNECTION_NATIVE_QUALIFIED: bool = false;
 const LIFETIME: Duration = Duration::from_secs(60 * 60);
 pub(crate) fn qualified() -> bool {
     GITHUB_CONNECTION_NATIVE_QUALIFIED && crate::runtime::GITHUB_TLS_PROFILE_QUALIFIED
         && cfg!(all(feature = "development-runtime", debug_assertions,
             target_os = "linux", target_arch = "x86_64", target_env = "gnu"))
+}
+
+// Only the actual document's Supervisor supplies installed availability. The
+// same sealed profile is selected again inside its original inspection worker.
+// Session-only memory neither depends on nor enables credential-asset storage.
+pub(crate) fn qualified_for(supervisor: &Supervisor) -> bool {
+    supervisor.github_readonly_profile_available() || qualified()
 }
 
 // Supplied private-session DATA for PG01 only. No ticket, socket, credential

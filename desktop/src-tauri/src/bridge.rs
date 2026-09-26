@@ -219,6 +219,20 @@ pub struct DesktopBridge {
 impl DesktopBridge {
     pub fn new(resource_dir: PathBuf) -> Self {
         let runtime = RuntimeConfig::packaged(resource_dir);
+        Self::from_runtime(runtime)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_installed_github_observation(resource_dir: PathBuf,
+        profile: crate::runtime::GitHubReadOnlyObservationProfile) -> Result<Self, BridgeError> {
+        // Selection is DATA before the SAME original Supervisor is created.
+        // It changes only GitHub's closed installed fixture; all other domains use N.
+        let mut runtime = RuntimeConfig::packaged(resource_dir);
+        runtime.select_github_readonly_observation(profile)?;
+        Ok(Self::from_runtime(runtime))
+    }
+    fn from_runtime(runtime: RuntimeConfig) -> Self {
         let installed_project_selection_available = runtime.project_selection_profile_available();
         let installed_project_path_selection_available = runtime.project_path_selection_profile_available();
         let installed_evidence_selection_available = runtime.evidence_selection_profile_available();
