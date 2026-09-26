@@ -5419,6 +5419,38 @@ class AndroidPublicationContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "document bytes differ"):
                 L._android_publication_plan(raw)
 
+    def test_resolver_contract_matches_material_and_rust_exact_file_alias(self):
+        canonical = "/run/systemd/resolve/stub-resolv.conf"
+        def documents(alias, include_file=True):
+            def change(manifest, contract, sources):
+                if include_file:
+                    contract["files"].insert(0, {"path": canonical, "size": 1, "sha256": "b" * 64, "mode": 0o644})
+                contract["aliases"].append(alias)
+                manifest["osProfile"]["files"] = deepcopy(contract["files"])
+            raw, materials, data = self.data(change)
+            data["totals"].update(osFiles=4 + int(include_file), osAliases=2, osBytes=4 + int(include_file))
+            return raw, materials, data
+        for target in (canonical, "../run/systemd/resolve/stub-resolv.conf"):
+            alias = {"path": "/etc/resolv.conf", "target": target, "canonical": canonical}
+            raw, materials, data = documents(alias)
+            with self.subTest(target=target), patch.object(L, "SHELL_ANDROID_MATERIALS", materials), \
+                 patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data):
+                self.assertIn(alias, L._android_publication_plan(raw)["aliases"])
+        for change, include_file in (({"target": "../run/systemd/resolve/other.conf"}, True),
+                                     ({"path": "/etc/other.conf"}, True),
+                                     ({"canonical": "/run/systemd/resolve", "target": "/run/systemd/resolve"}, True),
+                                     ({"target": "../run/systemd/resolve/../resolve/stub-resolv.conf"}, True),
+                                     ({}, False)):
+            alias = {"path": "/etc/resolv.conf", "target": canonical, "canonical": canonical, **change}
+            raw, materials, data = documents(alias, include_file)
+            with self.subTest(alias=alias, regular=include_file), patch.object(L, "SHELL_ANDROID_MATERIALS", materials), \
+                 patch.object(L, "SHELL_ANDROID_PUBLICATION_DATA", data), self.assertRaisesRegex(ValueError, "alias escapes"):
+                L._android_publication_plan(raw)
+        self.assertTrue(L._android_native_path(canonical))
+        for name in ("/run/systemd/resolve/resolv.conf", canonical + ".bak", "/run/other.conf"):
+            with self.subTest(path=name):
+                self.assertFalse(L._android_native_path(name))
+
     def test_target_node_checks_device_owner_links_mode_and_xattrs(self):
         valid = inert_stat(9, stat.S_IFREG | 0o444, size=1)
         with patch.object(L, "_END", 10.0), patch.object(L.time, "monotonic", return_value=0.0), patch.object(L, "_FAILED", False):

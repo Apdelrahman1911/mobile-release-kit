@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import importlib.util
 import io
+import ipaddress
 import math
 import os
 from pathlib import Path
@@ -66,6 +67,25 @@ CHUNK, FILE_LIMIT, TOTAL_LIMIT = 64 << 10, 512 << 20, 1 << 30
 CONTEXT_FIELDS = {"sourceCommit", "sourceTree", "runId", "runAttempt", "job", "preparation"}
 LICENSE_HASH = "24333f8a63b6825ea9c5514f83c2829b004d1fee"
 LICENSE_NORMALIZED_SHA256 = "aaf80cd0aee7e569ffa8a4be1b61189c0fefccf23068e38dfafe336289b8c723"
+SDK_RECEIPT_CLASSIFICATION = "existing-sdk-receipt-correspondence-v1"
+SDK_RECEIPT = "/usr/local/lib/android/sdk/licenses/android-sdk-license"
+SDK_IMAGE_DATA = "/imagegeneration/imagedata.json"
+SDK_IMAGE = {"image_name": "ubuntu-24.04", "image_version": "20260920.314.1",
+    "os_name": "Ubuntu 24.04.5 LTS",
+    "image_url": "https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md",
+    "image_release": "https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314"}
+# Immutable supplier SOURCE correspondence, never execution or licence consent.
+# The source recipe itself grants world-writable SDK permissions; neither that
+# fact nor a matching receipt digest relaxes the protected-original reader.
+SDK_SOURCE_RECIPE = {"repository": "actions/runner-images", "tag": "ubuntu24/20260920.314",
+    "commit": "e75633902841aa5479c759492b73409e6d317f12",
+    "installer": {"path": "images/ubuntu/scripts/build/install-android-sdk.sh", "size": 5472,
+        "sha256": "17c5823f6e9696a99bad3b3550808e858293d1d793c5df259b6cc3b7c17cdfe9"},
+    "toolset": {"path": "images/ubuntu/toolsets/toolset-2404.json", "size": 7613,
+        "sha256": "291c28ea606bdbf16ec8f11c1b60d54c97f1cf0496b23060771c05cbc1391414"}}
+NETWORK_ROLES = ("/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf")
+RESOLVER_CANONICAL = "/run/systemd/resolve/stub-resolv.conf"
+CONFIGURATION_LIMIT = 128 << 10
 SDK_NAMESPACE = "http://schemas.android.com/sdk/android/repo/repository2/03"
 COMMON_NAMESPACE = "http://schemas.android.com/repository/android/common/02"
 GENERIC_NAMESPACE = "http://schemas.android.com/repository/android/generic/02"
@@ -190,12 +210,22 @@ def _protected_ancestry(binding):
                "Android protected host alias changed")
 
 
+def _host_input_limit(name):
+    if name == SDK_RECEIPT:
+        return 4096
+    if name == SDK_IMAGE_DATA:
+        return 64 << 10
+    if name in (*NETWORK_ROLES, RESOLVER_CANONICAL):
+        return CONFIGURATION_LIMIT
+    return FILE_LIMIT  # Existing tool/provider/font limits are unchanged.
+
+
 def _protected_binding(binding, expected_path):
     """Recheck an existing compiler protected_host_file record, without commands."""
     _keys(binding, {"path", "size", "sha256", "selectedPath", "identity", "links", "ancestry"},
           "Android protected host binding shape differs")
     D.need(binding["selectedPath"] == expected_path and type(binding["size"]) is int
-           and 0 <= binding["size"] <= FILE_LIMIT, "Android host selection differs")
+           and 0 <= binding["size"] <= _host_input_limit(expected_path), "Android host selection differs")
     path = _absolute(binding["path"])
     _protected_ancestry(binding)
     item = path.lstat()
@@ -282,14 +312,20 @@ def android_host_inputs(native, bindings, *, bind_path, deadline):
     _point(deadline)
     inputs = _input_rules(policy())
     D.need(type(native) is dict and type(bindings) is dict and type(bindings.get("files")) is dict
-           and "androidDirectories" not in bindings and "androidAbsences" not in bindings,
+           and "androidDirectories" not in bindings and "androidAbsences" not in bindings
+           and "androidGenerated" not in native,
            "Android original shell host input shape differs")
     host = {"graph": deepcopy(native), "bindings": deepcopy(bindings)}
     files = host["bindings"]["files"]
     for name in inputs["files"]:
         _point(deadline)
+        limit = _host_input_limit(name)
         if name not in files:
-            files[name] = bind_path(Path(name), limit=FILE_LIMIT)
+            files[name] = bind_path(Path(name), limit=limit)
+        # An inherited shell binding must not cause a generic 512MiB rehash
+        # before the small role's parser gets a chance to reject its size.
+        D.need(type(files[name]) is dict and type(files[name].get("size")) is int
+               and 0 <= files[name]["size"] <= limit, "Android host input role extent differs")
         _protected_binding(files[name], name)
     for key, names, options in (("androidDirectories", inputs["directories"], {"directory_only": True}),
                                 ("androidAbsences", inputs["absences"], {"absent": True})):
@@ -302,6 +338,9 @@ def android_host_inputs(native, bindings, *, bind_path, deadline):
                                  deadline=deadline)
         host["bindings"][key] = selected
     _provider_host_inputs(policy(), host, bind_path, deadline)
+    # Only this existing-owner path produces the private SDK correspondence.
+    # Its unavailable authority is not promoted by copying a caller's proof.
+    host["graph"]["androidGenerated"] = {"sdkLicense": _sdk_receipt_state(policy(), host, deadline)}
     _point(deadline)
     return host
 
@@ -448,12 +487,274 @@ def _stock_staged_jks(root, owner, row, identity, jks, deadline):
         D.need(staged == jks, "Android staged JKS bytes differ from the checked original")
 
 
+def _sdk_receipt_rule(value):
+    rule = value["hostPolicy"]["generated"]["sdkLicense"]
+    expected = {"path": SDK_RECEIPT, "classification": SDK_RECEIPT_CLASSIFICATION,
+        "imagePath": SDK_IMAGE_DATA, "sourceRecipe": SDK_SOURCE_RECIPE,
+        "licenseDefinition": {"id": "android-sdk-license", "normalizedSha1": LICENSE_HASH,
+                              "normalizedSha256": LICENSE_NORMALIZED_SHA256}}
+    D.need(D.same(rule, expected), "Android SDK receipt source-correspondence rule differs")
+    D.need({SDK_RECEIPT, SDK_IMAGE_DATA} <= set(_input_rules(value)["files"]),
+           "Android fixed receipt/image original roster is incomplete")
+    return rule
+
+
+def _sdk_image_identity(raw):
+    """Fixed public runner-image DATA, not an assertion that its recipe ran."""
+    value = D.decode(raw, 64 << 10)
+    D.need(type(value) is list and len(value) == 2 and all(type(row) is dict
+           and set(row) == {"group", "detail"} for row in value)
+           and [row["group"] for row in value] == ["Operating System", "Runner Image"],
+           "Android fixed image report shape differs")
+    details = [row["detail"] for row in value]
+    D.need(all(type(item) is str and 0 < len(item) <= 2048 and item.isascii()
+               and all(c == "\n" or 32 <= ord(c) < 127 for c in item) for item in details),
+           "Android fixed image report detail differs")
+    os_lines, lines = (item.split("\n") for item in details)
+    D.need(1 <= len(os_lines) <= 8 and all(os_lines) and " ".join(os_lines) == SDK_IMAGE["os_name"]
+           and lines == [prefix + SDK_IMAGE[key] for prefix, key in (
+               ("Image: ", "image_name"), ("Version: ", "image_version"),
+               ("Included Software: ", "image_url"), ("Image Release: ", "image_release"))],
+           "Android fixed image/source recipe correspondence differs")
+    return dict(SDK_IMAGE)
+
+
+def _sdk_receipt_ids(raw):
+    D.need(type(raw) is bytes and 0 < len(raw) <= 4096
+           and re.fullmatch(rb"\n?(?:[0-9a-f]{40}\n)*[0-9a-f]{40}\n?", raw),
+           "Android existing SDK licence receipt shape differs")
+    lines = raw.decode("ascii").strip("\n").split("\n")
+    D.need(len(lines) == len(set(lines)) and len(lines) <= 64 and LICENSE_HASH in lines,
+           "Android existing receipt does not contain the selected bounded SDK licence")
+    return {"selectedId": LICENSE_HASH, "definitionSha256": LICENSE_NORMALIZED_SHA256, "idCount": len(lines)}
+
+
+def _sdk_receipt_state(value, host, deadline):
+    """Observe protected current originals; never create prior legal authority.
+
+    H's file-ancestry refusal is not repaired by this producer. A caller cannot
+    supply a positive origin boolean; immutable source and local identity are
+    explicitly distinct, and neither establishes the image installer ran.
+    """
+    _point(deadline)
+    rule = _sdk_receipt_rule(value)
+    files = host["bindings"]["files"]
+    D.need({SDK_RECEIPT, SDK_IMAGE_DATA} <= set(files), "Android receipt/image originals are absent")
+    proof = {"classification": SDK_RECEIPT_CLASSIFICATION, "sourceRecipe": deepcopy(rule["sourceRecipe"]),
+             "receiptAuthority": "unavailable", "producerExecutionProven": False, "newConsent": False}
+    for role, selected, limit, parse in (("receipt", SDK_RECEIPT, 4096, _sdk_receipt_ids),
+                                       ("image", SDK_IMAGE_DATA, 64 << 10, _sdk_image_identity)):
+        with _stock_host_original(files[selected], selected, limit, deadline) as (raw, original):
+            summary = parse(raw)
+        proof[role] = {**original, "correspondence": summary}
+    for selected in (SDK_RECEIPT, SDK_IMAGE_DATA):
+        _point(deadline)
+        _protected_binding(files[selected], selected)
+    _point(deadline)
+    return proof
+
+
+def _sdk_receipt_bytes(host, proof, deadline):
+    with _stock_host_original(host["bindings"]["files"][SDK_RECEIPT], SDK_RECEIPT, 4096, deadline) as (raw, original):
+        D.need(D.same({**original, "correspondence": _sdk_receipt_ids(raw)}, proof["receipt"]),
+               "Android SDK receipt differs from its checked original")
+    return raw  # The original read, close and named POST all completed.
+
+
+def _sdk_staged_receipt(root, owner, row, identity, receipt, deadline):
+    with _stock_private_original(root / "tools" / GENERATED[2], owner, 4096, deadline, mode=0o400,
+        expected={"path": "android-sdk-license", "size": row["size"], "sha256": row["sha256"],
+                  "identity": identity}) as (staged, _):
+        D.need(staged == receipt, "Android staged SDK receipt differs from the checked original")
+
+
+def _sdk_receipt_authority(value, host, deadline):
+    proof = _sdk_receipt_state(value, host, deadline)
+    supplied = host["graph"].get("androidGenerated")
+    D.need(type(supplied) is dict and set(supplied) == {"sdkLicense"}
+           and D.same(supplied["sdkLicense"], proof), "Android original SDK correspondence changed")
+    # Deliberately no external true/false switch. The available source/image/
+    # normalized-hash observations cannot establish historical hosted origin
+    # or legal permission. A separately reviewed authenticated prior receipt
+    # route (or explicit owner-authorized licence route) is still required.
+    raise D.Refused("Android SDK receipt authority is unavailable; authenticated prior receipt provenance "
+                    "or an explicit owner-authorized licence route is required")
+
+
+def _configuration_lines(role, raw, deadline):
+    # Keep the shared original reader's nonempty subset. A comment-only file
+    # expresses defaults; zero-byte files are not claimed to be supported.
+    D.need(type(raw) is bytes and 0 < len(raw) <= CONFIGURATION_LIMIT and raw.isascii()
+           and all(c in (9, 10) or 32 <= c < 127 for c in raw),
+           "Android network configuration body differs")
+    lines = raw.decode("ascii").splitlines()
+    D.need(len(lines) <= 2048 and all(len(line) <= 4096 for line in lines),
+           "Android network configuration line bound")
+    for line in lines:
+        _point(deadline)
+        if role == "/etc/resolv.conf":
+            # A narrow LF/column-zero resolver grammar avoids normalizing a
+            # comment or ignored native line into an active directive. CRLF,
+            # indentation and inline #/; comments are intentionally unsupported.
+            if not line.strip() or line.startswith(("#", ";")):
+                continue
+            D.need(line[0] not in " \t" and "#" not in line and ";" not in line,
+                   "Android resolver directive/comment layout is unreviewed")
+            yield line
+            continue
+        line = line.split("#", 1)[0].strip()
+        if line:
+            yield line
+
+
+def _configuration_hostname(name):
+    D.need(type(name) is str and 0 < len(name) <= 253, "Android network hostname bound")
+    canonical = name[:-1] if name.endswith(".") else name
+    D.need(all(0 < len(part) <= 63 and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", part)
+               for part in canonical.split(".")), "Android network hostname shape differs")
+    return canonical.lower()
+
+
+def _configuration_address(value):
+    D.need(type(value) is str and 0 < len(value) <= 45 and "%" not in value,
+           "Android network address shape differs")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        raise D.Refused("Android network address shape differs") from None
+    D.need(not address.is_unspecified, "Android network address is unsupported")
+    return address
+
+
+def _network_configuration_data(role, raw, deadline):
+    """Finite configuration correspondence only; no query or producer claim.
+
+    The source rule must also equal this entire projection. In particular,
+    syntactically valid hosts overrides are not admitted merely by parsing.
+    Other NSS database dispatch is represented, not claimed to be exercised.
+    """
+    _point(deadline)
+    D.need(role in NETWORK_ROLES, "Android network configuration role differs")
+    lines = list(_configuration_lines(role, raw, deadline))
+    if role == "/etc/gai.conf":
+        D.need(not lines, "Android nondefault address-selection configuration is unreviewed")
+        return {"defaults": True}
+    if role == "/etc/host.conf":
+        D.need(lines in ([], ["multi on"]), "Android host configuration directive is unreviewed")
+        return {"multi": bool(lines)}
+    if role == "/etc/nsswitch.conf":
+        databases = {}
+        for line in lines:
+            name, separator, body = line.partition(":")
+            name, sources = name.strip(), body.split()
+            D.need(separator == ":" and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name)
+                   and name not in databases and len(databases) < 32 and 1 <= len(sources) <= 8
+                   and all(re.fullmatch(r"[a-z][a-z0-9_+-]{0,31}", item) for item in sources)
+                   and len(sources) == len(set(sources)), "Android NSS database/dispatch is unreviewed")
+            databases[name] = sources
+        D.need(databases.get("hosts") == ["files", "dns"], "Android NSS hosts dispatch is not fixed files dns")
+        return {"databases": databases}
+    if role == "/etc/hosts":
+        records, seen = [], set()
+        # Includes the fixed suppliers and both allowed release redirect roles.
+        # HTTPS/digest admission remains independently required by acquisition.
+        suppliers = {"dl.google.com", "github.com", "repo.maven.apache.org", "security.ubuntu.com",
+                     "snapshot.ubuntu.com", "services.gradle.org", "downloads.gradle.org",
+                     "release-assets.githubusercontent.com"}
+        for line in lines:
+            fields = line.split()
+            D.need(2 <= len(fields) <= 9 and len(records) < 128, "Android hosts record bound")
+            address = _configuration_address(fields[0])
+            names = [_configuration_hostname(name) for name in fields[1:]]
+            D.need(not set(names) & suppliers, "Android hosts overrides a fixed acquisition host")
+            for name in names:
+                key = (address.version, name)
+                D.need(key not in seen, "Android hosts contains an ambiguous same-family name")
+                seen.add(key)
+            records.append({"address": str(address), "names": names})
+        return {"records": records}
+    servers, search, options, options_seen = [], None, {}, False
+    for line in lines:
+        fields = line.split()
+        if not fields:
+            continue
+        if fields[0] == "nameserver":
+            D.need(len(fields) == 2 and len(servers) < 3, "Android resolver nameserver bound")
+            parsed_address = _configuration_address(fields[1])
+            D.need(not parsed_address.is_multicast, "Android resolver multicast nameserver is unsupported")
+            address = str(parsed_address)
+            D.need(address not in servers, "Android resolver nameserver is duplicated")
+            servers.append(address)
+        elif fields[0] in ("search", "domain"):
+            D.need(search is None and 1 <= len(fields[1:]) <= (1 if fields[0] == "domain" else 6),
+                   "Android resolver search directive differs")
+            # The DNS root is a normal resolver search/domain value, not a
+            # hosts-file alias. Its use still requires exact source policy.
+            search = ["." if name == "." else _configuration_hostname(name) for name in fields[1:]]
+            D.need(len(search) == len(set(search)), "Android resolver search is duplicated")
+        elif fields[0] == "options":
+            D.need(not options_seen and 1 <= len(fields[1:]) <= 8, "Android resolver options directive differs")
+            options_seen = True
+            for option in fields[1:]:
+                key, separator, value = option.partition(":")
+                D.need(key not in options and key in {"timeout", "attempts", "ndots", "edns0", "trust-ad"},
+                       "Android resolver option is unreviewed or duplicated")
+                if key in ("edns0", "trust-ad"):
+                    D.need(not separator, "Android resolver flag has a value")
+                    options[key] = True
+                else:
+                    bounds = {"timeout": (1, 30), "attempts": (1, 5), "ndots": (0, 15)}
+                    D.need(separator == ":" and re.fullmatch(r"[0-9]{1,2}", value)
+                           and bounds[key][0] <= int(value) <= bounds[key][1], "Android resolver option bound")
+                    options[key] = int(value)
+        else:
+            raise D.Refused("Android resolver directive is unreviewed")
+    D.need(servers, "Android resolver nameserver is absent")
+    # These are configuration defaults, NOT a GitHub timeout-negative recipe,
+    # actual query count, connectivity proof or a renewed operation endpoint.
+    return {"nameservers": servers, "search": search or [], "options": {
+        "timeout": options.get("timeout", 5), "attempts": options.get("attempts", 2),
+        "ndots": options.get("ndots", 1), "edns0": options.get("edns0", False),
+        "trust-ad": options.get("trust-ad", False)}}
+
+
+def _network_configuration(value, host, rule, row, deadline):
+    origin = _keys(rule["origin"], {"kind", "rule", "role", "configuration"},
+                   "Android network origin rule shape differs")
+    role, name = origin["role"], rule["path"]
+    D.need(origin["kind"] == "same-vm" and origin["rule"] == "network-config" and role in NETWORK_ROLES
+           and (name == role or role == "/etc/resolv.conf" and name == RESOLVER_CANONICAL),
+           "Android network origin path/role differs")
+    inputs = _input_rules(value)
+    files = host["bindings"]["files"]
+    D.need({name, role} <= set(inputs["files"]) and {name, role} <= set(files),
+           "Android network selected/canonical original is missing")
+    aliases = [alias for alias in value["hostPolicy"]["aliases"] if alias["path"] == role]
+    if name == role:
+        D.need(not aliases, "Android regular network input has an alias")
+    else:
+        D.need(len(aliases) == 1 and aliases[0]["canonical"] == RESOLVER_CANONICAL
+               and aliases[0]["target"] in (RESOLVER_CANONICAL, "../run/systemd/resolve/stub-resolv.conf"),
+               "Android resolver source alias is not the fixed target")
+        D.need(os.readlink(role) == aliases[0]["target"], "Android original resolver alias spelling changed")
+    with _stock_host_original(files[role], role, CONFIGURATION_LIMIT, deadline) as (raw, original):
+        D.need(original["file"] == row and original["binding"]["identity"] == files[name]["identity"],
+               "Android network selected/canonical originals differ")
+        configuration = _network_configuration_data(role, raw, deadline)
+        D.need(D.same(configuration, origin["configuration"]), "Android network configuration differs from its source rule")
+    _point(deadline)
+    _protected_binding(files[name], name)
+    _point(deadline)
+    return {"original": original, "configuration": configuration}
+
+
 def _host_state(value, host, deadline):
     """A source-reviewed supplier/configuration policy, not an ambient census.
 
     ``runtimeData.suppliers`` is the existing portable shell DATA projection;
     ``caches`` is its explicitly separate original same-VM observation. Dynamic
-    Android rows must be named in the policy and in that original observation.
+    Android rows must be named in the policy and their explicit original
+    bindings; network configuration uses a separate fixed correspondence rule.
     The caller independently recreates shell_data_snapshot before this check.
     """
     rules = value["hostPolicy"]
@@ -491,6 +792,8 @@ def _host_state(value, host, deadline):
             _keys(origin, {"kind", "size", "sha256", "mode"}, "Android supplier origin fields differ")
             D.need(row == {"path": name, **{k: origin[k] for k in ("size", "sha256", "mode")}},
                    "Android portable supplier bytes/mode differ")
+        elif origin.get("rule") == "network-config":
+            _network_configuration(value, host, rule, row, deadline)
         else:
             _keys(origin, {"kind", "cacheRoot", "rule"}, "Android generated OS origin fields differ")
             if origin["rule"] == "font-cache":
@@ -507,9 +810,7 @@ def _host_state(value, host, deadline):
                        and name == "/etc/ld.so.cache" and name in provider_state["bindings"],
                        "Android loader cache is outside its original consumer interval")
             else:
-                # No caller-populated androidValidatedFiles map can substitute
-                # for the still-required loader/network rule implementation.
-                raise D.Refused("Android generated loader/network rule is not yet implemented")
+                raise D.Refused("Android generated OS rule is outside its fixed source policy")
         used.add(name)
         files.append(row)
     D.need([r["path"] for r in files] == sorted(used), "Android OS contract order differs")
@@ -526,23 +827,8 @@ def _host_state(value, host, deadline):
     _keys(rules["generated"], {"javaTrustStore", "sdkLicense"}, "Android generated origins differ")
     stock = _stock_trust_state(value, host, deadline)
     generated = {"javaTrustStore": stock["jks"]["file"]}
-    for role, rule in rules["generated"].items():
-        if role == "javaTrustStore":
-            continue  # Exact consumer contents, never an updater execution claim.
-        _keys(rule, {"path", "producerSha256", "inputsSha256", "binding"}, "Android generated producer policy differs")
-        D.need(rule["path"] in bindings and type(rule["binding"]) is dict,
-               "Android fixed generated input is absent")
-        # These producer/input projections must be generated by the admitted
-        # current-host preparation. Merely copying an ambient digest cannot pass.
-        proof = host["graph"]["androidGenerated"][role]
-        D.need(proof["producerSha256"] == D.sha(rule["producerSha256"])
-               and proof["inputsSha256"] == D.sha(rule["inputsSha256"])
-               and proof["policy"] == rule["binding"] and proof["newConsent"] is False,
-               "Android generated input producer/origin differs")
-        generated[role] = _protected_binding(bindings[rule["path"]], rule["path"])
-        D.need(rule["path"] == "/usr/local/lib/android/sdk/licenses/android-sdk-license"
-               and proof["preExistingHostedImageReceipt"] is True,
-               "Android SDK receipt is not the fixed existing hosted-image input")
+    _sdk_receipt_authority(value, host, deadline)
+    generated["sdkLicense"] = _protected_binding(bindings[SDK_RECEIPT], SDK_RECEIPT)
     return {"schemaVersion": 1, "id": rules["id"], "closure": "python-jdk-sdk-gradle-shell-loader-v1",
             "files": files, "aliases": aliases}, generated
 
@@ -1404,11 +1690,7 @@ def existing_license(raw, text):
     normalized = sdk_license_value(text).encode("utf-8")
     D.need(len(normalized) == 16960 and _sha(normalized) == LICENSE_NORMALIZED_SHA256
            and hashlib.sha1(normalized).hexdigest() == LICENSE_HASH, "Android pinned SDK licence definition differs")
-    D.need(type(raw) is bytes and 0 < len(raw) <= 4096 and re.fullmatch(rb"\n?(?:[0-9a-f]{40}\n)*[0-9a-f]{40}\n?", raw),
-           "Android existing SDK licence receipt shape differs")
-    lines = raw.decode("ascii").strip("\n").split("\n")
-    D.need(len(lines) == len(set(lines)) and LICENSE_HASH in lines,
-           "Android existing hosted receipt does not contain the selected SDK licence")
+    _sdk_receipt_ids(raw)
     return raw  # Preserve the existing bytes. Never synthesize an acceptance marker.
 
 
@@ -2207,9 +2489,9 @@ def _prepare(check, source: Path, material_root: Path, *, context: dict, host: d
                                           for name in ("platforms;android-35", "build-tools;35.0.0")})
     D.need({name: {"size": len(body), "sha256": _sha(body)} for name, body in packages.items()} == value["generatedPackages"],
            "Android deterministic package metadata source commitment differs")
-    receipt = generated["sdkLicense"]
     packages[GENERATED[0]] = _stock_jks_bytes(host, stock, check.end)
-    packages[GENERATED[2]] = existing_license(D.read(Path(receipt["path"]), 4096), licence)
+    packages[GENERATED[2]] = existing_license(_sdk_receipt_bytes(host,
+        host["graph"]["androidGenerated"]["sdkLicense"], check.end), licence)
     for name, raw in sorted(packages.items()):
         row = {"path": name, "size": len(raw), "sha256": _sha(raw), "mode": 0o444}
         _member_output(io.BytesIO(raw), root, [{**row, "sourceMode": 0o444}], row, check.end,
@@ -2338,8 +2620,8 @@ def validate(record, *, context: dict, host: dict, deadline: float):
     D.need(_closed_namespace(root, owner, deadline) == provenance["namespace"], "Android original private namespace changed")
     jks = _stock_jks_bytes(host, provenance["stockTrust"], deadline)
     _stock_staged_jks(root, owner, actual[GENERATED[0]], originals[GENERATED[0]], jks, deadline)
-    D.need(D.read(root / "tools" / GENERATED[2], 4096) == D.read(Path(generated["sdkLicense"]["path"]), 4096),
-           "Android generated receipt input differs")
+    receipt = _sdk_receipt_bytes(host, host["graph"]["androidGenerated"]["sdkLicense"], deadline)
+    _sdk_staged_receipt(root, owner, actual[GENERATED[2]], originals[GENERATED[2]], receipt, deadline)
     _point(deadline)
     return record
 

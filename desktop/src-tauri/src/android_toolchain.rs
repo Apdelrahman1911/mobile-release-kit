@@ -125,7 +125,8 @@ fn native_path(v: &str) -> bool {
         || ["dejavu", "lato", "liberation", "noto"].iter().any(|family|
             direct_file(v, &format!("/usr/share/fonts/truetype/{family}/"), ".ttf"))
         || matches!(v, "/etc/ld.so.cache" | "/etc/ld.so.conf" | "/etc/fonts/fonts.conf"
-            | "/etc/nsswitch.conf" | "/etc/host.conf" | "/etc/hosts" | "/etc/resolv.conf" | "/etc/gai.conf"))
+            | "/etc/nsswitch.conf" | "/etc/host.conf" | "/etc/hosts" | "/etc/resolv.conf" | "/etc/gai.conf"
+            | "/run/systemd/resolve/stub-resolv.conf"))
 }
 fn files_valid(files: &[FileSpec], native: bool) -> bool {
     !files.is_empty() && files.len() <= (if native { OS_FILE_COUNT } else { TOOL_FILE_COUNT })
@@ -178,8 +179,15 @@ fn parse_os_contract(raw: &[u8], anchor: &str) -> Option<OsContract> {
             && (matches!(a.path.as_str(), "/bin" | "/lib" | "/lib64") || a.path.starts_with("/usr/"));
         let font_alias = direct_file(&a.path, "/etc/fonts/conf.d/", ".conf")
             && font_configuration(&a.canonical) && regular_files.contains(a.canonical.as_str());
+        // Exactly the source-policy-selected resolver original, not /run/** or
+        // a copied /etc file. Native capture must still prove its protected
+        // ancestry, identity and bytes; this schema alone grants no admission.
+        let resolver_alias = a.path == "/etc/resolv.conf"
+            && a.canonical == "/run/systemd/resolve/stub-resolv.conf"
+            && matches!(a.target.as_str(), "/run/systemd/resolve/stub-resolv.conf" | "../run/systemd/resolve/stub-resolv.conf")
+            && regular_files.contains(a.canonical.as_str());
         if !names.insert(a.path.to_ascii_lowercase()) || folded_targets.contains(&a.path.to_ascii_lowercase())
-            || !targets.contains(&a.canonical) || !(loader_alias || font_alias)
+            || !targets.contains(&a.canonical) || !(loader_alias || font_alias || resolver_alias)
             || alias_destination(a).as_deref() != Some(a.canonical.as_str()) { return None; }
     }
     Some(OsContract { id: d.id, sha256: anchor.into(), files: d.files, aliases: d.aliases })
@@ -476,10 +484,12 @@ mod pure_tests {
             "/usr/share/fonts/truetype/lato/Lato-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", "/var/cache/fontconfig/CACHEDIR.TAG",
             "/var/cache/fontconfig/0bd3dc0958fa2205aaaa8ebb13e2872b-le64.cache-9",
-            "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"] {
+            "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf",
+            "/run/systemd/resolve/stub-resolv.conf"] {
             assert!(native_path(allowed), "{allowed}");
         }
         for denied in ["/etc/passwd", "/etc/resolv.conf.bak", "/etc/fonts/conf.avail/.conf",
+            "/run/systemd/resolve/resolv.conf", "/run/systemd/resolve/stub-resolv.conf.bak", "/run/other.conf",
             "/etc/fonts/conf.avail/nested/file.conf", "/etc/fonts/conf.avail/FILE.CONF",
             "/etc/fonts/conf.avail/../outside.conf", "/etc/fonts/conf.d/50-user.conf",
             "/usr/share/fontconfig/conf.avail/nested/file.conf", "/usr/share/fonts/truetype/other/Font.ttf",
@@ -492,6 +502,30 @@ mod pure_tests {
             "/usr/local/share/fonts/Font.ttf", "/usr/share/arbitrary/data"] {
             assert!(!native_path(denied), "{denied}");
         }
+    }
+    #[test]
+    fn resolver_alias_is_one_exact_original_file_not_a_run_directory_allowance() {
+        let canonical = "/run/systemd/resolve/stub-resolv.conf";
+        let mut value = os_data();
+        value["files"].as_array_mut().unwrap().insert(0,
+            json!({"path":canonical,"size":1,"sha256":"e".repeat(64),"mode":0o644}));
+        value["files"].as_array_mut().unwrap().sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        for target in [canonical, "../run/systemd/resolve/stub-resolv.conf"] {
+            value["aliases"] = json!([{"path":"/etc/resolv.conf","target":target,"canonical":canonical}]);
+            assert!(os_valid(&value));
+        }
+        for alias in [
+            json!({"path":"/etc/resolv.conf","target":"../run/systemd/resolve/other.conf","canonical":canonical}),
+            json!({"path":"/etc/other.conf","target":canonical,"canonical":canonical}),
+            json!({"path":"/etc/resolv.conf","target":"/run/systemd/resolve","canonical":"/run/systemd/resolve"}),
+            json!({"path":"/etc/resolv.conf","target":"../run/systemd/resolve/../resolve/stub-resolv.conf","canonical":canonical}),
+        ] {
+            value["aliases"] = json!([alias]);
+            assert!(!os_valid(&value));
+        }
+        value["aliases"] = json!([{"path":"/etc/resolv.conf","target":canonical,"canonical":canonical}]);
+        value["files"].as_array_mut().unwrap().retain(|row| row["path"] != canonical);
+        assert!(!os_valid(&value));
     }
     #[test]
     fn font_aliases_cannot_mix_loader_routes_or_borrow_directory_targets() {
