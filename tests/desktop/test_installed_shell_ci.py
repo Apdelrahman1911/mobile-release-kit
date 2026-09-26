@@ -841,6 +841,7 @@ class AndroidSameJobIntegrationContracts(unittest.TestCase):
                 observed = {"state": lifecycle.result_state({"shell": {}}), "productQualified": False,
                     "sourceSha": "a" * 40, "consumerAttempt": "1", "packageLifecycleQualified": False,
                     "shellPackageBuilt": False, "privateInput": "private-native-marker",
+                    "lifecycleDocuments": {"privateInput": "private-lifecycle-marker"},
                     "cases": {case: {"exitCode": 1 if case == "settled-failure" else 0} for case in lifecycle.SHELL_CASES},
                     **{key: {} for key in ("candidateDocuments", "projectPaths", "workflowApply", "sessionInputs", "metadataSave",
                         "versionSave", "toolsOffline", "androidBuild", "androidPublication", "settledFailure")}}
@@ -901,10 +902,11 @@ class AndroidSameJobIntegrationContracts(unittest.TestCase):
                     private = (root / "private-compiler/result.json").read_bytes()
                     self.assertIn(b"private-tools-marker", private)
                     self.assertIn(b"private-native-marker", private)
+                    self.assertIn(b"private-lifecycle-marker", private)
                 uploaded = b"".join(p.read_bytes() for p in (root / "public").iterdir())
                 displayed = (stdout.getvalue() + stderr.getvalue()).encode()
                 for marker in ("argument", "compiler", "transport", "preparation", "os", "host", "native", "tools", "input",
-                               "owner", "finality", "root", "path", "driver", "original"):
+                               "owner", "finality", "root", "path", "driver", "original", "lifecycle"):
                     self.assertNotIn(("private-" + marker + "-marker").encode(), uploaded + displayed)
 
 
