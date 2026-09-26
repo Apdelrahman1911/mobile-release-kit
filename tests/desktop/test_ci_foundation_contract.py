@@ -15019,6 +15019,116 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             self.assertEqual(job.count("ci_foundation.py "+phase+"'"),1)
 
 
+    def test_windows_modal_observer_turn_uses_original_timer_and_retains_callback_depth(self):
+        # Source contracts only. These assertions do not execute the native
+        # timer, modal loop, COM callback or either inert Rust unit test.
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        shell = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/shell_windows.rs").read_text()
+        self.assertEqual(native.count("W::SetTimer("), 1)
+        self.assertIn("const TIMER: usize = 1;", native)
+        self.assertIn("W::SetTimer(window, TIMER, 25, None)", native)
+        self.assertIn('#[cfg(feature = "windows-installed-observation")]\n    ObservationTurn,', native)
+        control = native.split('unsafe extern "system" fn control_window(', 1)[1].split('unsafe extern "system" fn task_callback(', 1)[0]
+        timer = control.split("if message == W::WM_TIMER && wparam == TIMER {", 1)[1].split("if message == W::WM_NCDESTROY", 1)[0]
+        self.assertIn("let _returned = original.enter();", control)
+        self.assertLess(timer.index("original.visible();"), timer.index("original.close_on_sta();"))
+        self.assertLess(timer.index("original.close_on_sta();"), timer.index("original.enter_observation_turn()"))
+        self.assertIn('#[cfg(feature = "windows-installed-observation")]\n            if let Some(_turn_returned)', timer)
+        self.assertIn("original.event(DialogEvent::ObservationTurn);", timer)
+        for forbidden in ("drop(_returned)", "depth.set(", "run_on_main_thread", "SetTimer", "PostMessage"):
+            self.assertNotIn(forbidden, timer)
+        ready = native.split("fn observation_turn_ready(", 1)[1].split("fn enter_observation_turn(", 1)[0]
+        for required in ("self.depth.get() == 1", "self.created.get()", "self.presented.get()", "self.showing.get()",
+                         "!self.show_returned.get()", "self.response.get().is_none()", "!self.control.stopped.load(Ordering::SeqCst)",
+                         "!self.close_entered.get()", "!self.settled.get()", "!self.unknown.get()"):
+            self.assertIn(required, ready)
+        self.assertIn("!self.observation_turn_ready() || self.observation_entered.replace(true)", native)
+        self.assertIn("self.observation_entered.get() && self.observation_turn_ready()", native)
+        self.assertIn("callbacks_active: self.depth.get() != 0, observation_turn: self.observation_turn_active()", native)
+        self.assertIn("impl Drop for DialogReturn<'_> { fn drop(&mut self) { self.0.depth.set(self.0.depth.get().saturating_sub(1)); } }", native)
+        self.assertIn("impl Drop for ObservationTurnReturn<'_> { fn drop(&mut self) { self.0.observation_entered.set(false); } }", native)
+        action = native.split("pub fn installed_action(", 1)[1].split("struct DialogReturn", 1)[0]
+        self.assertGreaterEqual(action.count("if !self.observation_turn_active() { return Err(UiError::State); }"), 4)
+        self.assertLess(action.index("self.observation_turn_active()"), action.index("self.native_window()?"))
+        event = shell.split("fn native_event(", 1)[1].split("fn show(", 1)[0]
+        self.assertIn("native::DialogEvent::ObservationTurn => return", event)
+        self.assertLess(event.index("native::DialogEvent::ObservationTurn => return"), event.index("call.changed();"))
+        show = shell.split("fn show(", 1)[1].split("pub(crate) async fn run_owned_dialog(", 1)[0]
+        self.assertIn("let id = owner.id;", show)
+        self.assertIn("q.modal_turn(app, id, kind, &events)", show)
+        callback = show.split("Box::new(move |event| {", 1)[1].split("})));", 1)[0]
+        self.assertNotIn("owner.", callback)
+        self.assertIn('feature = "windows-installed-observation"', callback)
+        self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol"', callback)
+        self.assertIn("native_event(&events, event, kind == native::DialogKind::Quit);", callback)
+        self.assertIn("app.try_state::<Arc<super::installed_observation::Observation>>().map(|q| (q.inner().clone(), app.clone()))", shell)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 19)
+        self.assertFalse(any("ui_dialog::tests" in name for name in helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS))
+        for test in ("stop_before_native_construction_is_latched_without_a_foreign_window",
+                     "retired_original_cannot_repost_to_a_reused_window"):
+            self.assertEqual(native.count("fn " + test + "("), 1)
+
+    def test_windows_modal_observer_pending_actions_and_reload_preserve_original_finality(self):
+        observer = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/installed_shell_observation_windows.rs").read_text()
+        shell = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/shell_windows.rs").read_text()
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        assets = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/asset_session.rs").read_text()
+        outer = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/shell.rs").read_text()
+        self.assertNotIn("run_on_main_thread", observer)  # Neither Native nor Reload may leave a replayable task.
+        tick = observer.split("pub(super) fn tick(", 1)[1].split("fn document_sample(", 1)[0]
+        self.assertIn("r.pending = Some(Pending::Native(step)); return;", tick)
+        self.assertIn("r.pending = Some(Pending::Reload); return;", tick)
+        self.assertNotIn("r.reload_requested = true", tick)
+        nonwaiting = observer.split("fn try_record(", 1)[1].split("fn timely(", 1)[0]
+        self.assertIn("self.record.try_lock()", nonwaiting)
+        self.assertIn("Err(TryLockError::WouldBlock) => None", nonwaiting)
+        self.assertIn("Err(TryLockError::Poisoned(_)) => { self.fail(Refusal::Record); None }", nonwaiting)
+        modal = observer.split("pub(super) fn modal_turn(", 1)[1].split("fn reload_step(", 1)[0]
+        self.assertIn("std::thread::current().id() != self.main || !self.timely()", modal)
+        self.assertIn("let Some(r) = self.try_record() else { return; };", modal)
+        self.assertIn("self.native_step(step, id, kind, call)", modal)
+        self.assertIn("self.reload_step(app, id, kind, call)", modal)
+        self.assertNotIn("self.record()", modal)
+        step = observer.split("fn native_step(", 1)[1].split("fn native_body(", 1)[0]
+        self.assertLess(step.index("self.native_body(step, id, kind, call)"), step.index("r.pending = None"))
+        self.assertLess(step.index("if returned == Ok(None) { return; }"), step.index("r.pending = None"))
+        self.assertLess(step.index("returned != Ok(Some(true)) || !self.timely()"), step.index("r.actions_returned[index] = true"))
+        body = observer.split("fn native_body(", 1)[1].split("fn dom(", 1)[0]
+        for required in ("callback_id != id || callback_kind != kind", "!Arc::ptr_eq(call, &dialog.call)",
+                         "self.try_record() else { return Ok(None); }", "!witness.same(&dialog)",
+                         "!dialog.native.callbacks_active || !dialog.native.observation_turn", "r.actions_attempted[index] || !self.timely()"):
+            self.assertIn(required, body)
+        self.assertLess(body.index("r.actions_attempted[index] = true; drop(r);"), body.index("observe_dialog_action(id, action)"))
+        reload = observer.split("fn reload_step(", 1)[1].split("fn native_step(", 1)[0]
+        for required in ("self.case != Case::DocumentLoss || id != 2 || kind != DialogKind::Project",
+                         "r.pending != Some(Pending::Reload)", "r.reload_requested || r.reload_returned || !r.picker_pending",
+                         "Arc::ptr_eq(&witness.call, call)", "Arc::ptr_eq(&witness.owner.gui, call)", "!witness.owner.interrupted()",
+                         "facts.created && facts.showing", "witness.outstanding().is_ok()", "self.try_record()"):
+            self.assertIn(required, reload)
+        self.assertEqual(observer.count('eval("window.location.reload()")'), 1)
+        self.assertLess(reload.index("r.reload_requested = true; drop(r);"), reload.index('eval("window.location.reload()")'))
+        self.assertLess(reload.index('eval("window.location.reload()")'), reload.index("r.reload_returned = true"))
+        self.assertLess(reload.index("returned.is_err() || !self.timely()"), reload.index("r.pending = None"))
+        for forbidden in ("observed_dialog()", ".lost(", "facts.response =", "call.changed()", "diagnostic_progress()", "report_failure()", "Instant::now() +"):
+            self.assertNotIn(forbidden, modal + reload)
+        stop = native.split("pub fn request_stop(", 1)[1].split("pub struct Dialog {", 1)[0]
+        self.assertLess(stop.index("self.stopped.store(true"), stop.index("W::PostMessageW("))
+        self.assertEqual(stop.count("W::PostMessageW("), 1)
+        close = native.split("fn close_on_sta(", 1)[1].split("fn setup_route(", 1)[0]
+        self.assertIn("file.Close(CANCEL)", close); self.assertIn("C::TDM_CLICK_BUTTON", close)
+        release = native.split("fn release_once(", 1)[1].split("pub fn settled(", 1)[0]
+        self.assertIn("self.depth.get() != 0 || self.showing.get()", release)
+        self.assertLess(release.index("W::KillTimer("), release.index("W::DestroyWindow("))
+        self.assertLess(release.index("W::DestroyWindow("), release.index("self.event(DialogEvent::Settled)"))
+        owned = shell.split("pub(crate) async fn run_owned_dialog(", 1)[1].split("pub(super) mod observation", 1)[0]
+        self.assertIn("owner.interrupted() && control.request_stop().is_err()", owned)
+        self.assertIn("result == Err(Reason::CleanupUnknown) || !call.settled()", owned)
+        self.assertIn("state.slot.as_ref().is_some_and(|slot| !slot.owner.gui.settled())", assets)
+        self.assertIn("quit.join_if_ended() == Some(true) && quit.resources_settled()", assets)
+        exit_path = outer.split("if document.can_exit() {", 1)[1]
+        self.assertLess(exit_path.index("settle_relay(&app).await"), exit_path.index("owned_windows::settle_for_exit(&app, &document).await"))
+
+
 class WindowsNormalUiInertRegressionTests(unittest.TestCase):
     """Bounded policy-output and source routing DATA; no native execution."""
 

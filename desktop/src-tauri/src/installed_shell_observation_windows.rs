@@ -3,7 +3,7 @@
 //! replacement executor, document, runtime or shipping automation interface.
 //! All native actions target B's retained original STA dialog. Child result
 //! bytes report pre-exit readiness only; the native owner/finalizer proves exit.
-use std::{path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, OnceLock, atomic::{AtomicBool, Ordering}},
+use std::{path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError, atomic::{AtomicBool, Ordering}},
     thread::ThreadId, time::Instant};
 use serde_json::{json, Value};
 use tauri::Manager;
@@ -133,6 +133,12 @@ impl Observation {
     }
     fn record(&self) -> Option<MutexGuard<'_, Record>> {
         match self.record.lock() { Ok(record) => Some(record), Err(_) => { self.fail(Refusal::Record); None } }
+    }
+    fn try_record(&self) -> Option<MutexGuard<'_, Record>> {
+        match self.record.try_lock() {
+            Ok(record) => Some(record), Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(_)) => { self.fail(Refusal::Record); None },
+        }
     }
     fn timely(&self) -> bool {
         if Instant::now() >= self.end { self.fail(Refusal::Deadline); }
@@ -405,25 +411,15 @@ impl Observation {
         if matches!(step, Step::CancelProject | Step::SetFolder | Step::AcceptProject | Step::QuitCancel | Step::QuitConfirm | Step::PickerPending) {
             let Some(mut r) = self.record() else { return; };
             if !self.timely() || r.pending.is_some() || r.step != step { self.fail(Refusal::Tick); return; }
-            r.pending = Some(Pending::Native(step)); drop(r);
-            let q = self.clone();
-            if window.run_on_main_thread(move || q.native_step(step)).is_err() { self.fail(Refusal::Tick); } return;
+            // The already-owned dialog's timer services this exact pending
+            // value. No Tauri task may wait behind the Show it must dismiss.
+            r.pending = Some(Pending::Native(step)); return;
         }
         if step == Step::Reload {
             let Some(mut r) = self.record() else { return; };
             if !self.timely() || r.pending.is_some() || r.step != step || self.case != Case::DocumentLoss || r.reload_requested || !r.picker_pending
                 || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
-            r.reload_requested = true; r.pending = Some(Pending::Reload); drop(r);
-            let q = self.clone(); let reload = window.clone();
-            if window.run_on_main_thread(move || {
-                if std::thread::current().id() != q.main || !q.timely() { q.fail(Refusal::Tick); return; }
-                // Real reload. Only the production navigation/Started callback
-                // can invalidate this original; no direct lost() injection.
-                let returned = reload.eval("window.location.reload()");
-                let Some(mut r) = q.record() else { return; };
-                if r.pending != Some(Pending::Reload) || returned.is_err() { q.fail(Refusal::Tick); return; }
-                r.pending = None; r.reload_returned = true; r.step = Step::Lost;
-            }).is_err() { self.fail(Refusal::Tick); } return;
+            r.pending = Some(Pending::Reload); return;
         }
         let Some(script) = script(step) else { self.fail(Refusal::Tick); return; };
         let original = {
@@ -459,15 +455,53 @@ impl Observation {
         }
         true
     }
-    fn native_step(&self, step: Step) {
+    pub(super) fn modal_turn(&self, app: &tauri::AppHandle, id: u32, kind: DialogKind, call: &Arc<GuiCall>) {
         if std::thread::current().id() != self.main || !self.timely() { self.fail(Refusal::NativeStep); return; }
-        let returned = self.native_body(step);
+        let pending = {
+            let Some(r) = self.try_record() else { return; };
+            r.pending
+        }; // No Record/TLS/GuiFacts guard crosses a native action or eval.
+        match pending {
+            Some(Pending::Native(step)) => self.native_step(step, id, kind, call),
+            Some(Pending::Reload) => self.reload_step(app, id, kind, call),
+            _ => {},
+        }
+    }
+    fn reload_step(&self, app: &tauri::AppHandle, id: u32, kind: DialogKind, call: &Arc<GuiCall>) {
+        let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else { self.fail(Refusal::Tick); return; };
+        let Some(mut r) = self.try_record() else { return; };
+        if self.case != Case::DocumentLoss || id != 2 || kind != DialogKind::Project
+            || r.pending != Some(Pending::Reload) || r.step != Step::Reload || r.reload_requested || r.reload_returned || !r.picker_pending
+            || !r.dialogs.iter().find(|witness| witness.id == id).is_some_and(|witness|
+                witness.kind == kind && Arc::ptr_eq(&witness.call, call) && witness.owner.id == id
+                    && witness.call.owner().is_some_and(|owner| Arc::ptr_eq(&owner, &witness.owner))
+                    && Arc::ptr_eq(&witness.owner.gui, call) && !witness.owner.interrupted())
+            || !call.facts().is_some_and(|facts| facts.dispatched && facts.created && facts.showing && !facts.constructing
+                && !facts.not_created && facts.refusal.is_none() && !facts.response && !facts.accepted && !facts.declined
+                && !facts.close_queued && !facts.destroyed && !facts.close_ack && !facts.release_queued && !facts.released)
+            || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) || !self.timely() {
+            self.fail(Refusal::Tick); return;
+        }
+        r.reload_requested = true; drop(r); // One-shot effect entry, never a queued/replayable task.
+        // Real reload on this original main-STA modal turn. Only production
+        // navigation/Started can invalidate the document; no lost() injection.
+        let returned = window.eval("window.location.reload()");
+        let Some(mut r) = self.record() else { return; };
+        if r.pending != Some(Pending::Reload) || r.step != Step::Reload || returned.is_err() || !self.timely() {
+            self.fail(Refusal::Tick); return;
+        }
+        r.pending = None; r.reload_returned = true; r.step = Step::Lost;
+    }
+    fn native_step(&self, step: Step, id: u32, kind: DialogKind, call: &Arc<GuiCall>) {
+        if std::thread::current().id() != self.main || !self.timely() { self.fail(Refusal::NativeStep); return; }
+        let returned = self.native_body(step, id, kind, call);
+        if returned == Ok(None) { return; } // Record contention never consumes the pending operation.
         if returned.is_err() { self.fail(Refusal::NativeStep); }
         let Some(mut r) = self.record() else { return; };
         if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail(Refusal::NativeStep); return; }
         // Only this very synchronous body return retires its dispatch marker.
         r.pending = None;
-        if returned != Ok(true) || !self.timely() { return; }
+        if returned != Ok(Some(true)) || !self.timely() { return; }
         let (index, next) = match step {
             Step::CancelProject => (0, Step::CancelSettled), Step::SetFolder => (1, Step::AcceptProject),
             Step::AcceptProject => (2, Step::ProjectSettled), Step::QuitCancel => (3, Step::QuitCancelled),
@@ -477,16 +511,18 @@ impl Observation {
         if r.actions_returned[index] { self.fail(Refusal::NativeStep); return; }
         r.actions_returned[index] = true; r.step = next;
     }
-    fn native_body(&self, step: Step) -> Result<bool, ()> {
+    fn native_body(&self, step: Step, callback_id: u32, callback_kind: DialogKind, call: &Arc<GuiCall>) -> Result<Option<bool>, ()> {
         let (id, kind) = match step {
             Step::CancelProject => (1, DialogKind::Project),
             Step::SetFolder | Step::AcceptProject => (self.case.selected_id(), DialogKind::Project),
             Step::PickerPending => (2, DialogKind::Project), Step::QuitCancel => (2, DialogKind::Quit),
             Step::QuitConfirm => (3, DialogKind::Quit), _ => return Err(()),
         };
-        let Some(dialog) = observed_dialog().map_err(|_| ())? else { return Ok(false); };
-        let mut r = self.record().ok_or(())?;
+        if callback_id != id || callback_kind != kind { return Err(()); }
+        let Some(dialog) = observed_dialog().map_err(|_| ())? else { return Ok(Some(false)); };
+        let Some(mut r) = self.try_record() else { return Ok(None); };
         if r.pending != Some(Pending::Native(step)) || r.step != step || dialog.id != id || dialog.native.kind != kind
+            || !Arc::ptr_eq(call, &dialog.call)
             || dialog.native.stopped || dialog.native.close_entered
             || dialog.native.show_returned || dialog.native.settled || dialog.native.response.is_some()
             || !self.timely() { return Err(()); }
@@ -502,19 +538,19 @@ impl Observation {
             r.dialogs.push(DialogWitness { id, kind, call: dialog.call.clone(), owner });
         }
         if !dialog.native.created || !dialog.native.showing || !dialog.native.visible || !dialog.native.presented {
-            return if r.visible[(id - 1) as usize] { Err(()) } else { Ok(false) };
+            return if r.visible[(id - 1) as usize] { Err(()) } else { Ok(Some(false)) };
         }
-        // Read-only nonreadiness retires this sampling dispatch. No action has
-        // entered, and the same original callback must return before acting.
-        if dialog.native.callbacks_active { return Ok(false); }
+        // The one known timer is truthfully still live. A nested/foreign live
+        // callback is never an admitted observer turn or a finality fact.
+        if !dialog.native.callbacks_active || !dialog.native.observation_turn { return Err(()); }
         r.visible[(id - 1) as usize] = true;
         if !dialog.action_allowed || !dialog.call.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.not_created
             && facts.showing && !facts.constructing && !facts.response && !facts.accepted && !facts.declined
             && facts.selected.is_none() && facts.refusal.is_none() && !facts.destroyed && !facts.released) { return Err(()); }
         if self.case.held() && matches!(step, Step::QuitCancel | Step::QuitConfirm | Step::PickerPending)
             && !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { return Err(()); }
-        if step == Step::PickerPending { return Ok(true); } // Read only; no fake Cancel.
-        if step == Step::AcceptProject && !dialog.native.folder_ready { return Ok(false); }
+        if step == Step::PickerPending { return Ok(Some(true)); } // Read only; no fake Cancel.
+        if step == Step::AcceptProject && !dialog.native.folder_ready { return Ok(Some(false)); }
         let (index, action) = match step {
             Step::CancelProject => (0, DialogAction::Decline), Step::SetFolder => (1, DialogAction::ChooseFolder(&self.project_path)),
             Step::AcceptProject => (2, DialogAction::Accept), Step::QuitCancel => (3, DialogAction::Decline),
@@ -524,7 +560,7 @@ impl Observation {
         r.actions_attempted[index] = true; drop(r);
         // The native adapter rechecks the original object/STA/current folder.
         // Any post-effect error is sticky; it can never become a retry.
-        if observe_dialog_action(id, action).map_err(|_| ())? { Ok(true) } else { Err(()) }
+        if observe_dialog_action(id, action).map_err(|_| ())? { Ok(Some(true)) } else { Err(()) }
     }
     fn dom(&self, original: DomDispatch, raw: &str) {
         let result = self.dom_body(original, raw);

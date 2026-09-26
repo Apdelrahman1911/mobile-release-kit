@@ -558,10 +558,17 @@ fn native_event(call: &Arc<GuiCall>, event: native::DialogEvent, quit: bool) {
             } else { call.failed(Reason::CleanupUnknown); }
         }
         native::DialogEvent::Unknown => call.failed(Reason::CleanupUnknown),
+        #[cfg(feature = "windows-installed-observation")]
+        native::DialogEvent::ObservationTurn => return, // Never a GUI fact/change notification.
     }
     call.changed();
 }
-fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::DialogKind) -> Result<Option<PathBuf>, Reason> {
+fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::DialogKind,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    observation: Option<(Arc<super::installed_observation::Observation>, tauri::AppHandle)>,
+) -> Result<Option<PathBuf>, Reason> {
     let Some(owner) = call.owner() else { call.not_created(Reason::DocumentLost); return Err(Reason::DocumentLost); };
     if owner.interrupted() { call.not_created(Reason::UserCancelled); return Err(Reason::UserCancelled); }
     let parent = match SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
@@ -570,7 +577,20 @@ fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::D
         Err(_) => { call.not_created(Reason::SourceRefused); return Err(Reason::SourceRefused); }
     };
     let events = call.clone();
-    let original = Rc::new(native::Dialog::new(kind, control, Box::new(move |event| native_event(&events, event, kind == native::DialogKind::Quit))));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    let id = owner.id;
+    let original = Rc::new(native::Dialog::new(kind, control, Box::new(move |event| {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer")))]
+        if event == native::DialogEvent::ObservationTurn {
+            if let Some((q, app)) = &observation { q.modal_turn(app, id, kind, &events); }
+            return;
+        }
+        native_event(&events, event, kind == native::DialogKind::Quit);
+    })));
     let reserved = DIALOG.with(|slot| {
         let mut slot = slot.try_borrow_mut().map_err(|_| Reason::CleanupUnknown)?;
         if slot.is_some() { return Err(Reason::Busy); }
@@ -620,8 +640,20 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
         facts.dispatched = true; facts.constructing = true;
     }
     let control = Arc::new(native::DialogControl::new());
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    let observation = app.try_state::<Arc<super::installed_observation::Observation>>().map(|q| (q.inner().clone(), app.clone()));
     let creating = call.clone(); let closing = control.clone(); let (done, mut joined) = oneshot::channel();
-    if app.run_on_main_thread(move || { let result = show(creating, closing, kind); let _ = done.send(result); }).is_err() {
+    if app.run_on_main_thread(move || {
+        let result = show(creating, closing, kind,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+                not(feature = "macos-installed-installer")))]
+            observation,
+        );
+        let _ = done.send(result);
+    }).is_err() {
         call.failed(Reason::CleanupUnknown); std::future::pending::<()>().await;
     }
     loop {
