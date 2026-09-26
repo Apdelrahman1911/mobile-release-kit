@@ -23,6 +23,7 @@ REQUIRED = {"libc-bin", "libc-dev-bin", "libc6", "libc6-dev"}
 FIELDS = ("package", "architecture", "version", "sourcePackage", "sourceVersion", "status")
 MAX_DATA = 2 << 20
 ROUTES = {("refs/heads/verify/desktop-ubuntu-publication", "publisher-helpers", None),
+          ("refs/heads/verify/desktop-shell-host-metadata", "compile", "host-metadata-only"),
           ("refs/heads/verify/desktop-installed-shell", "compile", "compile"),
           ("refs/heads/verify/desktop-installed-github-readonly", "compile", "compile"),
           ("refs/heads/verify/desktop-installed-github-normal-boundaries", "compile", "compile")}
@@ -129,7 +130,9 @@ def context(env):
          and sha == env.get("MRK_PUSH_EVENT_AFTER") == env.get("GITHUB_WORKFLOW_SHA")
          and env.get("GITHUB_WORKFLOW_REF") == repository + "/.github/workflows/desktop-ubuntu-publication.yml@" + ref
          and all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(key, "")) is not None
-                 for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")), "original-setup-source-run")
+                 for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
+         and (ref != "refs/heads/verify/desktop-shell-host-metadata" or env.get("GITHUB_RUN_ATTEMPT") == "1"),
+         "original-setup-source-run")
     return {key: env[key] for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF",
             "GITHUB_REF", "GITHUB_JOB", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}
 

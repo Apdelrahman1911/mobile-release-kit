@@ -2312,6 +2312,30 @@ def tools_namespace_read(files):
 
 
 class InstalledToolsPreparationContracts(unittest.TestCase):
+    def test_metadata_tools_root_requires_the_complete_original_source_route(self):
+        env, root, identity, _, _ = tools_preparation_data()
+        observer = S.local("observe_hosted_python")
+        env.update(GITHUB_REF=S.SHELL_METADATA_REF, MRK_INSTALLED_SHELL_CASE="host-metadata-only",
+                   GITHUB_JOB="compile", GITHUB_EVENT_NAME="push", RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                   GITHUB_REPOSITORY="Apdelrahman1911/mobile-release-kit", GITHUB_WORKFLOW_SHA="a" * 40,
+                   MRK_PUSH_EVENT_AFTER="a" * 40, ImageOS="ubuntu24", ImageVersion="20260920.314.1",
+                   GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-ubuntu-publication.yml@" + S.SHELL_METADATA_REF)
+        for change in ({}, {"GITHUB_RUN_ATTEMPT": "2"}, {"MRK_INSTALLED_SHELL_CASE": "compile"},
+                       {"GITHUB_JOB": "observe"}, {"GITHUB_WORKFLOW_SHA": "b" * 40},
+                       {"GITHUB_EVENT_NAME": "pull_request"}, {"GITHUB_REPOSITORY": "different/repository"}):
+            with self.subTest(change=change), patch.dict(S.os.environ, {**env, **change}, clear=True), \
+                 patch.object(S.os, "geteuid", return_value=1001), patch.object(S.C, "conventional_host") as host, \
+                 patch.object(S, "directory_identity", return_value=identity) as directory, \
+                 patch.object(S, "local", return_value=observer):
+                if not change:
+                    self.assertEqual(S.shell_tools_input_root(), root)
+                    host.assert_called_once_with(S.D); directory.assert_called_once_with(root)
+                else:
+                    # The shared Python observer has its own typed refusal.
+                    with self.assertRaises((S.D.Refused, observer.Refused)):
+                        S.shell_tools_input_root()
+                    host.assert_not_called(); directory.assert_not_called()
+
     def test_only_nonroot_fixed_hosted_branch_and_original_fresh_root_are_addressed(self):
         env, root, identity, _, _ = tools_preparation_data()
         for key, replacement in ((None, None), ("GITHUB_REF", S.INSTALLED_REF), ("GITHUB_ACTIONS", "false"),
