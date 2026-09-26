@@ -160,7 +160,7 @@ def run_owned(
                 or source.guard is not cancellation or cleanup):
             message = ("Offline preflight command has no original input binding"
                        if domain is SavedCommandDomain.OfflinePreflight
-                       else "Android build command has no original input binding")
+                       else "Saved build command has no original input binding")
             raise ValueError(message)
         timeout, output_limit = source.command_limits(timeout, capture, output_limit)
         # Complete nonzero results remain ordinary policy DATA. This seam

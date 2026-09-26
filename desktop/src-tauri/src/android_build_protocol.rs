@@ -138,7 +138,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
         Ok(Value::Object(values))
     }
 }
-fn strict_data(bytes: &[u8], limit: usize, framed: bool) -> Result<Value, BridgeError> {
+pub(crate) fn strict_data(bytes: &[u8], limit: usize, framed: bool) -> Result<Value, BridgeError> {
     if bytes.is_empty() || bytes.len() > limit || bytes.starts_with(&[0xef, 0xbb, 0xbf])
         || framed && (!bytes.ends_with(b"\n") || bytes.iter().filter(|b| **b == b'\n').count() != 1)
         || !integer_lexemes(bytes) { return Err(protocol_error()); }
@@ -149,7 +149,7 @@ fn strict_data(bytes: &[u8], limit: usize, framed: bool) -> Result<Value, Bridge
     decoder.end().map_err(|_| protocol_error())?;
     Ok(value)
 }
-fn structure(value: &Value) -> bool {
+pub(crate) fn structure(value: &Value) -> bool {
     fn visit(value: &Value, depth: usize, nodes: &mut usize) -> bool {
         *nodes += 1;
         if *nodes > NODE_LIMIT || depth > DEPTH_LIMIT { return false; }
@@ -176,7 +176,7 @@ pub(crate) fn raw_request(bytes: &[u8]) -> Result<Value, BridgeError> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Content { pub(crate) bytes: u32, pub(crate) sha256: String }
 impl Content {
-    fn valid(&self, maximum: u32) -> bool { (1..=maximum).contains(&self.bytes) && sha(&self.sha256) }
+    pub(crate) fn valid(&self, maximum: u32) -> bool { (1..=maximum).contains(&self.bytes) && sha(&self.sha256) }
 }
 
 // Deliberately the existing release_version_protocol::relative_display_path
@@ -210,7 +210,7 @@ pub(crate) struct SavedVersion {
     pub(crate) name: String, pub(crate) build: u32,
 }
 impl SavedVersion {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         relative_display_path(&self.source) && (1..=VERSION_LIMIT).contains(&self.bytes) && sha(&self.sha256)
             && !self.name.is_empty() && self.name.len() <= 64
             && self.name.bytes().all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
@@ -322,11 +322,11 @@ fn decimal(value: &str) -> bool {
         && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok()
 }
 impl RootIdentity {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         decimal(&self.device) && decimal(&self.inode) && self.inode != "0" && self.mode & 0o170000 == 0o040000
     }
 }
-fn native_path(path: &Path) -> Option<&str> {
+pub(crate) fn native_path(path: &Path) -> Option<&str> {
     let text = path.to_str()?;
     if text.len() > 4096 || !text.starts_with('/') { return None; }
     if text != "/" {

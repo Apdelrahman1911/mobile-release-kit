@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Four fixed, source-bound installed Mac Aqua cases; never a general runner.
+"""Two fixed, source-bound installed Mac Aqua scopes; never a general runner.
 
 Importing this module loads only stdlib DATA/parsers. The native main alone
 admits the hosted user/source, prepares exclusive synthetic fixtures, and loads
-the unchanged source run_owned. No Store, release, alternate command or cleanup
+the pinned current-source run_owned. No Store, release, alternate command or cleanup
 controller is provided. Unknown invocation finality preserves the fixtures.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
 import hashlib
 from importlib.machinery import ModuleSpec
@@ -22,6 +22,8 @@ import sys
 from types import FunctionType, ModuleType
 
 CASES = ("first-save", "noop-stale", "picker-loss", "save-loss")
+IOS_CASES = ("ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality")
+ALL_CASES = CASES + IOS_CASES
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -41,6 +43,9 @@ FAILURE_STEPS = frozenset((
     "QuitCancel QuitCancelled RetainedReview Close Quit Exit PickerPending Reload Lost"
 ).split()) | frozenset(f"{name}({number})" for name in (
     "Prepare", "Review", "OpenConfirmation", "Confirmation", "Acknowledge", "Acknowledged", "Apply", "Applied") for number in (0, 1))
+FAILURE_STEPS |= frozenset(f"Ios({name})" for name in (
+    "Navigate ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final"
+).split())
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
@@ -72,7 +77,9 @@ FAILURE_REASONS = frozenset((
     "relay-join-contract exit-edit-status exit-finality-contract observer-report-unavailable "
     "project-result-path-app-child project-result-path-descendant project-result-path-ancestor "
     "project-result-path-sibling project-result-path-tmp-spelling project-result-path-data-spelling "
-    "native-completion-custody native-completion-data native-completion-unknown native-completion-selection"
+    "native-completion-custody native-completion-data native-completion-unknown native-completion-selection "
+    "ios-original-witness ios-request-contract ios-status-contract ios-version-contract "
+    "ios-finality-contract ios-fixture-contract ios-dom-contract"
 ).split())
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
@@ -199,6 +206,243 @@ CONFIG = b'''{
   }
 }
 '''
+
+# Fixed credential-free iOS fixture bytes, mirrored by the native observer.
+IOS_CONFIG = b'''{
+  "android": {
+    "enabled": false
+  },
+  "ios": {
+    "archiveConfiguration": "Release",
+    "bundleId": "org.example.mrk.observed",
+    "enabled": true,
+    "identityStatus": "unverified",
+    "project": "ios/MRKObserved.xcodeproj",
+    "scheme": "MRKObserved",
+    "symbols": {
+      "policy": "required",
+      "uploadCommand": [
+        "/usr/bin/false"
+      ]
+    }
+  },
+  "metadata": {
+    "androidLocales": [],
+    "iosLocales": [
+      "en-US"
+    ],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": []
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "version.properties"
+  }
+}
+'''
+IOS_CONFIG_PREREQUISITE = b'''{
+  "android": {
+    "enabled": false
+  },
+  "ios": {
+    "archiveConfiguration": "Release",
+    "bundleId": "org.example.mrk.observed",
+    "enabled": true,
+    "identityStatus": "unverified",
+    "prepareCommand": [
+      "/usr/bin/false"
+    ],
+    "project": "ios/MRKObserved.xcodeproj",
+    "scheme": "MRKObserved",
+    "symbols": {
+      "policy": "required",
+      "uploadCommand": [
+        "/usr/bin/false"
+      ]
+    }
+  },
+  "metadata": {
+    "androidLocales": [],
+    "iosLocales": [
+      "en-US"
+    ],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": []
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "version.properties"
+  }
+}
+'''
+IOS_CONFIG_CANCEL = b'''{
+  "android": {
+    "enabled": false
+  },
+  "ios": {
+    "archiveConfiguration": "Release",
+    "bundleId": "org.example.mrk.observed",
+    "enabled": true,
+    "identityStatus": "unverified",
+    "prepareCommand": [
+      "/bin/sleep",
+      "30"
+    ],
+    "project": "ios/MRKObserved.xcodeproj",
+    "scheme": "MRKObserved",
+    "symbols": {
+      "policy": "required",
+      "uploadCommand": [
+        "/usr/bin/false"
+      ]
+    }
+  },
+  "metadata": {
+    "androidLocales": [],
+    "iosLocales": [
+      "en-US"
+    ],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": []
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "version.properties"
+  }
+}
+'''
+IOS_PROJECT = b'''// !$*UTF8*$!
+{
+ archiveVersion = 1;
+ classes = {};
+ objectVersion = 56;
+ objects = {
+  000000000000000000000001 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1500;}; buildConfigurationList = 000000000000000000000002; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = 000000000000000000000003; productRefGroup = 000000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (000000000000000000000005);};
+  000000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+  000000000000000000000003 = {isa = PBXGroup; children = (000000000000000000000007, 000000000000000000000004, 000000000000000000000008); sourceTree = "<group>";};
+  000000000000000000000004 = {isa = PBXGroup; children = (000000000000000000000009); name = Products; sourceTree = "<group>";};
+  000000000000000000000005 = {isa = PBXNativeTarget; buildConfigurationList = 00000000000000000000000A; buildPhases = (00000000000000000000000B, 00000000000000000000000C, 00000000000000000000000D); buildRules = (); dependencies = (); name = MRKObserved; productName = MRKObserved; productReference = 000000000000000000000009; productType = "com.apple.product-type.application";};
+  000000000000000000000006 = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_OBJC_ARC = YES; SDKROOT = iphoneos;}; name = Release;};
+  000000000000000000000007 = {isa = PBXGroup; children = (00000000000000000000000E, 00000000000000000000000F); path = MRKObserved; sourceTree = "<group>";};
+  000000000000000000000008 = {isa = PBXGroup; children = (000000000000000000000010); name = Frameworks; sourceTree = "<group>";};
+  000000000000000000000009 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MRKObserved.app; sourceTree = BUILT_PRODUCTS_DIR;};
+  00000000000000000000000A = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+  00000000000000000000000B = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000012); runOnlyForDeploymentPostprocessing = 0;};
+  00000000000000000000000C = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000013); runOnlyForDeploymentPostprocessing = 0;};
+  00000000000000000000000D = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+  00000000000000000000000E = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>";};
+  00000000000000000000000F = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>";};
+  000000000000000000000010 = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT;};
+  000000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {
+   ARCHS = arm64;
+   CODE_SIGNING_ALLOWED = NO;
+   CODE_SIGNING_REQUIRED = NO;
+   DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+   GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+   INFOPLIST_FILE = MRKObserved/Info.plist;
+   IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+   PRODUCT_BUNDLE_IDENTIFIER = org.example.mrk.observed;
+   PRODUCT_NAME = MRKObserved;
+   SKIP_INSTALL = NO;
+   STRIP_INSTALLED_PRODUCT = NO;
+   SUPPORTED_PLATFORMS = iphoneos;
+   TARGETED_DEVICE_FAMILY = "1,2";
+  }; name = Release;};
+  000000000000000000000012 = {isa = PBXBuildFile; fileRef = 00000000000000000000000E;};
+  000000000000000000000013 = {isa = PBXBuildFile; fileRef = 000000000000000000000010;};
+ };
+ rootObject = 000000000000000000000001;
+}
+'''
+IOS_SCHEME = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="1500" version="1.3">
+ <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="NO"><BuildActionEntries>
+  <BuildActionEntry buildForTesting="NO" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+   <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="000000000000000000000005" BuildableName="MRKObserved.app" BlueprintName="MRKObserved" ReferencedContainer="container:MRKObserved.xcodeproj"/>
+  </BuildActionEntry>
+ </BuildActionEntries></BuildAction>
+ <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="NO"/>
+</Scheme>
+'''
+IOS_MAIN = b'''#import <UIKit/UIKit.h>
+@interface MRKObservedDelegate : UIResponder <UIApplicationDelegate>
+@property (strong, nonatomic) UIWindow *window;
+@end
+@implementation MRKObservedDelegate
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
+    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.window.rootViewController = [[UIViewController alloc] init];
+    self.window.rootViewController.view.backgroundColor = UIColor.systemBackgroundColor;
+    [self.window makeKeyAndVisible];
+    return YES;
+}
+@end
+int main(int argc, char *argv[]) {
+    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(MRKObservedDelegate.class)); }
+}
+'''
+IOS_PLIST = b'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+ <key>CFBundleDevelopmentRegion</key><string>en</string>
+ <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+ <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+ <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+ <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+ <key>CFBundlePackageType</key><string>APPL</string>
+ <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+ <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+ <key>LSRequiresIPhoneOS</key><true/>
+ <key>UILaunchScreen</key><dict/>
+ <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+</dict></plist>
+'''
+IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Workspace version="1.0"><FileRef location="self:"/></Workspace>
+'''
+
 OWNER_PINS = {
     "owned_process.py": "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02",
     "_command_process.py": "803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b",
@@ -262,9 +506,155 @@ def _expected_completion_selection(case):
                       "response": "accept", "selection": "match"}}
 
 
+def selected_cases(scope=None):
+    need(scope in (None, "ios-unsigned-archive"), "scope-not-supported")
+    return IOS_CASES if scope == "ios-unsigned-archive" else CASES
+
+
+def argument_scope(argv):
+    # Exactly one new fixed scope; no executable/path/env/timeout passthrough.
+    need(type(argv) is list and (argv == [] or argv == ["--scope", "ios-unsigned-archive"]), "arguments-not-supported")
+    return "ios-unsigned-archive" if argv else None
+
+
+def case_timeout(case):
+    need(type(case) is str and case in ALL_CASES, "case-binding")
+    return 325 if case in IOS_CASES else 60
+
+
+def ios_config(case):
+    need(case in IOS_CASES, "ios-case")
+    return IOS_CONFIG_PREREQUISITE if case == IOS_CASES[0] else IOS_CONFIG_CANCEL if case == "ios-cancel" else IOS_CONFIG
+
+
+def _ios_version_observation(case):
+    return {"schemaVersion": 2, "source": "version.properties", "version": {"name": "1.2.3", "build": 7},
+            "observationScope": "single-request-non-atomic",
+            "assurance": {"basis": "static-text", "projectCodeExecuted": False, "toolsProbed": False,
+                          "credentialsRead": False, "gitObserved": False, "storeContacted": False,
+                          "writesPerformed": False, "releaseReadiness": "unknown"},
+            "savedConfig": {"bytes": len(ios_config(case)), "sha256": digest(ios_config(case))},
+            "savedVersion": {"bytes": len(VERSION), "sha256": digest(VERSION)}}
+
+
+IOS_LIMITATIONS = ["saved-inputs-not-atomic", "project-build-code-is-trusted", "not-network-isolated",
+                  "unsigned-archive-not-an-ipa", "signing-and-profile-not-validated", "ipa-correspondence-not-validated",
+                  "source-provenance-not-authenticated", "store-operation-not-requested", "release-readiness-not-assessed",
+                  "retained-location-not-current-file-authority", "core-terminal-requires-original-native-finality"]
+
+
+def _expected_ios_report(case):
+    """Literal parser-test DATA, never a native receipt or a success producer."""
+    version = _ios_version_observation(case)
+    stale, cancel = case == "ios-version-stale", case == "ios-cancel"
+    complete = case in ("ios-unsigned-archive", "ios-finality")
+    operation, generation = "a" * 32, "b" * 32
+    context = {"projectId": "inert-ios-parser", "draftRevision": 1, "baselineGeneration": 1,
+               "savedConfig": version["savedConfig"], "savedVersion": {"source": "version.properties", "name": "1.2.3", "build": 7,
+                   **version["savedVersion"]}, "platform": "ios", "operation": "ios-unsigned-archive"}
+    facts = {key: True for key in (
+        "inspectionJoined acquisitionJoined attempted childWaitedSuccess stdinClosed stdoutEofClosed stderrEofClosed ioJoined "
+        "coreLifetimeSettled runtimeLedgerSettled toolsLedgerSettled nativeSettlementJoined nativeIntegrity "
+        "driverJoined managerJoined observerJoined watchdogJoined retiredBeforeCutoff"
+    ).split()}
+    facts.update(operationId=operation, ownerGeneration=generation, activeRetained=False, resourceUnknown=False,
+                 workMs=300000, hardMs=310000)
+    no = {"outcome": "not-dispatched", "exitCode": None}
+    zero = {"outcome": "exited", "exitCode": 0}
+    commands = {"xcode-version": dict(no if stale else zero), "ios-sdk": dict(no if stale else zero),
+                "archive": dict(zero if complete else no),
+                "prepare": dict(no) if stale else {"outcome": "not-configured", "exitCode": None} if complete
+                    else {"outcome": "unknown", "exitCode": None} if cancel else {"outcome": "exited", "exitCode": 1}}
+    selection = None if stale else {"containerKind": "project", "container": "ios/MRKObserved.xcodeproj",
+        "scheme": "MRKObserved", "configuration": "Release", "bundleId": "org.example.mrk.observed",
+        "symbolsPolicy": "required", "preparationConfigured": not complete}
+    result = None if not complete else {"schemaVersion": 1, "scope": "local-unsigned-ios-archive-observation",
+        "usedConfig": context["savedConfig"], "usedVersion": context["savedVersion"],
+        "archive": f".mobile-release/desktop-ios-archive/{operation}/archive.xcarchive",
+        "entries": 16, "bytes": 4096, "limitations": list(IOS_LIMITATIONS)}
+    terminal = {"schemaVersion": 1, "context": context,
+        "outcome": "complete" if complete else "refused" if stale else "cancelled" if cancel else "failed",
+        "reason": "none" if complete else "saved-version-changed" if stale else "cancelled" if cancel else "command-failed",
+        "activity": {"stage": "disposing-work" if complete else "accepted" if stale else "preparing", "selection": selection,
+                     "commands": commands, "findings": [{"check": "archive-identity", "status": "PASS"},
+                         {"check": "archive-dsym", "status": "PASS"}] if complete else []},
+        "disposition": {"snapshot": "removed" if complete else "not-created", "work": "not-created" if stale else "removed",
+                        "output": "retained-local-result" if complete else "not-created" if stale else "retained-incomplete",
+                        "relativeDirectory": None if stale else f".mobile-release/desktop-ios-archive/{operation}"},
+        "result": result,
+        "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": not stale,
+                     "commands": 0 if stale else 3, "profileCalls": 0, "stopObserved": "cancelled" if cancel else "none",
+                     **dict.fromkeys(("inputClosed", "handlersRestored", "invocationClosed", "snapshotClosed", "filesClosed", "namespaceClosed"), True)}}
+    held_facts = {**facts, "observerJoined": False, "watchdogJoined": False, "retiredBeforeCutoff": False, "activeRetained": True}
+    return {"protocol": "mrk-ios-archive/1", "savedVersionObservation": version, "context": context,
+            "prepareRequestedOnce": True, "prepareReturned": True, "reviewVisible": True, "acknowledged": True,
+            "startRequestedOnce": True, "startReturned": True, "statusCallsReturned": 1,
+            "staleVersionWriterReturnedAndClosed": stale,
+            "original": {"facts": facts, "terminal": terminal}, "finalResultVisible": True,
+            "prerequisiteOnly": case == "ios-toolchain-prerequisite",
+            "cancel": {"requestedOnce": True, "returned": True, "stageAtClick": "preparing",
+                       "prepareOutcome": commands["prepare"], "activeCommandKillClaimed": False} if cancel else None,
+            "hold": {"original": {"facts": held_facts, "terminal": terminal}, "publicSuccessHidden": True,
+                     "conflictingUiBlocked": True, "environmentDiagnosticsBlocked": True, "originalReleasedOnce": True} if case == "ios-finality" else None,
+            "workMs": 300000, "hardMs": 310000, "observationMs": 315000, "outerInvocationMs": 325000}
+
+
+def _ios_report(value, case):
+    """Closed independent DATA parser. Only bounded actual varying facts vary."""
+    need(type(value) is dict and case in IOS_CASES, "ios-report")
+    expected = _expected_ios_report(case)
+    try:
+        facts, context, terminal = value["original"]["facts"], value["context"], value["original"]["terminal"]
+        operation, generation = facts["operationId"], facts["ownerGeneration"]
+        need(all(type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) for v in (operation, generation)), "ios-original-identity")
+        need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", context["projectId"]), "ios-project-identity")
+        for name in ("draftRevision", "baselineGeneration"):
+            need(type(context[name]) is int and 0 <= context[name] < 2**32 - 1, "ios-context-generation")
+            expected["context"][name] = context[name]
+        expected["context"]["projectId"] = context["projectId"]
+        for snapshot in (expected["original"], *([expected["hold"]["original"]] if expected["hold"] else [])):
+            snapshot["facts"].update(operationId=operation, ownerGeneration=generation)
+        need(type(value["statusCallsReturned"]) is int and 0 <= value["statusCallsReturned"] <= 64, "ios-status-calls")
+        expected["statusCallsReturned"] = value["statusCallsReturned"]
+        out = expected["original"]["terminal"]
+        if out["disposition"]["relativeDirectory"] is not None:
+            out["disposition"]["relativeDirectory"] = f".mobile-release/desktop-ios-archive/{operation}"
+        if case in ("ios-unsigned-archive", "ios-finality"):
+            result = terminal["result"]
+            need(type(result["entries"]) is int and 1 <= result["entries"] <= 1024
+                 and type(result["bytes"]) is int and 1 <= result["bytes"] <= 128 * 1024 * 1024, "ios-fixture-archive-budget")
+            out["result"].update(archive=f".mobile-release/desktop-ios-archive/{operation}/archive.xcarchive",
+                                  entries=result["entries"], bytes=result["bytes"])
+        if case == "ios-cancel":
+            prepare = terminal["activity"]["commands"]["prepare"]
+            # Preparing may precede dispatch. A stopped original may also settle
+            # without a usable exit result: command-result Unknown is NOT native
+            # lifetime/custody Unknown. All exact original finality gates remain.
+            need(type(prepare) is dict and set(prepare) == {"outcome", "exitCode"}
+                 and ((prepare["outcome"] in ("not-dispatched", "unknown") and prepare["exitCode"] is None)
+                      or (prepare["outcome"] == "exited" and type(prepare["exitCode"]) is int
+                          and 0 <= prepare["exitCode"] <= 255)), "ios-cancel-prepare")
+            count = terminal["lifetime"]["commands"]
+            need(type(count) is int and count in ((2, 3) if prepare["outcome"] == "not-dispatched" else (3,)), "ios-cancel-command-count")
+            out["activity"]["commands"]["prepare"] = dict(prepare)
+            out["lifetime"]["commands"] = count
+            expected["cancel"]["prepareOutcome"] = dict(prepare)
+        _exact(value, expected, ("iosArchive",))
+    except (KeyError, TypeError, AttributeError) as error:
+        raise Refused("ios-report-shape") from error
+    return value
+
+
 def expected_result(binding, case):
     binding.checked()
-    need(case in CASES, "case-binding")
+    need(case in ALL_CASES, "case-binding")
+    if case in IOS_CASES:
+        value = expected_result(binding, "noop-stale")
+        value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False,
+                     iosArchive=_expected_ios_report(case))
+        value["native"]["projectOpenBinding"]["case"] = case
+        value["native"]["projectCompletionSelection"]["case"] = case
+        return value
     first, stale, lost = case == "first-save", case == "noop-stale", case in ("picker-loss", "save-loss")
     initial_ignore, saved_ignore = len(IGNORE_PREFIX), len(IGNORE_PREFIX + IGNORE_RULES)
     plans = {
@@ -290,7 +680,7 @@ def expected_result(binding, case):
             "nativeReason": native, "nativeFinality": "settled", "writerFrames": 3 if applied else 2,
             "stdoutFrames": 3, "originalsJoined": True})
     return {"schemaVersion": 1, **binding.public(), "case": case, "instrumentedEngineeringApp": True,
-        "shippingBinaryQualified": False, "distributionQualified": False, "methods": "eight-passive", "actionsAvailable": False,
+        "shippingBinaryQualified": False, "distributionQualified": False, "methods": "nine-passive", "actionsAvailable": False,
         "native": {"projectCancelSettled": first, "selectedPathMatched": case != "picker-loss",
             "originalWindow": {"mechanism": "passive-original-window-callback-v1", "accessorReturned": True,
                 "nativeReturned": True, "result": "ok", "admitted": True,
@@ -354,6 +744,22 @@ RESULT_LOCATION_KEYS = frozenset((
     "site sourceCommit staleMarkerWriterReturnedAndClosed start state stdoutFrames step syntheticFileReadback timely triggered "
     "urlsReadEntered urlsReadReturned webProcessCrashTested workerJoined workerRegistered writerFrames"
 ).split()) | frozenset(ACCESSIBILITY_PROOF_CHECKS) | frozenset(ACCESSIBILITY_BUTTON_CHECKS)
+RESULT_LOCATION_KEYS |= frozenset((
+    "iosArchive protocol savedVersionObservation context prepareRequestedOnce prepareReturned reviewVisible "
+    "startRequestedOnce startReturned statusCallsReturned staleVersionWriterReturnedAndClosed original terminal "
+    "finalResultVisible prerequisiteOnly cancel requestedOnce stageAtClick prepareOutcome activeCommandKillClaimed "
+    "hold publicSuccessHidden conflictingUiBlocked environmentDiagnosticsBlocked originalReleasedOnce "
+    "workMs hardMs observationMs outerInvocationMs operationId ownerGeneration inspectionJoined acquisitionJoined "
+    "childWaitedSuccess stdinClosed stdoutEofClosed stderrEofClosed ioJoined coreLifetimeSettled runtimeLedgerSettled "
+    "toolsLedgerSettled nativeSettlementJoined nativeIntegrity driverJoined managerJoined observerJoined watchdogJoined "
+    "retiredBeforeCutoff activeRetained resourceUnknown source version name build observationScope assurance basis "
+    "projectCodeExecuted toolsProbed credentialsRead gitObserved storeContacted writesPerformed releaseReadiness "
+    "savedConfig savedVersion bytes sha256 projectId platform operation activity commands xcode-version ios-sdk "
+    "prepare archive exitCode containerKind container scheme bundleId symbolsPolicy preparationConfigured findings "
+    "check status disposition snapshot work output relativeDirectory usedConfig usedVersion entries limitations "
+    "lifetime complete fatal contained commandDispatched profileCalls stopObserved inputClosed handlersRestored "
+    "invocationClosed snapshotClosed filesClosed namespaceClosed"
+).split())
 
 
 def _result_location(parts):
@@ -409,6 +815,9 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
+    if case in IOS_CASES:
+        need(type(value) is dict and "iosArchive" in value, "ios-report")
+        expected["iosArchive"] = _ios_report(value["iosArchive"], case)
     if case != "picker-loss":
         need(type(value) is dict and type(value.get("native")) is dict, "native-object")
         identity = _accessibility_binding_context(value["native"].get("projectOpenBinding"), case)
@@ -740,7 +1149,7 @@ def _accessibility_binding_context(value, case):
         return None
     try:
         label = "accessibility-binding-data"
-        need(type(case) is str and case in CASES and case != "picker-loss", label)
+        need(type(case) is str and case in ALL_CASES and case != "picker-loss", label)
         need(type(value) is dict and set(value) == {
             "mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
         need(value["mechanism"] == "preconfigured-original-sheet-v2" and value["case"] == case
@@ -801,7 +1210,7 @@ def _completion_selection_context(value, case):
         return None
     try:
         label = "completion-selection-data"
-        need(type(case) is str and case in CASES and case != "picker-loss", label)
+        need(type(case) is str and case in ALL_CASES and case != "picker-loss", label)
         need(type(value) is dict and set(value) == {
             "mechanism", "case", "id", "kind", "pollReturned", "pollResult", "timely", "facts"}, label)
         need(value["mechanism"] == "original-ok-singleton-selection-v1" and value["case"] == case
@@ -978,7 +1387,7 @@ def _original_exception_diagnostics(error, run_owned, case, cwd):
     pinned by load_owner before this callable can be the original owner.
     """
     try:
-        if type(case) is not str or case not in CASES:
+        if type(case) is not str or case not in ALL_CASES:
             return None
         argv = (EXECUTABLE, case)  # Do not trust the mutable list supplied to the call.
         source = Path(__file__).absolute().parents[2] / "src" / "mobile_release"
@@ -1021,7 +1430,7 @@ def _original_exception_diagnostics(error, run_owned, case, cwd):
         actual = local.get("argv")
         if (type(actual) is not list or len(actual) != 2 or any(type(arg) is not str for arg in actual)
                 or tuple(actual) != argv or type(local.get("cwd")) is not type(cwd) or local["cwd"] != cwd
-                or type(local.get("timeout")) is not int or local["timeout"] != 60
+                or type(local.get("timeout")) is not int or local["timeout"] != case_timeout(case)
                 or local.get("capture") is not True or local.get("text") is not False
                 or type(local.get("output_limit")) is not int or local["output_limit"] != OUTPUT_LIMIT):
             return None
@@ -1063,7 +1472,9 @@ def signature(info):
 
 
 def fixture_data(case, final):
-    need(case in CASES and type(final) is bool, "fixture-case")
+    need(case in ALL_CASES and type(final) is bool, "fixture-case")
+    if case in IOS_CASES:
+        return ios_fixture_data(case, final)
     saved = case == "noop-stale" or final and case == "first-save"
     files = {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
              ".gitignore": IGNORE_PREFIX + (IGNORE_RULES if saved else b"") + (STALE if final and case == "noop-stale" else b"")}
@@ -1073,6 +1484,27 @@ def fixture_data(case, final):
         files["release/mobile-release.json"] = CONFIG
         directories["."] = (0o700, (".gitignore", "app", "keep.txt", "release", "version.properties"))
         directories["release"] = (0o755, ("mobile-release.json",))
+    return files, directories
+
+
+def ios_fixture_data(case, final):
+    need(case in IOS_CASES and type(final) is bool, "fixture-case")
+    files = {".gitignore": IGNORE_PREFIX + b".mobile-release/\n", "keep.txt": KEEP,
+             "version.properties": b"VERSION_NAME=1.2.3\nBUILD_NUMBER=8\n" if final and case == "ios-version-stale" else VERSION,
+             "release/mobile-release.json": ios_config(case), "ios/MRKObserved.xcodeproj/project.pbxproj": IOS_PROJECT,
+             "ios/MRKObserved.xcodeproj/xcshareddata/xcschemes/MRKObserved.xcscheme": IOS_SCHEME,
+             "ios/MRKObserved.xcodeproj/project.xcworkspace/contents.xcworkspacedata": IOS_WORKSPACE,
+             "ios/MRKObserved/main.m": IOS_MAIN, "ios/MRKObserved/Info.plist": IOS_PLIST}
+    root = (".gitignore", "ios", "keep.txt", "release", "version.properties")
+    if final and case != "ios-version-stale":
+        root = tuple(sorted((*root, ".mobile-release")))
+    directories = {".": (0o700, root), "ios": (0o700, ("MRKObserved", "MRKObserved.xcodeproj")),
+        "ios/MRKObserved": (0o700, ("Info.plist", "main.m")),
+        "ios/MRKObserved.xcodeproj": (0o700, ("project.pbxproj", "project.xcworkspace", "xcshareddata")),
+        "ios/MRKObserved.xcodeproj/project.xcworkspace": (0o700, ("contents.xcworkspacedata",)),
+        "ios/MRKObserved.xcodeproj/xcshareddata": (0o700, ("xcschemes",)),
+        "ios/MRKObserved.xcodeproj/xcshareddata/xcschemes": (0o700, ("MRKObserved.xcscheme",)),
+        "release": (0o755, ("mobile-release.json",))}
     return files, directories
 
 
@@ -1103,6 +1535,8 @@ def validate_snapshot(original, current, case, final, uid, gid):
             need(after.identity[:2] != before.identity[:2], "save-ignore-not-replaced")
         elif final and case == "noop-stale" and path == ".gitignore":
             need(after.identity[:6] == before.identity[:6], "stale-ignore-replaced")
+        elif final and case == "ios-version-stale" and path == "version.properties":
+            need(after.identity[:7] == before.identity[:7], "stale-version-replaced")
         else:
             need(after.identity == before.identity, "fixture-original-changed")
     return {"completeRoster": True, "expectedBytesAndModes": True, "originalIdentitiesMatched": True,
@@ -1122,8 +1556,9 @@ def app_environment(state, uid, username):
 class Fixtures:
     """Finite helper-owned file custody, never process/Store custody."""
 
-    def __init__(self, binding, uid, gid):
+    def __init__(self, binding, uid, gid, scope=None):
         self.binding, self.uid, self.gid = binding, uid, gid
+        self.cases = selected_cases(scope)
         self.path = binding.root()
         self.fds = set()
         self.close_errors = 0
@@ -1214,17 +1649,22 @@ class Fixtures:
         need(p.st_mode == stat.S_IFDIR | 0o1777 and p.st_uid == 0, "temporary-parent")
         self.root = self._mkdir(self.parent, self.path.name)
         self.state = self._mkdir(self.root, "state")
-        for case in CASES:
+        for case in self.cases:
             project = self._mkdir(self.root, case)
             self.projects[case] = project
-            with self._temporary(self._mkdir(project, "app")) as app:
-                self._write(app, "build.gradle.kts", SOURCE)
-            self._write(project, "version.properties", VERSION)
-            self._write(project, "keep.txt", KEEP)
-            self._write(project, ".gitignore", IGNORE_PREFIX + (IGNORE_RULES if case == "noop-stale" else b""))
-            if case == "noop-stale":
-                with self._temporary(self._mkdir(project, "release", 0o755)) as release:
-                    self._write(release, "mobile-release.json", CONFIG)
+            files, directories = fixture_data(case, False)
+            with ExitStack() as children:
+                opened = {".": project}
+                # Closed literal roster, parents before children. No selected
+                # arbitrary project, pathname adoption, or source overwrite.
+                for path, (mode, _) in directories.items():
+                    if path == ".":
+                        continue
+                    parent, _, name = path.rpartition("/")
+                    opened[path] = children.enter_context(self._temporary(self._mkdir(opened[parent or "."], name, mode)))
+                for path, body in files.items():
+                    parent, _, name = path.rpartition("/")
+                    self._write(opened[parent or "."], name, body)
             state = self._mkdir(self.state, case)
             self.states[case] = state
             for child in ("home", "tmp"):
@@ -1237,9 +1677,9 @@ class Fixtures:
         need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
         self._named(self.parent, self.path.name, self.root, 0o700)
         self._named(self.root, "state", self.state, 0o700)
-        self._roster(self.root, (*CASES, "state"), "fixture-namespace-roster")
-        self._roster(self.state, CASES, "fixture-state-roster")
-        for case in CASES:
+        self._roster(self.root, (*self.cases, "state"), "fixture-namespace-roster")
+        self._roster(self.state, self.cases, "fixture-state-roster")
+        for case in self.cases:
             self._named(self.root, case, self.projects[case], 0o700)
             self._named(self.state, case, self.states[case], 0o700)
 
@@ -1296,16 +1736,15 @@ class Fixtures:
         files, directories = fixture_data(case, final)
         snapshot = {}
         project = self.projects[case]
-        for path, (mode, entries) in directories.items():
-            @contextmanager
-            def directory():
-                if path == ".":
-                    yield project
-                else:
-                    with self._temporary(self._open(path, project, directory=True)) as opened:
-                        self._named(project, path, opened, mode)
-                        yield opened
-            with directory() as fd:
+        with ExitStack() as children:
+            opened = {".": project}
+            for path, (mode, entries) in directories.items():
+                if path != ".":
+                    parent, _, leaf = path.rpartition("/")
+                    fd = children.enter_context(self._temporary(self._open(leaf, opened[parent or "."], directory=True)))
+                    self._named(opened[parent or "."], leaf, fd, mode)
+                    opened[path] = fd
+                fd = opened[path]
                 before = signature(os.fstat(fd))
                 observed = self._roster(fd, entries, "fixture-directory-roster")
                 for name, body in files.items():
@@ -1314,6 +1753,11 @@ class Fixtures:
                         snapshot[name] = self._file(fd, leaf, body)
                 need(signature(os.fstat(fd)) == before, "fixture-directory-read-race")
                 snapshot[path] = Node(before, None, observed)
+            for path, (mode, _) in directories.items():
+                need(signature(os.fstat(opened[path])) == snapshot[path].identity, "fixture-directory-read-race")
+                if path != ".":
+                    parent, _, leaf = path.rpartition("/")
+                    self._named(opened[parent or "."], leaf, opened[path], mode)
         _shape(snapshot, case, final, self.uid, self.gid)
         return snapshot
 
@@ -1334,6 +1778,152 @@ class Fixtures:
         self._namespace()
         return validate_snapshot(self.originals[case], self._capture(case, True), case, True, self.uid, self.gid)
 
+    def readback_ios(self, case, report):
+        need(case in IOS_CASES and case in self.cases and not self.inflight and self.last_returned, "ios-readback-order")
+        # Parser DATA bounds the spelling; this independent original-project
+        # descriptor supplies the filesystem authority. Never open a report path.
+        _ios_report(report, case)
+        source = self.readback(case)
+        original = report["original"]
+        disposition = original["terminal"]["disposition"]
+        if disposition["output"] == "not-created":
+            return {**source, "iosOutput": {"state": "not-created", "archiveObserved": False}}
+        operation = original["facts"]["operationId"]
+        project = self.projects[case]
+        with self._temporary(self._open(".mobile-release", project, directory=True)) as private:
+            self._named(project, ".mobile-release", private, 0o700)
+            self._roster(private, ("desktop-ios-archive",), "ios-output-parent-roster")
+            with self._temporary(self._open("desktop-ios-archive", private, directory=True)) as domain:
+                self._named(private, "desktop-ios-archive", domain, 0o700)
+                self._roster(domain, (operation,), "ios-output-domain-roster")
+                with self._temporary(self._open(operation, domain, directory=True)) as output:
+                    self._named(domain, operation, output, 0o700)
+                    complete = disposition["output"] == "retained-local-result"
+                    self._roster(output, ("archive.xcarchive",) if complete else (), "ios-output-roster")
+                    observed = self._archive_readback(output, original["terminal"]["result"]) if complete else None
+                    self._named(domain, operation, output, 0o700)
+                self._named(private, "desktop-ios-archive", domain, 0o700)
+            self._named(project, ".mobile-release", private, 0o700)
+        # Source readback is repeated only after reading the newly declared
+        # output so a concurrent replacement cannot license either observation.
+        validate_snapshot(self.originals[case], self._capture(case, True), case, True, self.uid, self.gid)
+        return {**source, "iosOutput": {"state": disposition["output"], "archiveObserved": complete,
+                                        "workAbsent": True, "archive": observed}}
+
+    def _archive_readback(self, parent, result):
+        import plistlib
+        import time
+        end = time.monotonic() + 20
+        rows, plists, total = {}, {}, 0
+        root_device = os.fstat(parent).st_dev
+        retained_info = {"Info.plist", "Products/Applications/MRKObserved.app/Info.plist"}
+
+        def current():
+            need(time.monotonic() < end, "ios-output-readback-deadline")
+
+        def bound(parent_fd, name, fd, before):
+            current()
+            need(signature(os.fstat(fd)) == signature(before)
+                 and signature(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) == signature(before), "ios-output-original-changed")
+            need(before.st_dev == root_device and (before.st_uid, before.st_gid) == (self.uid, self.gid)
+                 and stat.S_IMODE(before.st_mode) & 0o7022 == 0
+                 and (stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode) and before.st_nlink == 1), "ios-output-object")
+
+        def names(fd):
+            current()
+            before = signature(os.fstat(fd))
+            with self._temporary(self._open(".", fd, directory=True)) as reader:
+                need(signature(os.fstat(reader)) == before, "ios-output-reader-original")
+                iterator = os.scandir(reader)
+                error = None
+                try:
+                    found = []
+                    for entry in iterator:
+                        current()
+                        need(len(rows) + len(found) < 1024 and type(entry.name) is str, "ios-output-entry-budget")
+                        need(re.fullmatch(r"[A-Za-z0-9_. -]{1,255}", entry.name) is not None and entry.name not in (".", ".."), "ios-output-name")
+                        found.append(entry.name)
+                    need(len(found) == len(set(name.casefold() for name in found)), "ios-output-name-collision")
+                    need(signature(os.fstat(reader)) == before and signature(os.fstat(fd)) == before, "ios-output-directory-changed")
+                    return sorted(found)
+                except BaseException as caught:
+                    error = caught
+                    raise
+                finally:
+                    try:
+                        iterator.close()
+                    except BaseException as caught:
+                        self.close_errors += 1
+                        if self.first_close_error is None:
+                            self.first_close_error = caught
+                        if error is None:
+                            raise
+
+        def walk(fd, relative, depth):
+            nonlocal total
+            current()
+            need(depth <= 16, "ios-output-depth")
+            before = signature(os.fstat(fd))
+            for name in names(fd):
+                current()
+                path = f"{relative}/{name}" if relative else name
+                observed = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                directory = stat.S_ISDIR(observed.st_mode)
+                need(directory or stat.S_ISREG(observed.st_mode), "ios-output-kind")
+                need(len(rows) < 1024 and path not in rows, "ios-output-entry-budget")
+                with self._temporary(self._open(name, fd, directory=directory)) as child:
+                    bound(fd, name, child, observed)
+                    if directory:
+                        rows[path] = None
+                        walk(child, path, depth + 1)
+                    else:
+                        need(0 <= observed.st_size <= 64 * 1024 * 1024 and total + observed.st_size <= 128 * 1024 * 1024,
+                             "ios-output-byte-budget")
+                        if path in retained_info:
+                            need(observed.st_size <= 256 * 1024, "ios-output-plist-budget")
+                        count, hashed, captured = 0, hashlib.sha256(), []
+                        while True:
+                            current()
+                            part = os.read(child, min(1024 * 1024, observed.st_size + 1 - count))
+                            if not part:
+                                break
+                            count += len(part)
+                            need(count <= observed.st_size, "ios-output-grew")
+                            hashed.update(part)
+                            if path in retained_info:
+                                captured.append(part)
+                        need(count == observed.st_size, "ios-output-short-read")
+                        total += count
+                        rows[path] = {"bytes": count, "sha256": hashed.hexdigest()}
+                        if path in retained_info:
+                            plists[path] = b"".join(captured)
+                    bound(fd, name, child, observed)
+            need(signature(os.fstat(fd)) == before, "ios-output-directory-changed")
+
+        before = os.stat("archive.xcarchive", dir_fd=parent, follow_symlinks=False)
+        need(stat.S_ISDIR(before.st_mode), "ios-output-archive-kind")
+        with self._temporary(self._open("archive.xcarchive", parent, directory=True)) as archive:
+            bound(parent, "archive.xcarchive", archive, before)
+            walk(archive, "", 0)
+            bound(parent, "archive.xcarchive", archive, before)
+        need(len(rows) == result["entries"] and total == result["bytes"], "ios-output-core-inventory-mismatch")
+        binaries = ("Products/Applications/MRKObserved.app/MRKObserved", "dSYMs/MRKObserved.app.dSYM/Contents/Resources/DWARF/MRKObserved")
+        need(retained_info <= plists.keys() and all(type(rows.get(name)) is dict and rows[name]["bytes"] > 0 for name in binaries)
+             and not any("_CodeSignature" in name.split("/") or name.endswith(".mobileprovision") for name in rows), "ios-output-structure")
+        try:
+            archive_info = plistlib.loads(plists["Info.plist"])
+            app_info = plistlib.loads(plists["Products/Applications/MRKObserved.app/Info.plist"])
+        except (ValueError, TypeError, OverflowError) as error:
+            raise Refused("ios-output-plist") from error
+        need(type(archive_info) is dict and type(archive_info.get("ApplicationProperties")) is dict
+             and archive_info["ApplicationProperties"].get("ApplicationPath") == "Applications/MRKObserved.app"
+             and type(app_info) is dict and app_info.get("CFBundleIdentifier") == "org.example.mrk.observed"
+             and app_info.get("CFBundleShortVersionString") == "1.2.3" and app_info.get("CFBundleVersion") == "7", "ios-output-identity")
+        current()
+        return {"entries": len(rows), "bytes": total,
+                "inventorySha256": digest(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("ascii")),
+                "savedIdentityMatched": True, "unsignedAppAndDsymPresent": True, "retainedNotDeleted": True}
+
     def close(self):
         need(not self.inflight, "fixture-finality-unknown")
         for fd in tuple(self.fds):
@@ -1342,9 +1932,11 @@ class Fixtures:
             raise self.first_close_error
 
 
-def run_cases(binding, fixtures, run_owned, uid, username, emit):
+def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     """The sole invocation seam. Inert tests supply a non-executing callable."""
-    for case in CASES:
+    cases = selected_cases(scope)
+    need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
+    for case in cases:
         fixtures.before_call(case)
         state = binding.root() / "state" / case
         argv = [EXECUTABLE, case]
@@ -1356,7 +1948,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         # unknown, with no readback, close or later invocation.
         try:
             result = run_owned(argv, environ=app_environment(state, uid, username), cwd=state,
-                               timeout=60, capture=True, text=False, output_limit=OUTPUT_LIMIT)
+                               timeout=case_timeout(case), capture=True, text=False, output_limit=OUTPUT_LIMIT)
         except BaseException as error:
             # Diagnostics only: preserve identical error, inflight, unknown
             # finality and the no-readback/no-close/no-next-call boundary.
@@ -1380,7 +1972,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit):
         fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
-        readback = fixtures.readback(case)
+        readback = fixtures.readback_ios(case, report["iosArchive"]) if case in IOS_CASES else fixtures.readback(case)
         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
               "originalCallReturned": True, "observer": report, "independentReadback": readback})
 
@@ -1476,16 +2068,17 @@ def emit_record(value, stream):
 
 def main():
     fixtures = owner = binding = None
+    scope = None
     original_error = None
     try:
-        need(len(sys.argv) == 1, "arguments-not-supported")
+        scope = argument_scope(sys.argv[1:])
         root = Path(__file__).absolute().parents[2]
         binding, uid, gid, username = admit(os.environ, root)
         owner = load_owner(root)  # Native main only; no module-import-time core.
         os.umask(0o077)
-        fixtures = Fixtures(binding, uid, gid)
+        fixtures = Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
-        run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout))
+        run_cases(binding, fixtures, owner.run_owned, uid, username, lambda value: emit_record(value, sys.stdout), scope)
     except BaseException as error:
         original_error = error
     if fixtures is not None and not fixtures.inflight:
@@ -1504,7 +2097,7 @@ def main():
             pass  # Output loss remains failure; there is no diagnostic retry.
         return 130 if isinstance(original_error, KeyboardInterrupt) else 1
     try:
-        emit_record({"schemaVersion": 1, "type": "macos-aqua-complete", **binding.public(), "cases": list(CASES),
+        emit_record({"schemaVersion": 1, "type": "macos-aqua-complete", **binding.public(), "cases": list(selected_cases(scope)),
                      "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
                      "instrumentedEngineeringApp": True, "shippingBinaryQualified": False, "distributionQualified": False}, sys.stdout)
     except BaseException:

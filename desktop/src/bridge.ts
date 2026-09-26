@@ -29,10 +29,13 @@ import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
 import { ANDROID_BUILD_EVENT, encodeAndroidBuildRequest, androidBuildError, parseAndroidBuildStatus } from './androidBuildProtocol.ts';
 import type { AndroidBuildCommand } from './androidBuildProtocol.ts';
 import type { AndroidBuildStatus } from './androidBuildTypes.ts';
+import { IOS_ARCHIVE_EVENT, encodeIOSArchiveRequest, iosArchiveError, parseIOSArchiveStatus } from './iosArchiveProtocol.ts';
+import type { IOSArchiveCommand } from './iosArchiveProtocol.ts';
+import type { IOSArchiveStatus } from './iosArchiveTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -66,6 +69,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'android_build_protocol' };
       return status;
     } catch (error) { throw androidBuildError(error); }
+  };
+  const iosCall = async (command: IOSArchiveCommand, value: unknown): Promise<IOSArchiveStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'ios_archive_unavailable' };
+      const body = encodeIOSArchiveRequest(command, value);
+      if (!body) throw { code: 'ios_archive_invalid' };
+      // Raw IPC keeps duplicate-aware admission in the native command parser.
+      const status = parseIOSArchiveStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'ios_archive_protocol' };
+      return status;
+    } catch (error) { throw iosArchiveError(error); }
   };
   const offlineCall = async (command: OfflinePreflightCommand, value: unknown): Promise<OfflinePreflightStatus> => {
     try {
@@ -234,6 +248,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'android_build_unavailable' };
         return await listen(ANDROID_BUILD_EVENT, (value) => onStatus(parseAndroidBuildStatus(value)));
       } catch (error) { throw androidBuildError(error); }
+    },
+    prepareIOSArchive: (request) => iosCall('prepare_ios_archive', request),
+    startIOSArchive: (request) => iosCall('start_ios_archive', request),
+    iosArchiveStatus: () => iosCall('ios_archive_status', {}),
+    cancelIOSArchive: (operationId, ownerGeneration) => iosCall('cancel_ios_archive', { operationId, ownerGeneration }),
+    subscribeIOSArchive: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'ios_archive_unavailable' };
+        return await listen(IOS_ARCHIVE_EVENT, (value) => onStatus(parseIOSArchiveStatus(value)));
+      } catch (error) { throw iosArchiveError(error); }
     },
     prepareOfflinePreflight: (request) => offlineCall('prepare_offline_preflight', request),
     startOfflinePreflight: (request) => offlineCall('start_offline_preflight', request),

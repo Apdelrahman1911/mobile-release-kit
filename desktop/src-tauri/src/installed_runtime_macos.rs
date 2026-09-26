@@ -307,3 +307,160 @@ macro_rules! slots {
 }
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
 slots!(ConfigurationRuntimeSlots, ConfigurationInstalledRuntime, runtime::ConfigurationInstalledProfile);
+slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
+
+// The iOS owner lends its original, first-failure-shortened cleanup endpoint.
+// STOP is expected during final settlement, not permission to renew a clock.
+fn ios_audit_point(end: Instant, original: &watch::Receiver<Instant>) -> Result<()> {
+    if original.has_changed().is_err() || Instant::now() >= end.min(*original.borrow()) {
+        return Err(AdmissionFailure::Deadline);
+    }
+    Ok(())
+}
+impl Book {
+    fn ios_check_after_use(&self, end: Instant, original: &watch::Receiver<Instant>) -> Result<()> {
+        if !self.inspected || self.closed || self.unknown { return Err(AdmissionFailure::Unknown); }
+        for (index, record) in self.records.iter().enumerate() {
+            ios_audit_point(end, original)?;
+            if record.state != State::Owned { continue; }
+            let expected = record.identity.ok_or(AdmissionFailure::Identity)?;
+            let actual = stat::fstat(self.fd(index)?).map_err(native_error)?;
+            ios_audit_point(end, original)?;
+            let named = if let Some(parent) = record.parent {
+                stat::fstatat(self.fd(parent)?, record.name.as_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
+            } else { stat::lstat(Path::new("/")) }.map_err(native_error)?;
+            if Identity::of(&actual) != expected || Identity::of(&named) != expected { return Err(AdmissionFailure::Identity); }
+            ios_audit_point(end, original)?;
+            self.filesystem(index)?;
+            ios_audit_point(end, original)?;
+        }
+        Ok(())
+    }
+}
+impl IOSArchiveRuntimeSlots {
+    pub(crate) fn ios_check_after_use(&self, end: Instant, original: &watch::Receiver<Instant>) -> Result<()> {
+        if self.settlement { return Err(AdmissionFailure::AlreadyUsed); }
+        match (&self.inspection, &self.acquisition) {
+            (None, Some(capability)) if capability.claimed => capability.original.ios_check_after_use(end, original),
+            _ => Err(AdmissionFailure::AlreadyUsed),
+        }
+    }
+}
+
+struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
+/// Distinct tool originals, reusing only Book's finite no-follow descriptor,
+/// metadata and one-attempt close primitives. No runtime/tool interchange.
+pub(crate) struct IOSXcodeSlots {
+    original: Book, alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
+    sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
+    audit: watch::Receiver<Instant>, prepared: bool,
+}
+impl IOSXcodeSlots {
+    pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
+        Self { original: Book::new(), alias: None, developer: None, executable: None, sdk: None,
+            developer_path: None, sdk_path: None, audit, prepared: false }
+    }
+    pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, sibling_target};
+        if self.original.started { return Err(AdmissionFailure::AlreadyUsed); }
+        self.original.records.try_reserve_exact(32).map_err(native_error)?;
+        self.original.started = true;
+        checkpoint(end, stop)?;
+        native::real_user().map_err(native_error)?;
+        let applications = self.original.chain(Path::new(APPLICATIONS), end, stop)?;
+        checkpoint(end, stop)?;
+        let named = stat::fstatat(self.original.fd(applications)?, STANDARD_APP, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+        let app = if named.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFLNK.bits() {
+            if named.st_uid != 0 || named.st_nlink != 1 || !(1..=1024).contains(&named.st_size) {
+                return Err(AdmissionFailure::Ownership);
+            }
+            checkpoint(end, stop)?;
+            let target = fcntl::readlinkat(self.original.fd(applications)?, STANDARD_APP).map_err(native_error)?;
+            let target = PathBuf::from(target);
+            let name = sibling_target(target.to_str().ok_or(AdmissionFailure::Bounds)?).ok_or(AdmissionFailure::Inventory)?.to_owned();
+            self.alias = Some(IOSXcodeAlias { parent: applications, identity: Identity::of(&named), target });
+            self.check_alias(end, stop)?;
+            name
+        } else { STANDARD_APP.to_owned() };
+        // open() refuses a second alias and every symlink below this sibling.
+        let mut parent = applications;
+        for name in [app.as_str(), "Contents", "Developer"] {
+            parent = self.original.open(Some(parent), name, true, end, stop)?;
+        }
+        self.developer = Some(parent);
+        self.developer_path = Some(Path::new(APPLICATIONS).join(&app).join("Contents/Developer"));
+        let mut tool = parent;
+        for name in ["usr", "bin"] { tool = self.original.open(Some(tool), name, true, end, stop)?; }
+        self.executable = Some(self.original.open(Some(tool), "xcodebuild", false, end, stop)?);
+        let mut sdk = parent;
+        let mut path = self.developer_path.clone().ok_or(AdmissionFailure::Unknown)?;
+        for name in SDK_COMPONENTS {
+            sdk = self.original.open(Some(sdk), name, true, end, stop)?;
+            path.push(name);
+        }
+        self.sdk = Some(sdk); self.sdk_path = Some(path);
+        self.original.inspected = true;
+        let _ = self.binding_data()?;
+        self.check_current(end, stop)?;
+        Ok(())
+    }
+    fn check_alias(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        let Some(alias) = &self.alias else { return Ok(()); };
+        checkpoint(end, stop)?;
+        let named = stat::fstatat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP,
+            AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+        if Identity::of(&named) != alias.identity { return Err(AdmissionFailure::Identity); }
+        checkpoint(end, stop)?;
+        let target = fcntl::readlinkat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP).map_err(native_error)?;
+        if PathBuf::from(target) != alias.target { return Err(AdmissionFailure::Identity); }
+        checkpoint(end, stop)
+    }
+    pub(crate) fn check_before_spawn(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if !self.original.inspected || self.original.closed || self.original.unknown || self.prepared { return Err(AdmissionFailure::AlreadyUsed); }
+        self.check_current(end, stop)?;
+        self.prepared = true;
+        Ok(())
+    }
+    fn check_current(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.check_alias(end, stop)?;
+        for index in 0..self.original.records.len() { self.original.check_name(index, end, stop)?; }
+        checkpoint(end, stop)
+    }
+    pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
+        use crate::ios_archive_protocol::{RootIdentity, ToolIdentity, ToolchainBinding};
+        if !self.original.inspected || self.original.closed || self.original.unknown { return Err(AdmissionFailure::Unknown); }
+        let identity = |index: Option<usize>| -> Result<Identity> {
+            self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
+        };
+        let root = |id: Identity| RootIdentity { device: id.dev.to_string(), inode: id.ino.to_string(),
+            mode: u32::from(id.mode), uid: id.uid, gid: id.gid };
+        let developer = identity(self.developer)?; let sdk = identity(self.sdk)?; let tool = identity(self.executable)?;
+        let nanos = |seconds: i64, remainder: i64| -> Result<String> {
+            if !(0..1_000_000_000).contains(&remainder) { return Err(AdmissionFailure::Identity); }
+            seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(remainder)).filter(|n| *n >= 0)
+                .map(|n| n.to_string()).ok_or(AdmissionFailure::Identity)
+        };
+        let tool = ToolIdentity { device: tool.dev.to_string(), inode: tool.ino.to_string(), mode: u32::from(tool.mode),
+            uid: tool.uid, gid: tool.gid, links: u32::from(tool.links), size: u64::try_from(tool.size).map_err(native_error)?,
+            mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? };
+        ToolchainBinding::new_data(self.developer_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(developer), tool,
+            self.sdk_path.as_ref().ok_or(AdmissionFailure::Unknown)?, root(sdk)).map_err(|_| AdmissionFailure::Inventory)
+    }
+    pub(crate) fn check_after_use(&self, end: Instant) -> Result<()> {
+        self.original.ios_check_after_use(end, &self.audit)?;
+        if let Some(alias) = &self.alias {
+            ios_audit_point(end, &self.audit)?;
+            let actual = stat::fstatat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP,
+                AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+            if Identity::of(&actual) != alias.identity { return Err(AdmissionFailure::Identity); }
+            ios_audit_point(end, &self.audit)?;
+            let target = fcntl::readlinkat(self.original.fd(alias.parent)?, crate::ios_toolchain::STANDARD_APP).map_err(native_error)?;
+            if PathBuf::from(target) != alias.target { return Err(AdmissionFailure::Identity); }
+            ios_audit_point(end, &self.audit)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn mark_interrupted(&mut self) { self.original.unknown = true; }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome { self.original.settle() }
+    pub(crate) fn settled(&self) -> bool { self.original.settled() }
+}

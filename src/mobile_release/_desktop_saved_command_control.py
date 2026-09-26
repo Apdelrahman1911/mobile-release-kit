@@ -1,6 +1,6 @@
-"""The one held-input lifecycle for two fixed saved-command domains.
+"""The one held-input lifecycle for three fixed saved-command domains.
 
-Only the exact OfflinePreflight/AndroidBuild entry types may bind. This is not
+Only the exact OfflinePreflight/AndroidBuild/IOSArchive entry types may bind. This is not
 a command descriptor, extensible cancellation source or caller callback API.
 The child-local endpoints can only tighten the original native T/W/H.
 """
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._desktop_android_build_protocol import AndroidBuildRequest
+    from ._desktop_ios_archive_protocol import IOSArchiveRequest
     from ._desktop_preflight_protocol import PreflightRequest
     from .cancellation import DefaultCancellation
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 class SavedCommandDomain(Enum):
     OfflinePreflight = "offline-preflight"
     AndroidBuild = "android-build"
+    IOSArchive = "ios-archive"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -34,6 +36,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.AndroidBuild:
         from . import _desktop_android_build_protocol
         return _desktop_android_build_protocol
+    if domain is SavedCommandDomain.IOSArchive:
+        from . import _desktop_ios_archive_protocol
+        return _desktop_ios_archive_protocol
     raise ValueError("Invalid saved-command domain")
 
 
@@ -45,6 +50,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_android_build_control import AndroidBuildInput
     if type(source) is AndroidBuildInput and source.domain is SavedCommandDomain.AndroidBuild:
         return SavedCommandDomain.AndroidBuild
+    from ._desktop_ios_archive_control import IOSArchiveInput
+    if type(source) is IOSArchiveInput and source.domain is SavedCommandDomain.IOSArchive:
+        return SavedCommandDomain.IOSArchive
     raise ValueError("Invalid original saved-command input")
 
 
@@ -131,11 +139,17 @@ class _SavedCommandInput:
             return timeout, output_limit
         self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
         operation = self.require_operation()
-        # Independent Android-only affirmation of the four fixed roles. This
-        # is not a larger generic capture budget, nor an OfflinePreflight change.
+        # Independently affirm the exact domain's closed roles. Neither domain
+        # lends its role set or budget to a caller-supplied command descriptor.
         role = operation._pending
-        maxima = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}
-        self._require(role in maxima and capture is (role != "gradle"))
+        if self.domain is SavedCommandDomain.AndroidBuild:
+            maxima = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}
+            self._require(role in maxima and capture is (role != "gradle"))
+        elif self.domain is SavedCommandDomain.IOSArchive:
+            maxima = {"xcode-version": 30, "ios-sdk": 30, "prepare": 600, "archive": 3600}
+            self._require(role in maxima and capture is (role in {"xcode-version", "ios-sdk"}))
+        else:
+            self._require(False)
         selected = operation.command_limits(timeout, capture, output_limit)
         self._require(type(selected) is tuple and len(selected) == 2
                       and type(selected[0]) is int and 0 < selected[0] <= min(timeout, maxima[role])
@@ -171,7 +185,7 @@ class _SavedCommandInput:
             if (value.st_dev, value.st_ino, value.st_mode) != self.identity:
                 self.custody_unknown = True
                 message = ("Original preflight input changed" if self.domain is SavedCommandDomain.OfflinePreflight
-                           else "Original Android build input changed")
+                           else "Original saved build input changed")
                 raise _protocol(self.domain).ProtocolError(message)
             limit = 1 if self.active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
             self._require(limit > 0)
@@ -191,7 +205,7 @@ class _SavedCommandInput:
             self.stop()
             guard._abort(error)
 
-    def request(self) -> PreflightRequest | AndroidBuildRequest:
+    def request(self) -> PreflightRequest | AndroidBuildRequest | IOSArchiveRequest:
         self._owner()
         self._require(self.guard is not None and not self.active and not self.request_returned)
         while True:

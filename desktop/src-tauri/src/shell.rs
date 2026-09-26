@@ -37,6 +37,20 @@ macro_rules! installed_command_result {
         if let Some(q) = &$state.observation { q.commands_result(installed_observation::commands::Command::$kind, $value); }
     };
 }
+// The fixed installed Mac observer sees the same real command body/result.
+// These taps do not synthesize a request or admit an ordinary shipping build.
+macro_rules! installed_ios_request {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        if let Some(q) = &$state.observation { q.ios_request(installed_observation::ios::Command::$kind, $value); }
+    };
+}
+macro_rules! installed_ios_result {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        if let Some(q) = &$state.observation { q.ios_result(installed_observation::ios::Command::$kind, $value); }
+    };
+}
 macro_rules! fixture_command {
     ($state:expr, $kind:ident, $observed:ident, $error:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -263,6 +277,50 @@ async fn cancel_android_build(webview: Webview, request: tauri::ipc::Request<'_>
     result
 }
 #[tauri::command]
+async fn prepare_ios_archive(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::ios_archive_protocol::invalid())?;
+    let value = ios_archive_request_body(request.body())?;
+    let args = crate::ios_archive_protocol::prepare(&value)?;
+    installed_ios_request!(state, Prepare, &value);
+    let result = state.document.prepare_ios_archive(args);
+    installed_ios_result!(state, Prepare, &result);
+    result
+}
+#[tauri::command]
+async fn start_ios_archive(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::ios_archive_protocol::invalid())?;
+    let value = ios_archive_request_body(request.body())?;
+    let args = crate::ios_archive_protocol::start(&value)?;
+    installed_ios_request!(state, Start, &value);
+    let result = state.document.start_ios_archive(args);
+    installed_ios_result!(state, Start, &result);
+    result
+}
+#[tauri::command]
+async fn ios_archive_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::ios_archive_protocol::invalid())?;
+    let value = ios_archive_request_body(request.body())?;
+    crate::ios_archive_protocol::status_request(&value)?;
+    installed_ios_request!(state, Status, &value);
+    let result = state.document.ios_archive_status();
+    installed_ios_result!(state, Status, &result);
+    result
+}
+#[tauri::command]
+async fn cancel_ios_archive(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::ios_archive_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::ios_archive_protocol::invalid())?;
+    let value = ios_archive_request_body(request.body())?;
+    let args = crate::ios_archive_protocol::cancel(&value)?;
+    installed_ios_request!(state, Cancel, &value);
+    let result = state.document.cancel_ios_archive(args);
+    installed_ios_result!(state, Cancel, &result);
+    result
+}
+#[tauri::command]
 async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; let body = request_body(&request)?; crate::candidate_evidence_protocol::empty_request(body)?;
@@ -428,6 +486,14 @@ fn android_build_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, Br
         tauri::ipc::InvokeBody::Json(_) => Err(crate::android_build_protocol::invalid()),
     }
 }
+fn ios_archive_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
+    match body {
+        // Preserve the original IPC byte limit and duplicate keys; a Tauri
+        // Json value has already lost that evidence and is not admitted here.
+        tauri::ipc::InvokeBody::Raw(bytes) => crate::ios_archive_protocol::raw_request(bytes),
+        tauri::ipc::InvokeBody::Json(_) => Err(crate::ios_archive_protocol::invalid()),
+    }
+}
 #[cfg(test)]
 #[path = "offline_preflight_shell_tests.rs"]
 mod offline_preflight_shell_tests;
@@ -443,7 +509,7 @@ fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
         return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action."));
     }
     state.bridge.preflight.ensure_idle()?;
-    state.bridge.android_build.ensure_idle()?;
+    state.bridge.android_build.ensure_idle()?; state.bridge.ios_archive.ensure_idle()?;
     Ok(())
     }
 }
@@ -579,10 +645,10 @@ async fn release_version_observe(webview: Webview, request: tauri::ipc::Request<
     let body = request_body(&request).map_err(crate::release_version_protocol::public_error)?;
     let args = crate::release_version_protocol::request(body)?;
     not_closing(&state).map_err(crate::release_version_protocol::public_error)?;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.release_version_request(body); }
     let result = state.bridge.observe_release_version(&state.document, args).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.release_version(&result); }
     result
 }
@@ -989,6 +1055,10 @@ struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for AndroidBuildRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
 }
+struct IOSArchiveRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for IOSArchiveRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.ios_archive_relay_lost(); } }
+}
 #[deny(unused_variables, unused_assignments)]
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
@@ -998,10 +1068,13 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let preflight_guard = PreflightRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let mut android_build = document.android_build_subscribe();
     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+    let mut ios_archive = document.ios_archive_subscribe();
+    let ios_archive_guard = IOSArchiveRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         let mut preflight_guard = preflight_guard;
         let mut android_build_guard = android_build_guard;
+        let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
         let mut release_version_revision = None;
@@ -1010,8 +1083,10 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut preflight_relay_failed = false;
         let mut android_build_revision = None;
         let mut android_build_relay_failed = false;
+        let mut ios_archive_revision = None;
+        let mut ios_archive_relay_failed = false;
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; return; }
+            if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; ios_archive_guard.closed = true; return; }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
@@ -1083,14 +1158,32 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     Err(_) => { android_build_relay_failed = true; document.android_build_relay_lost(); },
                 }
             }
+            if !ios_archive_relay_failed {
+                match document.ios_archive_status() {
+                    Ok(status) => {
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+                        if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() {
+                            q.ios_status(&status, &app.state::<ShellState>().bridge.ios_archive);
+                        }
+                        if ios_archive_revision != Some(status.status_revision) {
+                            ios_archive_revision = Some(status.status_revision);
+                            if app.emit_to(MAIN_WINDOW, crate::ios_archive_protocol::EVENT, &status).is_err() {
+                                ios_archive_relay_failed = true; document.ios_archive_relay_lost();
+                            }
+                        }
+                    },
+                    Err(_) => { ios_archive_relay_failed = true; document.ios_archive_relay_lost(); },
+                }
+            }
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; ios_archive_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
                 result = preflight.changed() => { if result.is_err() { return; } },
                 result = android_build.changed() => { if result.is_err() { return; } },
+                result = ios_archive.changed() => { if result.is_err() { return; } },
                 // Observation only: status checks fixed original endpoints and
                 // already-ended joins. It launches no operation or new clock.
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -1184,11 +1277,11 @@ fn request_shutdown(app: &tauri::AppHandle) {
         }
         app.state::<ShellState>().document.compatibility_quit_result(true);
         // No short circuit can skip another original owner's shutdown.
-        let (passive, edit, diagnostics, preflight, android_build) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown());
-        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok()
-            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() {
+        let (passive, edit, diagnostics, preflight, android_build, ios_archive) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown(), bridge.ios_archive.shutdown());
+        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok() && ios_archive.is_ok()
+            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.ios_archive.can_exit() {
             if !settle_relay(&app).await { return; }
-            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit()) { return; }
+            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.ios_archive.can_exit()) { return; }
             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
             app.exit(0);
         } else {
@@ -2235,6 +2328,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let document = DocumentBinding::new(bridge.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2430,6 +2525,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,
+            prepare_ios_archive, start_ios_archive, ios_archive_status, cancel_ios_archive,
             validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,

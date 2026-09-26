@@ -68,6 +68,10 @@ class BuildInputError(CredentialError, ValidationError):
     """Bounded local admission/conflict diagnostic, without private values."""
 
 
+class BuildInputRootChanged(BuildInputError):
+    """The actual held project differs before lock/private-state admission."""
+
+
 class _PrivatePublicationError(ProcessError):
     """Generated recovery locations, never arbitrary private exception text."""
 
@@ -139,6 +143,9 @@ def _names(fd: int, limit: int = 4096, *, cancellation=None) -> set[str]:
         # Only the original fixed Android operation can lend its bounded
         # iterator owner. Ordinary callers retain their existing semantics.
         operation = cancellation._android_build_source.require_operation()
+        return operation.files.names(fd, limit=limit)
+    if cancellation is not None and getattr(cancellation, "_ios_archive_source", None) is not None:
+        operation = cancellation._ios_archive_source.require_operation()
         return operation.files.names(fd, limit=limit)
     budget = None
     if cancellation is not None and getattr(cancellation, "_preflight_source", None) is not None:
@@ -215,12 +222,16 @@ def _same_object(current: Mapping[str, Any], expected: Mapping[str, Any],
             and all(current[key] == value for key, value in expected.items() if key not in ignored))
 
 
-def _consumer_idle(guard: DefaultCancellation, *, lane_binding=None, owner=None) -> bool:
+def _consumer_idle(guard: DefaultCancellation, *, lane_binding=None, desktop_binding=None, owner=None) -> bool:
     try:
         # An unrelated cleanup fatality is not a claim that a consumer lives.
         # Active/unpublished original records project unknown containment here.
         if not guard.lifetime_ledger.verdict().contained:
             return False
+        if desktop_binding is not None:
+            from .ios_archive_operation import IOSArchiveSnapshotBinding
+            return (lane_binding is None and type(desktop_binding) is IOSArchiveSnapshotBinding
+                    and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
         if lane_binding is None:
             return True
         from ._store_lane_evidence import StoreLaneCallEvidence, StoreLaneResourceBinding
@@ -645,6 +656,7 @@ class FiniteScratch:
         self.creation = {"state": "NEW"}
         self.journal = _journal
         self._lane_binding = None
+        self._desktop_binding = None
         self._cleanup_complete = False
         if lane_evidence is not None:
             from ._store_lane_evidence import StoreLaneCallEvidence
@@ -679,7 +691,8 @@ class FiniteScratch:
 
     def acquire(self) -> None:
         self.parent.acquire()
-        _name_absent(self.parent.fd, self.name)
+        _name_absent(self.parent.fd, self.name,
+                     cancellation=self.cancellation if self._desktop_binding is not None else None)
         with self.cancellation.deferred(check_on_exit=False):
             _mkdir_private(self.name, self.parent.fd, self.cancellation, self.creation)
             self.created = True
@@ -911,13 +924,15 @@ class FiniteScratch:
             return
         _need(self.identity is not None, "scratch acquisition ownership is unknown")
         self._check()
-        _need((recovery_idle and self._lane_binding is None)
-              or _consumer_idle(self.cancellation, lane_binding=self._lane_binding, owner=self),
+        _need((recovery_idle and self._lane_binding is None and self._desktop_binding is None)
+              or _consumer_idle(self.cancellation, lane_binding=self._lane_binding,
+                                desktop_binding=self._desktop_binding, owner=self),
               "original scratch consumers are unconfirmed")
         fd = self.slot.number
         assert fd is not None
         expected = {self._spec(role).name for role in self.records}
-        _need(_names(fd) <= expected, "unexpected scratch entry must be preserved")
+        _need(_names(fd, cancellation=self.cancellation if self._desktop_binding is not None else None) <= expected,
+              "unexpected scratch entry must be preserved")
         actions = []
         for role, record in reversed(tuple(self.records.items())):
             def remove(role=role, record=record):
@@ -937,7 +952,8 @@ class FiniteScratch:
                 os.unlink(spec.name, dir_fd=fd)
             actions.append(remove)
         _attempt_all(self.cancellation, actions)
-        _need(not _names(fd), "scratch is not empty")
+        _need(not _names(fd, cancellation=self.cancellation if self._desktop_binding is not None else None),
+              "scratch is not empty")
         self._check()
         os.rmdir(self.name, dir_fd=self.parent.fd)
         os.fsync(self.parent.fd)
@@ -1118,7 +1134,7 @@ class _StoreNamespace:
 
     def __init__(self, root: Path, guard: DefaultCancellation, *, include_store: bool = True,
                  _descendants: tuple[str, ...] = (), _exclusive_index: int | None = None,
-                 _create: bool = True, _android_operation=None) -> None:
+                 _create: bool = True, _android_operation=None, _ios_operation=None) -> None:
         _need(type(include_store) is bool and type(_create) is bool
               and type(_descendants) is tuple and (not include_store or not _descendants),
               "invalid private namespace selection")
@@ -1139,6 +1155,9 @@ class _StoreNamespace:
         self.exclusive_index, self.create = _exclusive_index, _create
         self.root, self.cancellation = root, guard
         self.android_operation = _android_operation
+        self.ios_operation = _ios_operation
+        _need(_android_operation is None or _ios_operation is None,
+              "private namespace cannot mix original build domains")
         if _android_operation is not None:
             from .android_build_operation import AndroidBuildOperation
             _need(type(_android_operation) is AndroidBuildOperation
@@ -1147,6 +1166,14 @@ class _StoreNamespace:
                   and self.components == (_PRIVATE, "desktop-android-build", _android_operation.operation_id)
                   and _exclusive_index == 2,
                   "Android namespace requires its fixed original operation")
+        if _ios_operation is not None:
+            from .ios_archive_operation import IOSArchiveOperation
+            _need(type(_ios_operation) is IOSArchiveOperation
+                  and _ios_operation.guard is guard and _ios_operation.root == root
+                  and not include_store and _create
+                  and self.components == (_PRIVATE, "desktop-ios-archive", _ios_operation.operation_id)
+                  and _exclusive_index == 2,
+                  "iOS namespace requires its fixed original operation")
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.parent = _Directory(root, guard)
         self.parent_acquired = False
@@ -1175,7 +1202,7 @@ class _StoreNamespace:
         return number
 
     def require_empty(self) -> None:
-        _need(not _names(self.fd), "application workflow output must be empty")
+        _need(not _names(self.fd, cancellation=self.cancellation), "application workflow output must be empty")
         self.check()
 
     def _owner(self) -> None:
@@ -1185,14 +1212,15 @@ class _StoreNamespace:
     def acquire(self) -> None:
         self._owner()
         _need(not self.claimed and not self.parent_acquired, "Store namespace acquisition cannot be repeated")
-        if self.android_operation is None:
+        if self.android_operation is None and self.ios_operation is None:
             self.parent.acquire()
             parent = self.parent.fd
         else:
             # Borrow the already locked original project BEFORE the first
             # publication. In this fixed domain the independent path-based
             # _Directory remains unacquired and never substitutes a new root.
-            parent = self.android_operation._namespace_root(self, ensure_meta=True)
+            operation = self.android_operation if self.android_operation is not None else self.ios_operation
+            parent = operation._namespace_root(self, ensure_meta=True)
         self.parent_acquired = True
         for index, name in enumerate(self.components):
             self.cancellation.check()
@@ -1235,11 +1263,12 @@ class _StoreNamespace:
             _check_creation(creation, identity)
         if not self.parent_acquired:
             return
-        if self.android_operation is None:
+        if self.android_operation is None and self.ios_operation is None:
             self.parent.check()
             parent = self.parent.fd
         else:
-            parent = self.android_operation._namespace_root(self, cleanup=self.claimed)
+            operation = self.android_operation if self.android_operation is not None else self.ios_operation
+            parent = operation._namespace_root(self, cleanup=self.claimed)
         for index, name in enumerate(self.components):
             identity, slot = self.identities[index], self.slots[index]
             if identity is None:
@@ -1639,6 +1668,8 @@ class InvocationCustody:
             # As for offline admission, bind the original record before any
             # environment acquisition can fail or lose its result.
             guard._android_build_source.require_operation().bind_invocation(self)
+        elif getattr(guard, "_ios_archive_source", None) is not None:
+            guard._ios_archive_source.require_operation().bind_invocation(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1707,7 +1738,14 @@ class InvocationCustody:
                   "account cancellation owner differs")
             signing_lease.assert_owner()
         self.project_started = True
-        project = _Project(self.root, self.cancellation, recovery=False)
+        expected_root = None
+        source = getattr(self.cancellation, "_ios_archive_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _need(operation.invocation is self, "iOS project requires its original invocation")
+            expected = operation.request.native["rootIdentity"]
+            expected_root = (int(expected["device"]), int(expected["inode"]), expected["mode"], expected["uid"], expected["gid"])
+        project = _Project(self.root, self.cancellation, recovery=False, expected_root=expected_root)
         self._original_project = project
         self.project_owner, self.signing_lease = project, signing_lease
         try:
@@ -1814,13 +1852,15 @@ class InvocationCustody:
 
     def _offline_preflight_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:
         """Compatibility borrow; Android cannot obtain an offline capability."""
-        _need(getattr(guard, "_android_build_source", None) is None,
-              "Android operation cannot borrow the offline root")
+        _need(getattr(guard, "_android_build_source", None) is None
+              and getattr(guard, "_ios_archive_source", None) is None,
+              "saved build operation cannot borrow the offline root")
         return self._unsigned_build_root(guard)
 
     def _offline_preflight_closed(self, guard: DefaultCancellation) -> bool:
-        _need(getattr(guard, "_android_build_source", None) is None,
-              "Android operation cannot borrow offline closure")
+        _need(getattr(guard, "_android_build_source", None) is None
+              and getattr(guard, "_ios_archive_source", None) is None,
+              "saved build operation cannot borrow offline closure")
         return self._unsigned_build_closed(guard)
 
     def _android_build_root(self, operation) -> tuple[int, dict[str, Any]]:
@@ -1870,6 +1910,41 @@ class InvocationCustody:
               "Android closure requires its original invocation")
         return self._unsigned_build_closed(operation.guard)
 
+    def _ios_archive_root(self, operation) -> tuple[int, dict[str, Any]]:
+        from .ios_archive_operation import IOSArchiveOperation
+        _need(type(operation) is IOSArchiveOperation and operation.invocation is self
+              and operation.guard is self.cancellation and self.cancellation._ios_archive_source is operation.source
+              and operation.source.require_operation() is operation,
+              "iOS root requires its original invocation")
+        return self._unsigned_build_root(operation.guard)
+
+    def _ios_archive_cleanup_root(self, operation) -> tuple[int, dict[str, Any]]:
+        from .ios_archive_operation import IOSArchiveOperation
+        self._owner(cleanup=True)
+        _need(type(operation) is IOSArchiveOperation and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation
+              and operation.close_claimed and self.cancellation.depth > 0
+              and operation.files is not None and operation.files.namespace is not None
+              and operation.files.namespace.ios_operation is operation and operation.files.namespace.claimed,
+              "iOS cleanup root requires its claimed original namespace")
+        operation.cleanup_checkpoint()
+        _need(self.mode == "build" and self.signing_lease is None and self.child is None
+              and self.active and self.reserved and _ENV_OWNER is self and not _ENV_TAINTED
+              and self.project_owner is not None and self.project_owner is self._original_project
+              and not self.project_owner.claimed,
+              "iOS cleanup cannot replace or reacquire its original project")
+        self.project_owner.check()
+        value = os.fstat(self.project_owner.fd)
+        return self.project_owner.fd, {"device": str(value.st_dev), "inode": str(value.st_ino),
+            "mode": value.st_mode, "uid": value.st_uid, "gid": value.st_gid}
+
+    def _ios_archive_closed(self, operation) -> bool:
+        from .ios_archive_operation import IOSArchiveOperation
+        _need(type(operation) is IOSArchiveOperation and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation,
+              "iOS closure requires its original invocation")
+        return self._unsigned_build_closed(operation.guard)
+
     def fork_close(self) -> None:
         self.active = False
         if self.child is not None:
@@ -1892,8 +1967,10 @@ def invocation_custody(root: Path, *, mode: Literal["build", "online", "store"],
 
 
 class _Project:
-    def __init__(self, root: Path, guard: DefaultCancellation, *, recovery: bool) -> None:
+    def __init__(self, root: Path, guard: DefaultCancellation, *, recovery: bool,
+                 expected_root: tuple[int, int, int, int, int] | None = None) -> None:
         self.root, self.guard, self.recovery = root, guard, recovery
+        self.expected_root = expected_root
         self.directory = _Directory(root, guard)
         self.meta = _FD(guard)
         self.meta_identity: dict[str, int] | None = None
@@ -1920,6 +1997,13 @@ class _Project:
     def acquire(self) -> None:
         import fcntl
         self.directory.acquire()
+        # Compare the actual original root immediately, before loading rename
+        # support, taking the project lock or enumerating/opening private state.
+        # Neither a later pathname comparison nor a saved digest grants this.
+        if self.expected_root is not None:
+            observed = os.fstat(self.fd)
+            if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid) != self.expected_root:
+                raise BuildInputRootChanged("build inputs: selected project changed before admission")
         self.rename = _rename_function()
         try:
             with self.guard.deferred(check_on_exit=False):
@@ -1947,6 +2031,8 @@ class _Project:
     def ensure_meta(self) -> int:
         self.check()
         source = getattr(self.guard, "_android_build_source", None)
+        if source is None:
+            source = getattr(self.guard, "_ios_archive_source", None)
         if source is None:
             ignore = _read_file(self.fd, ".gitignore", self.guard, _SMALL)
             ignore_bytes = None if ignore is None else ignore[1]

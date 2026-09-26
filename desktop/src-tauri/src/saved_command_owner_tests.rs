@@ -13,6 +13,7 @@ fn application(domain: SavedCommandDomain) -> SavedCommandOwner {
 fn context(domain: SavedCommandDomain) -> Context { match domain {
     SavedCommandDomain::OfflinePreflight => Context::OfflinePreflight(wire::tests::context()),
     SavedCommandDomain::AndroidBuild => Context::AndroidBuild(android_wire::tests::context()),
+    SavedCommandDomain::IOSArchive => Context::IOSArchive(ios_wire::tests::context()),
 } }
 fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection {
     operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context: context(domain),
@@ -30,7 +31,8 @@ fn active_in(application: SavedCommandOwner) -> (SavedCommandOwner, Arc<Session>
     let clocks = Clocks::new(domain, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let profile = match domain { SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
-        SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64) };
+        SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
+        SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64) };
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), request: AsyncMutex::new(None),
         stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
@@ -66,11 +68,12 @@ fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_se
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration_callback() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
+            SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
         };
         original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project() });
@@ -107,11 +110,12 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_and_cancel() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
+            SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
         };
         let (application, owner) = active_in(original.clone());
         assert!(Arc::ptr_eq(&application.inner, &original.inner));
@@ -156,6 +160,10 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
                 let status = document.cancel_android_build(android_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
                 assert_eq!(status.operation.unwrap().phase, android_wire::Phase::Unknown);
             },
+            SavedCommandDomain::IOSArchive => {
+                let status = document.cancel_ios_archive(ios_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
+                assert_eq!(status.operation.unwrap().phase, ios_wire::Phase::Unknown);
+            },
         }
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
         assert!(Arc::ptr_eq(&a.owner, &owner) && a.unknown && !a.final_join_seen && r.last.is_none());
@@ -175,13 +183,13 @@ fn android_terminal(value: &Value) -> android_wire::Terminal {
     android_wire::terminal(value, &android_wire::tests::context()).unwrap()
 }
 fn frame(domain: SavedCommandDomain, sequence: u32, kind: &str, payload: Value) -> Vec<u8> {
-    let protocol = match domain { SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL };
+    let protocol = match domain { SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL, SavedCommandDomain::IOSArchive => ios_wire::PROTOCOL };
     let mut bytes = serde_json::to_vec(&json!({"protocol":protocol,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),
         "sequence":sequence,"kind":kind,"payload":payload})).unwrap(); bytes.push(b'\n'); bytes
 }
 fn accepted(domain: SavedCommandDomain) -> Vec<u8> {
     let context = match context(domain) { Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
-        Context::AndroidBuild(c) => serde_json::to_value(c).unwrap() };
+        Context::AndroidBuild(c) => serde_json::to_value(c).unwrap(), Context::IOSArchive(c) => serde_json::to_value(c).unwrap() };
     frame(domain, 0, "accepted", json!({"schemaVersion":1,"context":context}))
 }
 fn complete_stream(domain: SavedCommandDomain, progress: bool) -> Vec<Vec<u8>> {
@@ -197,19 +205,28 @@ fn complete_stream(domain: SavedCommandDomain, progress: bool) -> Vec<Vec<u8>> {
             } }
             frames.push(frame(domain, frames.len() as u32, "terminal", android_wire::tests::complete_with_failed_inspection()));
         }
+        SavedCommandDomain::IOSArchive => {
+            if progress { for stage in ["inputs-bound", "checking-xcode", "preparing", "archiving", "inspecting", "disposing-snapshot", "disposing-work"] {
+                frames.push(frame(domain, frames.len() as u32, "progress", json!({"schemaVersion":1,"stage":stage})));
+            } }
+            frames.push(frame(domain, frames.len() as u32, "terminal", ios_wire::tests::complete()));
+        }
     }
     frames
 }
 
 #[test]
-fn two_domains_have_fixed_nonrenewable_clocks_and_distinct_limits() {
+fn three_domains_have_fixed_nonrenewable_clocks_and_distinct_limits() {
     let admitted = Instant::now();
     assert_eq!(INTENT, Duration::from_secs(300));
     for (domain, work, hard, request, frames) in [
         (SavedCommandDomain::OfflinePreflight, 1800, 1810, 16384, 2),
         (SavedCommandDomain::AndroidBuild, 3000, 3010, 32768, 8),
+        (SavedCommandDomain::IOSArchive, 5400, 5410, 32768, 9),
     ] {
         let c = Clocks::new(domain, admitted);
+        let ordinary = application(domain).inner.start_clocks(admitted);
+        assert_eq!((ordinary.admitted, ordinary.work, ordinary.finality), (c.admitted, c.work, c.finality));
         assert_eq!(c.work, admitted + Duration::from_secs(work));
         assert_eq!(c.finality, admitted + Duration::from_secs(hard));
         assert_eq!(c.settlement(None), c.finality);
@@ -435,7 +452,7 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
 
 #[tokio::test]
 async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_never_renews() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain);
         assert_eq!(application.inner.qualified(), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && application.inner.runtime.offline_preflight_installed_profile_available());
@@ -446,7 +463,7 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
             application.inner.stop_locked(&mut r, &owner, Reason::Cancelled, owner.clocks.admitted);
             application.inner.stop_locked(&mut r, &owner, Reason::Shutdown, owner.clocks.admitted + Duration::from_secs(5));
             assert_eq!(r.active.as_ref().unwrap().first_stop, Some(owner.clocks.admitted));
-            let expected = if domain == SavedCommandDomain::AndroidBuild { owner.clocks.admitted + SETTLEMENT } else { owner.clocks.work };
+            let expected = if domain == SavedCommandDomain::OfflinePreflight { owner.clocks.work } else { owner.clocks.admitted + SETTLEMENT };
             assert_eq!(*cutoff.borrow(), expected);
             application.inner.advance_locked(&mut r, &owner, owner.clocks.admitted + SETTLEMENT);
             assert!(!final_clock_clear(&r, &owner, owner.clocks.admitted + SETTLEMENT));
@@ -482,10 +499,10 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
 
 #[test]
 fn foreign_domain_frames_fail_closed_without_converting_any_result() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain);
         let foreign = match domain { SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
-            SavedCommandDomain::AndroidBuild => Frame::OfflinePreflight(wire::Frame::Accepted) };
+            SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => Frame::OfflinePreflight(wire::Frame::Accepted) };
         application.inner.accept_at(&owner, foreign, owner.clocks.admitted);
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
         assert!(a.unknown && r.disabled && !a.accepted && !a.terminal);
@@ -541,7 +558,7 @@ fn known_retained_work_preserves_failed_outcome_and_original_stop_reason() {
         let mut projection = a.projection.clone(); projection.phase = Phase::Terminal;
         let p = projection.public().android().unwrap();
         assert_eq!(p.outcome, Some(android_wire::Outcome::Failed));
-        assert_eq!(p.reason, reason.android());
+        assert_eq!(p.reason, reason.android().unwrap());
         assert_eq!(p.disposition.as_ref().unwrap().work, android_wire::WorkDisposition::RetainedWork);
         let status = android_wire::Status { schema_version: 1, status_revision: 1,
             availability: android_wire::Availability::RuntimeUnqualified, operation: Some(p) };
@@ -556,7 +573,7 @@ fn known_retained_work_preserves_failed_outcome_and_original_stop_reason() {
 
 #[test]
 fn stdout_decoder_cannot_reopen_a_finished_domain_stream() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         let (_application, owner) = active(domain);
         let mut decoder = OutputDecoder::new(&owner).unwrap();
         for bytes in complete_stream(domain, true) { assert!(decoder.push(&bytes, &owner).is_ok()); }
@@ -615,8 +632,8 @@ async fn seven_android_frames_backpressure_two_slots_without_creating_native_fin
 }
 
 #[tokio::test]
-async fn both_domains_drain_rejected_bytes_charge_stderr_and_never_retry_a_close() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+async fn all_domains_drain_rejected_bytes_charge_stderr_and_never_retry_a_close() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         for fail_close in [false, true] {
             let (application, owner) = active(domain); owner.pipes.send_replace(Pipes::Available);
             let (error, error_control) = memory(vec![b'e'; 33000], false);
@@ -638,13 +655,74 @@ async fn both_domains_drain_rejected_bytes_charge_stderr_and_never_retry_a_close
 }
 
 #[tokio::test]
-async fn accepted_only_eof_is_not_a_settled_decoder_in_either_domain() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+async fn accepted_only_eof_is_not_a_settled_decoder_in_any_domain() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain); owner.pipes.send_replace(Pipes::Available);
         let (output, control) = memory(accepted(domain), false);
         let end = read_output(application.inner.clone(), owner.clone(), output, false, Guard::new(&application.inner, &owner)).await;
         assert!(end.failed && end.eof && end.closed && !end.decoder_settled); assert_eq!(end.frames, 1);
         assert_eq!(control.closes.load(Ordering::SeqCst), 1);
         assert!(application.inner.lock().active.as_ref().unwrap().unknown);
+    }
+}
+
+#[test]
+fn ios_consent_is_domain_local_one_use_and_cannot_qualify_runtime_custody() {
+    let owner = application(SavedCommandDomain::IOSArchive);
+    assert!(!owner.inner.qualified());
+    let mut android = serde_json::to_value(android_wire::tests::context()).unwrap();
+    android.as_object_mut().unwrap().remove("platform"); android.as_object_mut().unwrap().remove("operation");
+    assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
+    assert_eq!(owner.inner.lock().revision, 0);
+    assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+    owner.inner.lock().prepared = Some(Prepared { projection: projection(SavedCommandDomain::IOSArchive),
+        expires: Instant::now() + INTENT, registration: 1, project: project() });
+    let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
+    let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
+    let projection = status.operation.unwrap();
+    assert_eq!((projection.phase,projection.outcome),(ios_wire::Phase::Terminal,Some(ios_wire::Outcome::Refused)));
+    assert!(projection.result.is_none() && projection.activity.is_none() && projection.disposition.is_none());
+    assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+    assert!(owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).is_err());
+}
+
+#[tokio::test]
+async fn ios_nine_frames_backpressure_and_core_success_never_replace_original_native_finality() {
+    let (application, owner) = active(SavedCommandDomain::IOSArchive);
+    owner.pipes.send_replace(Pipes::Available);
+    let mut receiver = owner.resources.lock().await.frames.take().unwrap();
+    let frames = complete_stream(SavedCommandDomain::IOSArchive,true); assert_eq!(frames.len(),9);
+    let bytes: Vec<u8> = frames.into_iter().flatten().collect(); let count = bytes.len();
+    let (output,control) = memory(bytes,false);
+    let reading = read_output(application.inner.clone(),owner.clone(),output,false,Guard::new(&application.inner,&owner));
+    let consuming = async { for _ in 0..9 { application.inner.accept(&owner,receiver.recv().await.unwrap()); } };
+    let (end,()) = tokio::join!(reading,consuming);
+    assert!(end.eof && end.closed && end.decoder_settled && !end.failed && end.frames == 9);
+    assert_eq!(control.read.load(Ordering::SeqCst),count); assert_eq!(control.closes.load(Ordering::SeqCst),1);
+    assert_eq!(owner.output_bytes.load(Ordering::SeqCst),count);
+    {
+        let registry = application.inner.lock(); let active = registry.active.as_ref().unwrap();
+        assert!(active.accepted && active.terminal && active.projection.result.is_some() && !active.final_join_seen);
+        let projected = active.projection.public().ios().unwrap();
+        assert!(projected.result.is_none() && projected.activity.is_none() && projected.disposition.is_none());
+    }
+    // There is no actual runtime/tool book or native join in this DATA vector.
+    let status = application.status_ios(ios_wire::Availability::Available).unwrap().operation.unwrap();
+    assert_eq!(status.phase,ios_wire::Phase::Unknown);
+    assert!(status.result.is_none() && status.activity.is_none() && status.disposition.is_none());
+    assert!(!application.can_exit());
+}
+
+#[test]
+fn ios_late_core_terminal_never_undoes_first_failure_or_extends_original_endpoint() {
+    for due in [IOS_WORK,IOS_HARD] {
+        let (application,owner) = active(SavedCommandDomain::IOSArchive); let admitted = owner.clocks.admitted;
+        application.inner.accept_at(&owner,Frame::IOSArchive(ios_wire::Frame::Accepted),admitted);
+        let terminal = ios_wire::terminal(&ios_wire::tests::complete(),&ios_wire::tests::context(),&owner.id).unwrap();
+        application.inner.accept_at(&owner,Frame::IOSArchive(ios_wire::Frame::Terminal(terminal)),admitted+due);
+        let registry = application.inner.lock(); let active = registry.active.as_ref().unwrap();
+        assert_eq!(active.first_stop,Some(owner.clocks.work)); assert_eq!(active.projection.reason,Reason::TimedOut);
+        assert_eq!(active.unknown,due == IOS_HARD); assert!(active.projection.public().result.is_none());
+        assert!(registry.last.is_none());
     }
 }

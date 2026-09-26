@@ -1,5 +1,6 @@
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
+import { iosArchiveError } from './iosArchiveProtocol.ts';
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
@@ -79,6 +80,7 @@ const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditE
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
 const androidUnavailable = (): Promise<never> => Promise.reject(androidBuildError({ code: 'android_build_unavailable' }));
+const iosUnavailable = (): Promise<never> => Promise.reject(iosArchiveError({ code: 'ios_archive_unavailable' }));
 const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
 
 // Deliberate design fixture, not a core assessment or a source of version policy.
@@ -167,6 +169,11 @@ export const previewApi: DesktopApi = {
   androidBuildStatus: androidUnavailable,
   cancelAndroidBuild: androidUnavailable,
   subscribeAndroidBuild: androidUnavailable,
+  prepareIOSArchive: iosUnavailable,
+  startIOSArchive: iosUnavailable,
+  iosArchiveStatus: iosUnavailable,
+  cancelIOSArchive: iosUnavailable,
+  subscribeIOSArchive: iosUnavailable,
   prepareOfflinePreflight: offlineUnavailable,
   startOfflinePreflight: offlineUnavailable,
   offlinePreflightStatus: offlineUnavailable,

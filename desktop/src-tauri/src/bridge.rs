@@ -208,6 +208,7 @@ pub struct DesktopBridge {
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
+    pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
     installed_project_selection_available: bool,
     installed_project_path_selection_available: bool,
     installed_evidence_selection_available: bool,
@@ -242,7 +243,8 @@ impl DesktopBridge {
             preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime.clone()),
             // Retain the owner and compiled profile DATA only; neither is tool
             // custody or qualification. The renderer cannot select this profile.
-            android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime, crate::android_toolchain::AndroidToolchainProfile::compiled()),
+            android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled()),
+            ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
             installed_project_selection_available,
             installed_project_path_selection_available,
             installed_evidence_selection_available,
@@ -404,6 +406,7 @@ impl DesktopBridge {
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
+        self.ios_archive.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -534,6 +537,7 @@ impl DesktopBridge {
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
+        self.ios_archive.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }
