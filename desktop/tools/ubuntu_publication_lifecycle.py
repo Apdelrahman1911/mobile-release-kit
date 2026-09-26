@@ -45,13 +45,13 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
-SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline")
+SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase")
 SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                            "offline-drift", "offline-cancel", "offline-settlement")
-# Preserve all nineteen existing cases, including the exact raw failure; append saved version.
+# Preserve the twenty existing cases and their exact receipts; add one distinct iOS session witness.
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
                *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save")
-SHELL_PUBLIC_FILE_LIMIT = 165  # Exact twenty-case root roster:163, exported:165; non-shell remains128.
+SHELL_PUBLIC_FILE_LIMIT = 170  # Exact twenty-one-case root roster:168, exported:170; non-shell remains128.
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
@@ -624,6 +624,19 @@ SHELL_SESSION_CONFIG = b'''{
   "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
 }
 '''
+SHELL_SESSION_IOS_FIREBASE_CONFIG = b'''{
+  "android": {"applicationId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "ios": {"bundleId": "org.assessment.fixture", "enabled": true, "identityStatus": "unverified"},
+  "metadata": {"androidLocales": ["en-US"], "iosLocales": ["en-US"], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "required", "iosFirebase": "required"},
+  "source": {"candidateBranch": "main", "productionBranch": "main", "projectReadTokenRequired": true},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+SHELL_SESSION_IOS_FIREBASE = b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>BUNDLE_ID</key><string>org.assessment.fixture</string></dict></plist>\n'
+SHELL_SESSION_IOS_FIREBASE_MISMATCH = b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>BUNDLE_ID</key><string>org.assessment.other</string></dict></plist>\n'
 SHELL_SESSION_ABSENT = ("project/.gitignore", "project/.mobile-release", "project/.mobile-release-init-prepare",
     "project/.mobile-release-init", "project/.mobile-release-init-cleanup", "project/release/store")
 SHELL_SESSION_MARKER = b"MRK_INSTALLED_SHELL_SESSION_INPUTS="
@@ -631,7 +644,8 @@ SHELL_SESSION_INVENTORY_LIMIT = 8192
 SHELL_SESSION_RECEIPT_LIMIT = 4096
 SHELL_SESSION_R1_LIMIT = 16
 SHELL_SESSION_RECEIPTS = {case: {
-    "schemaVersion": 1, "case": case, "profile": "installed-linux-session-inputs",
+    "schemaVersion": 1, "case": case,
+    "profile": "installed-linux-session-ios-firebase" if case == "session-ios-firebase" else "installed-linux-session-inputs",
     "methods": "thirteen-passive-including-supplied-input-assessment",
     "project": {"cancelSettled": True, "selectedSettled": True, "snapshotMatched": True},
     "safety": {"persistentStorage": False, "storeContacted": False, "signingVerified": False, "releaseReady": False},
@@ -658,6 +672,13 @@ SHELL_SESSION_RECEIPTS = {case: {
     ("session-deadline", {
         "assessments": 1, "fileChoosers": 1, "originalDeadline": True, "firstCleanupPreserved": True,
         "noPreview": True, "queryResult": "query_timeout", "assetReason": "deadline",
+    }),
+    ("session-ios-firebase", {
+        "kinds": ["ios-firebase"], "assessments": 2, "fileChoosers": 3,
+        "capturedFiles": 2, "capturesClosed": 2, "kept": 1, "assigned": 1,
+        "xmlFormatAndBundleIdentityMatched": True, "firebaseMismatchRefused": True,
+        "cancelledReplacementPreservedBytes": True, "cancelledReplacementRevokedAssignment": True,
+        "discardReopenEmpty": True,
     }),
 )}
 # Closed synthetic project DATA from the PF01/PF02/PF06 fixture recipes.
@@ -3943,8 +3964,8 @@ def _capacity(value):
         tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
         required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
         # Each added existing GUI route creates eight directories, auth and
-        # bus-config files, its log, and a bus socket. The shell-only165 output
-        # slots cover the163 root originals; TOTAL_LIMIT is unchanged.
+        # bus-config files, its log, and a bus socket. The shell-only170 output
+        # slots cover the168 root originals; TOTAL_LIMIT is unchanged.
         # Settled-failure and version-save are outside both fixture groups:
         # each needs twelve GUI environment nodes in block/inode accounting.
         session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 2)
@@ -6421,7 +6442,7 @@ def _shell_log_capture(value, case, original, result):
 
 SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
     "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs",
-    "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project")
+    "session-ios-firebase", "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project")
 
 
 def _shell_session_roster(value, case, changed=False):
@@ -6429,13 +6450,21 @@ def _shell_session_roster(value, case, changed=False):
     need(case in SHELL_SESSION_CASES and type(changed) is bool
          and (not changed or case == "session-refusals"), "Different fixed session fixture or phase")
     owners = value["runnerUid"], value["runnerGid"]
-    files = {
-        "project/release/mobile-release.json": (0o600, SHELL_SESSION_CONFIG),
-        "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
-        "sources/input.jks": (0o600, SHELL_SESSION_JKS),
-        "sources/replacement.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS),
-        "sources/firebase.json": (0o600, SHELL_SESSION_FIREBASE),
-    }
+    if case == "session-ios-firebase":
+        files = {
+            "project/release/mobile-release.json": (0o600, SHELL_SESSION_IOS_FIREBASE_CONFIG),
+            "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+            "sources/firebase-ios.plist": (0o600, SHELL_SESSION_IOS_FIREBASE),
+            "sources/firebase-ios-mismatch.plist": (0o600, SHELL_SESSION_IOS_FIREBASE_MISMATCH),
+        }
+    else:
+        files = {
+            "project/release/mobile-release.json": (0o600, SHELL_SESSION_CONFIG),
+            "project/version.properties": (0o600, SHELL_PROJECT_VERSION),
+            "sources/input.jks": (0o600, SHELL_SESSION_JKS),
+            "sources/replacement.jks": (0o600, SHELL_SESSION_REPLACEMENT_JKS),
+            "sources/firebase.json": (0o600, SHELL_SESSION_FIREBASE),
+        }
     if case == "session-refusals":
         files.update({
             "project/overlap.jks": (0o600, SHELL_SESSION_JKS),
@@ -6527,7 +6556,8 @@ def _shell_session_inventory(value, namespace, case, *, changed=False):
          and all(identity(path.lstat()) == original for path, original in originals),
          "Session fixture aliases, device or original identity differs")
     _shell_namespace_check(value, binding)
-    document = {"schemaVersion": 1, "fixture": "four-kind-session-v1", "case": case, "root": str(root),
+    fixture_name = "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1"
+    document = {"schemaVersion": 1, "fixture": fixture_name, "case": case, "root": str(root),
                 "changed": changed, "entries": rows, "absent": absent, "namespace": namespace}
     need(len(canonical(document)) <= SHELL_SESSION_INVENTORY_LIMIT, "Session inventory exceeds its fixed bound")
     return document
@@ -6536,11 +6566,12 @@ def _shell_session_inventory(value, namespace, case, *, changed=False):
 def shell_session_fixture(value, case, before_raw, after_raw):
     """Closed original DATA correspondence; never authority to scan live work."""
     inventories, namespaces = [], []
+    fixture_name = "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1"
     for raw, changed in ((before_raw, False), (after_raw, case == "session-refusals")):
         document = decode(raw, SHELL_SESSION_INVENTORY_LIMIT)
         need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "case", "root", "changed", "entries", "absent", "namespace"}
              and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
-             and document["fixture"] == "four-kind-session-v1" and document["case"] == case and document["changed"] is changed
+             and document["fixture"] == fixture_name and document["case"] == case and document["changed"] is changed
              and document["root"] == str(shell_fixture_root(value) / case)
              and document["absent"] == _shell_session_absent(case, changed), "Session fixture inventory shape or phase differs")
         namespace = _shell_namespace_data(value, document["namespace"])
@@ -6590,7 +6621,7 @@ def shell_session_fixture(value, case, before_raw, after_raw):
                 need(first[name] == row, "Session mutation changed an unrelated original")
     else:
         need(first == last and before_raw == after_raw, "Read-only session changed its original fixture")
-    return {"fixture": "four-kind-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+    return {"fixture": fixture_name, "case": case, "rootRetained": True, "originalsAccounted": True,
             "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
             "beforeCount": len(first), "afterCount": len(last), "mutations": ["changed-leaf-rename"] if changed else [],
             "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
@@ -7127,7 +7158,7 @@ def _shell_github_roster(value):
 
 
 def _shell_github_fixtures_prepare(value):
-    """One registered project, not the unrelated nineteen legacy fixture trees."""
+    """One registered project, not the unrelated twenty legacy fixture trees."""
     need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "Different GitHub fixture route")
     ancestry = _shell_fixture_ancestry(value)
     root = shell_fixture_root(value)
@@ -7324,7 +7355,7 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the nineteen fixed DATA trees once, retained on every failure.
+    """Create the twenty fixed DATA trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
