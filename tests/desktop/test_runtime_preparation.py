@@ -148,6 +148,13 @@ class RuntimePreparationTests(unittest.TestCase):
             self.assertEqual(manifests[0], manifests[1])
 
     def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
+        current_only = (
+            "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+            "ios_archive_bootstrap.py",
+        )
+        self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
+        self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS),
+                         {path.name for path in (_SOURCE / "desktop").glob("*_bootstrap.py")})
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = base / "source"
@@ -162,17 +169,17 @@ class RuntimePreparationTests(unittest.TestCase):
             current = base / "current"
             (current / "python/bin").mkdir(parents=True)
             (current / "python/bin/python3").write_bytes(b"INERT SUPPLIER DATA\n")
-            with self.assertRaises(FileNotFoundError):
-                preparation.prepare_current(source, current, "x86_64-unknown-linux-gnu")
-            self.assertEqual({entry.name for entry in current.iterdir()}, {"python"})
-            for name in set(preparation.CURRENT_BOOTSTRAPS) - set(preparation.BOOTSTRAPS):
-                (desktop / name).write_bytes(b"INERT CURRENT ENTRY; NEVER EXECUTED\n")
+            for name in current_only:
+                with self.subTest(missing_current_entry=name):
+                    with self.assertRaises(FileNotFoundError):
+                        preparation.prepare_current(source, current, "x86_64-unknown-linux-gnu")
+                    self.assertEqual({entry.name for entry in current.iterdir()}, {"python"})
+                    (desktop / name).write_bytes(b"INERT CURRENT ENTRY; NEVER EXECUTED\n")
             preparation.prepare_current(source, current, "x86_64-unknown-linux-gnu")
             manifest = json.loads((current / "manifest.json").read_bytes())
             self.assertEqual({row["path"] for row in manifest["files"]},
                 set(preparation.CURRENT_BOOTSTRAPS) | {"core.zip", "github-ca.pem", "python/bin/python3"})
-            self.assertNotIn("project_recovery_bootstrap.py", preparation.BOOTSTRAPS)
-            self.assertIn("project_recovery_bootstrap.py", preparation.CURRENT_BOOTSTRAPS)
+            self.assertTrue(set(current_only).isdisjoint(preparation.BOOTSTRAPS))
 
     def test_payload_capacity_refuses_before_creating_any_generated_output(self):
         with tempfile.TemporaryDirectory() as temporary:

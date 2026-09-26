@@ -38,7 +38,10 @@ BOOTSTRAPS = (
 )
 # Keep the historical supplier preparation exact. Current product callers must
 # select this complete roster explicitly; file presence never selects a domain.
-CURRENT_BOOTSTRAPS = (*BOOTSTRAPS, "project_recovery_bootstrap.py")
+CURRENT_BOOTSTRAPS = (
+    *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+    "ios_archive_bootstrap.py",
+)
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
