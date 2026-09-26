@@ -14,7 +14,7 @@ pub(crate) const COOLDOWN_MAX_SECONDS: u32 = 604800;
 const IDS: [WorkflowId; 4] = [WorkflowId::Preflight, WorkflowId::Candidate, WorkflowId::ExternalTesting, WorkflowId::ProductionSubmit];
 
 // deserialize_with makes nullable fields REQUIRED, unlike a bare serde Option.
-fn nullable<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
+pub(crate) fn nullable<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
 where D: Deserializer<'de>, T: Deserialize<'de> { Option::<T>::deserialize(decoder) }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -135,11 +135,11 @@ pub struct Status {
     pub account: Fact<Account>, pub repository: Fact<Repository>, pub automation: Fact<Automation>, pub facts: UnobservedFacts,
 }
 
-fn numeric_id(value: &str) -> bool {
+pub(crate) fn numeric_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 20 && !value.starts_with('0')
         && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok()
 }
-fn coordinate(value: &str) -> bool {
+pub(crate) fn coordinate(value: &str) -> bool {
     let Some((owner, repository)) = value.split_once('/') else { return false; };
     let part = |s: &str, limit: usize, punctuation: &[u8]| !s.is_empty() && s.len() <= limit
         && s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
@@ -156,7 +156,7 @@ fn plain(value: &str, maximum: usize) -> bool {
         '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' |
         '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}'))
 }
-fn utc(value: &str) -> bool {
+pub(crate) fn utc(value: &str) -> bool {
     let b = value.as_bytes();
     if b.len() != 20 || !value.is_ascii() || b[4] != b'-' || b[7] != b'-' || b[10] != b'T'
         || b[13] != b':' || b[16] != b':' || b[19] != b'Z'
@@ -167,7 +167,7 @@ fn utc(value: &str) -> bool {
     let maximum = match month { 2 => if leap { 29 } else { 28 }, 4 | 6 | 9 | 11 => 30, 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31, _ => 0 };
     year > 0 && day > 0 && day <= maximum && n(11, 13) < 24 && n(14, 16) < 60 && n(17, 19) < 60
 }
-fn bounds(value: &Value, bytes: usize, nodes_limit: usize, depth_limit: usize) -> bool {
+pub(crate) fn bounds(value: &Value, bytes: usize, nodes_limit: usize, depth_limit: usize) -> bool {
     let mut stack = vec![(value, 0usize)]; let mut nodes = 0usize;
     while let Some((row, depth)) = stack.pop() {
         nodes += 1;
@@ -309,7 +309,7 @@ impl GitHubReadFacts {
     }
 }
 impl GitHubReadControl {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         if !private_reason(self.reason)
             || self.credential_expires_at.as_ref().is_some_and(|v| !utc(v))
             || self.cooldown_seconds.is_some_and(|v| !(1..=COOLDOWN_MAX_SECONDS).contains(&v))

@@ -14,6 +14,9 @@ pub(crate) const GITHUB_CA_LIMIT: u64 = 512 * 1024;
 // Separate from the session gate and the passive development feature. A CA
 // inventory hash is not native socket/TLS, runtime-custody or host qualification.
 pub(crate) const GITHUB_TLS_PROFILE_QUALIFIED: bool = false;
+// A prior read-only/TLS profile does not qualify a durable intent + dispatch
+// handshake. Enable only after this exact installed source/profile is observed.
+pub(crate) const GITHUB_PREFLIGHT_NATIVE_QUALIFIED: bool = false;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024;
 // Seven JSON nodes per payload entry; leave room under strict_json's 20k
@@ -28,10 +31,10 @@ const PYTHON_RESOURCE: &str = "python/bin/python3";
 
 // Canonical fixed inventory shared by packaging and installed-data validation.
 // Presence is not runtime, TLS, XML, or native-custody qualification.
-pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 9] = [
+pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 10] = [
     "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
     "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-    "github_connection_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -308,6 +311,28 @@ impl GitHubReadOnlyInstalledProfile {
         let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
             .join(PassiveInstalledProfile::TARGET).join(manifest);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_connection_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
+// Separate sealed action domain. It borrows the original Supervisor's common
+// installed-custody implementation, never a read-only book or edit capability.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct GitHubPreflightInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubPreflightInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        GITHUB_PREFLIGHT_NATIVE_QUALIFIED && crate::github_preflight_protocol::publisher_bound()
+            && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_preflight_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
@@ -932,6 +957,26 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         // Original inspection worker only. Paths are DATA, never native custody.
         originals.inspect_once(self.github_readonly_installed_profile()?, end, stop)
+    }
+    pub(crate) fn github_preflight_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.github_preflight_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_preflight_installed_profile(&self) -> Result<GitHubPreflightInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if GitHubPreflightInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(GitHubPreflightInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The installed GitHub preflight action profile is not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_preflight_installed(&self, originals: &mut crate::installed_runtime::GitHubPreflightRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.github_preflight_installed_profile()?, end, stop)
     }
     /// SAME sealed metadata selector for capability and original-owner admission.
     /// Neither another edit profile nor a feature-off native test can select it.

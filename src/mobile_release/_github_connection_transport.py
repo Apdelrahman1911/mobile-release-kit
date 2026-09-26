@@ -741,8 +741,15 @@ def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int) -> Any
     return context.wrap_socket(source, server_hostname="api.github.com", suppress_ragged_eofs=False)
 
 
-def _make_live_reader(request: ReadRequest, *, started: float, runtime_dir: str) -> _Reader:
-    """Only engine.main calls this; no runtime fake/host/CA/env override exists."""
+def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_version: str) -> Callable[[str, str, bytes | None], ReadResult]:
+    """Private bounded TLS/framing shared by two closed native action profiles.
+
+    This is not a renderer/API URL interface. The calling profile separately
+    claims each fixed endpoint once; this layer cannot grant or retry an action.
+    """
+    if (api_version not in {"2022-11-28", "2026-03-10"} or type(token) is not str
+            or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
+        raise ValueError("Invalid fixed GitHub transport input")
     # http.client itself imports ssl. Both must stay inside this original live
     # entry, not at pure frame/schedule import or fixture construction time.
     import http.client
@@ -759,6 +766,143 @@ def _make_live_reader(request: ReadRequest, *, started: float, runtime_dir: str)
     context.load_verify_locations(cadata=_fixed_ca(runtime_dir, budget))
     # Never create_default_context/load_default_certs/default_verify_paths;
     # never urllib, proxies, netrc, environment credentials or workflow clients.
+
+    def exchange(method: str, path: str, body: bytes | None = None) -> ReadResult:
+        if (method not in {"GET", "POST"} or type(path) is not str or not path.startswith("/")
+                or len(path) > 1024 or any(not 0x21 <= ord(c) <= 0x7e for c in path)
+                or "#" in path or "\\" in path
+                or method == "GET" and body is not None
+                or method == "POST" and (type(body) is not bytes or not 1 <= len(body) <= 2048)):
+            raise ValueError("Invalid fixed GitHub transport request")
+        original_response: list[Any] = [None]
+        close_failed = [False]
+        original_socket: list[Any] = [None]
+
+        def timeout(remaining: float) -> None:
+            if original_socket[0] is None:
+                raise ReadFailure("network-unavailable")
+            original_socket[0].settimeout(remaining)
+
+        def prior_control() -> dict[str, Any] | None:
+            response = original_response[0]
+            bounded = getattr(response, "bounded", None)
+            return None if bounded is None else bounded.control
+
+        class FixedResponse(http.client.HTTPResponse):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self._close_claimed = False
+                original_response[0] = self
+                super().__init__(*args, **kwargs)
+
+            def begin(self) -> None:
+                if self.headers is not None:
+                    return
+                self.bounded = _ResponseBody(self.fp, budget, before_read=timeout)
+                head = self.bounded.head
+                self.code = self.status = head.status
+                self.reason = ""  # Raw upstream reason phrases are discarded.
+                self.version = head.version
+                self.headers = self.msg = http.client.HTTPMessage()
+                for name, values in head.headers.items():
+                    for value in values:
+                        if value is not None:
+                            self.headers[name] = value
+                self.chunked = head.framing == "chunked"
+                self.chunk_left = None
+                self.length = head.length
+                self.will_close = head.framing == "eof" or self._check_close()
+
+            def read(self, amt: int | None = None) -> bytes:
+                return self.bounded.read(amt)
+
+            def close(self) -> None:
+                if self._close_claimed:
+                    return
+                self._close_claimed = True  # Includes stdlib failure closes.
+                try:
+                    super().close()
+                except BaseException:
+                    close_failed[0] = True
+                    raise
+
+        class FixedConnection(http.client.HTTPSConnection):
+            def __init__(self) -> None:
+                self._close_claimed = False
+                super().__init__("api.github.com", 443, timeout=budget.remaining(), context=context)
+                self.response_class = FixedResponse
+                self.set_debuglevel(0)
+
+            def connect(self) -> None:
+                # HTTPSConnection's default wrap suppresses ragged EOF.
+                # Use the ordinary base TCP connect, then one explicit TLS
+                # wrap. No tunnel/host override or second owner is added.
+                http.client.HTTPConnection.connect(self)
+                self.sock.settimeout(budget.remaining())
+                self.sock = _wrap_fixed_tls(context, self.sock,
+                                           ignore_eof_option=getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0))
+
+            def close(self) -> None:
+                if self._close_claimed:
+                    return
+                self._close_claimed = True
+                try:
+                    super().close()
+                except BaseException:
+                    close_failed[0] = True
+                    raise
+
+        connection: Any = None
+        try:
+            connection = FixedConnection()
+            connection.connect()
+            original_socket[0] = connection.sock
+            timeout(budget.remaining())
+            connection.auto_open = 0  # No implicit reconnect after our connect.
+            connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name, value in (
+                ("Host", "api.github.com"), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
+                ("Accept", "application/vnd.github+json"), ("X-GitHub-Api-Version", api_version),
+                ("Accept-Encoding", "identity"), ("Connection", "close"),
+                ("Authorization", "Bearer " + token),
+            ):
+                connection.putheader(name, value)
+            timeout(budget.remaining())
+            if body is not None:
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Content-Length", str(len(body)))
+            connection.endheaders(body)
+            timeout(budget.remaining())
+            response = connection.getresponse()
+            result = _response_result(response.bounded, budget)
+        except ReadFailure as error:
+            result = _failed(error.reason, prior_control())
+        except ssl.SSLError:
+            result = _failed("tls-failed", prior_control())
+        except http.client.HTTPException:
+            result = _failed("response-invalid", prior_control())
+        except OSError:
+            result = _failed("network-unavailable", prior_control())
+        finally:
+            # Each original response/connection has one synchronous close
+            # claim, even if stdlib already closed it on its own failure path.
+            # No retry, scan, replacement joiner or cleanup timeout is added.
+            for original in (original_response[0], connection):
+                if original is not None:
+                    try:
+                        original.close()
+                    except BaseException:
+                        close_failed[0] = True
+            if close_failed[0]:
+                raise _CloseFailure("Original GitHub close did not return") from None
+        return result
+
+    return exchange
+
+
+def _make_live_reader(request: ReadRequest, *, started: float, runtime_dir: str) -> _Reader:
+    """Unchanged at-most-five-GET Connect/Refresh profile, never a POST grant."""
+    exchange = _make_live_exchange(request.token, started=started, runtime_dir=runtime_dir,
+                                   api_version="2022-11-28")
 
     class FixedReader:
         def __init__(self) -> None:
@@ -779,123 +923,6 @@ def _make_live_reader(request: ReadRequest, *, started: float, runtime_dir: str)
             prefix = "/repos/" + request.repository
             path = ("/user" if step == "account" else prefix if step in {"repository-before", "repository-after"}
                     else prefix + "/actions/workflows?per_page=100&page=" + ("1" if step == "workflows-1" else "2"))
-            original_response: list[Any] = [None]
-            close_failed = [False]
-            original_socket: list[Any] = [None]
-
-            def timeout(remaining: float) -> None:
-                if original_socket[0] is None:
-                    raise ReadFailure("network-unavailable")
-                original_socket[0].settimeout(remaining)
-
-            def prior_control() -> dict[str, Any] | None:
-                response = original_response[0]
-                bounded = getattr(response, "bounded", None)
-                return None if bounded is None else bounded.control
-
-            class FixedResponse(http.client.HTTPResponse):
-                def __init__(self, *args: Any, **kwargs: Any) -> None:
-                    self._close_claimed = False
-                    original_response[0] = self
-                    super().__init__(*args, **kwargs)
-
-                def begin(self) -> None:
-                    if self.headers is not None:
-                        return
-                    self.bounded = _ResponseBody(self.fp, budget, before_read=timeout)
-                    head = self.bounded.head
-                    self.code = self.status = head.status
-                    self.reason = ""  # Raw upstream reason phrases are discarded.
-                    self.version = head.version
-                    self.headers = self.msg = http.client.HTTPMessage()
-                    for name, values in head.headers.items():
-                        for value in values:
-                            if value is not None:
-                                self.headers[name] = value
-                    self.chunked = head.framing == "chunked"
-                    self.chunk_left = None
-                    self.length = head.length
-                    self.will_close = head.framing == "eof" or self._check_close()
-
-                def read(self, amt: int | None = None) -> bytes:
-                    return self.bounded.read(amt)
-
-                def close(self) -> None:
-                    if self._close_claimed:
-                        return
-                    self._close_claimed = True  # Includes stdlib failure closes.
-                    try:
-                        super().close()
-                    except BaseException:
-                        close_failed[0] = True
-                        raise
-
-            class FixedConnection(http.client.HTTPSConnection):
-                def __init__(self) -> None:
-                    self._close_claimed = False
-                    super().__init__("api.github.com", 443, timeout=budget.remaining(), context=context)
-                    self.response_class = FixedResponse
-                    self.set_debuglevel(0)
-
-                def connect(self) -> None:
-                    # HTTPSConnection's default wrap suppresses ragged EOF.
-                    # Use the ordinary base TCP connect, then one explicit TLS
-                    # wrap. No tunnel/host override or second owner is added.
-                    http.client.HTTPConnection.connect(self)
-                    self.sock.settimeout(budget.remaining())
-                    self.sock = _wrap_fixed_tls(context, self.sock,
-                                               ignore_eof_option=getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0))
-
-                def close(self) -> None:
-                    if self._close_claimed:
-                        return
-                    self._close_claimed = True
-                    try:
-                        super().close()
-                    except BaseException:
-                        close_failed[0] = True
-                        raise
-
-            connection: Any = None
-            try:
-                connection = FixedConnection()
-                connection.connect()
-                original_socket[0] = connection.sock
-                timeout(budget.remaining())
-                connection.auto_open = 0  # No implicit reconnect after our connect.
-                connection.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
-                for name, value in (
-                    ("Host", "api.github.com"), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
-                    ("Accept", "application/vnd.github+json"), ("X-GitHub-Api-Version", "2022-11-28"),
-                    ("Accept-Encoding", "identity"), ("Connection", "close"),
-                    ("Authorization", "Bearer " + request.token),
-                ):
-                    connection.putheader(name, value)
-                timeout(budget.remaining())
-                connection.endheaders()
-                timeout(budget.remaining())
-                response = connection.getresponse()
-                result = _response_result(response.bounded, budget)
-            except ReadFailure as error:
-                result = _failed(error.reason, prior_control())
-            except ssl.SSLError:
-                result = _failed("tls-failed", prior_control())
-            except http.client.HTTPException:
-                result = _failed("response-invalid", prior_control())
-            except OSError:
-                result = _failed("network-unavailable", prior_control())
-            finally:
-                # Each original response/connection has one synchronous close
-                # claim, even if stdlib already closed it on its own failure path.
-                # No retry, scan, replacement joiner or cleanup timeout is added.
-                for original in (original_response[0], connection):
-                    if original is not None:
-                        try:
-                            original.close()
-                        except BaseException:
-                            close_failed[0] = True
-                if close_failed[0]:
-                    raise _CloseFailure("Original GitHub close did not return") from None
-            return result
+            return exchange("GET", path, None)
 
     return FixedReader()

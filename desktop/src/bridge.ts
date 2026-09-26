@@ -19,6 +19,9 @@ import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
 import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConnectionError, githubConnectionRequestFits,
   parseGitHubConnectionHelp, parseGitHubConnectionStatus } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
+import { GITHUB_PREFLIGHT_EVENT, githubPreflightError, githubPreflightRequestFits, parseGitHubPreflightStatus } from './githubPreflightProtocol.ts';
+import type { GitHubPreflightCommand } from './githubPreflightProtocol.ts';
+import type { GitHubPreflightStatus } from './githubPreflightTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 import { VERSION_EDIT_EVENT, parseVersionEditGuide, parseVersionEditStatus, versionEditError, versionEditRequestFits } from './releaseVersionEdit.ts';
@@ -35,7 +38,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -69,6 +72,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'project_recovery_protocol' };
       return status;
     } catch (error) { throw projectRecoveryError(error); }
+  };
+  const githubPreflightCall = async (command: GitHubPreflightCommand, value: unknown): Promise<GitHubPreflightStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'github_preflight_refused_runtime_unavailable' };
+      if (!githubPreflightRequestFits(command, value)) throw { code: 'github_preflight_refused_invalid_input' };
+      const status = parseGitHubPreflightStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_preflight_unknown' };
+      return status;
+    } catch (error) { throw githubPreflightError(error); }
   };
   const androidCall = async (command: AndroidBuildCommand, value: unknown): Promise<AndroidBuildStatus> => {
     try {
@@ -347,6 +359,19 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
       try { return listen(GITHUB_CONNECTION_EVENT, (value) => onStatus(parseGitHubConnectionStatus(value))).catch(connectionRejection); }
       catch (error) { return Promise.reject(githubConnectionError(error)); }
+    },
+    githubPreflightStatus: () => githubPreflightCall('github_preflight_status', {}),
+    prepareGitHubPreflight: (args) => githubPreflightCall('github_preflight_prepare', args),
+    dispatchGitHubPreflight: (args) => githubPreflightCall('github_preflight_dispatch', args),
+    trackGitHubPreflight: (args) => githubPreflightCall('github_preflight_track', args),
+    reconcileGitHubPreflight: (args) => githubPreflightCall('github_preflight_reconcile', args),
+    loadGitHubPreflightPending: (args) => githubPreflightCall('github_preflight_pending', args),
+    cancelGitHubPreflight: (args) => githubPreflightCall('github_preflight_cancel', args),
+    subscribeGitHubPreflight: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_preflight_refused_runtime_unavailable' };
+        return await listen(GITHUB_PREFLIGHT_EVENT, (value) => onStatus(parseGitHubPreflightStatus(value)));
+      } catch (error) { throw githubPreflightError(error); }
     },
     assetStatus: () => assetCall('vault_status', {}),
     openAssetSession: (storageMode = 'session') => assetCall('vault_open', { mode: storageMode }),

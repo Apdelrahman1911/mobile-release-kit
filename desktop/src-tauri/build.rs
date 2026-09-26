@@ -112,6 +112,28 @@ fn anchor(name: &str) {
     }
 }
 
+fn github_preflight_tooling() {
+    // Publisher-selected immutable toolkit release, NOT the application's
+    // current source commit and never a renderer/runtime environment override.
+    // Absent binding keeps the action unavailable. A release build must supply
+    // the reviewed commit containing this exact canonical reusable workflow.
+    const SELECTOR: &str = "MRK_GITHUB_PREFLIGHT_TOOLING_SHA";
+    println!("cargo:rerun-if-env-changed={SELECTOR}");
+    println!("cargo:rerun-if-changed=../../templates/workflows/mobile-preflight.yml");
+    let Some(value) = env::var_os(SELECTOR) else { return; };
+    let value = value.to_str().expect("GitHub preflight tooling commit must be UTF-8");
+    if value.len() != 40 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        panic!("GitHub preflight tooling commit must be an explicitly reviewed lowercase full commit");
+    }
+    // This hash binds response DATA to the template compiled into this source;
+    // it does not qualify the runtime, service API or an arbitrary GitHub ref.
+    let template = include_str!("../../templates/workflows/mobile-preflight.yml");
+    let caller = template.replace("__MOBILE_RELEASE_KIT_REPOSITORY__", "Apdelrahman1911/mobile-release-kit")
+        .replace("__MOBILE_RELEASE_KIT_SHA__", value);
+    println!("cargo:rustc-env={SELECTOR}={value}");
+    println!("cargo:rustc-env=MRK_GITHUB_PREFLIGHT_CALLER_SHA256={:x}", Sha256::digest(caller.as_bytes()));
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
@@ -146,6 +168,7 @@ fn main() {
     anchor("MRK_ENVIRONMENT_NATIVE_INPUTS_SHA256");
     let target = env::var("TARGET").unwrap_or_default();
     android_compile_data(&target);
+    github_preflight_tooling();
     println!("cargo:rustc-env=MRK_COMPILED_TARGET={target}");
     #[cfg(feature = "desktop-shell")]
     {
@@ -168,6 +191,8 @@ fn main() {
             "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
             "release_version_edit_close", "release_version_edit_status",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+            "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+            "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

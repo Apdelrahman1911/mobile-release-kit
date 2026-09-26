@@ -16,6 +16,21 @@ on:
         required: false
         default: both
         type: string
+      desktop_request:
+        description: Optional exact Desktop request marker, not release attestation.
+        required: false
+        default: ''
+        type: string
+      desktop_source_sha:
+        description: Optional reviewed application commit; all Desktop inputs must be supplied together.
+        required: false
+        default: ''
+        type: string
+      desktop_expected_ref:
+        description: Optional reviewed full branch ref.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -34,10 +49,24 @@ jobs:
         env:
           MOBILE_RELEASE_PLATFORM: ${{ inputs.platform }}
           MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MOBILE_RELEASE_DESKTOP_REQUEST: ${{ inputs.desktop_request }}
+          MOBILE_RELEASE_DESKTOP_SOURCE_SHA: ${{ inputs.desktop_source_sha }}
+          MOBILE_RELEASE_DESKTOP_EXPECTED_REF: ${{ inputs.desktop_expected_ref }}
+          MOBILE_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          MOBILE_RELEASE_CALLER_SHA: ${{ github.sha }}
+          MOBILE_RELEASE_CALLER_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios|both)$ ]]
           [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          if [[ -n "$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]; then
+            [[ "$MOBILE_RELEASE_DESKTOP_REQUEST" =~ ^[0-9a-f]{32}$ ]]
+            [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == refs/heads/* ]]
+            [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_SOURCE_SHA" ]]
+            [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]
+            [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == "$MOBILE_RELEASE_CALLER_REF" ]]
+          fi
 
   android:
     needs: validate-platform
