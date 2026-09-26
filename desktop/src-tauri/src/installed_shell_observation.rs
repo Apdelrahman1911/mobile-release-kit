@@ -6,8 +6,8 @@ use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, Mutex
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
-use crate::{asset_session::{InstalledEvidenceWitness, InstalledProjectWitness, InstalledSessionSnapshot, InstalledSessionFailure}, bridge::{AppInfo, Project},
-    candidate_evidence_protocol as evidence, credential_assessment::InstalledAssessmentFailure,
+use crate::{asset_session::{InstalledEvidenceWitness, InstalledLifecycleStopWitness, InstalledProjectWitness, InstalledSessionSnapshot, InstalledSessionFailure}, bridge::{AppInfo, Project},
+    candidate_evidence_protocol as evidence, lifecycle_evidence_protocol as lifecycle, credential_assessment::InstalledAssessmentFailure,
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledWorkflowFinality, InstalledMetadataFinality, InstalledVersionFinality},
     github_workflow_edit_protocol as workflow, metadata_text_edit_protocol as metadata, release_version_edit_protocol as version,
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
@@ -52,6 +52,9 @@ enum Step {
     EnterTitle, EnterShortDescription, EnterFullDescription, ReadMetadataInputs, ValidateMetadata, ReadMetadataValidation,
     SavedSettings, ReadSavedDraft, Artifacts, ReadEvidenceEmpty, ChooseEvidenceCancel, CancelEvidence, EvidenceCancelled, ReadEvidenceCancelled,
     ChooseEvidenceSelect, SetEvidence, SelectEvidence, EvidenceSelected, ReadEvidenceSelected, InspectEvidence, EvidenceObserved, ReadEvidenceObserved,
+    LifecycleReleases, ReadLifecycleReleases, LifecycleRecovery, ReadLifecycleRecovery, LifecycleControls,
+    ChangeEvidenceStage, ReadEvidenceStage, ChooseEvidenceReplacement, EvidenceReplacementReady,
+    RequestEvidenceStop, EvidenceStopped, ReadEvidenceStale, StaleArtifacts, ReadStaleArtifacts, StaleRecovery, ReadStaleRecovery,
     CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step), GitHubReadOnly(github::Step),
 }
 impl Step {
@@ -132,6 +135,22 @@ impl Step {
             Self::InspectEvidence => b"MRK_INSTALLED_SHELL_FAILURE_STEP=InspectEvidence\n",
             Self::EvidenceObserved => b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceObserved\n",
             Self::ReadEvidenceObserved => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceObserved\n",
+            Self::LifecycleReleases => b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleReleases\n",
+            Self::ReadLifecycleReleases => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadLifecycleReleases\n",
+            Self::LifecycleRecovery => b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleRecovery\n",
+            Self::ReadLifecycleRecovery => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadLifecycleRecovery\n",
+            Self::LifecycleControls => b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleControls\n",
+            Self::ChangeEvidenceStage => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChangeEvidenceStage\n",
+            Self::ReadEvidenceStage => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceStage\n",
+            Self::ChooseEvidenceReplacement => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceReplacement\n",
+            Self::EvidenceReplacementReady => b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceReplacementReady\n",
+            Self::RequestEvidenceStop => b"MRK_INSTALLED_SHELL_FAILURE_STEP=RequestEvidenceStop\n",
+            Self::EvidenceStopped => b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceStopped\n",
+            Self::ReadEvidenceStale => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceStale\n",
+            Self::StaleArtifacts => b"MRK_INSTALLED_SHELL_FAILURE_STEP=StaleArtifacts\n",
+            Self::ReadStaleArtifacts => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadStaleArtifacts\n",
+            Self::StaleRecovery => b"MRK_INSTALLED_SHELL_FAILURE_STEP=StaleRecovery\n",
+            Self::ReadStaleRecovery => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadStaleRecovery\n",
             Self::CandidateSettings => b"MRK_INSTALLED_SHELL_FAILURE_STEP=CandidateSettings\n",
             Self::ReadCandidateDraft => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCandidateDraft\n",
             Self::PrepareNoop => b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareNoop\n",
@@ -254,7 +273,7 @@ impl WorkflowStep {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Pending { Dom(Step), Project(Step), Evidence(Step), Path(PathStep), Session(SessionStep), Close, Gtk }
+enum Pending { Dom(Step), Project(Step), Evidence(Step), LifecycleOpposite, Path(PathStep), Session(SessionStep), Close, Gtk }
 
 // A fixed recipe, not a second controller: each action uses the rendered
 // control and each read compares the actual original's safe projection.
@@ -1213,8 +1232,8 @@ fn assert_failure_quit_contract() {
 const PROJECT_SOURCE: &str = "plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
 const APP_ID: &str = "org.example.mrk.observed";
 const FIELD: &str = "version.source";
-// Bootstrap inventory only: the legacy candidate witness below does not
-// exercise or qualify the separate lifecycle routes and shared release UI.
+// Inventory is not qualification. The positive recipe below exercises only
+// one candidate-stage lifecycle observation, not the wider stage/layout matrix.
 const METHODS: [&str; 13] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
     "github.setup.propose", "metadata.text.observe", "metadata.text.validate", "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"];
 const TOOLKIT_REPOSITORY: &str = "example/toolkit";
@@ -2055,6 +2074,11 @@ impl Picker {
     }
 }
 
+fn stopped_evidence_picker(p: &Picker) -> bool {
+    p.created && p.responded && p.disposal && p.destroyed && p.released
+        && !p.selected && !p.activated && !p.filename && !p.returned
+}
+
 fn assert_picker_activation_return_contract() {
     // Inert state assertions only, never native response or settlement receipts.
     for select in [false, true] {
@@ -2713,87 +2737,109 @@ impl SavedReads {
     }
 }
 
-fn candidate_context(selection: Option<&evidence::Selection>, cancelled: bool) -> Value {
-    serde_json::json!({"heading":"Understand your saved candidate evidence.",
-        "description":"Choose an existing final-evidence folder. The core checks three documents without changing your project, original files or Store state.",
-        "assurance":["Local document consistency; provenance and artifact bytes unverified.",
-            "No artifact bytes, signing, GitHub authenticity, Store state, release readiness or recovery safety are established here."],
-        "folder":{"heading":"Evidence folder","description":"Separate from the source project. No files need to be copied or renamed.",
-            "source":"Source project: positive-project · unchanged by evidence selection",
-            "selection":format!("Evidence folder: {}", selection.map_or("Not selected", |s| s.display_name.as_str())),
-            "buttons":[["Choose evidence folder",true],["Inspect documents",selection.is_some()],["Check operation status",true]],
-            "reason":if selection.is_some() { "Ready to inspect the fixed documents. This does not authorize a release or retry." }
-                else { "Choose the retained final-evidence folder to begin. Originals stay in place and are read only." },
-            "status":if cancelled { vec!["Original operation cancelled and settled. No new result was accepted.",
-                "The original evidence operation was cancelled. No new document observation was accepted."] } else { Vec::<&str>::new() }}})
+const LIFECYCLE_WARNING: &str = "Saved documents only, not live Store status or retry approval.";
+fn lifecycle_context_stage(selection: Option<&lifecycle::Selection>, cancelled: bool, stage: lifecycle::Stage) -> Value {
+    let stage_matches = selection.is_some_and(|s| s.stage == stage);
+    serde_json::json!({"heading":"Saved release evidence",
+        "description":"Inspect one selected final folder. Choosing evidence never saves or discards a project draft.",
+        "warning":LIFECYCLE_WARNING,"help":"Help: Saved release evidence folder",
+        "stage":if stage == lifecycle::Stage::Candidate { "candidate" } else { "external-testing" },
+        "stages":[["candidate","Candidate"],["external-testing","External testing"],["production-submit","Production submission"]],
+        "stageEnabled":true,"source":"Source project: positive-project · unchanged by evidence selection",
+        "selection":format!("Evidence folder: {}", selection.map_or("Not selected".to_owned(), |s| format!("{} · Candidate",s.display_name))),
+        "buttons":[["Choose evidence folder",true],["Inspect documents",stage_matches],["Check operation status",true]],
+        "reason":if selection.is_none() { "Choose an evidence folder first." }
+            else if !stage_matches { "Choose a new folder for this stage. An earlier selection cannot be reclassified." }
+            else { "Inspect the fixed saved documents when you want a new local observation. Original files stay in place and are read only." },
+        "status":if cancelled { vec!["Original operation cancelled and settled. No new result was accepted.",
+            "The original evidence operation was cancelled. No new document observation was accepted."] } else { Vec::<&str>::new() }})
 }
-fn candidate_empty_display(selection: Option<&evidence::Selection>, cancelled: bool) -> Value {
-    serde_json::json!({"context":candidate_context(selection, cancelled),"result":{
+fn lifecycle_context(selection: Option<&lifecycle::Selection>, cancelled: bool) -> Value {
+    lifecycle_context_stage(selection,cancelled,lifecycle::Stage::Candidate)
+}
+fn lifecycle_empty_display(selection: Option<&lifecycle::Selection>, cancelled: bool) -> Value {
+    serde_json::json!({"context":lifecycle_context(selection,cancelled),"result":{
         "heading":"No current document observation",
         "description":"An empty view does not mean a candidate was never released or that recovery is safe. Existing release evidence remains unchanged."}})
 }
-struct CandidateSample { value: Value, display: Value }
-impl CandidateSample {
-    fn read(result: &evidence::Observation, selection: &evidence::Selection) -> Option<Self> {
-        let raw = edit::bounded(result, evidence::RESULT_LIMIT).ok()?;
+struct LifecycleSample { value: Value, display: Value }
+impl LifecycleSample {
+    fn read(result: &lifecycle::Observation, selection: &lifecycle::Selection) -> Option<Self> {
+        let raw = edit::bounded(result,evidence::RESULT_LIMIT).ok()?;
         let value = crate::protocol::strict_json(&raw).ok()?;
-        // Fixed expected fixture DATA, compared with the genuine core DTO. It
-        // is never returned to the renderer, registered, sealed or substituted
-        // for the original result. Declared payloads are deliberately absent.
-        let expected = serde_json::json!({"schemaVersion":1,"outcome":"consistent",
-            "documents":[{"kind":"manifest","state":"valid"},{"kind":"receipt","state":"valid"},{"kind":"intent","state":"valid"}],
-            "summary":{"platform":"android","applicationId":"com.example.reader","version":{"marketing":"1.2.3","build":42},
-                "source":{"commit":"2".repeat(40),"tree":"3".repeat(40)},
-                "artifacts":[{"logicalName":"android-aab","declaredBytes":"12345678","sha256":"6".repeat(64)},
-                    {"logicalName":"store-metadata","declaredBytes":"34567","sha256":"5".repeat(64)},
-                    {"logicalName":"validation-report","declaredBytes":"2345","sha256":"7".repeat(64)}],
-                "recordedRuns":{"authorizedBy":{"runId":"1000000000","attempt":"1"},"executedBy":{"runId":"1000000000","attempt":"1"},
-                    "producedBy":{"runId":"1000000000","attempt":"1"}},
-                "documentPayloadSha256":{"manifest":"177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
-                    "receipt":"2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
-                    "intent":"24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"}},
-            "assurance":{"level":"local-document-consistency","documentsOnly":true,"artifactBytesVerified":false,"workflowAuthenticated":false,
-                "storeStateObserved":false,"comparedWithSourceProject":false,"releaseReady":false,"recoveryAuthorized":false}});
-        if value != expected { return None; }
-        let summary = &value["summary"];
-        let artifacts = summary["artifacts"].as_array()?.iter().zip(["Android App Bundle", "Store metadata", "Validation report"])
-            .map(|(artifact, name)| Some(serde_json::json!([name, format!("Declared size: {} bytes", artifact["declaredBytes"].as_str()?),
-                format!("Declared SHA-256: {}", artifact["sha256"].as_str()?)]))).collect::<Option<Vec<_>>>()?;
-        let runs = ["authorizedBy", "executedBy", "producedBy"].iter().zip(["Manifest records authorization", "Manifest records execution", "Manifest records production"])
-            .map(|(role, label)| { let run = &summary["recordedRuns"][*role]; Some(serde_json::json!([label,
-                format!("Run {} · attempt {}", run["runId"].as_str()?, run["attempt"].as_str()?)])) }).collect::<Option<Vec<_>>>()?;
-        let digests: Vec<_> = ["manifest", "receipt", "intent"].iter().map(|kind| serde_json::json!([kind,summary["documentPayloadSha256"][*kind]])).collect();
-        let display = serde_json::json!({"context":candidate_context(Some(selection), false),"result":{
-            "headings":[["Documents agree","Formats, canonical self-digests and candidate bindings agree under the core rules. This is not authenticated provenance or a release approval.","Documents only",null],
+        // Expected DATA only. Never injected into the app, controller or native result.
+        // The existing fixture's payload files remain deliberately absent.
+        let fixture: Value = serde_json::from_str(include_str!("../../tests/fixtures/lifecycle-evidence.json")).ok()?;
+        if value != fixture["androidCandidate"] || selection.stage != lifecycle::Stage::Candidate { return None; }
+        let summary = &value["summary"]; let first = value["history"].as_array()?.first()?;
+        let artifacts = summary["artifacts"].as_array()?.iter().zip(["Android App Bundle","Store metadata","Validation report"])
+            .map(|(artifact,name)| Some(serde_json::json!([name,format!("Declared size: {} bytes",artifact["declaredBytes"].as_str()?),
+                format!("Declared SHA-256: {}",artifact["sha256"].as_str()?)]))).collect::<Option<Vec<_>>>()?;
+        let runs = |values: &Value| -> Option<Vec<Value>> {
+            ["authorizedBy","executedBy","producedBy"].iter().zip(["Recorded authorization","Recorded execution","Recorded production"])
+                .map(|(role,label)| { let run = &values[*role]; Some(serde_json::json!([label,
+                    format!("Run {} · attempt {}",run["runId"].as_str()?,run["attempt"].as_str()?)])) }).collect()
+        };
+        let digests: Vec<_> = ["manifest","receipt","intent"].iter().map(|kind|
+            serde_json::json!([format!("Candidate {kind}"),summary["documentPayloadSha256"][*kind]])).collect();
+        let display = serde_json::json!({"context":lifecycle_context(Some(selection),false),"result":{
+            "headings":[["Documents agree","Candidate final folder · local document observation","Documents only",null],
                 ["Declared candidate identity","Read from the manifest, not compared with your project or the Stores.",null,"Help: Declared candidate identity"],
-                ["Declared artifacts","No artifact file is opened, measured or hashed by this inspector.",null,"Help: Declared artifacts"],
+                ["Stages recorded in this folder","Saved receipt declarations, not authenticated workflow or live Store history.",null,null]],
+            "guidance":format!("Recovery guidance: {}",value["guidance"]["message"].as_str()?),
+            "identity":format!("Android · {} · version {} / build {}",summary["applicationId"].as_str()?,summary["version"]["marketing"].as_str()?,summary["version"]["build"].as_u64()?),
+            "history":[["Candidate",format!("Recorded outcome: {} · recorded readback: {}",first["recordedOutcome"].as_str()?,first["recordedReadback"].as_str()?)]],
+            "notSupplied":"Not supplied: External testing, Production submission. These stages are not assessed.",
+            "technicalHeading":"Document status and technical details","technicalOpen":true,
+            "technicalWarning":"No artifact bytes, signing, GitHub authenticity, Store state, release readiness or recovery safety are established here. All six assurance flags remain false.",
+            "documents":[["candidate-receipt.json","Format + self-digest valid"],["candidate-manifest.json","Format + self-digest valid"],
+                ["operation/candidate-operation-intent.json","Format + self-digest valid"]],
+            "source":[["Declared source commit",summary["source"]["commit"]],["Declared source tree",summary["source"]["tree"]]],
+            "detailsHeadings":[["Declared artifacts","No artifact file is opened, measured or hashed by this inspector.",null,"Help: Declared artifacts"],
                 ["Manifest-recorded runs","These are unauthenticated declarations, not live workflow status.",null,"Help: Manifest-recorded runs"],
                 ["Canonical document payload digests","These are self-integrity digests, not raw-file hashes or signatures.",null,"Help: Document payload digests"]],
-            "documents":[["candidate-manifest.json","Format + self-digest valid"],["candidate-receipt.json","Format + self-digest valid"],
-                ["operation/candidate-operation-intent.json","Format + self-digest valid"]],
-            "identity":[["Platform",if summary["platform"].as_str()? == "android" { "Android" } else { "iOS" }],["Application ID",summary["applicationId"]],
-                ["Version / build",format!("{} / {}", summary["version"]["marketing"].as_str()?, summary["version"]["build"].as_u64()?)],
-                ["Source commit",summary["source"]["commit"]],["Source tree",summary["source"]["tree"]]],
-            "artifacts":artifacts,"runs":runs,"digests":digests}});
-        Some(Self { value, display })
+            "artifacts":artifacts,"manifestRuns":runs(&summary["recordedRuns"])?,"digests":digests,
+            "receipts":[{"heading":"Candidate receipt declarations","runs":runs(&first["recordedRuns"])?,
+                "digests":[["Receipt payload SHA-256",first["receiptSha256"]],["Intent payload SHA-256",first["intentSha256"]],
+                    ["Previous receipt payload SHA-256","No predecessor at candidate stage"]]}],
+            "limitation":"Manifest and receipt run roles are kept separate. A recorded operator-authorized outcome does not grant this app recovery authority. Production checks compare repeated candidate document bytes, not the whole evidence inventory."}});
+        Some(Self { value,display })
+    }
+    fn stage_changed_display(&self, selection: &lifecycle::Selection) -> Value {
+        serde_json::json!({"context":lifecycle_context_stage(Some(selection),false,lifecycle::Stage::ExternalTesting),"result":self.display["result"]})
+    }
+    fn stale_display(&self, selection: &lifecycle::Selection) -> Value {
+        serde_json::json!({"context":lifecycle_context_stage(None,true,lifecycle::Stage::ExternalTesting),
+            "stale":{"heading":format!("Previous observation · stale · {}",selection.display_name),"open":true,
+                "warning":"Historical display only. It is not the current selection or observation and cannot authorize any action.","result":self.display["result"]}})
+    }
+    fn guidance_display(&self, selection: &lifecycle::Selection, stale: bool) -> Value {
+        serde_json::json!({"heading":"Guidance from saved release evidence",
+            "description":"Shared with Releases and Artifacts. This view does not read any folder automatically.","warning":LIFECYCLE_WARNING,
+            "current":if stale { Value::Null } else { serde_json::json!([format!("Candidate · {}",selection.display_name),self.value["guidance"]["message"]]) },
+            "empty":if stale { Some("No current saved-document guidance. Project recovery remains unassessed.") } else { None },
+            "stale":if stale { serde_json::json!([format!("Previous guidance · stale · {}",selection.display_name),self.value["guidance"]["message"],"Not a current recovery assessment."]) } else { Value::Null },
+            "staleOpen":if stale { Some(true) } else { None },
+            "button":["Open saved evidence controls",true],"projectRecoveryUnassessed":true,"assessmentDisabled":true})
     }
 }
 // Closed, failure-only observations. No DTO, path, identifier or arbitrary
 // BridgeError string can enter the original bounded diagnostic channel.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum EvidenceCallback { Status, ObserveStart }
+enum EvidenceCallback { Status, ObserveStart, CancelStart }
 impl EvidenceCallback {
-    fn token(self) -> &'static [u8] { match self { Self::Status => b"status", Self::ObserveStart => b"observe-start" } }
+    fn token(self) -> &'static [u8] { match self { Self::Status => b"status", Self::ObserveStart => b"observe-start", Self::CancelStart => b"cancel-start" } }
     fn permits(self, step: Step) -> bool { match self {
         Self::Status => !matches!(step, Step::Paths(_) | Step::Session(_)),
         Self::ObserveStart => matches!(step, Step::InspectEvidence | Step::EvidenceObserved),
+        Self::CancelStart => matches!(step, Step::RequestEvidenceStop | Step::EvidenceStopped),
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EvidenceCheck {
     StatusPending, Bridge, Case, ObservePending, ObserveReturned, ObserveRequests,
     Revision, Schema, Availability, PreviousRevision, EqualRevision, OperationOrder,
-    Operation, OperationKind, OperationSelection, Phase, Problem, Result, Selection,
+    Operation, OperationKind, OperationSelection, OperationStage, Phase, Problem, Result, Selection,
     SelectionWitness, SelectionFormat, SelectionName, SelectionChanged, ChooseRequests,
     CancelStatus, PickerActivated, Cancelled, ObservationPresent, ObservationChanged,
 }
@@ -2805,7 +2851,7 @@ impl EvidenceCheck {
         Self::Availability => b"availability", Self::PreviousRevision => b"previous-revision",
         Self::EqualRevision => b"equal-revision", Self::OperationOrder => b"operation-order",
         Self::Operation => b"operation", Self::OperationKind => b"operation-kind",
-        Self::OperationSelection => b"operation-selection", Self::Phase => b"phase", Self::Problem => b"problem",
+        Self::OperationSelection => b"operation-selection", Self::OperationStage => b"operation-stage", Self::Phase => b"phase", Self::Problem => b"problem",
         Self::Result => b"result", Self::Selection => b"selection", Self::SelectionWitness => b"selection-witness",
         Self::SelectionFormat => b"selection-format", Self::SelectionName => b"selection-name",
         Self::SelectionChanged => b"selection-changed", Self::ChooseRequests => b"choose-requests",
@@ -3070,28 +3116,55 @@ fn assert_snapshot_frame_contract() {
     }
 }
 #[derive(Default)]
-struct Candidate {
-    initial_idle: bool, initial_visible: bool, pickers: [Picker; 2],
-    choose_requests: u8, choose_pending: Option<usize>, choose_returned: [bool; 2], status_pending: u16, latest: Option<evidence::Status>,
+struct LifecycleRecord {
+    initial_idle: bool, initial_visible: bool, pickers: [Picker; 3],
+    choose_requests: u8, choose_pending: Option<usize>, choose_returned: [bool; 3], status_pending: u16, latest: Option<lifecycle::Status>,
     cancel_status: bool, cancelled: bool, cancel_visible: bool,
-    selection_status: Option<evidence::Selection>, selected: Option<InstalledEvidenceWitness>, selected_visible: bool,
-    observe_requests: u8, observe_pending: bool, observe_returned: bool, observation_status: Option<evidence::Observation>,
-    observed: Option<CandidateSample>, observed_visible: bool, draft_retained: bool,
+    selection_status: Option<lifecycle::Selection>, selected: Option<InstalledEvidenceWitness>, selected_visible: bool,
+    observe_requests: u8, observe_pending: bool, observe_returned: bool, observation_status: Option<lifecycle::Observation>,
+    observed: Option<LifecycleSample>, observed_visible: bool, draft_retained: bool,
+    releases_visible: bool, recovery_visible: bool, stage_changed: bool,
+    opposite_reserved: bool, opposite_refused: bool, stop_original: Option<InstalledLifecycleStopWitness>,
+    stop_requests: u8, stop_pending: bool, stop_returned: bool, stop_status: bool, stopped: bool,
+    stale_visible: [bool; 3],
 }
-impl Candidate {
+impl LifecycleRecord {
+    fn current_observed(&self) -> bool {
+        self.choose_requests == 2 && self.choose_returned[..2] == [true; 2] && self.choose_pending.is_none()
+            && self.observe_requests == 1 && self.observe_returned && !self.observe_pending
+            && self.selected.as_ref().is_some_and(|selected| self.latest.as_ref().is_some_and(|status|
+                status.phase == evidence::Phase::Observed && status.selection.as_ref() == Some(&selected.selection)
+                    && status.operation.as_ref().is_some_and(|op| op.operation_id == "5" && op.kind == evidence::OperationKind::Observe
+                        && op.stage == lifecycle::Stage::Candidate && op.selection_id.as_deref() == Some(selected.selection.selection_id.as_str()))
+                    && status.result.as_ref() == self.observation_status.as_ref() && status.result.is_some()))
+            && self.observed.is_some()
+    }
+    fn stopped_current(&self) -> bool {
+        self.choose_requests == 3 && self.choose_returned == [true; 3] && self.choose_pending.is_none()
+            && self.observe_requests == 1 && self.observe_returned && !self.observe_pending
+            && self.stop_requests == 1 && self.stop_returned && !self.stop_pending && self.stop_status && self.stopped
+            && self.opposite_refused && stopped_evidence_picker(&self.pickers[2])
+            && self.latest.as_ref().is_some_and(|status| status.phase == evidence::Phase::Cancelled
+                && status.problem == Some(evidence::Problem::Cancelled) && status.selection.is_none() && status.result.is_none()
+                && status.operation.as_ref().is_some_and(|op| op.operation_id == "6" && op.kind == evidence::OperationKind::Choose
+                    && op.stage == lifecycle::Stage::ExternalTesting && op.selection_id.is_none()))
+    }
     fn documents_complete(&self) -> bool {
-        self.initial_idle && self.initial_visible && self.choose_requests == 2 && self.choose_pending.is_none()
-            && self.choose_returned == [true; 2] && self.status_pending == 0
+        self.initial_idle && self.initial_visible && self.choose_requests == 3 && self.choose_pending.is_none()
+            && self.choose_returned == [true; 3] && self.status_pending == 0
             && self.cancel_status && self.cancelled && self.cancel_visible && self.pickers[0].settled(false)
             && self.selection_status.is_some() && self.selected.is_some() && self.selected_visible && self.pickers[1].settled(true)
             && self.observe_requests == 1 && !self.observe_pending && self.observe_returned && self.observation_status.is_some()
-            && self.observed.is_some() && self.observed_visible
+            && self.observed.is_some() && self.observed_visible && self.releases_visible && self.recovery_visible && self.stage_changed
+            && self.opposite_reserved && self.opposite_refused && self.stop_original.is_some()
+            && self.stop_requests == 1 && !self.stop_pending && self.stop_returned && self.stop_status && self.stopped
+            && stopped_evidence_picker(&self.pickers[2]) && self.stale_visible == [true; 3]
     }
     fn complete(&self) -> bool { self.documents_complete() && self.draft_retained }
-    fn status(&mut self, status: &evidence::Status, closing: bool) -> bool {
+    fn status(&mut self, status: &lifecycle::Status, closing: bool) -> bool {
         self.checked_status(status, closing).is_ok()
     }
-    fn checked_status(&mut self, status: &evidence::Status, closing: bool) -> Result<(), EvidenceCheck> {
+    fn checked_status(&mut self, status: &lifecycle::Status, closing: bool) -> Result<(), EvidenceCheck> {
         use EvidenceCheck as C;
         // These are actual command replies, not fabricated native finality.
         // Match the original revision/binding and ignore only genuine older
@@ -3110,12 +3183,22 @@ impl Candidate {
             .and_then(|op| evidence::operation_id(&op.operation_id)) <= id, C::OperationOrder)?;
         if closing {
             // Quit normally revokes selection/result. Earlier positive facts
-            // stay latched; exit uses the original slot5/Quit6 witness instead.
-            evidence_require(id == Some(5), C::Operation)?;
+            // stay latched; exit uses the original stopped slot6/Quit7 witness.
+            evidence_require(id == Some(6), C::Operation)?;
+            let op = status.operation.as_ref().ok_or(C::Operation)?;
+            evidence_require(op.kind == evidence::OperationKind::Choose, C::OperationKind)?;
+            evidence_require(op.selection_id.is_none(), C::OperationSelection)?;
+            evidence_require(op.stage == lifecycle::Stage::ExternalTesting, C::OperationStage)?;
             evidence_require(matches!(status.phase, evidence::Phase::Refused | evidence::Phase::Stopping), C::Phase)?;
             evidence_require(status.problem == Some(evidence::Problem::StaleSelection), C::Problem)?;
             evidence_require(status.selection.is_none(), C::Selection)?;
             return evidence_require(status.result.is_none(), C::Result);
+        }
+        if let Some(op) = &status.operation {
+            let expected = if id == Some(6) { lifecycle::Stage::ExternalTesting } else { lifecycle::Stage::Candidate };
+            evidence_require(op.stage == expected, C::OperationStage)?;
+            evidence_require(status.selection.as_ref().is_none_or(|s| s.stage == op.stage), C::Selection)?;
+            evidence_require(status.result.as_ref().is_none_or(|r| r.stage == op.stage), C::Result)?;
         }
         match id {
             None => {
@@ -3187,11 +3270,27 @@ impl Candidate {
                     _ => return Err(C::Phase),
                 }
             },
+            Some(6) => {
+                evidence_require(self.choose_requests == 3 && self.stage_changed, C::ChooseRequests)?;
+                let op = status.operation.as_ref().ok_or(C::Operation)?;
+                evidence_require(op.kind == evidence::OperationKind::Choose, C::OperationKind)?;
+                evidence_require(op.selection_id.is_none(), C::OperationSelection)?;
+                evidence_require(status.selection.is_none(), C::Selection)?;
+                evidence_require(status.result.is_none(), C::Result)?;
+                match status.phase {
+                    evidence::Phase::Choosing => evidence_require(status.problem.is_none(), C::Problem)?,
+                    evidence::Phase::Stopping | evidence::Phase::Cancelled => {
+                        evidence_require(self.stop_requests == 1, C::CancelStatus)?;
+                        evidence_require(status.problem == Some(evidence::Problem::Cancelled), C::Problem)?;
+                    },
+                    _ => return Err(C::Phase),
+                }
+            },
             _ => return Err(C::Operation),
         }
         match status.phase {
             evidence::Phase::Idle => self.initial_idle = true,
-            evidence::Phase::Cancelled => self.cancel_status = true,
+            evidence::Phase::Cancelled => if id == Some(6) { self.stop_status = true; } else { self.cancel_status = true; },
             evidence::Phase::Selected => self.selection_status = status.selection.clone(),
             evidence::Phase::Observed => self.observation_status = status.result.clone(),
             _ => {},
@@ -3203,8 +3302,8 @@ impl Candidate {
 fn assert_evidence_failure_contract() {
     // Inert original-state contracts, run in the existing native policy gate.
     // These observations neither start a worker nor prove native finality.
-    let mut status = evidence::Status::unavailable(7); status.availability = "available"; status.problem = None;
-    let mut candidate = Candidate::default();
+    let mut status = lifecycle::Status::unavailable(7); status.availability = "available"; status.problem = None;
+    let mut candidate = LifecycleRecord::default();
     assert_eq!(candidate.checked_status(&status, false), Ok(()));
     assert!(candidate.initial_idle && candidate.latest.as_ref() == Some(&status));
     let mut older = status.clone(); older.revision = "6".into(); older.phase = evidence::Phase::Unknown;
@@ -3215,7 +3314,7 @@ fn assert_evidence_failure_contract() {
     assert_eq!(candidate.checked_status(&equal, false), Err(EvidenceCheck::EqualRevision));
     assert!(candidate.latest.as_ref() == Some(&status));
     let mut choose = status.clone(); choose.revision = "8".into(); choose.phase = evidence::Phase::Choosing;
-    choose.operation = Some(evidence::Operation { operation_id: "3".into(), kind: evidence::OperationKind::Choose, selection_id: None });
+    choose.operation = Some(lifecycle::Operation { operation_id: "3".into(), kind: evidence::OperationKind::Choose, selection_id: None, stage: lifecycle::Stage::Candidate });
     assert_eq!(candidate.checked_status(&choose, false), Err(EvidenceCheck::ChooseRequests));
     assert!(candidate.latest.as_ref() == Some(&status));
     candidate.choose_requests = 1;
@@ -3228,11 +3327,26 @@ fn assert_evidence_failure_contract() {
     assert_eq!(candidate.checked_status(&cancelled, false), Ok(()));
     assert!(candidate.cancel_status && candidate.latest.as_ref() == Some(&cancelled));
     let mut closing = cancelled.clone(); closing.revision = "10".into(); closing.phase = evidence::Phase::Refused;
-    closing.problem = Some(evidence::Problem::StaleSelection); closing.operation.as_mut().unwrap().operation_id = "5".into();
+    closing.problem = Some(evidence::Problem::StaleSelection); closing.operation.as_mut().unwrap().operation_id = "6".into(); closing.operation.as_mut().unwrap().stage = lifecycle::Stage::ExternalTesting;
     assert_eq!(candidate.checked_status(&closing, true), Ok(()));
     assert!(candidate.latest.as_ref() == Some(&cancelled)); // Closing never replaces prior accepted facts.
+    let mut wrong_stage = closing.clone(); wrong_stage.operation.as_mut().unwrap().stage = lifecycle::Stage::Candidate;
+    assert_eq!(candidate.checked_status(&wrong_stage, true), Err(EvidenceCheck::OperationStage));
     let mut malformed = status.clone(); malformed.revision = "07".into();
     assert_eq!(candidate.checked_status(&malformed, false), Err(EvidenceCheck::Revision));
+
+    let mut stop = LifecycleRecord { choose_requests: 3, stage_changed: true, ..LifecycleRecord::default() };
+    let mut replacement = choose.clone(); replacement.operation.as_mut().unwrap().operation_id = "6".into();
+    assert_eq!(stop.checked_status(&replacement, false), Err(EvidenceCheck::OperationStage));
+    replacement.operation.as_mut().unwrap().stage = lifecycle::Stage::ExternalTesting;
+    assert_eq!(stop.checked_status(&replacement, false), Ok(()));
+    let mut stopped = replacement.clone(); stopped.revision = "9".into(); stopped.phase = evidence::Phase::Cancelled;
+    stopped.problem = Some(evidence::Problem::Cancelled);
+    assert_eq!(stop.checked_status(&stopped, false), Err(EvidenceCheck::CancelStatus));
+    assert!(!stop.stop_status && stop.latest.as_ref() == Some(&replacement));
+    stop.stop_requests = 1;
+    assert_eq!(stop.checked_status(&stopped, false), Ok(()));
+    assert!(stop.stop_status && !stop.stopped && !stop.stopped_current()); // Status alone is never native finality.
 
     let first = EvidenceDiagnostic { step: Step::EvidenceObserved, callback: EvidenceCallback::Status,
         check: EvidenceCheck::Problem, phase: Some(evidence::Phase::Refused), problem: Some(evidence::Problem::Deadline),
@@ -3258,6 +3372,14 @@ fn assert_evidence_failure_contract() {
     assert!(!EvidenceDiagnostic { phase: first.phase, ..bridge }.valid(trace));
     assert!(!EvidenceDiagnostic { callback: EvidenceCallback::ObserveStart, check: EvidenceCheck::StatusPending,
         phase: None, problem: None, ..first }.valid(trace));
+    for step in [Step::RequestEvidenceStop, Step::EvidenceStopped] {
+        let next = EvidenceDiagnostic { step, callback: EvidenceCallback::CancelStart, check: EvidenceCheck::OperationStage,
+            phase: Some(evidence::Phase::Stopping), problem: Some(evidence::Problem::Cancelled), ..first };
+        assert!(next.valid((step, Boundary::Result)));
+        assert!(failure_frame((step, Boundary::Result), BootstrapProgress::Advanced, None, None, Some(next)).is_some());
+        assert!(!EvidenceDiagnostic { check: EvidenceCheck::ObservePending, ..next }.valid((step, Boundary::Result)));
+        assert!(!EvidenceDiagnostic { step: Step::ReadEvidenceStale, ..next }.valid((Step::ReadEvidenceStale, Boundary::Result)));
+    }
 
     for already_failed in [false, true] {
         let failed = FailureLatch::new(already_failed);
@@ -4175,7 +4297,7 @@ fn assert_version_open_race_contract() {
 struct Record {
     attached: bool, started: bool, loaded: bool, info: bool, methods: usize, catalog: bool, environment: bool,
     pickers: [Picker; 2], cancel_returned: bool, cancelled: bool, project: Option<Project>, selected: bool,
-    project_witness: Option<InstalledProjectWitness>, candidate: Candidate, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord, version: VersionRecord,
+    project_witness: Option<InstalledProjectWitness>, lifecycle: LifecycleRecord, paths: Paths, workflow: WorkflowRecord, metadata: MetadataRecord, version: VersionRecord,
     session: SessionRecord, github_entry: github::EntryDiagnostic, github_guidance: github::GuidanceReload,
     snapshot_requests: u8, snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, guidance: Guidance,
@@ -4242,7 +4364,7 @@ impl Observation {
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled, evidence_diagnostic: None, snapshot_diagnostic: None,
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
-                project_witness: None, candidate: Candidate::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
+                project_witness: None, lifecycle: LifecycleRecord::default(), paths, workflow: WorkflowRecord::default(), metadata: MetadataRecord::default(), version: VersionRecord::default(),
                 session: SessionRecord::new(case.session()), github_entry: github::EntryDiagnostic::default(), github_guidance: github::GuidanceReload::default(),
                 snapshot_requests: 0, snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, guidance: Guidance::default(),
@@ -4332,7 +4454,7 @@ impl Observation {
         }
     }
     fn evidence_fail(&self, r: &mut Record, callback: EvidenceCallback, check: EvidenceCheck,
-        status: Option<&evidence::Status>, error: EvidenceError) {
+        status: Option<&lifecycle::Status>, error: EvidenceError) {
         let next = EvidenceDiagnostic { step: r.step, callback, check,
             phase: status.map(|value| value.phase), problem: status.and_then(|value| value.problem), error };
         if !next.valid((r.step, Boundary::Result)) { self.fail(); return; }
@@ -4725,64 +4847,68 @@ impl Observation {
             || !matches!(r.step, Step::ValidateMetadata | Step::ReadMetadataValidation) { self.fail(); return; }
         r.saved_reads.validation = sample;
     }
-    pub(super) fn evidence_choose_request(&self, body: &Value) {
+    pub(super) fn lifecycle_evidence_choose_request(&self, body: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
-        let index = usize::from(r.candidate.choose_requests);
+        let index = usize::from(r.lifecycle.choose_requests);
         let allowed = match index {
-            0 => matches!(r.step, Step::ChooseEvidenceCancel | Step::CancelEvidence) && r.candidate.initial_idle && r.candidate.initial_visible,
-            1 => matches!(r.step, Step::ChooseEvidenceSelect | Step::SetEvidence) && r.candidate.cancelled && r.candidate.cancel_visible,
+            0 => matches!(r.step, Step::ChooseEvidenceCancel | Step::CancelEvidence) && r.lifecycle.initial_idle && r.lifecycle.initial_visible,
+            1 => matches!(r.step, Step::ChooseEvidenceSelect | Step::SetEvidence) && r.lifecycle.cancelled && r.lifecycle.cancel_visible,
+            2 => matches!(r.step, Step::ChooseEvidenceReplacement | Step::EvidenceReplacementReady)
+                && r.lifecycle.observed_visible && r.lifecycle.releases_visible && r.lifecycle.recovery_visible && r.lifecycle.stage_changed,
             _ => false,
         };
-        if self.case != Case::Positive || !allowed || !keys(body, &[]) || !saved_read_context(&r) || !r.saved_reads.complete()
-            || !r.saved_draft_retained || r.project_witness.is_none() || r.candidate.choose_pending.is_some() { self.fail(); return; }
-        r.candidate.choose_requests += 1; r.candidate.choose_pending = Some(index);
+        if self.case != Case::Positive || !allowed || !keys(body, &["stage"])
+            || body["stage"].as_str() != Some(if index == 2 { "external-testing" } else { "candidate" }) || !saved_read_context(&r) || !r.saved_reads.complete()
+            || !r.saved_draft_retained || r.project_witness.is_none() || r.lifecycle.choose_pending.is_some() { self.fail(); return; }
+        r.lifecycle.choose_requests += 1; r.lifecycle.choose_pending = Some(index);
     }
-    pub(super) fn evidence_choose_result(&self, result: &Result<evidence::Status, BridgeError>) {
+    pub(super) fn lifecycle_evidence_choose_result(&self, result: &Result<lifecycle::Status, BridgeError>) {
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        let Some(index) = r.candidate.choose_pending.take() else { self.fail(); return; };
+        let Some(index) = r.lifecycle.choose_pending.take() else { self.fail(); return; };
         let Some(status) = result.as_ref().ok() else { self.fail(); return; };
-        if self.case != Case::Positive || index > 1 || r.candidate.choose_returned[index]
+        if self.case != Case::Positive || index > 2 || r.lifecycle.choose_returned[index]
             || status.phase != evidence::Phase::Choosing || status.selection.is_some() || status.result.is_some() || status.problem.is_some()
-            || !status.operation.as_ref().is_some_and(|op| evidence::operation_id(&op.operation_id) == Some(index as u32 + 3)
+            || !status.operation.as_ref().is_some_and(|op| evidence::operation_id(&op.operation_id) == Some(if index == 2 { 6 } else { index as u32 + 3 })
+                && op.stage == if index == 2 { lifecycle::Stage::ExternalTesting } else { lifecycle::Stage::Candidate }
                 && op.kind == evidence::OperationKind::Choose && op.selection_id.is_none()) { self.fail(); return; }
-        r.candidate.choose_returned[index] = true;
-        if !r.candidate.status(status, false) { self.fail(); }
+        r.lifecycle.choose_returned[index] = true;
+        if !r.lifecycle.status(status, false) { self.fail(); }
     }
-    pub(super) fn evidence_status_request(&self, body: &Value) {
+    pub(super) fn lifecycle_evidence_status_request(&self, body: &Value) {
         if self.case == Case::Outstanding { return; }
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
-        let Some(pending) = r.candidate.status_pending.checked_add(1) else { self.fail(); return; };
+        let Some(pending) = r.lifecycle.status_pending.checked_add(1) else { self.fail(); return; };
         if !keys(body, &[]) { self.fail(); return; }
         // The normal controller checks Idle at connection, long before this
         // page is visited, and later polls the same operation. No extra poll
         // or exact polling count is introduced by this observer.
-        r.candidate.status_pending = pending;
+        r.lifecycle.status_pending = pending;
     }
-    pub(super) fn evidence_status_result(&self, result: &Result<evidence::Status, BridgeError>) {
+    pub(super) fn lifecycle_evidence_status_result(&self, result: &Result<lifecycle::Status, BridgeError>) {
         if self.case == Case::Outstanding { return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
-        let Some(pending) = r.candidate.status_pending.checked_sub(1) else {
+        let Some(pending) = r.lifecycle.status_pending.checked_sub(1) else {
             self.evidence_fail(&mut r, EvidenceCallback::Status, EvidenceCheck::StatusPending, None, EvidenceError::None); return;
         };
-        r.candidate.status_pending = pending;
+        r.lifecycle.status_pending = pending;
         let closing = r.close_prevented;
         match result {
             Err(error) => self.evidence_fail(&mut r, EvidenceCallback::Status, EvidenceCheck::Bridge, None, EvidenceError::classify(error)),
-            Ok(status) => if let Err(check) = r.candidate.checked_status(status, closing) {
+            Ok(status) => if let Err(check) = r.lifecycle.checked_status(status, closing) {
                 self.evidence_fail(&mut r, EvidenceCallback::Status, check, Some(status), EvidenceError::None);
             },
         }
     }
-    pub(super) fn evidence_observe_request(&self, body: &Value) {
+    pub(super) fn lifecycle_evidence_observe_request(&self, body: &Value) {
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
         if self.case != Case::Positive || !matches!(r.step, Step::InspectEvidence | Step::EvidenceObserved)
             || !saved_read_context(&r) || !r.saved_reads.complete() || !r.saved_draft_retained
-            || !r.candidate.selected_visible || r.candidate.observe_requests != 0 || r.candidate.observe_pending
-            || !keys(body, &["selectionId"]) || !r.candidate.selected.as_ref().is_some_and(|selected|
+            || !r.lifecycle.selected_visible || r.lifecycle.observe_requests != 0 || r.lifecycle.observe_pending
+            || !keys(body, &["selectionId"]) || !r.lifecycle.selected.as_ref().is_some_and(|selected|
                 body["selectionId"].as_str() == Some(selected.selection.selection_id.as_str())) { self.fail(); return; }
-        r.candidate.observe_requests = 1; r.candidate.observe_pending = true;
+        r.lifecycle.observe_requests = 1; r.lifecycle.observe_pending = true;
     }
-    pub(super) fn evidence_observe_result(&self, result: &Result<evidence::Status, BridgeError>) {
+    pub(super) fn lifecycle_evidence_observe_result(&self, result: &Result<lifecycle::Status, BridgeError>) {
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let status = match result {
             Ok(status) => status,
@@ -4793,25 +4919,55 @@ impl Observation {
         let accepted = (|| {
             use EvidenceCheck as C;
             evidence_require(self.case == Case::Positive, C::Case)?;
-            evidence_require(r.candidate.observe_pending, C::ObservePending)?;
-            evidence_require(!r.candidate.observe_returned, C::ObserveReturned)?;
-            evidence_require(r.candidate.observe_requests == 1, C::ObserveRequests)?;
+            evidence_require(r.lifecycle.observe_pending, C::ObservePending)?;
+            evidence_require(!r.lifecycle.observe_returned, C::ObserveReturned)?;
+            evidence_require(r.lifecycle.observe_requests == 1, C::ObserveRequests)?;
             evidence_require(status.phase == evidence::Phase::Observing, C::Phase)?;
             evidence_require(status.result.is_none(), C::Result)?;
             evidence_require(status.problem.is_none(), C::Problem)?;
-            let selected = r.candidate.selected.as_ref().ok_or(C::SelectionWitness)?;
+            let selected = r.lifecycle.selected.as_ref().ok_or(C::SelectionWitness)?;
             evidence_require(status.selection.as_ref() == Some(&selected.selection), C::Selection)?;
             let op = status.operation.as_ref().ok_or(C::Operation)?;
             evidence_require(op.operation_id == "5", C::Operation)?;
             evidence_require(op.kind == evidence::OperationKind::Observe, C::OperationKind)?;
+            evidence_require(op.stage == lifecycle::Stage::Candidate && selected.selection.stage == op.stage, C::OperationStage)?;
             evidence_require(op.selection_id.as_deref() == Some(selected.selection.selection_id.as_str()), C::OperationSelection)
         })();
         if let Err(check) = accepted {
             self.evidence_fail(&mut r, EvidenceCallback::ObserveStart, check, Some(status), EvidenceError::None); return;
         }
-        r.candidate.observe_pending = false; r.candidate.observe_returned = true;
-        if let Err(check) = r.candidate.checked_status(status, false) {
+        r.lifecycle.observe_pending = false; r.lifecycle.observe_returned = true;
+        if let Err(check) = r.lifecycle.checked_status(status, false) {
             self.evidence_fail(&mut r, EvidenceCallback::ObserveStart, check, Some(status), EvidenceError::None);
+        }
+    }
+    pub(super) fn lifecycle_evidence_cancel_request(&self, body: &Value) {
+        let Some(mut r) = self.record_at(Boundary::Request) else { return; };
+        if self.case != Case::Positive || !matches!(r.step,Step::RequestEvidenceStop | Step::EvidenceStopped)
+            || !r.lifecycle.opposite_refused || r.lifecycle.stop_original.is_none() || !r.lifecycle.pickers[2].created
+            || !r.lifecycle.choose_returned[2] || r.lifecycle.stop_requests != 0 || r.lifecycle.stop_pending
+            || !keys(body,&["operationId","selectionId"])
+            || !r.lifecycle.latest.as_ref().is_some_and(|status| status.phase == evidence::Phase::Choosing
+                && status.operation.as_ref().is_some_and(|op| op.operation_id == "6" && op.stage == lifecycle::Stage::ExternalTesting
+                    && op.kind == evidence::OperationKind::Choose && op.selection_id.is_none()
+                    && body["operationId"].as_str() == Some(op.operation_id.as_str()) && body["selectionId"].is_null())) { self.fail(); return; }
+        r.lifecycle.stop_requests = 1; r.lifecycle.stop_pending = true;
+    }
+    pub(super) fn lifecycle_evidence_cancel_result(&self, result: &Result<lifecycle::Status,BridgeError>) {
+        let Some(mut r) = self.record_at(Boundary::Result) else { return; };
+        let status = match result { Ok(status) => status, Err(error) => {
+            self.evidence_fail(&mut r,EvidenceCallback::CancelStart,EvidenceCheck::Bridge,None,EvidenceError::classify(error)); return;
+        } };
+        if self.case != Case::Positive || !r.lifecycle.stop_pending || r.lifecycle.stop_returned || r.lifecycle.stop_requests != 1
+            || !status.operation.as_ref().is_some_and(|op| op.operation_id == "6" && op.kind == evidence::OperationKind::Choose
+                && op.selection_id.is_none() && op.stage == lifecycle::Stage::ExternalTesting)
+            || !matches!(status.phase,evidence::Phase::Stopping | evidence::Phase::Cancelled)
+            || status.problem != Some(evidence::Problem::Cancelled) || status.selection.is_some() || status.result.is_some() {
+            self.evidence_fail(&mut r,EvidenceCallback::CancelStart,EvidenceCheck::CancelStatus,Some(status),EvidenceError::None); return;
+        }
+        r.lifecycle.stop_pending = false; r.lifecycle.stop_returned = true;
+        if let Err(check) = r.lifecycle.checked_status(status,false) {
+            self.evidence_fail(&mut r,EvidenceCallback::CancelStart,check,Some(status),EvidenceError::None);
         }
     }
     pub(super) fn open_request(&self, project_id: &str) {
@@ -4819,7 +4975,7 @@ impl Observation {
         let index = r.sessions.len();
         let allowed = match index {
             0 => matches!(r.step, Step::PrepareSave | Step::ReadSaveReview) && r.draft_visible && r.guidance.complete(),
-            1 => matches!(r.step, Step::PrepareNoop | Step::ReadNoopReview) && r.saved_draft_retained && r.readback_visible && r.saved_reads.complete() && r.candidate.complete()
+            1 => matches!(r.step, Step::PrepareNoop | Step::ReadNoopReview) && r.saved_draft_retained && r.readback_visible && r.saved_reads.complete() && r.lifecycle.complete()
                 && r.sessions[0].finality.is_some() && r.saved_visible && r.requests == [1, 1, 1, 0],
             _ => false,
         };
@@ -4847,7 +5003,7 @@ impl Observation {
         let index = usize::from(r.requests[1]);
         let Some(session) = r.sessions.get(index) else { self.fail(); return; };
         let allowed = if index == 0 { matches!(r.step, Step::PrepareSave | Step::ReadSaveReview) }
-            else { index == 1 && matches!(r.step, Step::PrepareNoop | Step::ReadNoopReview) && r.readback_visible && r.saved_draft_retained && r.saved_reads.complete() && r.candidate.complete() };
+            else { index == 1 && matches!(r.step, Step::PrepareNoop | Step::ReadNoopReview) && r.readback_visible && r.saved_draft_retained && r.saved_reads.complete() && r.lifecycle.complete() };
         let base = if index == 0 { &Value::Null } else { r.suggested.as_ref().unwrap_or(&Value::Null) };
         if self.case != Case::Positive || !allowed || r.prepare_pending.is_some() || session.prepare_requested
             || session.projection.phase != edit::Phase::Editing || session.projection.session_id != args.session_id
@@ -6169,9 +6325,9 @@ impl Observation {
                 Step::ReadVersionCard => r.saved_reads.version.is_none(),
                 Step::ReadMetadata => r.saved_reads.metadata.is_none(),
                 Step::ReadMetadataValidation => r.saved_reads.validation.is_none() || !r.metadata.ready,
-                Step::ReadEvidenceEmpty => !r.candidate.initial_idle,
-                Step::CancelEvidence => !r.candidate.choose_returned[0],
-                Step::SetEvidence => !r.candidate.choose_returned[1],
+                Step::ReadEvidenceEmpty => !r.lifecycle.initial_idle,
+                Step::CancelEvidence => !r.lifecycle.choose_returned[0],
+                Step::SetEvidence => !r.lifecycle.choose_returned[1],
                 Step::ReadNoopReview => !r.sessions.get(1).is_some_and(|session| session.prepare_returned && session.review.is_some()),
                 _ => false,
             };
@@ -6228,7 +6384,41 @@ impl Observation {
             r.paths.operations[index as usize].settled = true; r.step = Step::Paths(PathStep::ReadField(index));
             self.path_sample(&mut r); return;
         }
-        if matches!(step, Step::EvidenceCancelled | Step::EvidenceSelected | Step::EvidenceObserved) {
+        if step == Step::EvidenceReplacementReady {
+            let state = app.state::<super::ShellState>();
+            let project = {
+                let Some(r) = self.record_at(Boundary::Settlement) else { return; };
+                if self.failed.load(Ordering::SeqCst) || r.step != step || r.pending.is_some() { return; }
+                if !r.lifecycle.choose_returned[2] || !r.lifecycle.pickers[2].created { return; }
+                if r.lifecycle.opposite_reserved || r.lifecycle.stop_original.is_some() { self.fail(); return; }
+                let Some(project) = r.project_witness.as_ref() else { self.fail(); return; };
+                project.clone()
+            };
+            // Wait only for the actual original to be showing with its token
+            // thread joined. Capture is passive; it cannot reconcile or STOP.
+            let Some(original) = state.document.installed_observation_lifecycle_stop_owner(&project) else { return; };
+            {
+                let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
+                if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end { self.fail(); return; }
+                if r.step != step || r.pending.is_some() || r.lifecycle.opposite_reserved
+                    || r.lifecycle.stop_original.is_some() || r.lifecycle.stop_requests != 0 { self.fail(); return; }
+                r.lifecycle.opposite_reserved = true; r.pending = Some(Pending::LifecycleOpposite);
+            }
+            // Neither observation nor document guard is held over either real
+            // legacy endpoint. This is native owner refusal, NOT WebView IPC.
+            // A failure is terminal: never repair, replace or retry the owner.
+            let refused = state.document.installed_observation_lifecycle_opposite(&project, &original);
+            let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
+            r.lifecycle.stop_original = Some(original);
+            if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end || !refused
+                || r.step != step || r.pending.take() != Some(Pending::LifecycleOpposite)
+                || !r.lifecycle.opposite_reserved || r.lifecycle.opposite_refused || r.lifecycle.stop_requests != 0 {
+                self.fail(); return;
+            }
+            r.lifecycle.opposite_refused = true; r.step = Step::RequestEvidenceStop;
+            return;
+        }
+        if matches!(step, Step::EvidenceCancelled | Step::EvidenceSelected | Step::EvidenceObserved | Step::EvidenceStopped) {
             let state = app.state::<super::ShellState>();
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             let Some(project) = r.project_witness.as_ref() else { self.fail(); return; };
@@ -6236,25 +6426,32 @@ impl Observation {
             // poll is not proof of worker/coordinator/supervisor retirement.
             match step {
                 Step::EvidenceCancelled => {
-                    if !r.candidate.choose_returned[0] || !r.candidate.cancel_status || !r.candidate.pickers[0].settled(false)
-                        || !state.document.installed_observation_evidence_cancelled(project) { return; }
-                    r.candidate.cancelled = true; r.step = Step::ReadEvidenceCancelled;
+                    if !r.lifecycle.choose_returned[0] || !r.lifecycle.cancel_status || !r.lifecycle.pickers[0].settled(false)
+                        || !state.document.installed_observation_lifecycle_cancelled(project) { return; }
+                    r.lifecycle.cancelled = true; r.step = Step::ReadEvidenceCancelled;
                 },
                 Step::EvidenceSelected => {
-                    if !r.candidate.choose_returned[1] || !r.candidate.pickers[1].settled(true) { return; }
-                    let Some(selection) = r.candidate.selection_status.as_ref() else { return; };
-                    let Some(original) = state.document.installed_observation_evidence_selected(project) else { return; };
-                    if original.selection != *selection || r.candidate.selected.is_some() { self.fail(); return; }
-                    r.candidate.selected = Some(original); r.step = Step::ReadEvidenceSelected;
+                    if !r.lifecycle.choose_returned[1] || !r.lifecycle.pickers[1].settled(true) { return; }
+                    let Some(selection) = r.lifecycle.selection_status.as_ref() else { return; };
+                    let Some(original) = state.document.installed_observation_lifecycle_selected(project) else { return; };
+                    if original.selection != *selection || r.lifecycle.selected.is_some() { self.fail(); return; }
+                    r.lifecycle.selected = Some(original); r.step = Step::ReadEvidenceSelected;
                 },
                 Step::EvidenceObserved => {
-                    if !r.candidate.observe_returned { return; }
-                    let Some(returned) = r.candidate.observation_status.as_ref() else { return; };
-                    let Some(selection) = r.candidate.selected.as_ref() else { self.fail(); return; };
-                    let Some(original) = state.document.installed_observation_evidence_observed(project, selection) else { return; };
-                    if &original != returned || r.candidate.observed.is_some() { self.fail(); return; }
-                    let Some(sample) = CandidateSample::read(returned, &selection.selection) else { self.fail(); return; };
-                    r.candidate.observed = Some(sample); r.step = Step::ReadEvidenceObserved;
+                    if !r.lifecycle.observe_returned { return; }
+                    let Some(returned) = r.lifecycle.observation_status.as_ref() else { return; };
+                    let Some(selection) = r.lifecycle.selected.as_ref() else { self.fail(); return; };
+                    let Some(original) = state.document.installed_observation_lifecycle_observed(project, selection) else { return; };
+                    if &original != returned || r.lifecycle.observed.is_some() { self.fail(); return; }
+                    let Some(sample) = LifecycleSample::read(returned, &selection.selection) else { self.fail(); return; };
+                    r.lifecycle.observed = Some(sample); r.step = Step::ReadEvidenceObserved;
+                },
+                Step::EvidenceStopped => {
+                    if !r.lifecycle.stop_returned || !r.lifecycle.stop_status || !stopped_evidence_picker(&r.lifecycle.pickers[2]) { return; }
+                    let Some(original) = r.lifecycle.stop_original.as_ref() else { self.fail(); return; };
+                    if !state.document.installed_observation_lifecycle_stopped(project, original) { return; }
+                    if !r.lifecycle.opposite_refused || r.lifecycle.stopped { self.fail(); return; }
+                    r.lifecycle.stopped = true; r.step = Step::ReadEvidenceStale;
                 },
                 _ => { self.fail(); return; },
             }
@@ -6279,7 +6476,7 @@ impl Observation {
                     if self.case == Case::Positive {
                         if !r.sessions.get(1).is_some_and(|session| session.review_visible && session.live_review())
                             || r.requests != [2, 2, 1, 0] || !r.readback_visible || !r.saved_draft_retained || !r.saved_reads.complete()
-                            || !r.candidate.complete() { self.fail(); return; }
+                            || !r.lifecycle.complete() { self.fail(); return; }
                         r.noop_outstanding = true;
                     }
                     if self.case == Case::ProjectPaths && (!r.paths.complete() || r.requests != [0;4] || !r.sessions.is_empty()) { self.fail(); return; }
@@ -6445,7 +6642,7 @@ impl Observation {
             Step::ReadSaveReview | Step::ReadKeptReview => object.len() == 6 && review(0) && draft(false, false)
                 && r.requests == [1, 1, 0, 0] && (step != Step::ReadKeptReview || r.confirmation_opened == 1),
             Step::ReadNoopReview => object.len() == 6 && review(1) && draft(true, false)
-                && r.requests == [2, 2, 1, 0] && r.readback_visible && r.saved_draft_retained && r.saved_reads.complete() && r.candidate.complete(),
+                && r.requests == [2, 2, 1, 0] && r.readback_visible && r.saved_draft_retained && r.saved_reads.complete() && r.lifecycle.complete(),
             Step::ReadConfirmation | Step::ReadReopenedConfirmation | Step::ReadAcknowledged => {
                 let acknowledged = step == Step::ReadAcknowledged;
                 let dialog = &value["confirmation"];
@@ -6487,16 +6684,28 @@ impl Observation {
             Step::ReadSavedDraft => object.len() == 6 && r.readback_visible && r.saved_reads.complete() && source() && draft(true, true)
                 && value["staleSnapshot"].as_bool() == Some(false),
             Step::ReadEvidenceEmpty => object.len() == 2 && saved_read_context(&r) && r.saved_reads.complete() && r.saved_draft_retained
-                && r.project_witness.is_some() && r.candidate.initial_idle && !r.candidate.initial_visible
-                && value.get("display") == Some(&candidate_empty_display(None, false)),
-            Step::ReadEvidenceCancelled => object.len() == 2 && r.candidate.cancel_status && r.candidate.cancelled && r.candidate.pickers[0].settled(false)
-                && value.get("display") == Some(&candidate_empty_display(None, true)),
-            Step::ReadEvidenceSelected => object.len() == 2 && r.candidate.cancel_visible && r.candidate.pickers[1].settled(true)
-                && r.candidate.selected.as_ref().is_some_and(|selected| value.get("display") == Some(&candidate_empty_display(Some(&selected.selection), false))),
-            Step::ReadEvidenceObserved => object.len() == 2 && r.candidate.observe_requests == 1 && r.candidate.observe_returned
-                && r.candidate.observed.as_ref().is_some_and(|sample| value.get("display") == Some(&sample.display)),
+                && r.project_witness.is_some() && r.lifecycle.initial_idle && !r.lifecycle.initial_visible
+                && value.get("display") == Some(&lifecycle_empty_display(None, false)),
+            Step::ReadEvidenceCancelled => object.len() == 2 && r.lifecycle.cancel_status && r.lifecycle.cancelled && r.lifecycle.pickers[0].settled(false)
+                && value.get("display") == Some(&lifecycle_empty_display(None, true)),
+            Step::ReadEvidenceSelected => object.len() == 2 && r.lifecycle.cancel_visible && r.lifecycle.pickers[1].settled(true)
+                && r.lifecycle.selected.as_ref().is_some_and(|selected| value.get("display") == Some(&lifecycle_empty_display(Some(&selected.selection), false))),
+            Step::ReadEvidenceObserved | Step::ReadLifecycleReleases => object.len() == 2 && r.lifecycle.current_observed()
+                && r.lifecycle.observed.as_ref().is_some_and(|sample| value.get("display") == Some(&sample.display)),
+            Step::ReadLifecycleRecovery => object.len() == 2 && r.lifecycle.current_observed() && r.lifecycle.releases_visible
+                && r.lifecycle.selected.as_ref().is_some_and(|selected| r.lifecycle.observed.as_ref().is_some_and(|sample|
+                    value.get("display") == Some(&sample.guidance_display(&selected.selection,false)))),
+            Step::ReadEvidenceStage => object.len() == 2 && r.lifecycle.current_observed() && r.lifecycle.recovery_visible && !r.lifecycle.stage_changed
+                && r.lifecycle.selected.as_ref().is_some_and(|selected| r.lifecycle.observed.as_ref().is_some_and(|sample|
+                    value.get("display") == Some(&sample.stage_changed_display(&selected.selection)))),
+            Step::ReadEvidenceStale | Step::ReadStaleArtifacts => object.len() == 2 && r.lifecycle.stopped_current()
+                && r.lifecycle.selected.as_ref().is_some_and(|selected| r.lifecycle.observed.as_ref().is_some_and(|sample|
+                    value.get("display") == Some(&sample.stale_display(&selected.selection)))),
+            Step::ReadStaleRecovery => object.len() == 2 && r.lifecycle.stopped_current() && r.lifecycle.stale_visible[..2] == [true;2]
+                && r.lifecycle.selected.as_ref().is_some_and(|selected| r.lifecycle.observed.as_ref().is_some_and(|sample|
+                    value.get("display") == Some(&sample.guidance_display(&selected.selection,true)))),
             Step::ReadCandidateDraft => object.len() == 6 && r.saved_draft_retained && r.readback_visible && r.saved_reads.complete()
-                && r.candidate.documents_complete() && source() && draft(true, true) && value["staleSnapshot"].as_bool() == Some(false),
+                && r.lifecycle.documents_complete() && source() && draft(true, true) && value["staleSnapshot"].as_bool() == Some(false),
             _ => object.len() == 1,
         };
         if !valid { self.fail(); return; }
@@ -6577,15 +6786,29 @@ impl Observation {
             Step::SavedSettings => Step::ReadSavedDraft,
             Step::ReadSavedDraft => { r.saved_draft_retained = true; Step::Artifacts },
             Step::Artifacts => Step::ReadEvidenceEmpty,
-            Step::ReadEvidenceEmpty => { r.candidate.initial_visible = true; Step::ChooseEvidenceCancel },
+            Step::ReadEvidenceEmpty => { r.lifecycle.initial_visible = true; Step::ChooseEvidenceCancel },
             Step::ChooseEvidenceCancel => Step::CancelEvidence,
-            Step::ReadEvidenceCancelled => { r.candidate.cancel_visible = true; Step::ChooseEvidenceSelect },
+            Step::ReadEvidenceCancelled => { r.lifecycle.cancel_visible = true; Step::ChooseEvidenceSelect },
             Step::ChooseEvidenceSelect => Step::SetEvidence,
-            Step::ReadEvidenceSelected => { r.candidate.selected_visible = true; Step::InspectEvidence },
+            Step::ReadEvidenceSelected => { r.lifecycle.selected_visible = true; Step::InspectEvidence },
             Step::InspectEvidence => Step::EvidenceObserved,
-            Step::ReadEvidenceObserved => { r.candidate.observed_visible = true; Step::CandidateSettings },
+            Step::ReadEvidenceObserved => { r.lifecycle.observed_visible = true; Step::LifecycleReleases },
+            Step::LifecycleReleases => Step::ReadLifecycleReleases,
+            Step::ReadLifecycleReleases => { r.lifecycle.releases_visible = true; Step::LifecycleRecovery },
+            Step::LifecycleRecovery => Step::ReadLifecycleRecovery,
+            Step::ReadLifecycleRecovery => { r.lifecycle.recovery_visible = true; Step::LifecycleControls },
+            Step::LifecycleControls => Step::ChangeEvidenceStage,
+            Step::ChangeEvidenceStage => Step::ReadEvidenceStage,
+            Step::ReadEvidenceStage => { r.lifecycle.stage_changed = true; Step::ChooseEvidenceReplacement },
+            Step::ChooseEvidenceReplacement => Step::EvidenceReplacementReady,
+            Step::RequestEvidenceStop => Step::EvidenceStopped,
+            Step::ReadEvidenceStale => { r.lifecycle.stale_visible[0] = true; Step::StaleArtifacts },
+            Step::StaleArtifacts => Step::ReadStaleArtifacts,
+            Step::ReadStaleArtifacts => { r.lifecycle.stale_visible[1] = true; Step::StaleRecovery },
+            Step::StaleRecovery => Step::ReadStaleRecovery,
+            Step::ReadStaleRecovery => { r.lifecycle.stale_visible[2] = true; Step::CandidateSettings },
             Step::CandidateSettings => Step::ReadCandidateDraft,
-            Step::ReadCandidateDraft => { r.candidate.draft_retained = true; Step::PrepareNoop },
+            Step::ReadCandidateDraft => { r.lifecycle.draft_retained = true; Step::PrepareNoop },
             Step::PrepareNoop => Step::ReadNoopReview,
             Step::ReadNoopReview => { r.sessions[1].review_visible = true; Step::Close },
             _ => { self.fail(); return; },
@@ -6665,19 +6888,22 @@ impl Observation {
     pub(super) fn evidence_created(&self, id: u32) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         let allowed = match id {
-            3 => matches!(r.step, Step::ChooseEvidenceCancel | Step::CancelEvidence) && r.candidate.choose_requests == 1 && r.candidate.initial_visible,
-            4 => matches!(r.step, Step::ChooseEvidenceSelect | Step::SetEvidence) && r.candidate.choose_requests == 2 && r.candidate.cancel_visible,
+            3 => matches!(r.step, Step::ChooseEvidenceCancel | Step::CancelEvidence) && r.lifecycle.choose_requests == 1 && r.lifecycle.initial_visible,
+            4 => matches!(r.step, Step::ChooseEvidenceSelect | Step::SetEvidence) && r.lifecycle.choose_requests == 2 && r.lifecycle.cancel_visible,
+            6 => matches!(r.step, Step::ChooseEvidenceReplacement | Step::EvidenceReplacementReady)
+                && r.lifecycle.choose_requests == 3 && r.lifecycle.stage_changed,
             _ => false,
         };
-        if self.case != Case::Positive || !allowed || r.candidate.pickers[(id - 3) as usize].created { self.fail(); return; }
-        r.candidate.pickers[(id - 3) as usize].created = true;
+        let index = if id == 6 { 2 } else { id.saturating_sub(3) as usize };
+        if self.case != Case::Positive || !allowed || r.lifecycle.pickers[index].created { self.fail(); return; }
+        r.lifecycle.pickers[index].created = true;
     }
     pub(super) fn evidence_selection(&self, id: u32) -> Result<(), ()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
         if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end || self.case != Case::Positive
             || id != 4 || r.pending != Some(Pending::Evidence(Step::SetEvidence))
-            || !r.candidate.pickers[1].created || r.candidate.pickers[1].selected { self.fail(); return Err(()); }
-        r.candidate.pickers[1].selected = true; Ok(())
+            || !r.lifecycle.pickers[1].created || r.lifecycle.pickers[1].selected { self.fail(); return Err(()); }
+        r.lifecycle.pickers[1].selected = true; Ok(())
     }
     pub(super) fn evidence_activation(&self, id: u32, select: bool) -> Result<(), ()> {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return Err(()); };
@@ -6685,34 +6911,48 @@ impl Observation {
         let step = if select { Step::SelectEvidence } else { Step::CancelEvidence };
         if self.failed.load(Ordering::SeqCst) || Instant::now() >= self.end || self.case != Case::Positive
             || id != index as u32 + 3 || r.pending != Some(Pending::Evidence(step))
-            || !r.candidate.pickers[index].created || r.candidate.pickers[index].activated || r.candidate.pickers[index].selected != select { self.fail(); return Err(()); }
-        r.candidate.pickers[index].activated = true; Ok(())
+            || !r.lifecycle.pickers[index].created || r.lifecycle.pickers[index].activated || r.lifecycle.pickers[index].selected != select { self.fail(); return Err(()); }
+        r.lifecycle.pickers[index].activated = true; Ok(())
     }
     pub(super) fn evidence_filename(&self, id: u32, path: Option<&Path>) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
-        if id != 4 || !r.candidate.pickers[1].activated || r.candidate.pickers[1].filename || r.candidate.pickers[1].responded
+        if id != 4 || !r.lifecycle.pickers[1].activated || r.lifecycle.pickers[1].filename || r.lifecycle.pickers[1].responded
             || path.is_none() || path != self.evidence_path() { self.fail(); return; }
-        r.candidate.pickers[1].filename = true;
+        r.lifecycle.pickers[1].filename = true;
     }
     pub(super) fn evidence_response(&self, id: u32, accepted: bool, cancelled: bool, disposal: bool) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         if self.case != Case::Positive || !(3..=4).contains(&id) { self.fail(); return; }
-        let p = &mut r.candidate.pickers[(id - 3) as usize];
+        let p = &mut r.lifecycle.pickers[(id - 3) as usize];
         if !p.activated || p.destroyed || p.released { self.fail(); return; }
         if !p.responded && !disposal && (id == 3 && cancelled && !accepted && !p.filename
             || id == 4 && accepted && !cancelled && p.filename) { p.responded = true; }
         else if p.responded && p.returned && disposal && !accepted && !cancelled && !p.disposal { p.disposal = true; }
         else { self.fail(); }
     }
+    pub(super) fn lifecycle_evidence_stop_response(&self, id: u32, owner_stopped_delete: bool) {
+        let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
+        if self.case != Case::Positive || id != 6 || !owner_stopped_delete
+            || !matches!(r.step,Step::RequestEvidenceStop | Step::EvidenceStopped)
+            || !r.lifecycle.opposite_refused || r.lifecycle.stop_original.is_none() || r.lifecycle.stop_requests != 1 {
+            self.fail(); return;
+        }
+        let p = &mut r.lifecycle.pickers[2];
+        if !p.created || p.selected || p.activated || p.filename || p.returned || p.responded
+            || p.disposal || p.destroyed || p.released { self.fail(); return; }
+        // One actual post-STOP DeleteEvent serves as response/disposal. It is
+        // not a clicked GTK Cancel and never latches an activation return.
+        p.responded = true; p.disposal = true;
+    }
     fn evidence_gtk_returned(&self, step: Step, result: Result<bool, ()>) {
         let Some(mut r) = self.record_at(Boundary::Gtk) else { return; };
         if r.pending.take() != Some(Pending::Evidence(step)) || r.step != step { self.fail(); return; }
         let index = usize::from(step != Step::CancelEvidence);
         match result {
-            Ok(false) if !r.candidate.pickers[index].activated && (step != Step::SetEvidence || !r.candidate.pickers[index].selected) => {},
-            Ok(true) if step == Step::SetEvidence && r.candidate.pickers[1].selected && !r.candidate.pickers[1].activated => r.step = Step::SelectEvidence,
+            Ok(false) if !r.lifecycle.pickers[index].activated && (step != Step::SetEvidence || !r.lifecycle.pickers[index].selected) => {},
+            Ok(true) if step == Step::SetEvidence && r.lifecycle.pickers[1].selected && !r.lifecycle.pickers[1].activated => r.step = Step::SelectEvidence,
             Ok(true) if matches!(step, Step::CancelEvidence | Step::SelectEvidence) => {
-                if !r.candidate.pickers[index].activation_returned(result) { self.fail(); return; }
+                if !r.lifecycle.pickers[index].activation_returned(result) { self.fail(); return; }
                 r.step = if index == 0 { Step::EvidenceCancelled } else { Step::EvidenceSelected };
             },
             _ => self.fail(),
@@ -6725,7 +6965,7 @@ impl Observation {
             if !quit || id<=2 || !r.session.cancel_close_prevented || r.session.quit_cancel_id.is_some() { self.fail(); return; }
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
         }
-        if !quit || id == 0 || self.case == Case::Positive && id != 6 || self.case == Case::ProjectPaths && id != 14
+        if !quit || id == 0 || self.case == Case::Positive && id != 7 || self.case == Case::ProjectPaths && id != 14
             || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
@@ -6797,8 +7037,8 @@ impl Observation {
             if !seen || !p.responded || p.destroyed { self.path_fail(&mut r,PathRejection::GtkDestroyState); return; }
             p.destroyed = true; return;
         }
-        if self.case == Case::Positive && (3..=4).contains(&id) {
-            let p = &mut r.candidate.pickers[(id - 3) as usize];
+        if self.case == Case::Positive && matches!(id,3 | 4 | 6) {
+            let p = &mut r.lifecycle.pickers[if id == 6 { 2 } else { (id - 3) as usize }];
             if !seen || !p.responded || p.destroyed { self.fail(); return; }
             p.destroyed = true; return;
         }
@@ -6826,8 +7066,8 @@ impl Observation {
             if !seen || !p.destroyed || p.released { self.path_fail(&mut r,PathRejection::GtkReleaseState); return; }
             p.released = true; return;
         }
-        if self.case == Case::Positive && (3..=4).contains(&id) {
-            let p = &mut r.candidate.pickers[(id - 3) as usize];
+        if self.case == Case::Positive && matches!(id,3 | 4 | 6) {
+            let p = &mut r.lifecycle.pickers[if id == 6 { 2 } else { (id - 3) as usize }];
             if !seen || !p.destroyed || p.released { self.fail(); return; }
             p.released = true; return;
         }
@@ -6865,7 +7105,7 @@ impl Observation {
                 && self.commands.as_ref().is_none_or(|c| c.complete()) && self.github.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
             else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
                 && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
-            else { r.candidate.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_candidate_final(project)) }
+            else { r.lifecycle.complete() && r.project_witness.as_ref().is_some_and(|project| r.lifecycle.stop_original.as_ref().is_some_and(|original| document.installed_observation_lifecycle_final(project, original))) }
         };
         let Some(mut r) = self.record_at(Boundary::Exit) else { return; };
         if self.failed.load(Ordering::SeqCst) { r.failure_quit.observe_loop_exit(ready); }
@@ -6920,7 +7160,7 @@ impl Observation {
                 && r.confirmation_opened == 2 && r.kept_reviewing && r.acknowledged && r.saved_visible
                 && r.snapshot_requests == 2 && r.readback && r.readback_visible && r.saved_reads.complete() && r.saved_draft_retained && r.noop_outstanding
                 && r.sessions.len() == 2 && r.sessions.iter().all(|session| session.prepare_returned && session.review_visible && session.finality.is_some())
-                && r.project_witness.is_some() && r.candidate.complete() && r.originals_final
+                && r.project_witness.is_some() && r.lifecycle.complete() && r.originals_final
                 || self.case == Case::WorkflowApply && r.info && r.catalog && r.environment
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.suggested.is_some()
@@ -7128,7 +7368,7 @@ impl Observation {
         let prepared: Vec<_> = r.sessions.iter().filter_map(|session| session.projection.prepared.as_ref()).collect();
         if prepared.len() != 2 { return None; }
         serde_json::to_vec(&serde_json::json!({
-            "schemaVersion":3,"fixture":"android-saved-readonly-v1","projectGateContract":true,"methods":"twelve-passive","passiveActions":false,
+            "schemaVersion":3,"fixture":"android-saved-readonly-v1","projectGateContract":true,"methods":"thirteen-passive","passiveActions":false,
             "cancel":{"operation":1,"widget":"cancel","guiSettled":r.pickers[0].settled(false),"originalsSettled":r.cancelled,"registered":false},
             "select":{"operation":2,"widget":"select","filenameRead":r.pickers[1].filename,"guiSettled":r.pickers[1].settled(true),"originalsSettled":r.selected,"registered":r.project.is_some()},
             "snapshot":{"initial":"missing","sourceFiles":2,"androidHint":r.snapshot},
@@ -7151,7 +7391,7 @@ impl Observation {
                 "ioSettled":count(|f| f.stdin_closed && f.stdout_eof_closed && f.stderr_eof_closed && f.io_joined),
                 "ownersJoined":count(|f| f.driver_joined && f.watchdog_joined && f.manager_joined),
                 "runtimeLedgerSettled":count(|f| f.runtime_ledger_settled),"runtimeSettlementJoined":count(|f| f.runtime_settlement_joined)},
-            "quit":{"operation":6,"originalsSettled":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit},
+            "quit":{"operation":7,"originalsSettled":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit},
             "guidance":{"draftUnchanged":r.guidance.draft_retained && r.sessions.iter().all(|session| session.prepare_requested && session.prepare_returned),
                 "requirements":{"requestResultDomMatched":r.guidance.requirements_called && r.guidance.requirements.is_some() && r.guidance.requirements_visible,
                     "context":"android/build","roles":3},
@@ -7166,35 +7406,49 @@ impl Observation {
                     "browserEdit":"insertText","draftRetained":r.saved_reads.draft_retained},"scope":"single-request-non-atomic"}
         })).ok().filter(|raw| raw.len() + 1 <= 2048)
     }
-    fn candidate_report(&self) -> Option<Vec<u8>> {
+    fn lifecycle_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
-        if self.case != Case::Positive || !r.exit || !r.originals_final || !r.candidate.complete() || r.sessions.len() != 2 { return None; }
-        let c = &r.candidate; let sample = c.observed.as_ref()?; let a = &sample.value["assurance"];
+        if self.case != Case::Positive || !r.exit || !r.originals_final || !r.lifecycle.complete() || r.sessions.len() != 2 { return None; }
+        let c = &r.lifecycle; let sample = c.observed.as_ref()?; let a = &sample.value["assurance"];
         let preserved = r.project_witness.is_some() && c.cancelled && c.selected.is_some() && c.observed.is_some() && r.originals_final;
         let whole_draft = c.draft_retained && r.saved_draft_retained && r.requests == [2, 2, 1, 0]
             && r.sessions[1].prepare_requested && r.sessions[1].prepare_returned;
+        let current_pages: Vec<_> = [c.observed_visible,c.releases_visible,c.recovery_visible].into_iter()
+            .zip(["Artifacts","Releases","Recovery"]).filter_map(|(seen,name)| seen.then_some(name)).collect();
+        let stale_pages: Vec<_> = c.stale_visible.into_iter().zip(["Releases","Artifacts","Recovery"])
+            .filter_map(|(seen,name)| seen.then_some(name)).collect();
         serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"fixture":"android-candidate-documents-v1",
-            "gate":"installed-project-profile+candidate-passive","privacy":"independent-predicate+gtk-readback",
-            "cancel":{"operation":3,"requestMatched":c.choose_requests == 2 && c.choose_returned[0],"gtkSettled":c.pickers[0].settled(false),
-                "tokenJoined":c.cancelled,"probeUnstarted":c.cancelled,"coordinatorJoined":c.cancelled,"noRegistration":c.cancelled},
-            "select":{"operation":4,"requestMatched":c.choose_requests == 2 && c.choose_returned[1],"gtkSettled":c.pickers[1].settled(true),
-                "filenameMatched":c.pickers[1].filename,"tokenJoined":c.selected.is_some(),"probeJoined":c.selected.is_some(),
-                "coordinatorJoined":c.selected.is_some(),"selectionMatched":c.selected.as_ref().is_some_and(|s| c.selection_status.as_ref() == Some(&s.selection))},
-            "observe":{"operation":5,"requests":c.observe_requests,"requestResultDomMatched":c.observe_returned && c.observed_visible,
-                "bindingMatched":c.observed.is_some(),"coordinatorJoined":c.observed.is_some(),"supervisorIdle":c.observed.is_some(),"knownIdle":c.observed.is_some()},
+            "gate":"installed-project-profile+lifecycle-passive","privacy":"independent-predicate+gtk-readback",
+            "requests":{"choose":c.choose_requests,"observe":c.observe_requests,"cancel":c.stop_requests},
+            "cancel":{"operation":3,"stage":"candidate","gtkSettled":c.pickers[0].settled(false),
+                "nativeFinal":c.cancelled,"probeUnstarted":c.cancelled},
+            "select":{"operation":4,"stage":"candidate","gtkSettled":c.pickers[1].settled(true),"filenameMatched":c.pickers[1].filename,
+                "nativeFinal":c.selected.is_some(),"selectionMatched":c.selected.as_ref().is_some_and(|s| c.selection_status.as_ref() == Some(&s.selection))},
+            "observe":{"operation":5,"method":"release.evidence.observe","stage":sample.value["stage"],
+                "bindingMatched":c.observed.is_some(),"requestResultDomMatched":c.observe_returned && c.observed_visible,"nativeFinal":c.observed.is_some()},
+            "shared":{"current":current_pages,"stale":stale_pages,"sameObservation":c.releases_visible && c.recovery_visible && c.stale_visible == [true;3],
+                "noExtraObservation":c.observe_requests == 1,"recoveryCurrent":!c.stale_visible[2]},
+            "stageChange":{"requested":"external-testing","retained":sample.value["stage"],
+                "inspectDisabled":c.stage_changed,"currentBeforeChoice":c.stage_changed},
+            "opposite":{"boundary":"native-owner-endpoints","checks":u8::from(c.opposite_reserved && c.opposite_refused),
+                "status":"busy","cancel":"stale-selection","sameOriginal":c.opposite_refused,"noStop":c.opposite_refused},
+            "stop":{"operation":6,"stage":"external-testing","rendererRequest":c.stop_requests == 1 && c.stop_returned,
+                "createdBeforeStop":c.stop_original.is_some(),"deleteEvent":c.pickers[2].responded && c.pickers[2].disposal,
+                "gtkCancel":c.pickers[2].activated,"gtkSettled":stopped_evidence_picker(&c.pickers[2]),
+                "nativeFinal":c.stopped,"probeUnstarted":c.stopped,"noResult":c.stopped},
             "preserved":{"sourceProject":preserved,"registry":preserved,"credentialStateEmpty":preserved,"savedReads":r.saved_reads.complete(),"wholeDraft":whole_draft},
             "scope":{"documents":sample.value["documents"].as_array()?.len(),"formatsDigestsBindingsMatched":c.observed_visible && sample.value["outcome"].as_str() == Some("consistent"),
                 "artifactPayloadsObserved":a["artifactBytesVerified"],"sourceCompared":a["comparedWithSourceProject"],
                 // A documents-only result cannot be a signature verdict.
-                "signingVerified":a["documentsOnly"].as_bool() == Some(false),"storeObserved":a["storeStateObserved"],
-                "releaseReady":a["releaseReady"],"recoveryAuthority":a["recoveryAuthorized"]},
-            "quit":{"operation":6,"gtkSettled":r.native_id == Some(6) && r.gtk_returned && r.destroyed && r.released,
+                "signingVerified":a["documentsOnly"].as_bool() == Some(false),"workflowAuthenticated":a["workflowAuthenticated"],
+                "storeObserved":a["storeStateObserved"],"releaseReady":a["releaseReady"],"recoveryAuthority":a["recoveryAuthorized"]},
+            "quit":{"operation":7,"gtkSettled":r.native_id == Some(7) && r.gtk_returned && r.destroyed && r.released,
                 "coordinatorJoined":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit}})).ok().filter(|raw| raw.len() + 1 <= 2048)
     }
 }
 
-// Fixed synchronous session expressions use the separately reviewed standard
-// select change stimulus. The old recipes below remain button/insertText-only.
+// Fixed synchronous session/lifecycle-stage expressions use the reviewed
+// controlled-select change stimulus. Other recipes remain button/insertText-only.
 // No injected DTO, controller/invoke call, async Promise, substitute reply,
 // alternate bootstrap or review owner exists on either path.
 
@@ -8812,14 +9066,20 @@ fn script(step: Step, case: Case) -> Option<String> {
             if (!selected('Project settings') || !field() || !document.querySelector('.draft-banner')) return {state:'wait'};
             const draft = draftState(); if (!draft.saved || !draft.saveAvailable) return {state:'wait'};
             return {state:'ready', source:sourceValue(), ...draft, staleSnapshot:staleSettings()};"#,
-        Step::Artifacts => r#"
+        Step::Artifacts | Step::StaleArtifacts => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Artifacts"]');
+            if (!b || b.disabled) return {state:'error'}; b.click(); return {state:'ready'};"#,
+        Step::LifecycleReleases => r#"
+            const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Releases"]');
+            if (!b || b.disabled) return {state:'error'}; b.click(); return {state:'ready'};"#,
+        Step::LifecycleRecovery | Step::StaleRecovery => r#"
+            const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Recovery"]');
             if (!b || b.disabled) return {state:'error'}; b.click(); return {state:'ready'};"#,
         Step::ReadEvidenceEmpty => r#"
             if (!selected('Artifacts') || !document.querySelector('#evidence-start-reason')) return {state:'wait'};
             const c = evidenceControls(); if (!evidenceReady(c)) return {state:'wait'};
             return {state:'ready', display:evidenceDisplay(c, false)};"#,
-        Step::ChooseEvidenceCancel | Step::ChooseEvidenceSelect => r#"
+        Step::ChooseEvidenceCancel | Step::ChooseEvidenceSelect | Step::ChooseEvidenceReplacement => r#"
             const c = evidenceControls(); if (!evidenceReady(c)) return {state:'wait'};
             c.choose.scrollIntoView({block:'center'}); if (!visible(c.choose)) return {state:'error'};
             c.choose.click(); return {state:'ready'};"#,
@@ -8835,9 +9095,55 @@ fn script(step: Step, case: Case) -> Option<String> {
             c.inspect.scrollIntoView({block:'center'}); if (!visible(c.inspect)) return {state:'error'};
             c.inspect.click(); return {state:'ready'};"#,
         Step::ReadEvidenceObserved => r#"
+            if (!selected('Artifacts')) return {state:'wait'};
             const c = evidenceControls(); if (!evidenceReady(c) || c.inspect.disabled
-                || text(c.result.querySelector('h2')) !== 'Documents agree') return {state:'wait'};
+                || text(c.result.querySelector(':scope > .section-heading h2')) !== 'Documents agree') return {state:'wait'};
             return {state:'ready', display:evidenceDisplay(c, true)};"#,
+        Step::ReadLifecycleReleases => r#"
+            if (!selected('Releases')) return {state:'wait'};
+            const c = evidenceControls(); if (!evidenceReady(c) || c.inspect.disabled
+                || text(c.result.querySelector(':scope > .section-heading h2')) !== 'Documents agree') return {state:'wait'};
+            return {state:'ready', display:evidenceDisplay(c, true)};"#,
+        Step::ReadLifecycleRecovery => r#"
+            if (!selected('Recovery')) return {state:'wait'};
+            return {state:'ready',display:evidenceGuidance(false)};"#,
+        Step::LifecycleControls => r#"
+            const g = evidenceGuidanceControls(); evidenceShow(g.button); g.button.click(); return {state:'ready'};"#,
+        Step::ChangeEvidenceStage => r#"
+            if (!selected('Releases')) return {state:'wait'};
+            const c = evidenceControls(), s = c.stage; if (!evidenceReady(c) || c.inspect.disabled) return {state:'wait'};
+            if (s.value !== 'candidate' || text(c.result.querySelector(':scope > .section-heading h2')) !== 'Documents agree') throw 0;
+            const choices = [...s.options].map((option,index) => option.value === 'external-testing' ? index : -1).filter(index => index >= 0);
+            if (choices.length !== 1) throw 0;
+            evidenceShow(s); s.focus(); s.selectedIndex = choices[0]; s.dispatchEvent(new Event('change',{bubbles:true}));
+            return {state:'ready'};"#,
+        Step::ReadEvidenceStage => r#"
+            const c = evidenceControls(); if (!evidenceReady(c) || c.stage.value !== 'external-testing') return {state:'wait'};
+            if (!c.inspect.disabled || !selected('Releases')) throw 0;
+            return {state:'ready',display:evidenceDisplay(c,true)};"#,
+        Step::RequestEvidenceStop => r#"
+            const c = evidenceControls(); if (c.buttons.length !== 4) return {state:'wait'};
+            const stop = c.buttons[3];
+            if (!selected('Releases') || !c.choose.disabled || !c.inspect.disabled || !c.stage.disabled || c.stage.value !== 'external-testing'
+                || text(stop) !== 'Request stop' || stop.disabled || c.result.children.length !== 1
+                || !c.result.firstElementChild.matches('details')
+                || text(c.result.querySelector(':scope > details > summary')) !== 'Previous observation · stale · candidate-evidence') throw 0;
+            evidenceShow(stop); stop.click(); return {state:'ready'};"#,
+        Step::ReadEvidenceStale => r#"
+            if (!selected('Releases')) return {state:'wait'};
+            const c = evidenceControls(); if (!evidenceReady(c)
+                || ![...c.status.querySelectorAll(':scope > p')].some(p => text(p) === 'Original operation cancelled and settled. No new result was accepted.')) return {state:'wait'};
+            if (!c.inspect.disabled || c.stage.value !== 'external-testing') throw 0;
+            return {state:'ready',display:evidenceStaleDisplay(c)};"#,
+        Step::ReadStaleArtifacts => r#"
+            if (!selected('Artifacts')) return {state:'wait'};
+            const c = evidenceControls(); if (!evidenceReady(c)
+                || ![...c.status.querySelectorAll(':scope > p')].some(p => text(p) === 'Original operation cancelled and settled. No new result was accepted.')) return {state:'wait'};
+            if (!c.inspect.disabled || c.stage.value !== 'external-testing') throw 0;
+            return {state:'ready',display:evidenceStaleDisplay(c)};"#,
+        Step::ReadStaleRecovery => r#"
+            if (!selected('Recovery')) return {state:'wait'};
+            return {state:'ready',display:evidenceGuidance(true)};"#,
         _ => return None,
     };
     Some(format!(r#"(() => {{ try {{
@@ -8846,55 +9152,112 @@ fn script(step: Step, case: Case) -> Option<String> {
         const text = e => {{ if (!e) throw 0; const t=e.textContent; if (typeof t!=='string' || t.length>4096) throw 0; return t; }};
         const visible = e => {{ const r=e.getBoundingClientRect(), s=getComputedStyle(e); return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible'; }};
         const selected = label => [...document.querySelectorAll('nav[aria-label="Workspace navigation"] button[aria-current="page"]')].some(b => b.getAttribute('aria-label')===label);
+        const evidenceShow = e => {{ if (!e) throw 0; e.scrollIntoView({{block:'center'}}); if (!visible(e)) throw 0; }};
         const evidenceControls = () => {{
             const reasons=document.querySelectorAll('#evidence-start-reason');
-            if (!selected('Artifacts') || reasons.length!==1 || document.querySelector('dialog')) throw 0;
+            if ((!selected('Artifacts') && !selected('Releases')) || reasons.length!==1 || document.querySelector('dialog')) throw 0;
             const reason=reasons[0], folder=reason.closest('section.card'), result=folder?.nextElementSibling;
-            const warning=folder?.previousElementSibling, heading=warning?.previousElementSibling;
-            if (!folder || !result?.matches('section.card') || !warning?.matches('.notice.notice-warning') || !heading?.matches('.page-heading')
-                || folder.querySelector('.notice-danger') || result.querySelector('details, dialog, a, input, textarea, select, [role="alert"]')
-                || text(heading.querySelector('.eyebrow'))!=='ARTIFACTS') throw 0;
+            const stages=folder?.querySelectorAll('select#release-evidence-stage'), labels=folder?.querySelectorAll('label[for="release-evidence-stage"]');
+            if (!folder || !result?.matches('section.card') || stages?.length!==1 || labels?.length!==1
+                || !(stages[0] instanceof HTMLSelectElement) || text(labels[0])!=='Evidence stage'
+                || folder.querySelector('.notice-danger') || result.querySelector('dialog, a, input, textarea, select, [role="alert"]')) throw 0;
             const buttons=[...folder.querySelectorAll(':scope > .button-row > button')];
             const statuses=folder.querySelectorAll(':scope > [role="status"][aria-live="polite"]');
             if (buttons.length<3 || buttons.length>4 || statuses.length!==1 || text(buttons[0])!=='Choose evidence folder' || text(buttons[1])!=='Inspect documents'
                 || buttons.slice(0,2).some(b => b.type!=='button' || b.getAttribute('aria-describedby')!=='evidence-start-reason')) throw 0;
-            return {{reason,folder,result,warning,heading,buttons,choose:buttons[0],inspect:buttons[1],check:buttons[2],status:statuses[0]}};
+            return {{reason,folder,result,stage:stages[0],label:labels[0],buttons,choose:buttons[0],inspect:buttons[1],check:buttons[2],status:statuses[0]}};
         }};
-        const evidenceReady = c => !c.choose.disabled && !c.check.disabled && text(c.check)==='Check operation status';
-        const evidenceDisplay = (c, observed) => {{
-            const show=e => {{ e.scrollIntoView({{block:'center'}}); if (!visible(e)) throw 0; }};
-            const paragraphs=[...c.folder.querySelectorAll(':scope > p')], folderHelp=c.folder.querySelector('.section-heading > .help-button');
-            if (c.buttons.length!==3 || paragraphs.length!==3 || paragraphs[2]!==c.reason || !folderHelp || folderHelp.disabled
-                || folderHelp.getAttribute('aria-label')!=='Help: Evidence folder') throw 0;
-            for (const element of [c.heading,c.warning,...paragraphs,...c.buttons,folderHelp]) show(element);
-            const context={{heading:text(c.heading.querySelector('h1')),description:text(c.heading.querySelector('p')),
-                assurance:[text(c.warning.querySelector('strong')),text(c.warning.querySelector('p'))],
-                folder:{{heading:text(c.folder.querySelector('.section-heading h2')),description:text(c.folder.querySelector('.section-heading p')),
-                    source:text(paragraphs[0]),selection:text(paragraphs[1]),buttons:c.buttons.map(b => [text(b),!b.disabled]),reason:text(c.reason),
-                    status:[...c.status.querySelectorAll(':scope > p')].map(p => {{ show(p); return text(p); }})}}}};
+        const evidenceReady = c => !c.choose.disabled && !c.check.disabled && !c.stage.disabled && text(c.check)==='Check operation status';
+        const evidenceContext = c => {{
+            const paragraphs=[...c.folder.querySelectorAll(':scope > p')], heading=c.folder.querySelector(':scope > .section-heading');
+            const help=heading?.querySelector(':scope > .help-button');
+            if (c.buttons.length!==3 || paragraphs.length!==6 || paragraphs[5]!==c.reason || !paragraphs[0].matches('.review-caution')
+                || !help || help.disabled || c.stage.options.length!==3 || c.stage.selectedOptions.length!==1) throw 0;
+            for (const element of [heading,...paragraphs,...c.buttons,help,c.label,c.stage]) evidenceShow(element);
+            return {{heading:text(heading.querySelector('h2')),description:text(heading.querySelector('p')),
+                warning:text(paragraphs[0]).trim(),help:help.getAttribute('aria-label'),stage:c.stage.value,
+                stages:[...c.stage.options].map(option=>[option.value,text(option)]),stageEnabled:!c.stage.disabled,
+                source:text(paragraphs[3]),selection:text(paragraphs[4]),buttons:c.buttons.map(b=>[text(b),!b.disabled]),reason:text(c.reason),
+                status:[...c.status.querySelectorAll(':scope > p')].map(p=>{{evidenceShow(p);return text(p);}})}};
+        }};
+        const evidenceHeading = row => {{
+            evidenceShow(row); const badges=[...row.querySelectorAll(':scope > .badge')], helps=[...row.querySelectorAll(':scope > .help-button')];
+            if (badges.length>1 || helps.length>1 || helps.some(b=>b.disabled)) throw 0;
+            return [text(row.querySelector('h2')),text(row.querySelector('p')),badges.length?text(badges[0]):null,helps.length?helps[0].getAttribute('aria-label'):null];
+        }};
+        const evidenceDefinitions = (root,count) => {{
+            if (!root) throw 0; const rows=[...root.querySelectorAll(':scope > div')]; if (rows.length!==count) throw 0;
+            return rows.map(row=>{{evidenceShow(row);if(row.children.length!==2)throw 0;
+                return [text(row.querySelector(':scope > dt')),text(row.querySelector(':scope > dd'))];}});
+        }};
+        const evidenceOpen = details => {{
+            if (!details?.matches('details')) throw 0;
+            const summary=details.querySelector(':scope > summary'); evidenceShow(summary);
+            if (!details.open) summary.click();
+            if (!details.open) throw 0; return text(summary);
+        }};
+        const evidenceResult = (root,historical) => {{
+            const headings=[...root.querySelectorAll(':scope > .section-heading')], paragraphs=[...root.querySelectorAll(':scope > p:not([class])')];
+            const histories=root.querySelectorAll(':scope > ol.plain-list'), notes=root.querySelectorAll(':scope > p.subtle-note');
+            const details=root.querySelectorAll(':scope > details');
+            if (root.children.length!==(historical?10:8) || headings.length!==3 || paragraphs.length!==2 || histories.length!==1
+                || histories[0].children.length!==1 || notes.length!==1 || details.length!==1) throw 0;
+            const technical=details[0], technicalHeading=evidenceOpen(technical);
+            const lists=[...technical.querySelectorAll(':scope > ul.plain-list')], definitions=[...technical.querySelectorAll(':scope > dl.help-definitions')];
+            const detailHeadings=[...technical.querySelectorAll(':scope > .section-heading')], receipts=[...technical.querySelectorAll(':scope > div:not(.section-heading)')];
+            const warnings=technical.querySelectorAll(':scope > p:not([class])'), limitations=technical.querySelectorAll(':scope > p.subtle-note');
+            if (technical.children.length!==12 || lists.length!==2 || definitions.length!==3 || detailHeadings.length!==3 || receipts.length!==1
+                || lists.some(list=>list.children.length!==3) || warnings.length!==1 || limitations.length!==1) throw 0;
+            for (const element of [...paragraphs,notes[0],warnings[0],limitations[0]]) evidenceShow(element);
+            const documents=[...lists[0].children].map(row=>{{evidenceShow(row);if(row.tagName!=='LI'||row.children.length!==2)throw 0;
+                return [text(row.querySelector(':scope > code')),text(row.querySelector(':scope > .badge'))];}});
+            const artifacts=[...lists[1].children].map(row=>{{evidenceShow(row);const ps=[...row.querySelectorAll(':scope > div > p')];
+                if(row.tagName!=='LI'||row.children.length!==1||ps.length!==2)throw 0;return [text(row.querySelector('strong')),...ps.map(text)];}});
+            const history=[...histories[0].children].map(row=>{{evidenceShow(row);if(row.tagName!=='LI'||row.children.length!==1)throw 0;
+                return [text(row.querySelector('strong')),text(row.querySelector('p'))];}});
+            return {{headings:headings.map(evidenceHeading),guidance:text(paragraphs[0]),identity:text(paragraphs[1]),history,notSupplied:text(notes[0]),
+                technicalHeading,technicalOpen:technical.open,technicalWarning:text(warnings[0]),documents,source:evidenceDefinitions(definitions[0],2),
+                detailsHeadings:detailHeadings.map(evidenceHeading),artifacts,manifestRuns:evidenceDefinitions(definitions[1],3),digests:evidenceDefinitions(definitions[2],3),
+                receipts:receipts.map(row=>{{const dls=row.querySelectorAll(':scope > dl.help-definitions');if(row.children.length!==3||dls.length!==2)throw 0;
+                    evidenceShow(row.querySelector('h3'));return {{heading:text(row.querySelector('h3')),runs:evidenceDefinitions(dls[0],3),digests:evidenceDefinitions(dls[1],3)}};}}),
+                limitation:text(limitations[0])}};
+        }};
+        const evidenceDisplay = (c,observed) => {{
+            const context=evidenceContext(c);
             if (!observed) {{
                 if (c.result.children.length!==1 || !c.result.firstElementChild.matches('.section-heading')) throw 0;
-                show(c.result); return {{context,result:{{heading:text(c.result.querySelector('h2')),description:text(c.result.querySelector('p'))}}}};
+                evidenceShow(c.result);return {{context,result:{{heading:text(c.result.querySelector('h2')),description:text(c.result.querySelector('p'))}}}};
             }}
-            const headings=[...c.result.querySelectorAll(':scope > .section-heading')], lists=[...c.result.querySelectorAll(':scope > ul.plain-list')];
-            const definitions=[...c.result.querySelectorAll(':scope > dl.help-definitions')];
-            if (c.result.children.length!==10 || headings.length!==5 || lists.length!==2 || definitions.length!==3
-                || c.result.querySelectorAll('button').length!==4 || lists.some(list => list.children.length!==3)) throw 0;
-            const projectedHeadings=headings.map((row,index) => {{
-                show(row); const badges=[...row.querySelectorAll(':scope > .badge')], helps=[...row.querySelectorAll(':scope > .help-button')];
-                if (badges.length!==(index===0?1:0) || helps.length!==(index===0?0:1) || helps.some(b => b.disabled)) throw 0;
-                return [text(row.querySelector('h2')),text(row.querySelector('p')),badges.length?text(badges[0]):null,helps.length?helps[0].getAttribute('aria-label'):null];
-            }});
-            const documents=[...lists[0].children].map(row => {{ show(row);
-                if (row.tagName!=='LI' || row.children.length!==2) throw 0;
-                return [text(row.querySelector(':scope > code')),text(row.querySelector(':scope > .badge'))]; }});
-            const artifacts=[...lists[1].children].map(row => {{ show(row); const paragraphs=[...row.querySelectorAll(':scope > div > p')];
-                if (row.tagName!=='LI' || row.children.length!==1 || paragraphs.length!==2) throw 0;
-                return [text(row.querySelector('strong')),...paragraphs.map(text)]; }});
-            const dl=(root,count) => {{ const rows=[...root.querySelectorAll(':scope > div')]; if (rows.length!==count) throw 0;
-                return rows.map(row => {{ show(row); if (row.children.length!==2) throw 0;
-                    return [text(row.querySelector(':scope > dt')),text(row.querySelector(':scope > dd'))]; }}); }};
-            return {{context,result:{{headings:projectedHeadings,documents,identity:dl(definitions[0],5),artifacts,runs:dl(definitions[1],3),digests:dl(definitions[2],3)}}}};
+            if (!c.result.firstElementChild?.matches('.section-heading')) throw 0;
+            return {{context,result:evidenceResult(c.result,false)}};
+        }};
+        const evidenceStaleDisplay = c => {{
+            if (c.result.children.length!==1) throw 0;
+            const details=c.result.firstElementChild, heading=evidenceOpen(details), warnings=details.querySelectorAll(':scope > p.review-caution');
+            if (warnings.length!==1) throw 0; evidenceShow(warnings[0]);
+            return {{context:evidenceContext(c),stale:{{heading,open:details.open,warning:text(warnings[0]),result:evidenceResult(details,true)}}}};
+        }};
+        const evidenceGuidanceControls = () => {{
+            if (!selected('Recovery') || document.querySelector('dialog, #evidence-start-reason')) throw 0;
+            const headings=[...document.querySelectorAll('section.card > .section-heading h2')].filter(h=>text(h)==='Guidance from saved release evidence');
+            if (headings.length!==1) throw 0;
+            const card=headings[0].closest('section.card'), buttons=card.querySelectorAll(':scope > button');
+            if (buttons.length!==1 || buttons[0].disabled || text(buttons[0])!=='Open saved evidence controls') throw 0;
+            return {{card,heading:headings[0].closest('.section-heading'),button:buttons[0]}};
+        }};
+        const evidenceGuidance = stale => {{
+            const g=evidenceGuidanceControls(), paragraphs=[...g.card.querySelectorAll(':scope > p')], details=g.card.querySelectorAll(':scope > details');
+            const recovery=[...document.querySelectorAll('.notice.notice-warning strong')].filter(p=>text(p)==='Project recovery remains unassessed');
+            const assess=[...document.querySelectorAll('button')].filter(b=>text(b)==='Assess recovery state');
+            if (paragraphs.length!==(stale?2:3) || !paragraphs[0].matches('.review-caution') || details.length!==(stale?1:0)
+                || recovery.length!==1 || assess.length!==1 || !assess[0].disabled) throw 0;
+            for(const element of [g.heading,...paragraphs,g.button,recovery[0],assess[0]])evidenceShow(element);
+            let historical=null;
+            if(stale){{const heading=evidenceOpen(details[0]),ps=[...details[0].querySelectorAll(':scope > p')];
+                if(ps.length!==2)throw 0;ps.forEach(evidenceShow);historical=[heading,...ps.map(text)];}}
+            return {{heading:text(g.heading.querySelector('h2')),description:text(g.heading.querySelector('p')),warning:text(paragraphs[0]),
+                current:stale?null:[text(paragraphs[1]),text(paragraphs[2])],empty:stale?text(paragraphs[1]):null,stale:historical,
+                staleOpen:stale?details[0].open:null,button:[text(g.button),!g.button.disabled],projectRecoveryUnassessed:true,assessmentDisabled:assess[0].disabled}};
         }};
         const githubInputs = () => {{
             const forms=document.querySelectorAll('form.github-form');
@@ -9212,8 +9575,8 @@ pub(crate) fn main() -> std::process::ExitCode {
         })
         .and_then(|_| {
             if case != Case::Positive { return Ok(()); }
-            let report = q.candidate_report().ok_or_else(|| std::io::Error::other("candidate receipt unavailable"))?;
-            stdout.write_all(b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS=")?;
+            let report = q.lifecycle_report().ok_or_else(|| std::io::Error::other("lifecycle receipt unavailable"))?;
+            stdout.write_all(b"MRK_INSTALLED_SHELL_LIFECYCLE_DOCUMENTS=")?;
             stdout.write_all(&report)?; stdout.write_all(b"\n")
         })
         .and_then(|_| stdout.write_all(line)).is_ok() { std::process::ExitCode::SUCCESS } else { std::process::ExitCode::FAILURE }

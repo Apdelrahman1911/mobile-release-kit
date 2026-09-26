@@ -4006,12 +4006,17 @@ pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProje
     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod installed_project_observation {
     use super::*;
+    #[derive(Clone)]
     pub(crate) struct ProjectWitness {
         project_id: String, generation: u32, root: asset_source::RegisteredRoot,
     }
     pub(crate) struct EvidenceWitness {
-        pub(crate) selection: evidence_wire::Selection,
-        root: asset_source::RegisteredRoot, epoch: u64,
+        pub(crate) selection: lifecycle_wire::Selection,
+        root: asset_source::RegisteredRoot, epoch: u64, purpose: EvidencePurpose,
+    }
+    pub(crate) struct LifecycleStopWitness {
+        owner: Arc<OriginalWork>, binding: EvidenceBinding, revision: u64, document_revision: u32,
+        endpoint: Option<Instant>,
     }
     // Private DATA observations of the existing originals only. No fixture
     // publication, source path opening, permission, worker or new native owner.
@@ -4146,8 +4151,8 @@ mod installed_project_observation {
                 && state.quit.as_ref().is_some_and(|quit| quit.id == 14 && quit.resources_settled()
                     && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
         }
-        pub(crate) fn installed_observation_evidence_cancelled(&self, project: &ProjectWitness) -> bool {
-            self.reconcile(); let state = self.lock();
+        pub(crate) fn installed_observation_lifecycle_cancelled(&self, project: &ProjectWitness) -> bool {
+            self.reconcile_scope(Some(true)); let state = self.lock();
             let Some(slot) = state.slot.as_ref() else { return false; };
             live_closed_document(&state, 3) && self.observed_source_unchanged(project) && self.observed_runtime_idle()
                 && !state.github.native_work_pending() && settled_evidence_slot(slot, 3, Operation::ChooseEvidenceFolder)
@@ -4155,12 +4160,13 @@ mod installed_project_observation {
                 && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
                 && slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
                 && !state.evidence.revoked && state.evidence.epoch == 1 && state.evidence.matches(slot)
+                && slot.evidence.as_ref().is_some_and(|binding| binding.purpose == EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate))
                 && state.evidence.selection.is_none() && state.evidence.result.is_none()
-                && evidence_snapshot(&state, true).phase == evidence_wire::Phase::Cancelled
-                && evidence_snapshot(&state, true).problem == Some(EvidenceProblem::Cancelled)
+                && release_evidence_snapshot(&state, true).phase == evidence_wire::Phase::Cancelled
+                && release_evidence_snapshot(&state, true).problem == Some(EvidenceProblem::Cancelled)
         }
-        pub(crate) fn installed_observation_evidence_selected(&self, project: &ProjectWitness) -> Option<EvidenceWitness> {
-            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+        pub(crate) fn installed_observation_lifecycle_selected(&self, project: &ProjectWitness) -> Option<EvidenceWitness> {
+            self.reconcile_scope(Some(true)); let state = self.lock(); let slot = state.slot.as_ref()?;
             if !live_closed_document(&state, 4) || !self.observed_source_unchanged(project) || !self.observed_runtime_idle()
                 || state.github.native_work_pending() || !settled_evidence_slot(slot, 4, Operation::ChooseEvidenceFolder)
                 || !completed_picker(slot, true) || slot.reason != Reason::None || slot.error.is_some()
@@ -4171,12 +4177,16 @@ mod installed_project_observation {
                 || state.evidence.phase != evidence_wire::Phase::Selected || state.evidence.result.is_some()
                 || state.evidence.problem.is_some() { return None; }
             let selected = state.evidence.selection.as_ref()?;
-            if selected.epoch != state.evidence.epoch { return None; }
-            Some(EvidenceWitness { selection: selected.view.clone(), root: selected.root.clone(), epoch: selected.epoch })
+            let purpose = EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate);
+            if selected.epoch != state.evidence.epoch || selected.purpose != purpose
+                || slot.evidence.as_ref()?.purpose != purpose { return None; }
+            Some(EvidenceWitness { selection: lifecycle_wire::Selection { selection_id: selected.view.selection_id.clone(),
+                display_name: selected.view.display_name.clone(), stage: lifecycle_wire::Stage::Candidate },
+                root: selected.root.clone(), epoch: selected.epoch, purpose })
         }
-        pub(crate) fn installed_observation_evidence_observed(&self, project: &ProjectWitness,
-            evidence: &EvidenceWitness) -> Option<evidence_wire::Observation> {
-            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+        pub(crate) fn installed_observation_lifecycle_observed(&self, project: &ProjectWitness,
+            evidence: &EvidenceWitness) -> Option<lifecycle_wire::Observation> {
+            self.reconcile_scope(Some(true)); let state = self.lock(); let slot = state.slot.as_ref()?;
             let binding = slot.evidence.as_ref()?; let selected = state.evidence.selection.as_ref()?;
             if !live_closed_document(&state, 5) || !self.observed_source_unchanged(project) || !self.observed_runtime_idle()
                 || state.github.native_work_pending() || !settled_evidence_slot(slot, 5, Operation::InspectEvidence)
@@ -4188,24 +4198,82 @@ mod installed_project_observation {
                 || !state.evidence.matches(slot) || !state.evidence.selection_matches(binding)
                 || selected.epoch != evidence.epoch || selected.root != evidence.root
                 || selected.view.selection_id != evidence.selection.selection_id
-                || selected.view.display_name != evidence.selection.display_name { return None; }
-            // Publication follows the original passive query's successful
-            // retirement, plus the real evidence coordinator/slot retirement.
-            match &state.evidence.result { Some(EvidenceResult::Candidate(result)) => Some(result.clone()), _ => None }
+                || selected.view.display_name != evidence.selection.display_name
+                || selected.purpose != evidence.purpose || binding.purpose != evidence.purpose
+                || evidence.purpose != EvidencePurpose::Lifecycle(lifecycle_wire::Stage::Candidate) { return None; }
+            // Publication follows this original passive query AND evidence slot retirement.
+            match &state.evidence.result {
+                Some(EvidenceResult::Lifecycle(result)) if result.stage == evidence.selection.stage => Some(result.clone()), _ => None,
+            }
         }
-        pub(crate) fn installed_observation_candidate_final(&self, project: &ProjectWitness) -> bool {
+        pub(crate) fn installed_observation_lifecycle_stop_owner(&self, project: &ProjectWitness) -> Option<LifecycleStopWitness> {
+            // Passive capture only: do not reconcile, expire, allocate or stop the original.
+            let state = self.lock(); let slot = state.slot.as_ref()?; let binding = slot.evidence.as_ref()?;
+            if !live_closed_document(&state, 6) || !self.observed_source_unchanged(project) || !self.observed_runtime_idle()
+                || state.github.native_work_pending() || state.evidence.revoked || state.evidence.epoch != 3
+                || !state.evidence.matches(slot) || state.evidence.selection.is_some() || state.evidence.result.is_some()
+                || state.evidence.problem.is_some() || binding.purpose != EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ExternalTesting)
+                || binding.kind != evidence_wire::OperationKind::Choose || binding.selection_id.is_some()
+                || binding.operation_id != 6 || binding.epoch != state.evidence.epoch
+                || slot.operation != Operation::ChooseEvidenceFolder || slot.owner.id != 6
+                || slot.phase != Phase::Picking || slot.reason != Reason::None
+                || slot.error.is_some() || slot.cleanup_end.is_some() || slot.owner.interrupted()
+                || !slot.owner.gui.facts().is_some_and(|f| f.dispatched && f.created && f.showing && !f.constructing
+                    && !f.not_created && !f.response && !f.accepted && !f.declined && f.accepted_at.is_none()
+                    && !f.destroyed && !f.released && !f.close_queued && !f.close_ack && !f.release_queued
+                    && f.selected.is_none() && f.refusal.is_none())
+                || !slot.owner.child.try_lock().is_ok_and(|b| b.receipt == JoinReceipt::Returned && b.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|b| b.not_started()) { return None; }
+            Some(LifecycleStopWitness { owner: slot.owner.clone(), binding: binding.clone(), revision: state.evidence.revision,
+                document_revision: state.revision, endpoint: slot.owner.endpoint() })
+        }
+        fn lifecycle_stop_owner_unchanged(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            self.installed_observation_lifecycle_stop_owner(project).is_some_and(|now|
+                Arc::ptr_eq(&now.owner, &original.owner) && now.binding == original.binding && now.revision == original.revision
+                    && now.document_revision == original.document_revision && now.endpoint == original.endpoint)
+        }
+        pub(crate) fn installed_observation_lifecycle_opposite(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            // Called once by the existing relay after its reservation. No observation or
+            // document guard crosses either REAL native endpoint; no renderer IPC injection.
+            if !self.lifecycle_stop_owner_unchanged(project, original) { return false; }
+            let status = self.artifact_evidence_status();
+            if !status.is_err_and(|error| error.code == "artifact_evidence_busy")
+                || !self.lifecycle_stop_owner_unchanged(project, original) { return false; }
+            let stopped = self.artifact_evidence_cancel(evidence_wire::Cancel {
+                operation_id: original.binding.operation_id.to_string(), selection_id: original.binding.selection_id.clone() });
+            stopped.is_err_and(|error| error.code == "artifact_evidence_stale_selection")
+                && self.lifecycle_stop_owner_unchanged(project, original)
+        }
+        pub(crate) fn installed_observation_lifecycle_stopped(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
+            self.reconcile_scope(Some(true)); let state = self.lock(); let Some(slot) = state.slot.as_ref() else { return false; };
+            live_closed_document(&state, 6) && self.observed_source_unchanged(project) && self.observed_runtime_idle()
+                && !state.github.native_work_pending() && Arc::ptr_eq(&slot.owner, &original.owner)
+                && slot.evidence.as_ref() == Some(&original.binding) && original.binding.epoch == 3
+                && original.binding.purpose == EvidencePurpose::Lifecycle(lifecycle_wire::Stage::ExternalTesting)
+                && settled_evidence_slot(slot, 6, Operation::ChooseEvidenceFolder) && completed_picker(slot, false)
+                && slot.reason == Reason::UserCancelled && slot.owner.stopped() && slot.error.is_none()
+                && slot.cleanup_end.is_some()
+                && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                && slot.owner.source.try_lock().is_ok_and(|book| book.not_started())
+                && !state.evidence.revoked && state.evidence.epoch == 3 && state.evidence.matches(slot)
+                && state.evidence.selection.is_none() && state.evidence.result.is_none()
+                && release_evidence_snapshot(&state, true).phase == evidence_wire::Phase::Cancelled
+                && release_evidence_snapshot(&state, true).problem == Some(EvidenceProblem::Cancelled)
+        }
+        pub(crate) fn installed_observation_lifecycle_final(&self, project: &ProjectWitness, original: &LifecycleStopWitness) -> bool {
             let state = self.lock();
             state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
-                && state.next_operation == 6 && state.stopping && state.quit_accepted
+                && state.next_operation == 7 && state.stopping && state.quit_accepted
                 && !state.session && !state.lock_pending && state.context.is_none()
                 && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
                 && self.observed_source_unchanged(project) && !state.github.native_work_pending()
                 && state.evidence.revoked && state.evidence.selection.is_none() && state.evidence.result.is_none()
-                && state.slot.as_ref().is_some_and(|slot| settled_evidence_slot(slot, 5, Operation::InspectEvidence)
-                    && state.evidence.matches(slot) && slot.owner.child.try_lock().is_ok_and(|book|
-                        book.receipt == JoinReceipt::New && book.handle.is_none())
+                && state.slot.as_ref().is_some_and(|slot| settled_evidence_slot(slot, 6, Operation::ChooseEvidenceFolder)
+                    && Arc::ptr_eq(&slot.owner, &original.owner) && slot.evidence.as_ref() == Some(&original.binding)
+                    && state.evidence.matches(slot) && slot.reason == Reason::UserCancelled
+                    && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
                     && slot.owner.source.try_lock().is_ok_and(|book| book.not_started()))
-                && state.quit.as_ref().is_some_and(|quit| quit.id == 6 && quit.resources_settled()
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 7 && quit.resources_settled()
                     && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
         }
         pub(crate) fn installed_observation_final(&self) -> bool {
@@ -4224,7 +4292,8 @@ mod installed_project_observation {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-pub(crate) use installed_project_observation::{ProjectWitness as InstalledProjectWitness, EvidenceWitness as InstalledEvidenceWitness};
+pub(crate) use installed_project_observation::{ProjectWitness as InstalledProjectWitness, EvidenceWitness as InstalledEvidenceWitness,
+    LifecycleStopWitness as InstalledLifecycleStopWitness};
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod installed_session_observation {

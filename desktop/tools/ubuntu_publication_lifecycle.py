@@ -65,7 +65,7 @@ SHELL_SESSION_FAILURE_V7_FRAME_BOUND = 512  # v6 + exactly 5B (;h= and two close
 SHELL_EVIDENCE_CHECKS = (
     b"status-pending", b"bridge", b"case", b"observe-pending", b"observe-returned", b"observe-requests",
     b"revision", b"schema", b"availability", b"previous-revision", b"equal-revision", b"operation-order",
-    b"operation", b"operation-kind", b"operation-selection", b"phase", b"problem", b"result", b"selection",
+    b"operation", b"operation-kind", b"operation-selection", b"operation-stage", b"phase", b"problem", b"result", b"selection",
     b"selection-witness", b"selection-format", b"selection-name", b"selection-changed", b"choose-requests",
     b"cancel-status", b"picker-activated", b"cancelled", b"observation-present", b"observation-changed")
 SHELL_EVIDENCE_PHASES = (b"na", b"idle", b"choosing", b"selected", b"observing", b"observed", b"stopping", b"cancelled", b"refused", b"unknown")
@@ -156,6 +156,22 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=InspectEvidence\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceObserved\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleReleases\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadLifecycleReleases\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadLifecycleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LifecycleControls\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChangeEvidenceStage\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceStage\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceReplacement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceReplacementReady\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=RequestEvidenceStop\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceStopped\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceStale\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=StaleArtifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadStaleArtifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=StaleRecovery\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadStaleRecovery\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=CandidateSettings\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCandidateDraft\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareNoop\n",
@@ -1235,7 +1251,7 @@ SHELL_METADATA_ABSENT = (".mobile-release", ".mobile-release-init-prepare", ".mo
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
     "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
-    "methods": "twelve-passive", "passiveActions": False,
+    "methods": "thirteen-passive", "passiveActions": False,
     "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
     "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
     "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
@@ -1252,7 +1268,7 @@ SHELL_PROJECT_RECEIPT = {
     "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
                   "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                   "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
-    "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
+    "quit": {"operation": 7, "originalsSettled": True, "relayJoined": True, "exit": True},
     "guidance": {
         "draftUnchanged": True,
         "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
@@ -1635,20 +1651,28 @@ SHELL_CANDIDATE_DOCUMENTS = {
 SHELL_CANDIDATE_ARTIFACT_TARGETS = (
     "reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json",
 )
-SHELL_CANDIDATE_MARKER = b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS="
-SHELL_CANDIDATE_RECEIPT = {
+SHELL_LIFECYCLE_MARKER = b"MRK_INSTALLED_SHELL_LIFECYCLE_DOCUMENTS="
+SHELL_LIFECYCLE_RECEIPT = {
     "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
-    "gate": "installed-project-profile+candidate-passive", "privacy": "independent-predicate+gtk-readback",
-    "cancel": {"operation": 3, "requestMatched": True, "gtkSettled": True, "tokenJoined": True,
-               "probeUnstarted": True, "coordinatorJoined": True, "noRegistration": True},
-    "select": {"operation": 4, "requestMatched": True, "gtkSettled": True, "filenameMatched": True,
-               "tokenJoined": True, "probeJoined": True, "coordinatorJoined": True, "selectionMatched": True},
-    "observe": {"operation": 5, "requests": 1, "requestResultDomMatched": True, "bindingMatched": True,
-                "coordinatorJoined": True, "supervisorIdle": True, "knownIdle": True},
+    "gate": "installed-project-profile+lifecycle-passive", "privacy": "independent-predicate+gtk-readback",
+    "requests": {"choose": 3, "observe": 1, "cancel": 1},
+    "cancel": {"operation": 3, "stage": "candidate", "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True},
+    "select": {"operation": 4, "stage": "candidate", "gtkSettled": True, "filenameMatched": True,
+               "nativeFinal": True, "selectionMatched": True},
+    "observe": {"operation": 5, "method": "release.evidence.observe", "stage": "candidate", "bindingMatched": True,
+                "requestResultDomMatched": True, "nativeFinal": True},
+    "shared": {"current": ["Artifacts", "Releases", "Recovery"], "stale": ["Releases", "Artifacts", "Recovery"],
+               "sameObservation": True, "noExtraObservation": True, "recoveryCurrent": False},
+    "stageChange": {"requested": "external-testing", "retained": "candidate", "inspectDisabled": True, "currentBeforeChoice": True},
+    "opposite": {"boundary": "native-owner-endpoints", "checks": 1, "status": "busy", "cancel": "stale-selection",
+                 "sameOriginal": True, "noStop": True},
+    "stop": {"operation": 6, "stage": "external-testing", "rendererRequest": True, "createdBeforeStop": True,
+             "deleteEvent": True, "gtkCancel": False, "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True, "noResult": True},
     "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
     "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
-              "sourceCompared": False, "signingVerified": False, "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
-    "quit": {"operation": 6, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
+              "sourceCompared": False, "signingVerified": False, "workflowAuthenticated": False,
+              "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+    "quit": {"operation": 7, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
 }
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
               "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}
@@ -6036,7 +6060,7 @@ def _shell_label_pair(raw):
         # receipt. Missing detail in historical three-line records stays absent.
         if session or result["step"].startswith("Path") or result["boundary"] != "result":
             return None
-        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=(status|observe-start);check=([a-z-]{1,20})"
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=(status|observe-start|cancel-start);check=([a-z-]{1,20})"
                              rb";phase=([a-z-]{1,20});problem=([a-z-]{1,20});error=([a-z-]{1,20})\n", evidence_detail)
         if match is None:
             return None
@@ -6044,6 +6068,7 @@ def _shell_label_pair(raw):
         if (check not in SHELL_EVIDENCE_CHECKS or phase not in SHELL_EVIDENCE_PHASES
                 or problem not in SHELL_EVIDENCE_PROBLEMS or error not in SHELL_EVIDENCE_ERRORS
                 or callback == b"observe-start" and result["step"] not in {"InspectEvidence", "EvidenceObserved"}
+                or callback == b"cancel-start" and result["step"] not in {"RequestEvidenceStop", "EvidenceStopped"}
                 or check in {b"case", b"observe-pending", b"observe-returned"} and callback != b"observe-start"):
             return None
         if check == b"bridge":
@@ -7889,9 +7914,9 @@ def shell_project_receipt(raw):
     return receipt
 
 
-def shell_candidate_receipt(raw):
+def shell_lifecycle_receipt(raw):
     receipt = decode(raw, 2048)
-    need(canonical(receipt) == canonical(SHELL_CANDIDATE_RECEIPT), "Candidate documents receipt is missing, malformed or premature")
+    need(canonical(receipt) == canonical(SHELL_LIFECYCLE_RECEIPT), "Lifecycle documents receipt is missing, malformed or premature")
     return receipt
 
 
@@ -8351,14 +8376,14 @@ def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
         need(len(output) == 6 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
              b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
              and output[3].startswith(SHELL_PROJECT_MARKER) and output[3].endswith(b"\n")
-             and output[4].startswith(SHELL_CANDIDATE_MARKER) and output[4].endswith(b"\n")
+             and output[4].startswith(SHELL_LIFECYCLE_MARKER) and output[4].endswith(b"\n")
              and output[5] == marker + b"\n" and diagnostics == [],
              "Positive original bootstrap/contract/receipt/completion order differs")
         # Each independent JSON+LF retains its original 2048-byte bound.
         receipt = shell_project_receipt(output[3][len(SHELL_PROJECT_MARKER):])
-        candidate = shell_candidate_receipt(output[4][len(SHELL_CANDIDATE_MARKER):])
+        lifecycle = shell_lifecycle_receipt(output[4][len(SHELL_LIFECYCLE_MARKER):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
-                "maps": [], "projectDraft": receipt, "candidateDocuments": candidate}
+                "maps": [], "projectDraft": receipt, "lifecycleDocuments": lifecycle}
     if case in ("project-paths", "workflow-apply", "metadata-save", "version-save"):
         receipt_marker, receipt_reader, field = {
             "project-paths": (SHELL_PATH_MARKER, shell_path_receipt, "projectPaths"),
@@ -9613,7 +9638,7 @@ def shell_closed_result(value, outcome, raw_files):
     return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
             "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
             "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
-            "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
+            "lifecycleDocuments": {"native": cases["positive"]["lifecycleDocuments"], "fixture": candidate},
             "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
             "workflowApply": {"native": cases["workflow-apply"]["workflowApply"], "fixture": workflow},
             "sessionInputs": sessions,

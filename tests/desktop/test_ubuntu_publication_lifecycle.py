@@ -2499,7 +2499,7 @@ def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
         "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
-        "methods": "twelve-passive", "passiveActions": False,
+        "methods": "thirteen-passive", "passiveActions": False,
         "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
         "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
         "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
@@ -2516,7 +2516,7 @@ def project_draft_receipt():
         "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
                       "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                       "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
-        "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
+        "quit": {"operation": 7, "originalsSettled": True, "relayJoined": True, "exit": True},
         "guidance": {
             "draftUnchanged": True,
             "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
@@ -2540,7 +2540,33 @@ CANDIDATE_FIXTURE_PINS = (
 )
 
 
-def candidate_documents_receipt():
+def lifecycle_documents_receipt():
+    """Independent expected DATA; source-only tests are not an installed witness."""
+    return {
+        "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
+        "gate": "installed-project-profile+lifecycle-passive", "privacy": "independent-predicate+gtk-readback",
+        "requests": {"choose": 3, "observe": 1, "cancel": 1},
+        "cancel": {"operation": 3, "stage": "candidate", "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True},
+        "select": {"operation": 4, "stage": "candidate", "gtkSettled": True, "filenameMatched": True,
+                   "nativeFinal": True, "selectionMatched": True},
+        "observe": {"operation": 5, "method": "release.evidence.observe", "stage": "candidate", "bindingMatched": True,
+                    "requestResultDomMatched": True, "nativeFinal": True},
+        "shared": {"current": ["Artifacts", "Releases", "Recovery"], "stale": ["Releases", "Artifacts", "Recovery"],
+                   "sameObservation": True, "noExtraObservation": True, "recoveryCurrent": False},
+        "stageChange": {"requested": "external-testing", "retained": "candidate", "inspectDisabled": True, "currentBeforeChoice": True},
+        "opposite": {"boundary": "native-owner-endpoints", "checks": 1, "status": "busy", "cancel": "stale-selection",
+                     "sameOriginal": True, "noStop": True},
+        "stop": {"operation": 6, "stage": "external-testing", "rendererRequest": True, "createdBeforeStop": True,
+                 "deleteEvent": True, "gtkCancel": False, "gtkSettled": True, "nativeFinal": True, "probeUnstarted": True, "noResult": True},
+        "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
+        "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
+                  "sourceCompared": False, "signingVerified": False, "workflowAuthenticated": False,
+                  "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+        "quit": {"operation": 7, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
+    }
+
+
+def legacy_candidate_documents_receipt():
     """Independent compact expected DATA; no paths, IDs or release authority."""
     return {
         "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
@@ -2558,11 +2584,11 @@ def candidate_documents_receipt():
     }
 
 
-def positive_capture(receipt=None, candidate=None):
+def positive_capture(receipt=None, lifecycle=None):
     return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
             + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
             + L.SHELL_PROJECT_MARKER + L.canonical(project_draft_receipt() if receipt is None else receipt)
-            + L.SHELL_CANDIDATE_MARKER + L.canonical(candidate_documents_receipt() if candidate is None else candidate)
+            + L.SHELL_LIFECYCLE_MARKER + L.canonical(lifecycle_documents_receipt() if lifecycle is None else lifecycle)
             + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n", b"")
 
 
@@ -3432,8 +3458,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
         raw = L.canonical(expected)
-        self.assertEqual(len(raw), 2041)  # The one receipt includes its trailing newline.
-        self.assertEqual(hashlib.sha256(raw).hexdigest(), "9896be85da12227c4920d61c65a0c50d6701ca4ae5c405a6d5c6a072a133d9af")
+        self.assertEqual(len(raw), 2043)  # The one receipt includes its trailing newline.
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "bb1e915f24abab3a6ba30e188af070abf7ad99bc735733f3fb28d045d6773b53")
         self.assertTrue(raw.endswith(b"\n"))
         self.assertLessEqual(len(raw), 2048)
         self.assertEqual(L.shell_project_receipt(raw), expected)
@@ -3472,6 +3498,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
         prior_u = deepcopy(expected)
+        prior_u["methods"] = "twelve-passive"
+        prior_u["quit"]["operation"] = 6
         prior_u["save"]["createReleaseDirectory"] = False
         prior_u["readback"].update(size=692, sha256="4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917")
         self.assertEqual(hashlib.sha256(L.canonical(prior_u)).hexdigest(), "40389f4ea473b4324690bf44bbc98fb8cc8106e829364fe07d1a3a2b8b9340ad")
@@ -3517,7 +3545,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         stdout, stderr = positive_capture()
         parsed = L.shell_result(stdout, stderr, "positive", 0, map_data())
         self.assertEqual(parsed["projectDraft"], project_draft_receipt())
-        self.assertEqual(parsed["candidateDocuments"], candidate_documents_receipt())
+        self.assertEqual(parsed["lifecycleDocuments"], lifecycle_documents_receipt())
         lines = stdout.splitlines(keepends=True)
         noise = b"ordinary wrapper text\nMRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n"
         self.assertEqual(L.shell_result(noise + noise.join(lines), noise, "positive", 0, map_data()), parsed)
@@ -4391,13 +4419,63 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
             self.assertIs(actual["assurance"][key], False)
         self.assertNotEqual(actual["summary"]["documentPayloadSha256"]["manifest"], CANDIDATE_FIXTURE_PINS[0][3])
 
+    def test_unchanged_candidate_bytes_produce_the_new_lifecycle_candidate_projection(self):
+        from mobile_release import provenance
+        from mobile_release.api import _lifecycle_evidence as evidence
+        expected = json.loads((SOURCE / "desktop/tests/fixtures/lifecycle-evidence.json").read_bytes())["androidCandidate"]
+        inventory = SimpleNamespace(counts={"sourceBytes": 0}, tick=lambda: True)
+        def read_document(relative, *, limit):
+            raw = L.SHELL_CANDIDATE_DOCUMENTS[relative]
+            self.assertLessEqual(len(raw), limit)
+            inventory.counts["sourceBytes"] += len(raw)
+            return raw.decode("utf-8")
+        reader = SimpleNamespace(read=Mock(side_effect=read_document))
+        with patch.object(os, "open", side_effect=AssertionError("No fixture or artifact open")), \
+             patch.object(Path, "open", side_effect=AssertionError("No document-directed read")), \
+             patch.object(provenance, "sha256_file", side_effect=AssertionError("No payload hashing")), \
+             patch.object(provenance, "seal", side_effect=AssertionError("No evidence generation")), \
+             patch.object(subprocess, "Popen", side_effect=AssertionError("No execution")):
+            actual = evidence._read_outcome("candidate", reader, inventory)
+        self.assertEqual(actual, expected)
+        self.assertEqual([call.args[0] for call in reader.read.call_args_list],
+                         [row["path"] for row in expected["documents"]])
+        self.assertEqual(inventory.counts["sourceBytes"], 11366)
+        self.assertEqual(actual["stage"], "candidate")
+        self.assertEqual([row["stage"] for row in actual["history"]], ["candidate"])
+        self.assertEqual(actual["guidance"]["code"], "candidate-only")
+        self.assertIs(actual["assurance"]["documentsOnly"], True)
+        for key in ("artifactBytesVerified", "workflowAuthenticated", "storeStateObserved", "comparedWithSourceProject", "releaseReady", "recoveryAuthorized"):
+            self.assertIs(actual["assurance"][key], False)
+
+    def test_legacy_candidate_marker_body_or_combined_key_cannot_be_relabelled_as_lifecycle_proof(self):
+        legacy = legacy_candidate_documents_receipt()
+        marker = b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS="
+        with self.assertRaises(ValueError):
+            L.shell_lifecycle_receipt(L.canonical(legacy))
+        stdout, stderr = positive_capture()
+        for changed in (stdout.replace(L.SHELL_LIFECYCLE_MARKER, marker),
+                        positive_capture(lifecycle=legacy)[0],
+                        positive_capture(lifecycle=legacy)[0].replace(L.SHELL_LIFECYCLE_MARKER, marker),
+                        stdout + marker + L.canonical(legacy)):
+            with self.subTest(stdout=changed), self.assertRaises(ValueError):
+                L.shell_result(changed, stderr, "positive", 0, map_data())
+        value, outcome, files, mappings = closed_shell_data()
+        for body in (legacy, lifecycle_documents_receipt()):
+            changed = dict(files)
+            cases = L.decode(changed["shell-cases.json"])
+            cases["positive"].pop("lifecycleDocuments")
+            cases["positive"]["candidateDocuments"] = body
+            changed["shell-cases.json"] = L.canonical(cases)
+            with self.subTest(body=body), patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
+                L.shell_closed_result(value, outcome, changed)
+
     def test_candidate_receipt_rejects_each_missing_changed_or_wrongly_typed_leaf(self):
-        expected = candidate_documents_receipt()
+        expected = lifecycle_documents_receipt()
         raw = L.canonical(expected)
         self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()),
-                         (1069, "e7a6cf04edfd5b331ca0a2e8fa8afab42d1fdfda1a6cbc40c979188679ac5902"))
+                         (1690, "7d7bef285e1d9aace0e4a5b6811c063ea6e2c2ef058b31bffc4b1cb37c16cb53"))
         self.assertLessEqual(len(raw), 2048)
-        self.assertEqual(L.shell_candidate_receipt(raw), expected)
+        self.assertEqual(L.shell_lifecycle_receipt(raw), expected)
         value, outcome, files, mappings = closed_shell_data()
         def leaves(value, prefix=()):
             for key, child in value.items():
@@ -4416,15 +4494,15 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 elif mode == "wrong-type":
                     parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
                 else:
-                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original[::-1] if type(original) is list else original + "-other"
                 with self.subTest(path=path, mode=mode):
                     with self.assertRaises(ValueError):
-                        L.shell_candidate_receipt(L.canonical(changed))
+                        L.shell_lifecycle_receipt(L.canonical(changed))
                     with self.assertRaises(ValueError):
-                        L.shell_result(*positive_capture(candidate=changed), "positive", 0, mappings)
+                        L.shell_result(*positive_capture(lifecycle=changed), "positive", 0, mappings)
                     altered = dict(files)
                     cases = L.decode(altered["shell-cases.json"])
-                    cases["positive"]["candidateDocuments"] = changed
+                    cases["positive"]["lifecycleDocuments"] = changed
                     altered["shell-cases.json"] = L.canonical(cases)
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
@@ -4436,7 +4514,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                         *(L.canonical({key: child for key, child in expected.items() if key != omitted})
                           for omitted in ("cancel", "select", "observe", "preserved", "scope", "quit"))):
             with self.subTest(raw=changed), self.assertRaises(ValueError):
-                L.shell_candidate_receipt(changed)
+                L.shell_lifecycle_receipt(changed)
 
     def test_both_independent_receipts_must_precede_completion_in_exact_stdout_order(self):
         stdout, stderr = positive_capture()
@@ -4458,7 +4536,7 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 L.shell_result(b"".join(lines[:index] + lines[index + 1:]), stderr + lines[index], "positive", 0, map_data())
             # Exactly 2048 bytes of JSON without LF must fail once the
             # independent line terminator is counted, not share another cap.
-            marker = L.SHELL_PROJECT_MARKER if index == 3 else L.SHELL_CANDIDATE_MARKER
+            marker = L.SHELL_PROJECT_MARKER if index == 3 else L.SHELL_LIFECYCLE_MARKER
             raw = lines[index][len(marker):-1]
             inflated = list(lines)
             inflated[index] = marker + raw + b" " * (2048 - len(raw)) + b"\n"
@@ -4567,8 +4645,8 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         value, outcome, files, mappings = closed_shell_data()
         with patch.object(L, "shell_closed_loader", return_value=mappings):
             result = L.shell_closed_result(value, outcome, files)
-        self.assertEqual(result["candidateDocuments"]["native"], candidate_documents_receipt())
-        self.assertEqual(result["candidateDocuments"]["fixture"]["before"], result["candidateDocuments"]["fixture"]["after"])
+        self.assertEqual(result["lifecycleDocuments"]["native"], lifecycle_documents_receipt())
+        self.assertEqual(result["lifecycleDocuments"]["fixture"]["before"], result["lifecycleDocuments"]["fixture"]["after"])
         self.assertEqual(result["projectDraft"]["native"], project_draft_receipt())
         for change in ("missing-before", "missing-after", "changed-after", "case-partial", "case-missing", "stdout-partial", "stdout-missing", "wrong-exit"):
             changed, current = dict(files), deepcopy(outcome)
@@ -4580,15 +4658,15 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
                 changed["shell-positive-candidate-after.json"] = L.canonical(fixture)
             elif change.startswith("case-"):
                 cases = L.decode(changed["shell-cases.json"])
-                if change == "case-missing": cases["positive"].pop("candidateDocuments")
-                else: cases["positive"]["candidateDocuments"].pop("observe")
+                if change == "case-missing": cases["positive"].pop("lifecycleDocuments")
+                else: cases["positive"]["lifecycleDocuments"].pop("observe")
                 changed["shell-cases.json"] = L.canonical(cases)
             elif change == "stdout-partial":
-                partial = candidate_documents_receipt(); partial.pop("quit")
-                changed["shell-positive.stdout"] = positive_capture(candidate=partial)[0]
+                partial = lifecycle_documents_receipt(); partial.pop("quit")
+                changed["shell-positive.stdout"] = positive_capture(lifecycle=partial)[0]
             elif change == "stdout-missing":
                 changed["shell-positive.stdout"] = b"".join(line for line in changed["shell-positive.stdout"].splitlines(keepends=True)
-                                                          if not line.startswith(L.SHELL_CANDIDATE_MARKER))
+                                                          if not line.startswith(L.SHELL_LIFECYCLE_MARKER))
             else:
                 current["commands"][1]["exitCode"] = 1
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=mappings), \
@@ -4602,16 +4680,17 @@ class CandidateDocumentsLifecycleContracts(unittest.TestCase):
         self.assertEqual((len(gated), len(inventories)), (1, 2))
         self.assertLess(gated[0], inventories[0])
         loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
-                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
-        branch = next(node for node in loop.body if isinstance(node, ast.If))
+                    and ast.unparse(node.iter) == "shell_cases(value)")
+        original_case = next(node for node in loop.body if isinstance(node, ast.Try))
+        branch = next(node for node in original_case.body if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == "case == 'normal'")
         gate = next(index for index, node in enumerate(branch.orelse) if isinstance(node, ast.Assign)
                     and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
-        positive = branch.orelse[gate + 1]
-        self.assertIsInstance(positive, ast.If)
-        self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
+        positive = next(node for node in branch.orelse[gate + 1:] if isinstance(node, ast.If)
+                        and ast.unparse(node.test) == "case == 'positive'")
         # The original post-exit capture remains a direct positive-branch
-        # assignment. The fifth-case and final ten-case checks reuse this
-        # original fixture only after their completed case gates.
+        # assignment inside the original case's try/finally. Later rechecks
+        # reuse this fixture only after their completed case gates.
         self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
         names = ["_shell_project_inventory", "_shell_candidate_inventory", "_shell_paths_inventory"]
         for index, (case, expected_calls) in enumerate((("workflow-apply", names),), 1):
@@ -5626,6 +5705,30 @@ class FailureLabelSinkContracts(unittest.TestCase):
             raw + b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v1;index=0;eval=0;reject=not-recorded;wait=not-sampled\n",
         ):
             self.assertIsNone(L._shell_label_pair(bad), bad)
+
+    def test_lifecycle_stop_diagnostic_is_finite_stage_bound_and_never_a_success_receipt(self):
+        def frame(step=b"EvidenceStopped", callback=b"cancel-start", check=b"operation-stage", phase=b"stopping", problem=b"cancelled", error=b"none"):
+            return (b"MRK_INSTALLED_SHELL_EVIDENCE_FAILURE=v1;callback=" + callback + b";check=" + check
+                    + b";phase=" + phase + b";problem=" + problem + b";error=" + error + b"\n"
+                    + b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\nMRK_INSTALLED_SHELL_FAILURE_PHASE=result\n"
+                    + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n")
+        for step in (b"RequestEvidenceStop", b"EvidenceStopped"):
+            raw = frame(step)
+            parsed = L._shell_label_pair(raw)
+            self.assertEqual(parsed["step"], step.decode())
+            self.assertEqual(parsed["evidence"], {"callback": "cancel-start", "check": "operation-stage",
+                                                "phase": "stopping", "problem": "cancelled", "error": "none"})
+            self.assertEqual(set(parsed), {"step", "boundary", "bootstrapProgress", "evidence"})
+            self.assertLessEqual(len(raw), L.SHELL_FAILURE_LABEL_LIMIT)
+            for end in range(len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw[:end]))
+            self.assertIsNotNone(L._shell_label_pair(frame(step, check=b"bridge", phase=b"na", problem=b"na", error=b"other")))
+            for check in (b"case", b"observe-pending", b"observe-returned", b"status-pending"):
+                self.assertIsNone(L._shell_label_pair(frame(step, check=check)))
+        for step in (b"InspectEvidence", b"EvidenceObserved", b"ReadEvidenceStale", b"ReadStaleRecovery", b"PathActivate", b"SessionReview", b"Close"):
+            self.assertIsNone(L._shell_label_pair(frame(step)))
+        for raw in (frame(callback=b"stop"), frame(check=b"actual-stage"), frame(phase=b"external-testing"), frame(error=b"private-message")):
+            self.assertIsNone(L._shell_label_pair(raw))
 
     def test_path_v3_readiness_relations_are_closed_and_keep_original_callback_contract(self):
         def frame(*, step=b"PathActivate", index=b"7", wait=b"selection-different", picker=b"4o"):

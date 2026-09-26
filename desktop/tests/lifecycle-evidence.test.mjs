@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { Script } from 'node:vm';
 import { LifecycleEvidenceController, documentPaths, evidenceStages, lifecycleEvidenceRequestFits,
   parseLifecycleEvidence, parseLifecycleEvidenceStatus, releaseEvidenceHelp, SAVED_EVIDENCE_WARNING } from '../src/lifecycleEvidence.ts';
 import { parseCandidateEvidence, parseEvidenceStatus } from '../src/candidateEvidence.ts';
@@ -132,6 +133,34 @@ test('stage change requires new native choice; observing the old selection canno
   h.reply('observe', observed('7', SECOND, '4', fixtures.androidExternal)); await observing;
   assert.equal(h.state.status.result.stage, 'external-testing');
 });
+test('installed recipe DATA retains candidate on stage change and only replacement choice6 makes it stale through exact STOP6', async (t) => {
+  const h = harness(t); await h.ready;
+  let work = h.controller.choose();
+  h.reply('choose', status('2', { phase: 'cancelled', operation: { operationId: '3', kind: 'choose', selectionId: null, stage: 'candidate' }, problem: 'cancelled' })); await work;
+  work = h.controller.choose(); h.reply('choose', selected('4', FIRST, '4')); await work;
+  work = h.controller.observe(); h.reply('observe', observed('6', FIRST, '5')); await work;
+  const original = h.state.status;
+  assert.deepEqual(wire(original.result), fixtures.androidCandidate); assert.equal(h.state.stale, null);
+  h.controller.setStage('external-testing');
+  assert.equal(h.state.status, original); assert.equal(h.state.status.selection.stage, 'candidate'); assert.equal(h.state.stale, null);
+  assert.equal(h.state.stage, 'external-testing'); assert.match(h.controller.observeReason(), /new folder/);
+  await h.controller.observe(); assert.equal(h.count('observe'), 1);
+  work = h.controller.choose();
+  assert.deepEqual(h.last('choose').args, { stage: 'external-testing' }); assert.equal(h.state.pending, 'choose');
+  assert.equal(h.state.stale.selection, original.selection); assert.equal(h.state.stale.result, original.result);
+  const replacement = status('7', { phase: 'choosing', operation: { operationId: '6', kind: 'choose', selectionId: null, stage: 'external-testing' } });
+  h.reply('choose', replacement); await work;
+  assert.equal(h.state.status.result, null); assert.equal(h.state.status.selection, null);
+  work = h.controller.cancel(); assert.deepEqual(h.last('cancel').args, { operationId: '6', selectionId: null });
+  h.reply('cancel', { ...replacement, revision: '8', phase: 'stopping', problem: 'cancelled' }); await work;
+  h.registry({ ...replacement, revision: '9', phase: 'cancelled', problem: 'cancelled' }); await h.controller.check();
+  assert.equal(h.state.status.phase, 'cancelled'); assert.equal(h.state.status.operation.stage, 'external-testing');
+  assert.equal(h.state.status.result, null); assert.equal(h.state.status.selection, null); assert.equal(h.state.pending, null);
+  assert.equal(h.state.stale.selection, original.selection); assert.equal(h.state.stale.result, original.result);
+  assert.equal(h.state.stale.result.stage, 'candidate'); assert.equal(h.state.stale.result.assurance.recoveryAuthorized, false);
+  assert.equal(h.controller.startReason(), null); assert.match(h.controller.observeReason(), /Choose an evidence folder first/);
+  assert.deepEqual(['choose', 'observe', 'cancel'].map((kind) => h.count(kind)), [3, 1, 1]);
+});
 test('stage selection is recovered observationally on reconnect, never auto-inspected', async (t) => {
   const h = harness(t, selected('5', SECOND, '3')); await h.ready;
   assert.equal(h.state.stage, 'external-testing'); assert.equal(h.count('observe'), 0); assert.equal(h.count('choose'), 0);
@@ -246,5 +275,53 @@ test('SOURCE catalogs, shell permissions and purpose-gated reconciliation includ
     const body = owner.split('pub(crate) fn ' + prefix + '_evidence_' + suffix + '(', 2)[1].split('\n    pub(crate) fn ', 1)[0];
     assert.ok(body.includes('self.reconcile_scope(Some(' + family + '))'));
     assert.ok(body.indexOf('evidence_route_gate(&state, ' + family + ')?') < body.indexOf('self.expire(&mut state'));
+  }
+});
+test('SOURCE installed lifecycle witness uses actual routes, once-only native refusal and STOP-specific finality', () => {
+  const source = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
+  const observer = source('../src-tauri/src/installed_shell_observation.rs'), shell = source('../src-tauri/src/shell.rs');
+  const owner = source('../src-tauri/src/asset_session.rs');
+  assert.match(source('../src-tauri/tests/installed_shell_observation.rs'), /#\[path = "\.\.\/src\/lifecycle_evidence_protocol.rs"\] mod lifecycle_evidence_protocol;/);
+  for (const suffix of ['choose', 'status', 'observe', 'cancel']) {
+    const body = shell.split('async fn release_evidence_' + suffix + '(', 2)[1].split('\n#[tauri::command', 1)[0];
+    assert.match(body, new RegExp('q\\.lifecycle_evidence_' + suffix + '_request\\(body\\)'));
+    assert.match(body, new RegExp('q\\.lifecycle_evidence_' + suffix + '_result\\(&result\\)'));
+    assert.equal((body.match(/#\[cfg\(all\(test, debug_assertions/g) ?? []).length, 2);
+  }
+  const probe = owner.split('pub(crate) fn installed_observation_lifecycle_opposite(', 2)[1].split('pub(crate) fn installed_observation_lifecycle_stopped(', 1)[0];
+  assert.equal((probe.match(/self\.artifact_evidence_status\(\)/g) ?? []).length, 1);
+  assert.equal((probe.match(/self\.artifact_evidence_cancel\(/g) ?? []).length, 1);
+  assert.equal((probe.match(/self\.lifecycle_stop_owner_unchanged\(project, original\)/g) ?? []).length, 3);
+  assert.match(probe, /original\.binding\.operation_id\.to_string\(\)/); assert.match(probe, /original\.binding\.selection_id\.clone\(\)/);
+  assert.doesNotMatch(probe, /self\.lock\(|self\.reconcile|self\.expire|\.stop\(/);
+  const tick = observer.split('if step == Step::EvidenceReplacementReady {', 2)[1].split('if matches!(step, Step::EvidenceCancelled', 1)[0];
+  assert.equal((tick.match(/installed_observation_lifecycle_opposite\(/g) ?? []).length, 1);
+  assert.match(tick, /r\.lifecycle\.opposite_reserved = true; r\.pending = Some\(Pending::LifecycleOpposite\)/);
+  assert.ok(tick.indexOf('let project = {') < tick.indexOf('project.clone()'));
+  assert.ok(tick.indexOf('project.clone()') < tick.indexOf('installed_observation_lifecycle_stop_owner(&project)'));
+  assert.ok(tick.indexOf('r.pending = Some(Pending::LifecycleOpposite);\n            }') < tick.indexOf('installed_observation_lifecycle_opposite(&project, &original)'));
+  assert.match(tick, /r\.pending\.take\(\) != Some\(Pending::LifecycleOpposite\)/); assert.match(tick, /Instant::now\(\) >= self\.end/);
+  const stopped = observer.split('fn stopped_evidence_picker(', 2)[1].split('\nfn ', 1)[0];
+  assert.match(stopped, /p\.created && p\.responded && p\.disposal && p\.destroyed && p\.released/);
+  assert.match(stopped, /!p\.selected && !p\.activated && !p\.filename && !p\.returned/);
+  const response = observer.split('pub(super) fn lifecycle_evidence_stop_response(', 2)[1].split('fn evidence_gtk_returned(', 1)[0];
+  assert.match(response, /!owner_stopped_delete/); assert.match(response, /r\.lifecycle\.stop_requests != 1/);
+  assert.match(response, /p\.responded = true; p\.disposal = true/); assert.doesNotMatch(response, /p\.(activated|returned|filename) = true/);
+  assert.match(observer, /MRK_INSTALLED_SHELL_LIFECYCLE_DOCUMENTS=/); assert.doesNotMatch(observer, /MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS=/);
+  assert.match(owner, /quit\.id == 7 && quit\.resources_settled\(\)/);
+});
+test('SOURCE exact positive observer JS bodies compile with their actual shared lifecycle helpers without DOM execution', () => {
+  const source = readFileSync(new URL('../src-tauri/src/installed_shell_observation.rs', import.meta.url), 'utf8');
+  const fn = source.split('fn script(step: Step, case: Case)', 2)[1].split('\nfn assert_recent_files_suppression_contract()', 1)[0];
+  const raw = [...fn.matchAll(/r#"([\s\S]*?)"#/g)].map((match) => match[1]);
+  const template = raw.pop(); assert.equal(raw.length, 62); assert.ok(template.includes('{body}'));
+  const ignoreLimit = source.match(/const IGNORE_LINES: \[&str; (\d+)\]/)[1];
+  for (const [index, body] of raw.entries()) {
+    const values = { project_name: 'positive-project', ignore_limit: ignoreLimit, body };
+    const script = template.replace(/{{|}}|{([a-z_]+)}/g, (match, name) => {
+      if (match === '{{') return '{'; if (match === '}}') return '}';
+      assert.ok(Object.hasOwn(values, name), name); return values[name];
+    });
+    assert.doesNotThrow(() => new Script(script), 'exact positive body ' + index);
   }
 });

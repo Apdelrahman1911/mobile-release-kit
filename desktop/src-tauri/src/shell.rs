@@ -255,10 +255,8 @@ async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, reque
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; let body = request_body(&request)?; crate::candidate_evidence_protocol::empty_request(body)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.evidence_choose_request(body); }
+    if let Some(q) = &state.observation { q.unexpected(); } // Legacy IPC is not the lifecycle witness.
     let result = state.document.artifact_evidence_choose(app);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.evidence_choose_result(&result); }
     result
 }
 #[tauri::command]
@@ -266,10 +264,8 @@ async fn artifact_evidence_status(webview: Webview, request: tauri::ipc::Request
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; let body = request_body(&request)?; crate::candidate_evidence_protocol::empty_request(body)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.evidence_status_request(body); }
+    if let Some(q) = &state.observation { q.unexpected(); }
     let result = state.document.artifact_evidence_status();
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.evidence_status_result(&result); }
     result
 }
 #[tauri::command]
@@ -277,10 +273,8 @@ async fn artifact_evidence_observe(webview: Webview, request: tauri::ipc::Reques
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; let body = request_body(&request)?; let args = crate::candidate_evidence_protocol::observe_request(body)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.evidence_observe_request(body); }
+    if let Some(q) = &state.observation { q.unexpected(); }
     let result = state.document.artifact_evidence_observe(args);
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.evidence_observe_result(&result); }
     result
 }
 #[tauri::command]
@@ -288,32 +282,55 @@ async fn artifact_evidence_cancel(webview: Webview, request: tauri::ipc::Request
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; let args = crate::candidate_evidence_protocol::cancel_request(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.unexpected(); } // This case uses the real chooser's Cancel widget, not STOP IPC.
+    if let Some(q) = &state.observation { q.unexpected(); } // Wrong-family probes use native owner endpoints, not injected IPC.
     state.document.artifact_evidence_cancel(args)
 }
 #[tauri::command]
 async fn release_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    edit_window(&webview)?;
-    state.document.release_evidence_choose(app, crate::lifecycle_evidence_protocol::choose_request(request_body(&request)?)?)
+    edit_window(&webview)?; let body = request_body(&request)?;
+    let args = crate::lifecycle_evidence_protocol::choose_request(body)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_choose_request(body); }
+    let result = state.document.release_evidence_choose(app, args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_choose_result(&result); }
+    result
 }
 #[tauri::command]
 async fn release_evidence_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    edit_window(&webview)?; crate::lifecycle_evidence_protocol::empty_request(request_body(&request)?)?;
-    state.document.release_evidence_status()
+    edit_window(&webview)?; let body = request_body(&request)?; crate::lifecycle_evidence_protocol::empty_request(body)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_status_request(body); }
+    let result = state.document.release_evidence_status();
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_status_result(&result); }
+    result
 }
 #[tauri::command]
 async fn release_evidence_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    edit_window(&webview)?;
-    state.document.release_evidence_observe(crate::lifecycle_evidence_protocol::observe_request(request_body(&request)?)?)
+    edit_window(&webview)?; let body = request_body(&request)?;
+    let args = crate::lifecycle_evidence_protocol::observe_request(body)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_observe_request(body); }
+    let result = state.document.release_evidence_observe(args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_observe_result(&result); }
+    result
 }
 #[tauri::command]
 async fn release_evidence_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::lifecycle_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    edit_window(&webview)?;
-    state.document.release_evidence_cancel(crate::lifecycle_evidence_protocol::cancel_request(request_body(&request)?)?)
+    edit_window(&webview)?; let body = request_body(&request)?;
+    let args = crate::lifecycle_evidence_protocol::cancel_request(body)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_cancel_request(body); }
+    let result = state.document.release_evidence_cancel(args);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.lifecycle_evidence_cancel_result(&result); }
+    result
 }
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
@@ -1378,6 +1395,17 @@ mod owned_gtk {
                             });
                             match choice {
                                 DialogChoice::Project => q.project_response(observed_id, accepted, cancelled, disposal),
+                                DialogChoice::EvidenceFolder if observed_id == 6 => {
+                                    // The first real post-STOP DeleteEvent returns Some(false),
+                                    // not the None used by a later post-response disposal.
+                                    // Observe it separately; never synthesize a GTK Cancel.
+                                    let stopped_response = observed_delete && read_one_path == Some(false)
+                                        && call.owner().is_some_and(|owner| owner.stopped())
+                                        && call.facts().is_some_and(|facts| facts.response && !facts.accepted && !facts.declined
+                                            && facts.accepted_at.is_none() && facts.selected.is_none() && facts.refusal.is_none()
+                                            && !facts.destroyed && !facts.released);
+                                    q.lifecycle_evidence_stop_response(observed_id, stopped_response);
+                                },
                                 DialogChoice::EvidenceFolder => q.evidence_response(observed_id, accepted, cancelled, disposal),
                                 DialogChoice::ProjectPath(_) => q.path_response(observed_id,accepted,cancelled,disposal),
                                 DialogChoice::File(_) => q.session_file_response(observed_id,accepted,cancelled,disposal),
