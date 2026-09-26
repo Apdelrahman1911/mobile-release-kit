@@ -2,6 +2,7 @@ import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
 import type { GitHubPreflightApi } from './githubPreflightTypes.ts';
+import type { GitHubReleaseApi } from './githubReleaseTypes.ts';
 import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
 import type { EnvironmentRequest, EnvironmentResult } from './environment.ts';
 import type { EnvironmentDiagnosticsApi } from './environmentDiagnosticsTypes.ts';
@@ -381,7 +382,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

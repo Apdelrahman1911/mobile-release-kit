@@ -5,13 +5,14 @@ import { futureReason } from '../certainty.ts';
 import { DisabledAction, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
-export function Releases({ info, offlineChecks, androidBuild, evidence }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode; evidence: ReactNode }) {
+export function Releases({ info, offlineChecks, androidBuild, evidence, protectedWorkflows }: { info: AppInfo | null; offlineChecks: ReactNode; androidBuild: ReactNode; evidence: ReactNode; protectedWorkflows?: ReactNode }) {
   return <>
-    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, then review local checks and Android build inputs separately. Protected workflow dispatch is not available here." />
+    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, review local checks, and separately prepare a protected release workflow when its installed runtime is qualified." />
+    {protectedWorkflows}
     {evidence}
     {offlineChecks}
     {androidBuild}
-    <section className="card"><EmptyState icon="rocket" title="Authenticated release history is not loaded" description="A selected local folder is not authenticated or global history. Missing desktop records do not mean the project has never released."><DisabledAction label="Create release candidate" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Protected GitHub dispatch and authenticated release history are not implemented.')} /></EmptyState></section>
+    <section className="card"><EmptyState icon="rocket" title="Authenticated release history is not loaded" description="A selected local folder is not authenticated or global history. Missing desktop records do not mean the project has never released."><DisabledAction label="Load authenticated release history" icon="rocket" reason={futureReason(info?.capabilities, 'release.history', 'Remote authenticated artifact history is not implemented. A workflow observation or a selected local folder is not authentication.')} /></EmptyState></section>
   </>;
 }
 
@@ -25,9 +26,10 @@ const editAttentionHelp: HelpContent = {
   failure: 'An empty list, changing projects, or restarting the app does not prove that files are clean or a retry is safe. Recovery assessment is not implemented.',
 };
 
-export function Recovery({ info, attention, choosingProject, onOpenProject, onHelp, evidenceGuidance }: {
+export function Recovery({ info, attention, choosingProject, onOpenProject, onHelp, evidenceGuidance, onOpenReleases }: {
   info: AppInfo | null;
   evidenceGuidance: ReactNode;
+  onOpenReleases?: () => void;
   attention: readonly RetainedEditAttention[];
   choosingProject: boolean;
   onOpenProject: (attention: RetainedEditAttention) => void;
@@ -36,6 +38,7 @@ export function Recovery({ info, attention, choosingProject, onOpenProject, onHe
   return <>
     <PageHeading eyebrow="RECOVERY" title="An interruption shouldn’t leave you guessing." description="Recovery must know what really happened, preserve original ownership, and never mistake partial success for a clean restart." />
     {evidenceGuidance}
+    {onOpenReleases && <section className="card"><SectionHeading title="Protected workflow request recovery" description="Reconcile an exact release request or prepare the core’s existing evidence-based same-step recovery. This is separate from local project recovery and does not prove Store state." /><button type="button" className="button secondary" onClick={onOpenReleases}>Open original release requests</button></section>}
     <div className="notice notice-warning"><Icon name="shield" /><div><strong>Project recovery remains unassessed</strong><p>The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. This screen does not establish that a project is clean or an operation can safely be retried.</p></div></div>
     <section className="card">
       <SectionHeading title="File-edit alerts from this session" description="Earlier alerts stay visible even after another edit replaces the latest result. Original active or uncertain operations keep their existing status controls.">

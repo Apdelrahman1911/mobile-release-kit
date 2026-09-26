@@ -20,8 +20,11 @@ import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConne
   parseGitHubConnectionHelp, parseGitHubConnectionStatus } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
 import { GITHUB_PREFLIGHT_EVENT, githubPreflightError, githubPreflightRequestFits, parseGitHubPreflightStatus } from './githubPreflightProtocol.ts';
+import { GITHUB_RELEASE_EVENT, githubReleaseError, githubReleaseRequestFits, parseGitHubReleaseStatus } from './githubReleaseProtocol.ts';
 import type { GitHubPreflightCommand } from './githubPreflightProtocol.ts';
+import type { GitHubReleaseCommand } from './githubReleaseProtocol.ts';
 import type { GitHubPreflightStatus } from './githubPreflightTypes.ts';
+import type { GitHubReleaseStatus } from './githubReleaseTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 import { VERSION_EDIT_EVENT, parseVersionEditGuide, parseVersionEditStatus, versionEditError, versionEditRequestFits } from './releaseVersionEdit.ts';
@@ -35,7 +38,7 @@ import type { AndroidBuildStatus } from './androidBuildTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -67,6 +70,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'github_preflight_unknown' };
       return status;
     } catch (error) { throw githubPreflightError(error); }
+  };
+  const githubReleaseCall = async (command: GitHubReleaseCommand, value: unknown): Promise<GitHubReleaseStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'github_release_refused_runtime_unavailable' };
+      if (!githubReleaseRequestFits(command, value)) throw { code: 'github_release_refused_invalid_input' };
+      const status = parseGitHubReleaseStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_release_unknown' };
+      return status;
+    } catch (error) { throw githubReleaseError(error); }
   };
   const androidCall = async (command: AndroidBuildCommand, value: unknown): Promise<AndroidBuildStatus> => {
     try {
@@ -348,6 +360,19 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'github_preflight_refused_runtime_unavailable' };
         return await listen(GITHUB_PREFLIGHT_EVENT, (value) => onStatus(parseGitHubPreflightStatus(value)));
       } catch (error) { throw githubPreflightError(error); }
+    },
+    githubReleaseStatus: () => githubReleaseCall('github_release_status', {}),
+    prepareGitHubRelease: (args) => githubReleaseCall('github_release_prepare', args),
+    dispatchGitHubRelease: (args) => githubReleaseCall('github_release_dispatch', args),
+    trackGitHubRelease: (args) => githubReleaseCall('github_release_track', args),
+    reconcileGitHubRelease: (args) => githubReleaseCall('github_release_reconcile', args),
+    loadGitHubReleasePending: (args) => githubReleaseCall('github_release_pending', args),
+    cancelGitHubRelease: (args) => githubReleaseCall('github_release_cancel', args),
+    subscribeGitHubRelease: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_release_refused_runtime_unavailable' };
+        return await listen(GITHUB_RELEASE_EVENT, (value) => onStatus(parseGitHubReleaseStatus(value)));
+      } catch (error) { throw githubReleaseError(error); }
     },
     assetStatus: () => assetCall('vault_status', {}),
     openAssetSession: () => assetCall('vault_open', { mode: 'session' }),

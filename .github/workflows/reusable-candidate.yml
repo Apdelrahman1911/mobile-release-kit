@@ -28,6 +28,21 @@ on:
         required: false
         default: ''
         type: string
+      desktop_request:
+        description: Optional exact Desktop request marker; use with reviewed source and full ref.
+        required: false
+        default: ''
+        type: string
+      desktop_source_sha:
+        description: Optional Desktop-reviewed current dispatch commit; not a replacement for original recovery source.
+        required: false
+        default: ''
+        type: string
+      desktop_expected_ref:
+        description: Optional Desktop-reviewed full branch ref; all three Desktop inputs must be supplied together.
+        required: false
+        default: ''
+        type: string
     outputs:
       android_evidence_run_id:
         description: Authenticated android evidence run_id; may point to the unchanged original run.
@@ -61,10 +76,24 @@ jobs:
       env:
         MOBILE_RELEASE_PLATFORM: ${{ inputs.platform }}
         MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        MOBILE_RELEASE_DESKTOP_REQUEST: ${{ inputs.desktop_request }}
+        MOBILE_RELEASE_DESKTOP_SOURCE_SHA: ${{ inputs.desktop_source_sha }}
+        MOBILE_RELEASE_DESKTOP_EXPECTED_REF: ${{ inputs.desktop_expected_ref }}
+        MOBILE_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+        MOBILE_RELEASE_CALLER_SHA: ${{ github.sha }}
+        MOBILE_RELEASE_CALLER_REF: ${{ github.ref }}
       run: |
         set -euo pipefail
         [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios|both)$ ]]
         [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+        if [[ -n "$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]; then
+          [[ "$MOBILE_RELEASE_DESKTOP_REQUEST" =~ ^[0-9a-f]{32}$ ]]
+          [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == refs/heads/* ]]
+          [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_SOURCE_SHA" ]]
+          [[ "$MOBILE_RELEASE_DESKTOP_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]
+          [[ "$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" == "$MOBILE_RELEASE_CALLER_REF" ]]
+        fi
   android_resolve:
     needs: validate-platform
     if: inputs.platform == 'android' || inputs.platform == 'both'

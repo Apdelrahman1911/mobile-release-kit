@@ -831,6 +831,56 @@ async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<
     state.document.github_preflight_command("github_preflight_cancel", request_body(&request)?)
 }
 
+
+#[tauri::command]
+async fn github_release_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_status", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_release_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_prepare", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_release_dispatch(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_dispatch", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_release_track(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_track", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_release_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_reconcile", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_release_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_pending", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_release_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
+    state.document.github_release_command("github_release_cancel", request_body(&request)?)
+}
+
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
     if webview.label() == MAIN_WINDOW { Ok(()) } else { Err(AssetError::invalid()) }
 }
@@ -1056,6 +1106,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut release_version_revision = None;
         let mut diagnostics_revision = None;
         let mut github_preflight_revision = None;
+        let mut github_release_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
         let mut android_build_revision = None;
@@ -1108,6 +1159,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if github_preflight_revision != Some(status.revision) {
                 github_preflight_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_preflight_protocol::EVENT, &status);
+            }
+            let status = document.github_release_status();
+            if github_release_revision != Some(status.revision) {
+                github_release_revision = Some(status.revision);
+                let _ = app.emit_to(MAIN_WINDOW, crate::github_release_protocol::EVENT, &status);
             }
             if let Ok(status) = document.environment_diagnostics_status() {
                 if diagnostics_revision != Some(status.status_revision) {
@@ -2497,6 +2553,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
+            github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
+            github_release_reconcile, github_release_pending, github_release_cancel,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
             ];
