@@ -13709,6 +13709,65 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
                 self.assertEqual((result["guiCasesExecuted"], result["verifiedMethods"], result["guiCases"]), (0, 0, []))
                 self.assertEqual(result["notVerified"], list(helper.WINDOWS_NORMAL_UI_NOT_VERIFIED))
 
+    def test_hive_unload_pending_is_only_predelete_and_keeps_original_clock_close_and_strict_probes(self):
+        text = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ordinary_owner_ui.rs").read_text()
+        production, tests = text.split("// Inert regressions.", 1)
+        self.assertIn("enum KeyOpenPurpose { Strict, HiveUnload }", production)
+        self.assertIn("enum KeyPresence { Present, Absent, Pending }", production)
+        strict = production.split("fn open_traced(", 1)[1].split("fn open_with_purpose_traced(", 1)[0]
+        self.assertIn("self.open_with_purpose_traced(KeyOpenPurpose::Strict, clock, trace)?", strict)
+        self.assertIn("KeyPresence::Pending => Err(Error::State)", strict)
+        call = production.split("fn open_with_purpose_traced(", 1)[1].split("fn observe_open_return_traced(", 1)[0]
+        markers = ("need(self.state == SlotState::Reserved", "clock.effect_traced(trace)?;",
+                   "self.state = SlotState::Acquiring; self.active = true;", "R::RegOpenKeyExW(self.root, self.name.as_ptr(), 0,",
+                   "let original = self.observe_open_return_traced(purpose, trace);",
+                   "if matches!(self.state, SlotState::Owned | SlotState::NoHandle) { clock.effect_traced(trace)?; }")
+        self.assertEqual([call.index(marker) for marker in markers], sorted(call.index(marker) for marker in markers))
+        self.assertIn("purpose == KeyOpenPurpose::Strict || self.root == R::HKEY_USERS", call)
+        self.assertIn("R::KEY_READ | R::KEY_WOW64_64KEY, &mut self.handle", call)
+        returned = production.split("fn observe_open_return_traced(", 1)[1].split("fn profile_path(", 1)[0]
+        self.assertIn("need(self.state == SlotState::Acquiring && self.active)?;", returned)
+        self.assertIn("self.handle.is_null() && self.status != F::ERROR_SUCCESS && self.status != F::ERROR_IO_PENDING", returned)
+        self.assertLess(returned.index("self.active = false; self.state = SlotState::NoHandle;"), returned.index("Ok(KeyPresence::Pending)"))
+        self.assertIn("self.status == F::ERROR_KEY_DELETED && purpose == KeyOpenPurpose::HiveUnload && self.root == R::HKEY_USERS", returned)
+        self.assertIn("if self.status == F::ERROR_FILE_NOT_FOUND { Ok(KeyPresence::Absent) }", returned)
+        self.assertNotIn("ERROR_PATH_NOT_FOUND", returned)
+        self.assertIn("self.state = SlotState::Unknown; Err(Error::Unknown)", returned)
+        self.assertIn("trace.prerequisite_native_result(PrerequisiteCheck::K01, original,", returned)
+        for forbidden in ("R::RegOpenKeyExW(", "R::RegCloseKey(", "GetLastError", "clock.", "std::thread::"):
+            self.assertNotIn(forbidden, returned)
+        profile = production.split("impl Profile {", 1)[1].split("\n}\n", 1)[0]
+        strict_probes = profile[profile.index("    fn key(&mut self,"):profile.index("    fn unloading_hives_absent_traced(")]
+        self.assertEqual(hashlib.sha256(strict_probes.encode()).hexdigest(), "b31c1dcec407b989724a6a990356478679de9a0a2c43d25b4f33b46fa405f61b")
+        unload = profile.split("fn unloading_hives_absent_traced(", 1)[1].split("fn absence(", 1)[0]
+        self.assertIn("need(self.prestate && self.exact && !self.unknown && !self.delete_entered && !self.settled)?;", unload)
+        self.assertIn('for name in [sid.clone(), format!("{sid}_Classes")]', unload)
+        self.assertIn("need(self.keys.len() < 64)?;", unload)
+        registered = "self.keys.push(Box::new(Key::new(R::HKEY_USERS, &name)))"
+        observed = "self.keys[index].open_with_purpose_traced(KeyOpenPurpose::HiveUnload, clock, trace)?"
+        closed = "self.keys[index].close_traced(trace)?;"
+        absent = "absent &= observed == KeyPresence::Absent;"
+        self.assertEqual([unload.index(marker) for marker in (registered, observed, closed, absent)],
+                         sorted(unload.index(marker) for marker in (registered, observed, closed, absent)))
+        self.assertEqual(production.count(".open_with_purpose_traced(KeyOpenPurpose::HiveUnload,"), 1)
+        self.assertEqual(production.count("self.unloading_hives_absent_traced(clock, trace)?"), 1)
+        retire = profile[profile.index("    fn retire(&mut self,"):profile.index("    fn settle(&mut self)")]
+        prior = retire.replace("self.unloading_hives_absent_traced(clock, trace)?", "self.hives_absent_traced(clock, trace)?", 1)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), "64d95cddae0660fd651a1a0377cff265b26bcad455c2a46b9e6d2b91dfb8ac3b")
+        close = production[production.index("    fn close(&mut self) -> Result<()> { self.close_traced"):production.index("// These are two different lifecycle observations")]
+        self.assertEqual(hashlib.sha256(close.encode()).hexdigest(), "80d3eb445ec8a7949b20e407274a453bb809720aaaa2d33478e6a9923a46cd71")
+        clock = production[production.index("struct Clock {"):production.index("\n#[derive(Default)]\nstruct ObserverCapture")]
+        self.assertEqual(hashlib.sha256(clock.encode()).hexdigest(), "2531bf905015df0beb876446e4c87f5e22cce8c196f2b8501f1db6ccbb058a81")
+        cases = tests.split("fn hive_unload_original_return_cases()", 1)[1].split("#[test]", 1)[0]
+        for required in ("for purpose in [Strict, HiveUnload]", "F::ERROR_KEY_DELETED", "F::ERROR_IO_PENDING", "F::ERROR_PATH_NOT_FOUND",
+                         "wrong_root.observe_open_return_traced(HiveUnload", "not_returned.observe_open_return_traced(HiveUnload",
+                         "key.close_traced(&mut trace), Err(Error::Unknown)"):
+            self.assertIn(required, cases)
+        selected = "ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow"
+        self.assertIn(selected, helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)
+        selected_body = tests.split("fn prerequisite_helper_decisions_preserve_native_control_flow()", 1)[1].split("#[test]", 1)[0]
+        self.assertEqual(selected_body.count("hive_unload_original_return_cases()?;"), 1)
+
     def test_prerequisite_fault_route_roster_is_explicit_and_legacy_smoke_sink_unchanged(self):
         expected = ('e01', 'e02', 'e03', 'e04', 'p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'a01', 'a02', 'a03', 'l01', 'l02', 'l03', 'l04', 'c01', 'c02', 'c03', 's01', 's02', 'r01', 'r02', 'z01', 'z02', 'u01', 'k01', 'k02', 'k03', 'b01', 'b02', 'b03', 'v01', 'v02', 'v03', 'v04', 'v05', 'v06', 'v07', 'v08', 'v09', 'v10', 'v11', 'f01', 'f02', 'f03', 'f04', 'f05', 'f06', 'f07', 'f08', 'f09', 'h01', 'q01', 'q02', 'q03', 'q04', 'q05', 'g01', 'g02', 'n01', 'n02', 'n03', 'n04', 'n05', 'n06', 'n07', 'd01', 'd02', 'd03', 'd04', 'd05', 'd06', 't01', 'o01', 'o02', 'o03', 'nb01', 'nb02', 'nb03', 'nb04', 'nb05', 'nb06', 'nb07', 'nb08', 'nb09', 'nb10', 'nb11', 'ht01')
         self.assertEqual(helper.WINDOWS_NORMAL_UI_PREREQUISITE_CHECKS, expected)

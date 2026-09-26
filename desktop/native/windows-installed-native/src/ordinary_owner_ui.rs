@@ -176,6 +176,10 @@ impl Launch {
 
 // Every registry output/name/query/close destination lives in one retained
 // original, including no-handle results. Borrowed HKLM/HKU are never closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyOpenPurpose { Strict, HiveUnload }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyPresence { Present, Absent, Pending }
 struct Key {
     root: R::HKEY, name: Vec<u16>, handle: R::HKEY, state: SlotState,
     status: u32, value_name: Vec<u16>, value_kind: u32, value_size: u32,
@@ -189,27 +193,41 @@ impl Key {
     }
     fn open(&mut self, clock: &mut Clock) -> Result<bool> { self.open_traced(clock, &mut InputTrace::default()) }
     fn open_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<bool> {
+        match self.open_with_purpose_traced(KeyOpenPurpose::Strict, clock, trace)? {
+            KeyPresence::Present => Ok(true), KeyPresence::Absent => Ok(false),
+            KeyPresence::Pending => Err(Error::State), // Never convert inconclusive into absence.
+        }
+    }
+    fn open_with_purpose_traced(&mut self, purpose: KeyOpenPurpose, clock: &mut Clock, trace: &mut InputTrace) -> Result<KeyPresence> {
         trace.prerequisite_scope(PrerequisiteCheck::K01, |trace| {
-            need(self.state == SlotState::Reserved)?; clock.effect_traced(trace)?;
+            need(self.state == SlotState::Reserved && (purpose == KeyOpenPurpose::Strict || self.root == R::HKEY_USERS))?;
+            clock.effect_traced(trace)?;
             self.state = SlotState::Acquiring; self.active = true;
             self.status = unsafe { R::RegOpenKeyExW(self.root, self.name.as_ptr(), 0,
                 R::KEY_READ | R::KEY_WOW64_64KEY, &mut self.handle) };
-            if self.status == F::ERROR_SUCCESS && !self.handle.is_null() {
-                self.active = false; self.state = SlotState::Owned; clock.effect_traced(trace)?; return Ok(true);
-            }
-            if self.handle.is_null() && self.status != F::ERROR_SUCCESS && self.status != F::ERROR_IO_PENDING {
+            let original = self.observe_open_return_traced(purpose, trace);
+            // Preserve the original fault-before-clock order and do not perform
+            // a post-return clock call while an output is Unknown/active.
+            if matches!(self.state, SlotState::Owned | SlotState::NoHandle) { clock.effect_traced(trace)?; }
+            original
+        })
+    }
+    fn observe_open_return_traced(&mut self, purpose: KeyOpenPurpose, trace: &mut InputTrace) -> Result<KeyPresence> {
+        trace.prerequisite_scope(PrerequisiteCheck::K01, |trace| {
+            need(self.state == SlotState::Acquiring && self.active)?;
+            let original = if self.status == F::ERROR_SUCCESS && !self.handle.is_null() {
+                self.active = false; self.state = SlotState::Owned; Ok(KeyPresence::Present)
+            } else if self.handle.is_null() && self.status != F::ERROR_SUCCESS && self.status != F::ERROR_IO_PENDING {
                 self.active = false; self.state = SlotState::NoHandle;
-                if self.status != F::ERROR_FILE_NOT_FOUND {
-                    trace.prerequisite_fault(PrerequisiteCheck::K01, Error::Unavailable,
-                        PrerequisiteNative::registry(PrerequisiteApi::RegOpenKeyExW, PrerequisiteSelector::None, self.status), None);
-                }
-                clock.effect_traced(trace)?;
-                return if self.status == F::ERROR_FILE_NOT_FOUND { Ok(false) } else { Err(Error::Unavailable) };
-            }
-            self.state = SlotState::Unknown;
-            trace.prerequisite_fault(PrerequisiteCheck::K01, Error::Unknown,
-                PrerequisiteNative::registry(PrerequisiteApi::RegOpenKeyExW, PrerequisiteSelector::None, self.status), None);
-            Err(Error::Unknown)
+                if self.status == F::ERROR_FILE_NOT_FOUND { Ok(KeyPresence::Absent) }
+                else if self.status == F::ERROR_KEY_DELETED && purpose == KeyOpenPurpose::HiveUnload && self.root == R::HKEY_USERS {
+                    // Completed null output, not a pending native borrower and
+                    // not positive absence. The same finite unload loop decides.
+                    Ok(KeyPresence::Pending)
+                } else { Err(Error::Unavailable) }
+            } else { self.state = SlotState::Unknown; Err(Error::Unknown) };
+            trace.prerequisite_native_result(PrerequisiteCheck::K01, original,
+                PrerequisiteNative::registry(PrerequisiteApi::RegOpenKeyExW, PrerequisiteSelector::None, self.status), None)
         })
     }
     fn profile_path(&mut self, expected: &Path, clock: &mut Clock) -> Result<()> { self.profile_path_traced(expected, clock, &mut InputTrace::default()) }
@@ -447,6 +465,26 @@ impl Profile {
             Ok(absent)
         })
     }
+    fn unloading_hives_absent_traced(&mut self, clock: &mut Clock, trace: &mut InputTrace) -> Result<bool> {
+        trace.prerequisite_scope(PrerequisiteCheck::V02, |trace| {
+            need(self.prestate && self.exact && !self.unknown && !self.delete_entered && !self.settled)?;
+            let sid = self.sid_name_traced(trace)?;
+            let mut absent = true;
+            for name in [sid.clone(), format!("{sid}_Classes")] {
+                let (index, observed) = trace.prerequisite_scope(PrerequisiteCheck::V01, |trace| {
+                    // Same retained Key book, registration and output as strict
+                    // probes; this fixed pre-delete HKU caller alone permits Pending.
+                    need(self.keys.len() < 64)?;
+                    let index = self.keys.len(); self.keys.push(Box::new(Key::new(R::HKEY_USERS, &name)));
+                    let observed = self.keys[index].open_with_purpose_traced(KeyOpenPurpose::HiveUnload, clock, trace)?;
+                    Ok((index, observed))
+                })?;
+                self.keys[index].close_traced(trace)?;
+                absent &= observed == KeyPresence::Absent;
+            }
+            Ok(absent)
+        })
+    }
     fn absence(&self, epoch: AbsenceEpoch) -> Result<&Absence> { self.absence_traced(epoch, &mut InputTrace::default()) }
     fn absence_traced(&self, epoch: AbsenceEpoch, trace: &mut InputTrace) -> Result<&Absence> {
         trace.prerequisite_scope(PrerequisiteCheck::V03, |trace| {
@@ -627,7 +665,7 @@ impl Profile {
             // B's genuine application exit already joined its browser/user-data
             // lifetime. LOGON_WITH_PROFILE owns automatic hive unload, not this test.
             for _ in 0..20 {
-                if self.hives_absent_traced(clock, trace)? { self.hives_unloaded = true; break; }
+                if self.unloading_hives_absent_traced(clock, trace)? { self.hives_unloaded = true; break; }
                 clock.effect_traced(trace)?; std::thread::sleep(Duration::from_millis(250));
             }
             need(self.hives_unloaded)?; self.recheck_traced(clock, trace)?;
@@ -3462,8 +3500,58 @@ mod contract_tests {
         Ok(())
     }
 
+    fn hive_unload_original_return_cases() -> Result<()> {
+        // Actual returned-output classifier, without registry/clock calls. The
+        // existing selected policy test below owns these inert DATA assertions.
+        use KeyOpenPurpose::{HiveUnload, Strict}; use KeyPresence::{Absent, Pending, Present};
+        for purpose in [Strict, HiveUnload] {
+            let deleted = if purpose == HiveUnload { Ok(Pending) } else { Err(Error::Unavailable) };
+            for (status, null, expected, state, active) in [
+                (F::ERROR_SUCCESS, false, Ok(Present), SlotState::Owned, false),
+                (F::ERROR_FILE_NOT_FOUND, true, Ok(Absent), SlotState::NoHandle, false),
+                (F::ERROR_KEY_DELETED, true, deleted, SlotState::NoHandle, false),
+                (F::ERROR_PATH_NOT_FOUND, true, Err(Error::Unavailable), SlotState::NoHandle, false),
+                (F::ERROR_ACCESS_DENIED, true, Err(Error::Unavailable), SlotState::NoHandle, false),
+                (F::ERROR_SUCCESS, true, Err(Error::Unknown), SlotState::Unknown, true),
+                (F::ERROR_IO_PENDING, true, Err(Error::Unknown), SlotState::Unknown, true),
+                (F::ERROR_IO_PENDING, false, Err(Error::Unknown), SlotState::Unknown, true),
+                (F::ERROR_KEY_DELETED, false, Err(Error::Unknown), SlotState::Unknown, true),
+                (F::ERROR_FILE_NOT_FOUND, false, Err(Error::Unknown), SlotState::Unknown, true),
+            ] {
+                let mut key = Key::new(R::HKEY_USERS, "S-1-5-21-1-2-3-1001");
+                key.state = SlotState::Acquiring; key.active = true; key.status = status;
+                key.handle = if null { null_mut() } else { 11usize as R::HKEY };
+                let mut trace = prerequisite_trace(PrerequisiteStage::Retirement, PrerequisiteCheck::K01);
+                assert_eq!(key.observe_open_return_traced(purpose, &mut trace), expected);
+                assert_eq!((key.status, key.state, key.active), (status, state, active));
+                if let Err(error) = expected {
+                    let first = prerequisite_first(&trace);
+                    assert_eq!((first.check, first.error), (PrerequisiteCheck::K01, error));
+                    assert_eq!(first.native, PrerequisiteNative::registry(PrerequisiteApi::RegOpenKeyExW, PrerequisiteSelector::None, status));
+                } else { assert!(trace.prerequisite.expect("enabled").first.is_none()); }
+                // No native close for a real NoHandle; Unknown still refuses.
+                // The inert Owned handle is never passed to any native API.
+                if state == SlotState::NoHandle { assert_eq!(key.close_traced(&mut trace), Ok(())); }
+                if state == SlotState::Unknown { assert_eq!(key.close_traced(&mut trace), Err(Error::Unknown)); }
+                assert_eq!((key.status, key.state, key.active), (status, state, active));
+            }
+        }
+        let mut wrong_root = Key::new(R::HKEY_LOCAL_MACHINE, "inert");
+        wrong_root.state = SlotState::Acquiring; wrong_root.active = true; wrong_root.status = F::ERROR_KEY_DELETED;
+        let mut trace = prerequisite_trace(PrerequisiteStage::Retirement, PrerequisiteCheck::K01);
+        assert_eq!(wrong_root.observe_open_return_traced(HiveUnload, &mut trace), Err(Error::Unavailable));
+        assert_eq!(wrong_root.close_traced(&mut trace), Ok(()));
+        let mut not_returned = Key::new(R::HKEY_USERS, "inert"); not_returned.status = F::ERROR_KEY_DELETED;
+        let mut trace = prerequisite_trace(PrerequisiteStage::Retirement, PrerequisiteCheck::K01);
+        assert_eq!(not_returned.observe_open_return_traced(HiveUnload, &mut trace), Err(Error::Unsafe));
+        assert_eq!((not_returned.state, not_returned.active), (SlotState::Reserved, false));
+        assert!(prerequisite_first(&trace).native.is_none());
+        Ok(())
+    }
+
     #[test]
     fn prerequisite_helper_decisions_preserve_native_control_flow() -> Result<()> {
+        hive_unload_original_return_cases()?;
         use PrerequisiteCheck as C; use PrerequisiteStage as G;
         let mut facts = prerequisite_created_process()?;
         let mut trace = prerequisite_trace(G::Launch, C::D04);
