@@ -577,7 +577,7 @@ def exact_test_result(stdout, stderr, name):
            "Exact singleton test did not pass once")
 
 
-def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, shell_provider=False):
+def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, shell_provider=False, android_data=False):
     """Bounded ELF DATA, including required/exported symbol-version labels.
 
     No binary, loader, ldd or readelf execution. The caller binds the actual
@@ -589,6 +589,8 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
     D.need(type(shell_provider) is bool and (not shell_provider or shell), "Provider role requires the shell ELF profile")
     D.need(shell_path is None or shell and type(shell_path) is str and Path(shell_path).is_absolute()
            and ".." not in Path(shell_path).parts, "Only the isolated shell profile has a requester path")
+    D.need(type(android_data) is bool and (not android_data or runtime_path is None and not shell
+           and shell_path is None and not shell_provider), "Separate Android ELF DATA inspection required")
 
     def unpack(fmt, offset):
         size = struct.calcsize(fmt)
@@ -599,6 +601,7 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
     D.need(ident[:7] == b"\x7fELF\x02\x01\x01" and kind in (2, 3) and machine == 62
            and version == 1 and ehsize == 64 and phsize == 56 and 0 < phnum <= 128,
            "Expected bounded ELF64 little-endian x86_64")
+    D.need(not android_data or ident[7] in (0, 3), "Android native DATA is not GNU/Linux ELF")
     D.need(not shell_provider or kind == 3, "Shell provider must be an ET_DYN shared object")
     headers = [unpack("<IIQQQQQQ", phoff + i * phsize) for i in range(phnum)]
     for p in headers:
@@ -629,8 +632,9 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
         if tag == 0:
             finished = True
             break
-        D.need(tag not in {15, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF}
-               and (tag != 29 or runtime_path is not None or shell_path in SHELL_RUNPATHS),
+        D.need(tag not in {0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF}
+               and (tag != 15 or android_data)
+               and (tag != 29 or android_data or runtime_path is not None or shell_path in SHELL_RUNPATHS),
                "ELF search/audit/filter override refused")
         tags.setdefault(tag, []).append(value)
     D.need(finished, "Unterminated ELF dynamic table")
@@ -646,9 +650,13 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
         # role instead; providers never become approved subprocess programs.
         flags = single(0x6FFFFFFB, True)  # DT_FLAGS_1
         D.need(flags is None or flags & 0x08000000 == 0, "Shell provider must not be a PIE executable")
+    if android_data:
+        flags = single(0x6FFFFFFB, True)
+        D.need(flags is None or flags & 0x800 == 0,  # DF_1_NODEFLIB changes cache/default selection.
+               "Android native DATA has an unsupported loader search flag")
 
     size = single(10)
-    D.need(0 < size <= (16 << 20 if shell else 2 << 20), "ELF string table bound")
+    D.need(0 < size <= (16 << 20 if shell or android_data else 2 << 20), "ELF string table bound")
     offset = address(single(5), size)
     strings = raw[offset:offset + size]
 
@@ -660,14 +668,14 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
 
     needed = [string(value) for value in tags.get(1, [])]
     allowed = set(SONAME_PACKAGES) | ({"libssl.so.3", "libcrypto.so.3"} if runtime_path is not None else set())
-    D.need(len(needed) <= (128 if shell else 32) and len(set(needed)) == len(needed)
+    D.need(len(needed) <= (128 if shell or android_data else 32) and len(set(needed)) == len(needed)
            and all((re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_+.-]{0,191}", name) is not None and ".so" in name)
-                   if shell else name in allowed for name in needed), "Unreviewed/duplicate native ELF dependency")
+                   if shell or android_data else name in allowed for name in needed), "Unreviewed/duplicate native ELF dependency")
     requirements, definitions = {}, []
     pointer, count = single(0x6FFFFFFE, True), single(0x6FFFFFFF, True)
     D.need((pointer is None) == (count is None), "Incomplete ELF version-needs")
     if pointer is not None:
-        D.need(0 < count <= (128 if shell else 32), "ELF version-need count")
+        D.need(0 < count <= (128 if shell or android_data else 32), "ELF version-need count")
         seen = set()
         for i in range(count):
             D.need(pointer not in seen, "ELF version-need cycle")
@@ -721,6 +729,13 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, sh
         D.need((result["soname"], string(runpath)) == SHELL_RUNPATHS[shell_path]
                and interpreter is None, "Fixed shell requester/SONAME/private RUNPATH differs")
         result["runpath"] = string(runpath)
+    elif android_data:
+        # Inspection only: the caller must compare every field with its exact
+        # source object and resolve paths in that launch's requester context.
+        # No old shell/A consumer receives permission to accept these tags.
+        for key, tag in (("rpath", 15), ("runpath", 29)):
+            index = single(tag, True)
+            result[key] = string(index) if index is not None else None
     return result
 
 
@@ -891,20 +906,64 @@ def artifact_record(path, *, copy_to=None):
 
 
 class Check:
-    def __init__(self, root, owner, *, deadline=None):
+    def __init__(self, root, owner, *, deadline=None, private=False):
         self.root, self.owner = root, owner
         self.end = time.monotonic() + 1200 if deadline is None else deadline
         self.retained = 0
         self.phase = "admission"
         self.commands = []
+        self.original_commands = []
         self.failed = False
+        D.need(type(private) is bool, "Compiler capture mode differs")
+        self.private = private
+        self.private_roots = {}
+        self.private_metadata = {"compiler": [], "material": []}
+
+    @property
+    def evidence_root(self):
+        return self._private_capture_root("compiler") if self.private else self.root / "public"
+
+    def _private_capture_root(self, role):
+        # Fixed task-owned sibling of disposable work, never an upload path.
+        D.need(role in {"compiler", "material"}, "Private capture role differs")
+        path = self.root / ("private-" + role)
+        if role not in self.private_roots:
+            path.mkdir(mode=0o700)
+            self.private_roots[role] = directory_identity(path)
+        D.need(directory_identity(path) == self.private_roots[role],
+               "Original private compiler capture directory changed")
+        return path
 
     def command(self, label, argv, env, cwd, *, timeout=600, codes=(0,), limit=LOG_LIMIT):
+        return self._command(label, argv, env, cwd, timeout=timeout, codes=codes, limit=limit,
+                             private="compiler" if self.private else None)
+
+    def private_command(self, label, argv, env, cwd, *, timeout=600, codes=(0,), limit=LOG_LIMIT):
+        """Same original owner/endpoint/latch; raw private inputs never exported."""
+        return self._command(label, argv, env, cwd, timeout=timeout, codes=codes, limit=limit, private="material")
+
+    def _command(self, label, argv, env, cwd, *, timeout, codes, limit, private):
         D.need(not self.failed, "Prior command failed; no further launch")
+        if private:
+            D.need(type(label) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", label) is not None,
+                   "Fixed private command evidence label differs")
         self.phase = label
         self.failed = True
         remaining = min(timeout, int(self.end - time.monotonic()))
         D.need(remaining >= 1, "Common publisher-check endpoint expired")
+        capture_root = self._private_capture_root(private) if private else self.root / "public"
+        request_pin = None
+        pending = {"phase": label, "exitCode": None, "timeoutSeconds": remaining, "ordinaryOwnerReturned": False}
+        if private:
+            request = {"phase": label, "argv": argv, "timeoutSeconds": remaining}
+            raw = D.canonical(request)
+            D.need(len(raw) <= 64 << 10 and self.retained + len(raw) <= LOG_TOTAL,
+                   "Private command request retention bound")
+            self.retained += len(raw)  # A partial write remains charged.
+            request_pin = D.write(capture_root / (label + ".request.json"), raw)
+            self.private_metadata[private].append(request_pin)
+            pending["privateRequest"] = {key: request_pin[key] for key in ("size", "sha256")}
+            self.commands.append(pending)
         print("Publisher check: " + label, flush=True)
         result = self.owner(argv, environ=env, cwd=cwd, timeout=remaining, capture=True, text=False, output_limit=limit)
         D.need(type(result) is subprocess.CompletedProcess and result.args == argv
@@ -913,10 +972,24 @@ class Check:
         size = len(result.stdout) + len(result.stderr)
         D.need(size <= limit and self.retained + size <= LOG_TOTAL, "Original command capture bound")
         self.retained += size
+        captures = {}
         for suffix, raw in (("stdout", result.stdout), ("stderr", result.stderr)):
-            D.write(self.root / "public" / (label + "." + suffix), raw)
-        self.commands.append({"phase": label, "argv": argv, "exitCode": result.returncode,
-                              "timeoutSeconds": remaining, "ordinaryOwnerReturned": True})
+            pin = D.write(capture_root / (label + "." + suffix), raw)
+            captures[suffix] = {key: pin[key] for key in ("size", "sha256")}
+        original = {"phase": label, "argv": argv, "exitCode": result.returncode,
+                    "timeoutSeconds": remaining, "ordinaryOwnerReturned": True}
+        self.original_commands.append(original)
+        if private:
+            D.need(directory_identity(capture_root) == self.private_roots[private], "Private capture directory changed during command")
+            raw = D.canonical({**original, "captures": captures})
+            D.need(len(raw) <= 128 << 10 and self.retained + len(raw) <= LOG_TOTAL, "Private result retention bound")
+            self.retained += len(raw)
+            result_pin = D.write(capture_root / (label + ".result.json"), raw)
+            self.private_metadata[private].append(result_pin)
+            pending.update(exitCode=result.returncode, ordinaryOwnerReturned=True, privateCaptures=captures,
+                           privateResult={key: result_pin[key] for key in ("size", "sha256")})
+        else:
+            self.commands.append(original)
         on_time = time.monotonic() < self.end
         D.need(result.returncode in codes and on_time, "Original command failed or finished late: " + label
                + f" (exitCode={result.returncode}, endpointExpired={not on_time})")
@@ -924,8 +997,412 @@ class Check:
         return result
 
 
-def failure_reason(error):
+def android_close_compiler_metadata(check):
+    """Coalesce only our redundant request/result DATA, not raw compiler output.
+
+    The original compiler already has ~1400 stream/record files. Preserve the
+    unchanged1536-file transport cap by retaining these new tiny metadata bodies
+    exactly in one private index after every original owner has returned. The
+    stdout/stderr files and complete original argv records remain untouched.
+    """
+    D.need(check.private and not check.failed and check.commands
+           and all(row["ordinaryOwnerReturned"] is True for row in check.commands),
+           "Private compiler metadata cannot close with an unsettled owner")
+    check.failed = True
+    root = check.evidence_root
+    original_root = directory_identity(root)
+    rows = check.private_metadata["compiler"]
+    D.need(0 < len(rows) <= 3072 and len({row["path"] for row in rows}) == len(rows),
+           "Private compiler command metadata roster differs")
+    documents, originals = [], {}
+    for row in rows:
+        name = row["path"]
+        D.need(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\.(request|result)\.json", name) is not None
+               and time.monotonic() < check.end, "Private compiler metadata member/endpoint differs")
+        path = root / name
+        item = path.lstat()
+        D.need(stat.S_IMODE(item.st_mode) == 0o600 and (item.st_uid, item.st_gid) == (os.getuid(), os.getgid())
+               and not os.listxattr(path, follow_symlinks=False), "Private compiler metadata owner/mode differs")
+        originals[name] = (*D.state(item), item.st_uid, item.st_gid)
+        D.bound(path, row)
+        raw = D.read(path, 128 << 10)
+        body = D.decode(raw, 128 << 10)
+        D.need(D.canonical(body) == raw, "Private compiler metadata is not its original canonical body")
+        documents.append({**row, "body": body})
+    raw = D.canonical({"schemaVersion": 1, "scope": "original-private-compiler-command-metadata-v1", "files": documents})
+    D.need(len(raw) <= SHELL_METADATA_LIMIT and check.retained + len(raw) <= LOG_TOTAL
+           and time.monotonic() < check.end, "Private compiler metadata retained-byte/endpoint bound")
+    check.retained += len(raw)  # Partial index/deletion failures never receive cleanup credit.
+    pin = D.write(root / "private-command-metadata.json", raw, 0o400)
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(directory_fd)
+        D.need((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid) == original_root,
+               "Private compiler metadata directory changed before retirement")
+        for row in rows:
+            name = row["path"]
+            item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            D.need(time.monotonic() < check.end and (*D.state(item), item.st_uid, item.st_gid) == originals[name]
+                   and directory_identity(root) == original_root, "Private compiler metadata original changed before retirement")
+            D.bound(root / name, row)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            D.need((*D.state(current), current.st_uid, current.st_gid) == originals[name],
+                   "Private compiler metadata changed during retirement readback")
+            os.unlink(name, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    D.need(directory_identity(root) == original_root and time.monotonic() < check.end
+           and all(not (root / row["path"]).exists() and not (root / row["path"]).is_symlink() for row in rows),
+           "Private compiler metadata retirement incomplete")
+    D.bound(root / pin["path"], pin)
+    check.failed = False
+    return pin
+
+
+def android_private_pin(row):
+    """An explicit content-only public projection, never a private pathname."""
+    D.need(type(row) is dict and type(row.get("size")) is int and 0 <= row["size"] <= MAX_BINARY,
+           "Private Android record size differs")
+    return {"size": row["size"], "sha256": D.sha(row.get("sha256"))}
+
+
+def android_public_profile(preparation):
+    """Only the accepted profile identifiers, content pins and finite counts."""
+    materials, publication = preparation["materials"], preparation["publication"]
+    D.need(type(materials) is dict and set(materials) == {"instance", "manifestSha256", "osContractSha256", "distributionSha256"}
+           and type(materials["instance"]) is str and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", materials["instance"]) is not None,
+           "Public Android profile identifiers differ")
+    selectors = {"instance": materials["instance"], **{key: D.sha(materials[key])
+        for key in ("manifestSha256", "osContractSha256", "distributionSha256")}}
+    D.need(type(publication) is dict and set(publication) == {"documents", "totals"}
+           and type(publication["documents"]) is dict and set(publication["documents"]) == {"manifest", "osContract", "sources"},
+           "Public Android profile document roster differs")
+    documents = {key: android_private_pin(publication["documents"][key]) for key in ("manifest", "osContract", "sources")}
+    D.need(documents["manifest"]["sha256"] == selectors["manifestSha256"]
+           and documents["osContract"]["sha256"] == selectors["osContractSha256"], "Public Android profile anchors differ")
+    totals = publication["totals"]
+    D.need(type(totals) is dict and set(totals) == {"toolFiles", "toolDirectories", "toolBytes", "osFiles", "osAliases", "osBytes"}
+           and all(type(value) is int and value >= 0 for value in totals.values())
+           and 0 < totals["toolFiles"] <= 16384 and 0 < totals["toolDirectories"]
+           and totals["toolFiles"] + totals["toolDirectories"] + 1 <= 32768
+           and 0 < totals["osFiles"] <= 256 and totals["osAliases"] <= 128
+           and 0 < totals["toolBytes"] + totals["osBytes"] <= 1 << 30, "Public Android profile totals differ")
+    return {"materials": selectors, "publication": {"documents": documents, "totals": dict(totals)},
+            "policySha256": D.sha(preparation["provenance"]["policySha256"])}
+
+
+def android_compiler_public_summary(compiler, result, preparation, records, commands):
+    """Public DATA is not a replacement for complete original private records."""
+    identity = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}
+    D.need(all(type(identity[key]) is str and re.fullmatch(r"[0-9a-f]{40}", identity[key]) is not None
+               for key in ("sourceSha", "sourceTree"))
+           and all(type(identity[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", identity[key]) is not None
+                   for key in ("runId", "attempt"))
+           and all(result[key] == identity[key] for key in identity), "Private Android compiler identity differs")
+    D.need(compiler["features"] == result["features"] == SHELL_FEATURES
+           and result["compilations"] == ["normal", "observer"]
+           and type(result["cargoBuilds"]) is int and result["cargoBuilds"] == 1
+           and type(result["frontendBuilds"]) is int and result["frontendBuilds"] == 1
+           and all(result[key] is False for key in ("shellExecuted", "observerExecuted", "supplierRebuilt", "packageBuilt", "helper11Rerun", "qualified"))
+           and D.same(result["compilerCleanup"], SHELL_CLEANUP_SUCCESS), "Private Android compiler result is not closed")
+    projected_commands = []
+    for row in commands:
+        D.need(type(row) is dict and set(row) == {"phase", "exitCode", "timeoutSeconds", "ordinaryOwnerReturned",
+                 "privateRequest", "privateCaptures", "privateResult"}
+               and type(row["phase"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", row["phase"]) is not None
+               and type(row["exitCode"]) is int and type(row["timeoutSeconds"]) is int and 0 < row["timeoutSeconds"] <= 1200
+               and row["ordinaryOwnerReturned"] is True and set(row["privateCaptures"]) == {"stdout", "stderr"},
+               "Private Android command summary is not closed")
+        projected_commands.append({**{key: row[key] for key in ("phase", "exitCode", "timeoutSeconds", "ordinaryOwnerReturned")},
+            "privateRequest": android_private_pin(row["privateRequest"]), "privateResult": android_private_pin(row["privateResult"]),
+            "privateCaptures": {key: android_private_pin(row["privateCaptures"][key]) for key in ("stdout", "stderr")}})
+    D.need(0 < len(projected_commands) <= 1536 and set(compiler["exportedArtifacts"]) == set(SHELL_EXPORTS),
+           "Private Android compiler command/output roster differs")
+    return {"schemaVersion": 1, "scope": "android-same-job-private-compiler-summary-v1", **identity,
+            "features": list(SHELL_FEATURES), "compilations": ["normal", "observer"], "cargoBuilds": 1, "frontendBuilds": 1,
+            "androidProfile": android_public_profile(preparation),
+            "outputs": {role: {"path": name, **android_private_pin(compiler["exportedArtifacts"][role])}
+                        for role, name in SHELL_EXPORTS.items()},
+            "privateRecords": {name: android_private_pin(records[name])
+                               for name in ("compiler.json", "source.json", "result.json", "shell-roster.json")},
+            "commands": projected_commands, "compilerCleanup": dict(SHELL_CLEANUP_SUCCESS),
+            "shellExecuted": False, "observerExecuted": False, "packageBuilt": False,
+            "crossJobReusePermitted": False, "qualified": False}
+
+
+def android_original_context(root, source_sha, source_tree):
+    """The existing compiler preparation, not an environment-selected file."""
+    run, attempt, job = (os.environ[name] for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB"))
+    D.need(all(re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in (run, attempt))
+           and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job) is not None
+           and all(type(item) is str and re.fullmatch(r"[0-9a-f]{40}", item) is not None for item in (source_sha, source_tree))
+           and root.name == "mrk-desktop-ubuntu-publisher-" + run + "-" + attempt + "-compile"
+           and root.parent == Path(os.environ["RUNNER_TEMP"]),
+           "Android original compiler namespace/source differs")
+    path = root / "preparation.json"
+    pin = {**D.file_record(path, 16384), "path": str(path)}
+    original = D.decode(D.read(path, 16384), 16384)
+    D.need(type(original) is dict and set(original) == {"sourceSha", "runId", "attempt", "source", "root", "deadline",
+           "runnerUid", "runnerGid", "rootIdentity", "workIdentity", "shellCase", "job"}
+           and (original["sourceSha"], original["runId"], original["attempt"], original["job"], original["shellCase"])
+               == (source_sha, run, attempt, job, "compile")
+           and original["root"] == str(root) and original["rootIdentity"] == list(directory_identity(root))
+           and original["source"] == str(SOURCE) and type(original["deadline"]) is str
+           and re.fullmatch(r"[0-9]+\.[0-9]+", original["deadline"]) is not None
+           and original["runnerUid"] == os.getuid() and original["runnerGid"] == os.getgid(),
+           "Android original preparation/source/owner changed")
+    if (root / "work").exists() or (root / "work").is_symlink():
+        D.need(original["workIdentity"] == list(directory_identity(root / "work")), "Android original compiler work changed")
+    D.bound(path, pin)
+    return {"sourceCommit": source_sha, "sourceTree": source_tree, "runId": run, "runAttempt": attempt,
+            "job": job, "preparation": pin}
+
+
+def android_local_transport_record(root, compiler, preparation, roster):
+    """Closed same-job authority; there is deliberately no Actions artifact ID."""
+    context = android_original_context(root, compiler["sourceSha"], compiler["sourceTree"])
+    material = root.parent / ("mrk-android-material-" + context["runId"] + "-" + context["runAttempt"])
+    D.need(preparation["materialRoot"] == str(material)
+           and compiler["runId"] == context["runId"] and compiler["attempt"] == context["runAttempt"]
+           and compiler["androidBuildMaterials"] == preparation["materials"]
+           and compiler["androidBuildPublication"] == preparation["publication"], "Android compiler/material context differs")
+    evidence = root / "private-compiler"
+    D.bound(evidence / "shell-roster.json", roster)
+    prepared = material / "private/prepared.json"
+    return {"schemaVersion": 1, "kind": "android-same-job-local-v1", "context": context,
+            "compilerRoot": {"path": str(root), "identity": list(directory_identity(root))},
+            "compilerEvidence": {"path": str(evidence), "identity": list(directory_identity(evidence))},
+            "materialRoot": {"path": str(material), "identity": list(directory_identity(material))},
+            "compilerRoster": {"path": str(evidence / "shell-roster.json"), **android_private_pin(roster)},
+            "materialRecord": {**D.file_record(prepared, 64 << 10), "path": str(prepared)}}
+
+
+def android_local_transport_context(transport, *, compiler_root, source_sha, source_tree):
+    """Refuse other attempts/jobs before any destination creation or copying."""
+    D.need(type(transport) is dict and set(transport) == {"schemaVersion", "kind", "context", "compilerRoot",
+           "compilerEvidence", "materialRoot", "compilerRoster", "materialRecord"}
+           and type(transport["schemaVersion"]) is int and transport["schemaVersion"] == 1
+           and transport["kind"] == "android-same-job-local-v1", "Android local transport schema differs")
+    context = android_original_context(compiler_root, source_sha, source_tree)
+    D.need(D.same(transport["context"], context), "Android local transport changed source/run/attempt/job/preparation")
+    material = compiler_root.parent / ("mrk-android-material-" + context["runId"] + "-" + context["runAttempt"])
+    for key, path in (("compilerRoot", compiler_root), ("compilerEvidence", compiler_root / "private-compiler"),
+                      ("materialRoot", material)):
+        D.need(type(transport[key]) is dict and set(transport[key]) == {"path", "identity"}
+               and transport[key]["path"] == str(path) and transport[key]["identity"] == list(directory_identity(path)),
+               "Android local transport original directory changed")
+    for key, path, limit in (("compilerRoster", compiler_root / "private-compiler/shell-roster.json", SHELL_ROSTER_LIMIT),
+                             ("materialRecord", material / "private/prepared.json", 64 << 10)):
+        pin = transport[key]
+        D.need(type(pin) is dict and set(pin) == {"path", "size", "sha256"} and pin["path"] == str(path)
+               and type(pin["size"]) is int and 0 < pin["size"] <= limit, "Android local transport fixed reference differs")
+        D.bound(path, pin)
+    return context
+
+
+def android_private_inventory(root, files, directories, *, role, executable, deadline, copied=False):
+    """Android-only finite tree check; the ordinary 8192-entry reader is unchanged.
+
+    D.copy hashes each source/readback; android_copy_private_tree also rechecks
+    all original and destination bodies after the transfer. This retains node
+    identities separately and refuses extra/empty directories rather than
+    adopting them. Metadata identity alone is not proof of file contents.
+    """
+    wanted = set(files) | set(directories)
+    originals, pending, seen, pairs = {}, [(root, "")], set(), set()
+    device = root.lstat().st_dev
+    while pending:
+        path, name = pending.pop()
+        D.need(time.monotonic() < deadline, "Android private inventory endpoint expired")
+        info = path.lstat()
+        D.need(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+               and (info.st_uid, info.st_gid) == (os.getuid(), os.getgid()) and info.st_dev == device
+               and not os.listxattr(path, follow_symlinks=False), "Android private directory custody differs")
+        originals[name] = (*D.state(info), info.st_uid, info.st_gid)
+        with os.scandir(path) as children:
+            for child in children:
+                relative = child.name if not name else name + "/" + child.name
+                D.need(relative in wanted and relative not in seen and len(seen) < len(wanted),
+                       "Android private tree has an extra or duplicated member")
+                seen.add(relative)
+                member = path / child.name
+                value = member.lstat()
+                if relative in directories:
+                    D.need(stat.S_ISDIR(value.st_mode), "Android private directory was replaced")
+                    pending.append((member, relative))
+                    continue
+                mode = stat.S_IMODE(value.st_mode)
+                allowed = ({0o500} if relative in executable else {0o400}) if copied or role == "material" else (
+                    {0o555} if relative in executable else {0o400, 0o600})
+                pair = (value.st_dev, value.st_ino)
+                D.need(stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and mode in allowed
+                       and (value.st_uid, value.st_gid) == (os.getuid(), os.getgid()) and value.st_dev == device
+                       and value.st_size == files[relative]["size"] and pair not in pairs
+                       and not os.listxattr(member, follow_symlinks=False), "Android private file custody differs")
+                pairs.add(pair)
+                originals[relative] = (*D.state(value), value.st_uid, value.st_gid)
+    D.need(seen == wanted, "Android private tree is missing an admitted member")
+    return originals
+
+
+def android_copy_private_tree(source, target, rows, directories, *, deadline, role, executable=()):
+    """One bounded fresh same-job transfer; no ordinary cap change or adoption."""
+    D.need(role in {"shell", "material"} and type(deadline) in {int, float} and math.isfinite(deadline),
+           "Android private transfer role/endpoint differs")
+    file_limit, entry_limit, byte_limit = ((1536, 8192, 1536 << 20) if role == "shell" else (16384, 32768, 1 << 30))
+    D.need(type(rows) is list and 0 < len(rows) <= file_limit and type(directories) is list
+           and len(rows) + len(directories) + 1 <= entry_limit, "Android private transfer entry bound")
+    files = D.records(rows)
+    required_directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    D.need(directories == sorted(required_directories, key=lambda name: (name.count("/"), name))
+           and set(executable) <= set(files), "Android private transfer order/roles differ")
+    wanted = set(files) | set(directories)
+    D.need(not set(files).intersection(directories)
+           and all(len(name.split("/")) <= 16 for name in wanted)
+           and len({name.casefold() for name in wanted}) == len(wanted), "Android private transfer namespace collision")
+    required = sum(row["size"] for row in rows)
+    D.need(required <= byte_limit and all(row["size"] <= MAX_BINARY for row in rows), "Android private transfer byte bound")
+    source_id, parent_id = directory_identity(source), directory_identity(target.parent)
+    parents = {path: shell_directory_identity(path) for path in {*source.parents, *target.parents}}
+    originals = android_private_inventory(source, files, directories, role=role, executable=executable, deadline=deadline)
+    fs = os.statvfs(target.parent)
+    D.need(time.monotonic() < deadline and fs.f_bavail * fs.f_frsize >= required + (len(wanted) + 1) * fs.f_frsize
+           and fs.f_favail >= len(wanted) + 1, "Android private transfer lacks simultaneous byte/inode capacity")
+    target.mkdir(mode=0o700)
+    target_id = directory_identity(target)
+    targets = {target: target_id}
+    for name in directories:
+        D.need(time.monotonic() < deadline, "Android private transfer endpoint expired")
+        destination = target / name
+        for parent in (destination.parent, *destination.parents):
+            if parent in targets:
+                D.need(directory_identity(parent) == targets[parent], "Android private destination directory changed")
+        destination.mkdir(mode=0o700)
+        targets[destination] = directory_identity(destination)
+    pairs, copied_originals = {row[:2] for row in originals.values()}, {}
+    for name, row in files.items():
+        D.need(time.monotonic() < deadline and directory_identity(source) == source_id
+               and directory_identity(target.parent) == parent_id and directory_identity(target) == target_id,
+               "Android private transfer original changed")
+        for parent in ((source / name).parent, *(source / name).parents):
+            if parent == source or parent.is_relative_to(source):
+                key = "" if parent == source else parent.relative_to(source).as_posix()
+                item = parent.lstat()
+                D.need((*D.state(item), item.st_uid, item.st_gid) == originals[key], "Android private source directory changed")
+            elif parent in parents:
+                D.need(shell_directory_identity(parent) == parents[parent], "Android private source ancestry changed")
+        for parent in ((target / name).parent, *(target / name).parents):
+            expected = targets.get(parent, parents.get(parent))
+            D.need(expected is not None and shell_directory_identity(parent) == expected,
+                   "Android private destination ancestry changed")
+        item = (source / name).lstat()
+        D.need((*D.state(item), item.st_uid, item.st_gid) == originals[name], "Android private source file changed")
+        D.copy(source / name, target / name, row, 0o500 if name in executable else 0o400)
+        item = (target / name).lstat()
+        pair = (item.st_dev, item.st_ino)
+        D.need(item.st_uid == os.getuid() and item.st_gid == os.getgid() and item.st_nlink == 1
+               and pair not in pairs, "Android private copy is not a fresh original")
+        pairs.add(pair)
+        copied_originals[name] = (*D.state(item), item.st_uid, item.st_gid)
+    for name, row in files.items():
+        D.need(time.monotonic() < deadline, "Android private transfer endpoint expired")
+        D.bound(source / name, row)
+        D.bound(target / name, row)
+    after = android_private_inventory(source, files, directories, role=role, executable=executable, deadline=deadline)
+    final = android_private_inventory(target, files, directories, role=role, executable=executable, deadline=deadline, copied=True)
+    D.need(after == originals and directory_identity(source) == source_id and directory_identity(target.parent) == parent_id
+           and all(final[name] == original for name, original in copied_originals.items())
+           and all(shell_directory_identity(path) == item for path, item in {**parents, **targets}.items())
+           and time.monotonic() < deadline, "Android private transfer changed or completed late")
+    return {"source": str(source), "sourceIdentity": list(source_id), "target": str(target),
+            "targetIdentity": list(target_id), "files": len(rows), "directories": len(directories),
+            "bytes": required, "freshCopies": True}
+
+
+def android_stage_local_inputs(check, sha, lifecycle):
+    """Bounded same-job copies into the existing native task, never an artifact."""
+    check.phase = "android-local-inputs"
+    D.need(not check.failed and os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+           and not os.environ.get("MRK_INSTALLED_SHELL_ARTIFACT_ID"), "Android private transport cannot use Actions compiler artifacts")
+    check.failed = True
+    run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
+    root = check.root.parent / ("mrk-desktop-ubuntu-publisher-" + run + "-" + attempt + "-compile")
+    transport_path = root / "android-local-transport.json"
+    raw = D.read(transport_path, 64 << 10)
+    D.need(hashlib.sha256(raw).hexdigest() == D.sha(os.environ.get("MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256")),
+           "Android original local transport bytes differ")
+    transport = D.decode(raw, 64 << 10)
+    context = android_local_transport_context(transport, compiler_root=root, source_sha=sha,
+                                              source_tree=transport["context"]["sourceTree"])
+    material_root = Path(transport["materialRoot"]["path"])
+    pin = transport["materialRecord"]
+    material = D.decode(D.read(Path(pin["path"]), pin["size"]), 64 << 10)
+    host_pin = material["provenance"]["documents"]["host"]
+    D.need(type(host_pin) is dict and set(host_pin) == {"path", "size", "sha256"} and host_pin["path"] == "host.json"
+           and type(host_pin["size"]) is int and 0 < host_pin["size"] <= 32 << 20, "Android original private host reference differs")
+    host_path = material_root / "private/host.json"
+    D.bound(host_path, host_pin)
+    host = D.decode(D.read(host_path, host_pin["size"]), 32 << 20)
+    engine = local("android_material_preparation")
+    material = engine.read_record(Path(pin["path"]), android_private_pin(pin), context=context, host=host, deadline=check.end)
+    lifecycle.bind_shell_android_profile(material["materials"], material["publication"])
+    documents = {key: D.read(material_root / name, lifecycle.SHELL_ANDROID_DOCUMENT_LIMITS[key])
+                 for key, name in lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.items()}
+    plan = lifecycle._android_publication_plan(documents)
+    roster_pin = transport["compilerRoster"]
+    D.need(roster_pin["sha256"] == D.sha(os.environ.get("MRK_INSTALLED_SHELL_ROSTER_SHA256"))
+           and os.environ.get("MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT") == attempt,
+           "Android local compiler roster/attempt output differs")
+    roster = D.decode(D.read(Path(roster_pin["path"]), SHELL_ROSTER_LIMIT), SHELL_ROSTER_LIMIT)
+    rows = sorted([*roster["files"], {"path": "shell-roster.json", **android_private_pin(roster_pin)}], key=lambda row: row["path"])
+    files = D.records(rows)
+    shell_directories = sorted({str(parent) for name in files for parent in Path(name).parents if str(parent) != "."},
+                               key=lambda name: (name.count("/"), name))
+    work = check.root / "work"
+    total_bytes = sum(row["size"] for row in rows) + plan["totals"]["toolBytes"] + sum(len(body) for body in documents.values())
+    entries = len(rows) + len(shell_directories) + plan["totals"]["toolFiles"] + plan["totals"]["toolDirectories"] + 6
+    space = os.statvfs(work)
+    D.need(time.monotonic() < check.end and space.f_bavail * space.f_frsize >= total_bytes + entries * space.f_frsize
+           and space.f_favail >= entries, "Android complete simultaneous native copies lack capacity")
+    shell_copy = android_copy_private_tree(root / "private-compiler", work / "admitted-shell", rows, shell_directories,
+        deadline=check.end, role="shell", executable=tuple(SHELL_EXPORTS.values()))
+    admitted = work / "admitted-android"
+    admitted.mkdir(mode=0o700)
+    admitted_identity = directory_identity(admitted)
+    copied_documents = {}
+    for key, name in lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.items():
+        D.need(time.monotonic() < check.end and directory_identity(admitted) == admitted_identity,
+               "Android local document destination changed or expired")
+        D.copy(material_root / name, admitted / name, {"path": name, **plan["documents"][key]}, 0o400)
+        item = (admitted / name).lstat()
+        copied_documents[name] = (*D.state(item), item.st_uid, item.st_gid)
+    tool_rows = [{key: row[key] for key in ("path", "size", "sha256")} for row in plan["files"]]
+    tool_copy = android_copy_private_tree(material_root / "tools", admitted / "tools", tool_rows, plan["directories"],
+        deadline=check.end, role="material", executable=tuple(row["path"] for row in plan["files"] if row["mode"] & 0o111))
+    D.need({path.name for path in admitted.iterdir()} == {"tools", *lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.values()}
+           and directory_identity(admitted) == admitted_identity, "Android local material has extra/changed members")
+    for key, name in lifecycle.SHELL_ANDROID_DOCUMENT_NAMES.items():
+        D.bound(admitted / name, {"path": name, **plan["documents"][key]})
+        item = (admitted / name).lstat()
+        D.need((*D.state(item), item.st_uid, item.st_gid) == copied_documents[name], "Android copied document original changed")
+    engine.validate(material, context=context, host=host, deadline=check.end)
+    android_local_transport_context(transport, compiler_root=root, source_sha=sha, source_tree=context["sourceTree"])
+    D.write(check.evidence_root / "android-local-copy.json", D.canonical({"transport": transport,
+        "shellCopy": shell_copy, "materialCopy": tool_copy, "qualified": False}), 0o400)
+    check.failed = False
+    return transport, material
+
+
+def failure_reason(error, *, private=False):
     """Only source-labelled invariant text; never arbitrary exception bodies."""
+    if private:
+        # Even a source-owned Refused can include a private path. Public output
+        # keeps only this fixed taxonomy; original messages remain task-private.
+        if isinstance(error, OSError):
+            return "private-filesystem-error"
+        if isinstance(error, (ValueError, KeyError, TypeError)):
+            return "private-input-refused"
+        return "private-operation-refused"
     if (type(error) in (D.Refused, C.CheckFailure)
             or type(error).__module__.startswith(("_publisher_", "_deb_"))
             and type(error).__name__ in {"Refused", "PreparationError", "SmokeRefused"}):
@@ -937,18 +1414,29 @@ def failure_reason(error):
     return type(error).__name__
 
 
-def retain_failure(root, phase, commands, error):
+def retain_failure(root, phase, commands, error, *, private=False):
     # Diagnostic retention must not replace the original failure or launch any
     # follow-up process. Never inspect a possibly-live privileged service tree.
-    reason = failure_reason(error)
+    reason = failure_reason(error, private=private)
+    if private:
+        phase = phase if type(phase) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", phase) else "private-android"
+        # Never trust a caller-supplied command dictionary as a public serializer.
+        # Complete originals have already been retained in the private role roots.
+        commands = [{"phase": row["phase"], "ordinaryOwnerReturned": row.get("ordinaryOwnerReturned") is True,
+                     "exitCode": row.get("exitCode") if type(row.get("exitCode")) is int else None}
+                    for row in commands if type(row) is dict and type(row.get("phase")) is str
+                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", row["phase"])]
     print("Publisher check refused in " + phase + ": " + reason, file=sys.stderr, flush=True)
     try:
         directory_identity(root)
         directory_identity(root / "public")
         D.write(root / "public/failure.json", D.canonical({"phase": phase, "reason": reason, "commands": commands,
                 "qualified": False, "partialOutputsMayRemain": True, "cleanupEstablished": False}))
+        if private:
+            D.write(root / "private-failure.json", D.canonical({"phase": phase, "errorType": type(error).__name__,
+                "reason": str(error)[:4096], "qualified": False, "cleanupEstablished": False}))
     except Exception as diagnostic_error:
-        print("Publisher failure evidence could not be retained: " + failure_reason(diagnostic_error), file=sys.stderr, flush=True)
+        print("Publisher failure evidence could not be retained: " + failure_reason(diagnostic_error, private=private), file=sys.stderr, flush=True)
 
 
 def hosted_paths():
@@ -1719,8 +2207,126 @@ def installed_candidate(work, sha):
     return {**rows["candidate"], "path": str(artifact / "candidate")}, compiler, graph, digest, producer_attempt, artifact_id
 
 
-def installed_shell_candidate(work, sha):
+def android_original_command_records(artifact, rows, result, transport, *, deadline):
+    """Validate all original argv/status/capture DATA in its retained role root.
+
+    Compiler request/result bodies are coalesced, never rewritten. Material
+    capture files stay private in the original compiler task on the same VM.
+    No original command is inferred from a phase prefix or rerun here.
+    """
+    D.need(type(deadline) in {int, float} and math.isfinite(deadline) and time.monotonic() < deadline,
+           "Android original command validation endpoint differs")
+    metadata_pin = result.get("privateCommandMetadata")
+    D.need(type(metadata_pin) is dict and metadata_pin.get("path") == "private-command-metadata.json"
+           and metadata_pin == rows.get("private-command-metadata.json"), "Android complete private command index is missing")
+    D.bound(artifact / "private-command-metadata.json", metadata_pin)
+    index = D.decode(D.read(artifact / "private-command-metadata.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
+    D.need(type(index) is dict and set(index) == {"schemaVersion", "scope", "files"} and type(index["schemaVersion"]) is int
+           and index["schemaVersion"] == 1 and index["scope"] == "original-private-compiler-command-metadata-v1"
+           and type(index["files"]) is list and 0 < len(index["files"]) <= 3072,
+           "Android original private command index shape differs")
+    metadata = {}
+    for row in index["files"]:
+        D.need(type(row) is dict and set(row) == {"path", "size", "sha256", "body"}
+               and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}\.(request|result)\.json", row["path"]) is not None
+               and row["path"] not in metadata, "Android original command index member differs")
+        body = D.canonical(row["body"])
+        D.need(len(body) == row["size"] and hashlib.sha256(body).hexdigest() == row["sha256"],
+               "Android original command body was not preserved")
+        metadata[row["path"]] = row["body"]
+    # Roles originate in the two fixed capture roots, not a label prefix.
+    roles = result.get("privateCommandRoles")
+    D.need(type(roles) is dict and set(roles) == {"compiler", "material"}
+           and all(type(values) is list and all(type(phase) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}", phase)
+                   for phase in values) and len(values) == len(set(values)) for values in roles.values())
+           and type(result["commands"]) is list and 0 < len(result["commands"]) <= 1536
+           and all(type(row) is dict and set(row) == {"phase", "argv", "exitCode", "timeoutSeconds", "ordinaryOwnerReturned"}
+                   and type(row["exitCode"]) is int and row["exitCode"] == 0 and row["ordinaryOwnerReturned"] is True
+                   and type(row["timeoutSeconds"]) is int and 0 < row["timeoutSeconds"] <= 1200
+                   and type(row["argv"]) is list and 0 < len(row["argv"]) <= 256
+                   and all(type(arg) is str and "\0" not in arg for arg in row["argv"])
+                   for row in result["commands"])
+           and len({row["phase"] for row in result["commands"]}) == len(result["commands"])
+           and not set(roles["compiler"]).intersection(roles["material"])
+           and set(roles["compiler"]) | set(roles["material"]) == {row["phase"] for row in result["commands"]},
+           "Android original command role roster differs")
+    roots = result.get("privateCaptureRoots")
+    D.need(type(roots) is dict and set(roots) == {role for role in roles if roles[role]}
+           and roots.get("compiler") == transport["compilerEvidence"]["identity"],
+           "Android original command capture-root roster differs")
+    originals = {}
+    for role, original in roots.items():
+        path = Path(transport["compilerRoot"]["path"]) / ("private-" + role)
+        D.need(type(original) is list and len(original) == 5 and all(type(item) is int for item in original)
+               and list(directory_identity(path)) == original, "Android original command capture root changed")
+        originals[path] = original
+    compiler_commands = [row for row in result["commands"] if row["phase"] in roles["compiler"]]
+    D.need(set(metadata) == {row["phase"] + suffix for row in compiler_commands for suffix in (".request.json", ".result.json")},
+           "Android private compiler command index is incomplete")
+    for command in compiler_commands:
+        phase = command["phase"]
+        D.need(metadata[phase + ".request.json"] == {key: command[key] for key in ("phase", "argv", "timeoutSeconds")}
+               and metadata[phase + ".result.json"] == {**command, "captures": {
+                   suffix: {key: rows[phase + "." + suffix][key] for key in ("size", "sha256")}
+                   for suffix in ("stdout", "stderr")}}, "Android private original argv/stream/result correspondence differs")
+    # Material request/result bodies and captures remain in the SAME
+    # original compiler task, not an Actions artifact or the public roster.
+    material_pins = result.get("privateMaterialMetadata")
+    D.need(type(material_pins) is list and len(material_pins) == 2 * len(roles["material"])
+           and all(type(row) is dict and set(row) == {"path", "size", "sha256"}
+                   and type(row["path"]) is str for row in material_pins),
+           "Android private material command index is incomplete")
+    material_index = {row["path"]: row for row in material_pins}
+    D.need(len(material_index) == len(material_pins)
+           and set(material_index) == {phase + suffix for phase in roles["material"] for suffix in (".request.json", ".result.json")},
+           "Android private material command role correspondence differs")
+    material_root = Path(transport["compilerRoot"]["path"]) / "private-material"
+    material_files = dict(material_index)
+    for command in (row for row in result["commands"] if row["phase"] in roles["material"]):
+        D.need(time.monotonic() < deadline, "Android original material metadata validation was late")
+        phase, documents = command["phase"], {}
+        for suffix in ("request", "result"):
+            row = material_index[phase + "." + suffix + ".json"]
+            D.need(set(row) == {"path", "size", "sha256"} and type(row["size"]) is int
+                   and 0 < row["size"] <= (64 << 10 if suffix == "request" else 128 << 10),
+                   "Android private material metadata bound differs")
+            D.bound(material_root / row["path"], row)
+            documents[suffix] = D.decode(D.read(material_root / row["path"], row["size"]), 128 << 10)
+        captures = documents["result"].get("captures")
+        D.need(type(captures) is dict and set(captures) == {"stdout", "stderr"},
+               "Android original material capture roster differs")
+        for suffix, pin in captures.items():
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"}
+                   and type(pin["size"]) is int and 0 <= pin["size"] <= LOG_LIMIT,
+                   "Android original material capture bound differs")
+            row = {"path": phase + "." + suffix, **android_private_pin(pin)}
+            D.bound(material_root / row["path"], row)
+            material_files[row["path"]] = row
+        D.need(documents["request"] == {key: command[key] for key in ("phase", "argv", "timeoutSeconds")}
+               and documents["result"] == {**command, "captures": captures},
+               "Android original material argv/capture/result correspondence differs")
+    if material_files:
+        D.need(sum(row["size"] for row in material_files.values()) <= LOG_TOTAL,
+               "Android original material capture retained-byte bound differs")
+        before = android_private_inventory(material_root, material_files, [], role="shell", executable=(), deadline=deadline)
+        for row in material_files.values():
+            D.need(time.monotonic() < deadline, "Android original material capture validation was late")
+            D.bound(material_root / row["path"], row)
+        D.need(android_private_inventory(material_root, material_files, [], role="shell", executable=(), deadline=deadline) == before,
+               "Android original material capture identity changed during validation")
+    D.need(time.monotonic() < deadline and all(list(directory_identity(path)) == original for path, original in originals.items()),
+           "Android original command capture root changed or validation was late")
+
+
+def installed_shell_candidate(work, sha, *, lifecycle=None, local_transport=None, deadline=None, github=False):
     """Admit both exact original shell outputs, including failed-job-only reuse."""
+    lifecycle = local("ubuntu_publication_lifecycle") if lifecycle is None else lifecycle
+    D.need(type(github) is bool and (not github or local_transport is None
+           and os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)),
+           "GitHub shell candidate requires its fixed artifact-only route")
+    android_materials = None if github else lifecycle.shell_android_materials()
+    android_bindings = {} if github else lifecycle.shell_android_compile_environment()
+    android_publication = None if github else lifecycle.shell_android_publication_data()
     artifact = work / "admitted-shell"
     raw = D.read(artifact / "shell-roster.json", SHELL_ROSTER_LIMIT)
     digest = D.sha(os.environ.get("MRK_INSTALLED_SHELL_ROSTER_SHA256"))
@@ -1728,10 +2334,19 @@ def installed_shell_candidate(work, sha):
     roster = D.decode(raw, SHELL_ROSTER_LIMIT)
     producer_attempt = os.environ.get("MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT", "")
     artifact_id = os.environ.get("MRK_INSTALLED_SHELL_ARTIFACT_ID", "")
-    D.need(re.fullmatch(r"[1-9][0-9]{0,19}", producer_attempt) is not None
-           and re.fullmatch(r"[1-9][0-9]{0,19}", artifact_id) is not None
-           and int(producer_attempt) <= int(os.environ["GITHUB_RUN_ATTEMPT"]),
-           "Original shell producer attempt/artifact identity differs")
+    if local_transport is None:
+        D.need(re.fullmatch(r"[1-9][0-9]{0,19}", producer_attempt) is not None
+               and re.fullmatch(r"[1-9][0-9]{0,19}", artifact_id) is not None
+               and int(producer_attempt) <= int(os.environ["GITHUB_RUN_ATTEMPT"]),
+               "Original shell producer attempt/artifact identity differs")
+    else:
+        D.need(not artifact_id and producer_attempt == os.environ["GITHUB_RUN_ATTEMPT"]
+               and local_transport["compilerRoster"]["sha256"] == digest,
+               "Android same-job candidate cannot adopt artifact/cross-attempt compiler output")
+        android_local_transport_context(local_transport, compiler_root=work.parent.parent /
+            ("mrk-desktop-ubuntu-publisher-" + os.environ["GITHUB_RUN_ID"] + "-" + producer_attempt + "-compile"),
+            source_sha=sha, source_tree=roster["sourceTree"])
+        artifact_id = None
     D.need(type(roster) is dict and set(roster) == {"sourceSha", "sourceTree", "runId", "attempt", "files"}
            and (roster["sourceSha"], roster["runId"], roster["attempt"])
                == (sha, os.environ["GITHUB_RUN_ID"], producer_attempt)
@@ -1747,6 +2362,12 @@ def installed_shell_candidate(work, sha):
     compiler = D.decode(D.read(artifact / "compiler.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
     source_record = D.decode(D.read(artifact / "source.json", 1 << 20), 1 << 20)
     result = D.decode(D.read(artifact / "result.json", 1 << 20), 1 << 20)
+    if local_transport is not None:
+        D.need(all(row.get("androidPreparation") == local_transport["materialRecord"] for row in (compiler, result))
+               and compiler.get("androidOsContractInput") == result.get("androidOsContractInput")
+               and compiler["androidOsContractInput"] == {"path": str(Path(local_transport["materialRoot"]["path"]) / "os-contract.json"),
+                    **android_publication["documents"]["osContract"]}, "Android original compiler material/input record differs")
+        android_original_command_records(artifact, rows, result, local_transport, deadline=deadline)
     identity = (sha, roster["sourceTree"], os.environ["GITHUB_RUN_ID"], producer_attempt)
     D.need(all(tuple(row[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")) == identity
                and row["features"] == SHELL_FEATURES for row in (compiler, source_record, result))
@@ -1760,6 +2381,10 @@ def installed_shell_candidate(work, sha):
                                                     "packageBuilt", "helper11Rerun", "qualified"))
            and D.same(result.get("compilerCleanup"), SHELL_CLEANUP_SUCCESS),
            "Original shell source/anchors/features/compile-only result differs")
+    D.need(all(D.canonical(row.get("androidBuildMaterials")) == D.canonical(android_materials)
+               and D.canonical(row.get("androidBuildBindings")) == D.canonical(android_bindings)
+               and D.canonical(row.get("androidBuildPublication")) == D.canonical(android_publication) for row in (compiler, result)),
+           "Normal and observer did not compile with the same fixed reviewed Android material/OS selectors")
     source, target = Path(compiler["source"]), Path(compiler["target"])
     D.need(source.is_absolute() and target.is_absolute() and ".." not in (*source.parts, *target.parts),
            "Original shell compiler source/target path differs")
@@ -1796,7 +2421,6 @@ def installed_shell_candidate(work, sha):
     bindings = D.decode(D.read(artifact / "shell-host-bindings.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
     D.need({path: shell_file_projection(row) for path, row in bindings["files"].items()} == native["osFiles"],
            "Complete original shell host bindings differ from the portable native graph")
-    lifecycle = local("ubuntu_publication_lifecycle")
     data = native["runtimeData"]
     D.need(len(data["records"]) == len(lifecycle.SHELL_DATA_ROOTS)
            and set(data["suppliers"]["roots"]) == set(data["caches"]["roots"]) == {path for path, _ in lifecycle.SHELL_DATA_ROOTS},
@@ -2001,7 +2625,7 @@ def installed_shell_os_inputs(check, work, native, compiler, u_compiler):
            and D.same(snapshot["eglLibraries"], native["runtimeData"]["eglLibraries"])
            and all(set(paths) <= set(modules) for paths in snapshot["moduleSelections"].values()),
            "Actual VM supplier DATA or generated module selection differs from the admitted profile")
-    runtime_data = shell_data_records(snapshot, check.root / "public", "shell-consumer-data")
+    runtime_data = shell_data_records(snapshot, check.evidence_root, "shell-consumer-data")
     fields = "${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n"
     environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
     packages = {}
@@ -2163,7 +2787,12 @@ def shell_source_manifest(source):
              'desktop/src-tauri/tests/fixtures/github_tls/server-key.pem',
              'desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem',
              'desktop/tools/hosted_glibc_policy.py',
-             'desktop/tools/observe_hosted_python.py')
+             'desktop/tools/observe_hosted_python.py',
+             "desktop/tools/ci_foundation.py", "desktop/tools/android_material_preparation.py",
+             "desktop/tools/android_material_data/policy.json", "desktop/tools/android_material_data/suppliers.json",
+             "desktop/tools/android_material_data/layout.json.gz", "desktop/tools/android_material_data/archives.json.gz",
+             "desktop/tools/android_material_data/fonts.json", "desktop/tools/android_material_data/providers.json",
+             "desktop/src-tauri/src/android_toolchain.rs")
     return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
 
 
@@ -2669,7 +3298,7 @@ def shell_native_inputs(check, work, environment):
     lifecycle = local("ubuntu_publication_lifecycle")
     check.phase = "shell-runtime-data"
     snapshot = lifecycle.shell_data_snapshot(shell_host_binding)
-    runtime_data = shell_data_records(snapshot, check.root / "public", "shell-data")
+    runtime_data = shell_data_records(snapshot, check.evidence_root, "shell-data")
     check.phase = "shell-module-roots"
     roots, root_bindings, module_paths = shell_module_inventory()
     D.need(all(set(names) <= set(module_paths) for names in snapshot["moduleSelections"].values()),
@@ -2883,6 +3512,17 @@ def prepare_packages(check, source, work, public, environment, binaries, native_
 def verify_installed_shell_compile():
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "compile" and "MRK_INSTALLED_CASE" not in os.environ,
            "Fixed production shell compiler route differs")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    same_job = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+    github = os.environ.get("GITHUB_REF") in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)
+    D.need(not (github and same_job), "GitHub shell cannot use Android same-job transport")
+    material_engine, material_preparation, material_host = None, None, None
+    if same_job or github:
+        android_materials, android_bindings, android_publication = None, {}, None
+    else:
+        android_materials = lifecycle.shell_android_materials()
+        android_bindings = lifecycle.shell_android_compile_environment()
+        android_publication = lifecycle.shell_android_publication_data()
     sha, source, temporary, root, deadline = resumed_preparation()
     os.umask(0o077)
     work, public = root / "work", root / "public"
@@ -2892,10 +3532,12 @@ def verify_installed_shell_compile():
     cleanup_parents = {path: shell_directory_identity(path) for path in sorted(cleanup_paths)}
     sys.path.insert(0, str(source / "src"))
     from mobile_release.owned_process import run_owned
-    check = Check(root, run_owned, deadline=deadline)
+    check = Check(root, run_owned, deadline=deadline, private=same_job)
+    public = check.evidence_root  # Android originals are private; public/ is projections only.
     environment = C.clean_environment(work)
     environment.update(CARGO_TARGET_DIR=str(work / "target"), CC="/usr/bin/cc", CXX="/usr/bin/c++",
                        PKG_CONFIG="/usr/bin/pkg-config", CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="/usr/bin/cc")
+    environment.update(android_bindings)  # One Cargo command builds BOTH original outputs.
     git = shutil.which("git", path=environment["PATH"])
     rustup = shutil.which("rustup", path=environment["PATH"])
     node = shutil.which("node", path=environment["PATH"])
@@ -2946,6 +3588,14 @@ def verify_installed_shell_compile():
         generated[relative] = shell_directory_identity(path)
 
     try:
+        D.need(same_job or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") in (None, "actions-artifact-v1"),
+               "Unknown installed shell compiler transport")
+        if same_job:
+            check.phase = "android-material-policy-admission"
+            lifecycle.check_source_pins(source, android=True)
+            material_engine = local("android_material_preparation")
+            D.need(type(material_engine.policy().get("hostPolicy")) is dict,
+                   "Android same-VM supplier/generated-input policy is not yet admitted")
         D.need(all(value is not None and Path(value).is_absolute() for value in (git, rustup, node)),
                "Selected shell compiler/frontend/source tools missing")
         source_check("before")
@@ -3033,6 +3683,21 @@ def verify_installed_shell_compile():
         check.command("typescript-no-emit", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
                       environment, desktop, timeout=60)
         native, native_bindings = shell_native_inputs(check, work, environment)
+        if same_job:
+            check.phase = "android-same-vm-material"
+            material_context = android_original_context(root, sha, tree)
+            material_host = material_engine.android_host_inputs(native, native_bindings,
+                bind_path=shell_host_binding, deadline=deadline)
+            material_root = root.parent / ("mrk-android-material-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"])
+            material_preparation = material_engine.prepare(check, source, material_root,
+                context=material_context, host=material_host)
+            material_engine.validate(material_preparation, context=material_context, host=material_host, deadline=deadline)
+            lifecycle.bind_shell_android_profile(material_preparation["materials"], material_preparation["publication"])
+            android_materials = lifecycle.shell_android_materials()
+            android_bindings = lifecycle.shell_android_compile_environment()
+            android_publication = lifecycle.shell_android_publication_data()
+            environment.update(android_bindings)
+            environment["MRK_ANDROID_OS_CONTRACT_INPUT"] = str(material_root / "os-contract.json")
         check.command("vite-assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                       str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
                       environment, desktop, timeout=90)
@@ -3063,6 +3728,8 @@ def verify_installed_shell_compile():
                    and all(originals[role][key] == exports[role][key] for key in ("size", "sha256")),
                    "Shell original/fresh export differ or alias")
         native = finish_shell_native_inputs(native, {role: Path(row["path"]) for role, row in exports.items()}, native_bindings)
+        if same_job:
+            material_engine.validate(material_preparation, context=material_context, host=material_host, deadline=deadline)
         native["hostBindingsRecord"] = D.write(public / "shell-host-bindings.json", D.canonical(native_bindings))
         native.update(shell_runtime_graph(prepared[3], prepared[4], native["sharedObjects"]))
         native_pin = D.write(public / "shell-native.json", D.canonical(native))
@@ -3084,7 +3751,14 @@ def verify_installed_shell_compile():
                     "compilerInputs": compiler_inputs, "nativeInputs": native,
                     "nativeRecord": native_pin, "frontendRecord": frontend_pin,
                     "originalArtifacts": originals, "exportedArtifacts": exports, "selections": selections,
-                    "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED), "generatedPermissions": permissions}
+                    "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED), "generatedPermissions": permissions,
+                    "androidBuildMaterials": android_materials, "androidBuildBindings": android_bindings,
+                     "androidBuildPublication": android_publication}
+        if same_job:
+            compiler["androidPreparation"] = {**D.file_record(material_root / "private/prepared.json", 64 << 10),
+                "path": str(material_root / "private/prepared.json")}
+            compiler["androidOsContractInput"] = {**D.file_record(material_root / "os-contract.json", 1 << 20),
+                "path": str(material_root / "os-contract.json")}
         D.write(public / "compiler.json", D.canonical(compiler))
         source_check("after")
         check.phase = "shell-generated-cleanup"
@@ -3118,13 +3792,24 @@ def verify_installed_shell_compile():
                "Original surviving shell source/public bindings changed after cleanup")
         for path in (work, *(source / relative for relative in SHELL_GENERATED)):
             D.need(not path.exists() and not path.is_symlink(), "Compiler output remains after original cleanup")
-        D.write(public / "result.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
+        result = {"sourceSha": sha, "sourceTree": tree,
             "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-            "features": SHELL_FEATURES, "compilations": ["normal", "observer"], "cargoBuilds": 1,
+            "features": SHELL_FEATURES, "compilations": ["normal", "observer"], "androidBuildMaterials": android_materials,
+            "androidBuildBindings": android_bindings, "androidBuildPublication": android_publication, "cargoBuilds": 1,
             "frontendBuilds": 1, "shellExecuted": False, "observerExecuted": False, "supplierRebuilt": False,
-            "packageBuilt": False, "helper11Rerun": False, "commands": check.commands, "qualified": False,
+            "packageBuilt": False, "helper11Rerun": False,
+            "commands": check.original_commands if same_job else check.commands, "qualified": False,
             "compilerCleanup": SHELL_CLEANUP_SUCCESS,
-            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only"}))
+            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only"}
+        if same_job:
+            result["androidPreparation"] = compiler["androidPreparation"]
+            result["androidOsContractInput"] = compiler["androidOsContractInput"]
+            result["privateCommandRoles"] = {role: [row["path"].removesuffix(".request.json")
+                for row in rows if row["path"].endswith(".request.json")] for role, rows in check.private_metadata.items()}
+            result["privateCaptureRoots"] = {role: list(identity) for role, identity in check.private_roots.items()}
+            result["privateMaterialMetadata"] = list(check.private_metadata["material"])
+            result["privateCommandMetadata"] = android_close_compiler_metadata(check)
+        D.write(public / "result.json", D.canonical(result))
         files = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
         retained = {row["path"]: row for row in files}
         D.need(all(all(retained[SHELL_EXPORTS[role]][key] == exports[role][key] for key in ("size", "sha256"))
@@ -3133,12 +3818,24 @@ def verify_installed_shell_compile():
                "Original shell artifact roster/endpoint bound")
         pin = D.write(public / "shell-roster.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
             "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "files": files}))
+        transport_pin = None
+        if same_job:
+            transport = android_local_transport_record(root, compiler, material_preparation, pin)
+            transport_pin = D.write(root / "android-local-transport.json", D.canonical(transport), 0o400)
+            summary = android_compiler_public_summary(compiler, result, material_preparation,
+                {**retained, "shell-roster.json": pin}, check.commands)
+            D.write(root / "public/android-compiler-summary.json", D.canonical(summary))
+            D.need({path.name for path in (root / "public").iterdir()} == {"android-compiler-summary.json"},
+                   "Private Android compiler leaked an unapproved public member")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("shell_roster_sha256=" + pin["sha256"] + "\nshell_producer_attempt=" + os.environ["GITHUB_RUN_ATTEMPT"] + "\n")
+            output.write("shell_transport=" + ("android-same-job-local-v1" if same_job else "actions-artifact-v1") + "\n")
+            if transport_pin is not None:
+                output.write("shell_local_transport_sha256=" + transport_pin["sha256"] + "\n")
         D.need(time.monotonic() < deadline, "Original shell compiler closed late")
         print("Both fresh shell outputs and embedded frontend retained; no shell, observer or installed runtime executed.", flush=True)
     except BaseException as error:
-        retain_failure(root, check.phase, check.commands, error)
+        retain_failure(root, check.phase, check.commands, error, private=same_job)
         raise
 
 
@@ -3516,6 +4213,7 @@ def shell_project_draft_observation(observed, lifecycle):
     _shell_metadata_save_observation(cases["metadata-save"], observed.get("metadataSave"), files, lifecycle)
     _shell_version_save_observation(cases["version-save"], observed.get("versionSave"), files, lifecycle)
     _shell_tools_offline_observation(cases, observed.get("toolsOffline"), files, lifecycle)
+    _shell_android_observation(cases, observed.get("androidBuild"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -4313,6 +5011,71 @@ def shell_github_observation(observed, lifecycle, profile="github-readonly-insta
     return github
 
 
+def _shell_android_observation(cases, combined, files, lifecycle):
+    """Four original Android engineering cases, not normal/native qualification."""
+    D.need(type(cases) is dict and set(lifecycle.SHELL_ANDROID_CASES) <= set(cases)
+           and type(combined) is dict and set(combined) == set(lifecycle.SHELL_ANDROID_CASES),
+           "Closed four-case Android observation is missing")
+    for name in lifecycle.SHELL_ANDROID_CASES:
+        case, pair = cases[name], combined[name]
+        D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "androidBuild"}
+               and case["case"] == name and type(case["exitCode"]) is int and case["exitCode"] == 0
+               and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+               "Closed Android original result is incomplete")
+        D.need(type(pair) is dict and set(pair) == {"native", "fixture"}, "Closed Android native/fixture pair is missing")
+        receipt = lifecycle.shell_android_receipt(D.canonical(case["androidBuild"]), name)
+        D.need(D.canonical(pair["native"]) == D.canonical(receipt), "Closed Android native receipt correspondence differs")
+        expected = lifecycle._shell_android_fixture_facts(name)
+        fixture = pair["fixture"]
+        D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+               and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected)
+               and D.canonical(receipt["fixture"]) == D.canonical({key: fixture[key] for key in receipt["fixture"]}),
+               "Closed Android source controls, material or excluded output scopes differ")
+        for phase in ("before", "after"):
+            pin = fixture[phase]
+            D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int
+                   and 0 < pin["size"] <= lifecycle.SHELL_ANDROID_INVENTORY_LIMIT
+                   and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+                   "Closed Android original inventory pin differs")
+            matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-" + name + "-" + phase + ".json"]
+            D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+                   and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+                   "Original Android before/after export pin differs")
+        D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"],
+               "Closed Android inventory lost its fixed source mutation")
+
+
+def android_native_public_summary(source, observed, preparation, records, lifecycle):
+    """Small typed projection after full original root/client/case validation.
+
+    No raw fixture, host input, transcript, private path or compiler record is
+    copied into the public upload directory, including nested native receipts.
+    """
+    identity = {key: source[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}
+    D.need(all(type(identity[key]) is str and re.fullmatch(r"[0-9a-f]{40}", identity[key]) for key in ("sourceSha", "sourceTree"))
+           and all(type(identity[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", identity[key]) for key in ("runId", "attempt")),
+           "Android native public source identity differs")
+    D.need(observed["state"] == lifecycle.result_state({"shell": {}}) and observed["productQualified"] is False
+           and observed["sourceSha"] == identity["sourceSha"] and observed["consumerAttempt"] == identity["attempt"]
+           and observed["packageLifecycleQualified"] is False and observed["shellPackageBuilt"] is False
+           and type(observed["cases"]) is dict and set(observed["cases"]) == set(lifecycle.SHELL_CASES),
+           "Android native original finality/case result is incomplete")
+    cases = []
+    for name in lifecycle.SHELL_CASES:
+        row = observed["cases"][name]
+        code = 1 if name == "settled-failure" else 0
+        D.need(type(row) is dict and type(row.get("exitCode")) is int and row["exitCode"] == code
+               and row.get("qualified", False) is False, "Android native case status differs")
+        cases.append({"case": name, "exitCode": code, "qualified": False})
+    return {"schemaVersion": 1, "scope": "android-same-job-private-native-summary-v1", **identity,
+            "localTransportSha256": D.sha(observed["shellLocalTransport"]["sha256"]),
+            "androidProfile": android_public_profile(preparation), "cases": cases,
+            "originalFinalityVerified": True, "state": observed["state"],
+            "privateRecords": {key: android_private_pin(records[key]) for key in ("source.json", "result.json", "private-evidence-roster.json")},
+            "compilerRerun": False, "supplierRebuilt": False, "packageBuilt": False, "signingExercised": False,
+            "androidBuildLimits": dict(lifecycle.SHELL_ANDROID_LIMITS), "qualified": False}
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -4320,19 +5083,27 @@ def verify_installed_shell():
     github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)
     normal_boundaries = os.environ["GITHUB_REF"] == SHELL_GITHUB_BOUNDARY_REF
     work, public = root / "work", root / "public"
+    same_job = os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+    D.need(not (github and same_job), "GitHub shell cannot use Android same-job transport")
     check, phase = None, "accepted-shell-data"
     try:
         entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
         D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
                "Workflow reviewed shell lifecycle entry differs")
-        local("ubuntu_publication_lifecycle").check_source_pins(source)
-        library, packages, old_compiler, accepted = installed_u_inputs(work)
-        binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(work, sha)
-        D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
-               "Accepted U platform executable closure differs")
+        lifecycle = local("ubuntu_publication_lifecycle")
+        lifecycle.check_source_pins(source, android=same_job)
+        D.need(same_job or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") in (None, "actions-artifact-v1"),
+               "Unknown installed shell compiler transport")
         sys.path.insert(0, str(source / "src"))
         from mobile_release.owned_process import run_owned
-        check = Check(root, run_owned, deadline=deadline)
+        check = Check(root, run_owned, deadline=deadline, private=same_job)
+        public = check.evidence_root
+        library, packages, old_compiler, accepted = installed_u_inputs(work)
+        transport, material = android_stage_local_inputs(check, sha, lifecycle) if same_job else (None, None)
+        binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(
+            work, sha, lifecycle=lifecycle, local_transport=transport, deadline=check.end, github=github)
+        D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
+               "Accepted U platform executable closure differs")
         environment = C.clean_environment(work)
         original = {str(path): directory_identity(path) for path in (root, work, public, root / "cases")}
 
@@ -4349,16 +5120,24 @@ def verify_installed_shell():
         tools_inputs = None if github else shell_tools_inputs_for_observation()
         policy = installed_shell_os_inputs(check, work, native, compiler, old_compiler)
         check.phase = "shell-handoff"
-        lifecycle = local("ubuntu_publication_lifecycle")
         policy = lifecycle.compact_shell_loader_policy(policy, compiler)
         # Compile-only dependency/unit evidence stays in its already admitted
         # original artifact. The root service receives only the relevant typed
         # projection, plus the full original record's content binding.
         projection = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "features",
-            "manifestSha256", "protocolSha256", "exportedArtifacts", "nativeRecord", "frontendRecord")}
+            "manifestSha256", "protocolSha256", "exportedArtifacts", "nativeRecord", "frontendRecord",
+            "androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")}
         projection["originalRecord"] = D.file_record(work / "admitted-shell/compiler.json", SHELL_METADATA_LIMIT)
         shell = {"binaries": binaries, "compiler": projection, "rosterSha256": roster_sha,
-                 "producerAttempt": producer_attempt, "artifactId": artifact_id, "acceptedU": accepted, "loaderPolicy": policy}
+                 "producerAttempt": producer_attempt, "acceptedU": accepted, "loaderPolicy": policy}
+        if not github:
+            shell["androidPublication"] = lifecycle.shell_android_publication_request(root)
+        if same_job:
+            projection.update({key: compiler[key] for key in ("androidPreparation", "androidOsContractInput")})
+            transport_path = Path(transport["compilerRoot"]["path"]) / "android-local-transport.json"
+            shell["localTransport"] = {**D.file_record(transport_path, 64 << 10), "path": str(transport_path), "record": transport}
+        else:
+            shell["artifactId"] = artifact_id
         if github:
             D.need(lifecycle.SHELL_GITHUB_REF == SHELL_GITHUB_REF
                    and lifecycle.SHELL_GITHUB_BOUNDARY_REF == SHELL_GITHUB_BOUNDARY_REF,
@@ -4367,7 +5146,7 @@ def verify_installed_shell():
             shell["githubReadOnly"] = lifecycle.shell_github_selection(github_profile)
         source_record = {"sourceSha": sha, "sourceTree": compiler["sourceTree"], "runId": os.environ["GITHUB_RUN_ID"],
             "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "features": SHELL_FEATURES, "acceptedU": accepted,
-            "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, "shellArtifactId": artifact_id,
+            "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, **lifecycle.shell_transport_provenance(shell),
             "platformLibrarySourceSha": old_compiler["sourceSha"], "imageOS": os.environ["ImageOS"],
             "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False,
             "toolsInputPreparation": tools_inputs}
@@ -4377,6 +5156,8 @@ def verify_installed_shell():
             if normal_boundaries:
                 source_record.update(normalNetworkScope="normal-dns-and-scoped-https-acquisition-syns-only",
                                      normalHttpRequests=False)
+        if not github:
+            source_record["androidBuildPublication"] = compiler["androidBuildPublication"]
         D.write(public / "source.json", D.canonical(source_record))
         request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "deadline": deadline, "runnerUid": os.getuid(), "runnerGid": os.getgid(), "source": str(source), "taskRoot": str(root),
@@ -4412,19 +5193,37 @@ def verify_installed_shell():
         D.need(D.canonical(shell_tools_inputs_for_observation()) == D.canonical(tools_inputs),
                "Original Tools input preparation or live Git/Python/JDK nodes changed during shell observations")
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
-        D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+        native_metadata = android_close_compiler_metadata(check) if same_job else None
+        final_result = {**source_record, "lifecycle": observed,
             "projectDraft": project_draft, "lifecycleDocuments": observed["lifecycleDocuments"], "projectPaths": observed["projectPaths"],
             "workflowApply": observed["workflowApply"], "sessionInputs": observed["sessionInputs"], "metadataSave": observed["metadataSave"],
             "versionSave": observed["versionSave"],
             "toolsOffline": observed["toolsOffline"], "toolsOfflineQualificationOnly": True, "offlineFullWorkDeadlineExercised": False,
+            "androidBuild": observed["androidBuild"], "androidBuildQualificationOnly": True, "androidBuildLimits": lifecycle.SHELL_ANDROID_LIMITS,
+            "androidPublication": observed["androidPublication"],
             "settledFailure": observed["settledFailure"],
-            "commands": check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
+            "commands": check.original_commands if same_job else check.commands, "cases": list(lifecycle.SHELL_CASES), "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
-            "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
+            "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}
+        if same_job:
+            final_result["privateCommandMetadata"] = native_metadata
+        D.write(public / "result.json", D.canonical(final_result))
+        if same_job:
+            records = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
+            D.need(len(records) + 1 <= 1536 and sum(row["size"] for row in records) <= 2 * LOG_TOTAL
+                   and not check.failed and all(row["ordinaryOwnerReturned"] is True for row in check.commands),
+                   "Android complete native private evidence/owner bound differs")
+            roster_pin = D.write(public / "private-evidence-roster.json", D.canonical({"files": records,
+                "sourceSha": sha, "originalDeadline": repr(deadline), "cleanupClaimed": False}), 0o400)
+            summary = android_native_public_summary(source_record, observed, material,
+                {**{row["path"]: row for row in records}, "private-evidence-roster.json": roster_pin}, lifecycle)
+            D.write(root / "public/android-native-summary.json", D.canonical(summary))
+            D.need({path.name for path in (root / "public").iterdir()} == {"android-native-summary.json"},
+                   "Private Android native output leaked an unapproved public member")
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window, eighteen success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window, twenty-three success-requiring observers and one raw-exit1 expected negative retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
-        retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
+        retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error, private=same_job)
         raise
 
 
@@ -4452,5 +5251,7 @@ if __name__ == "__main__":
             D.need(len(sys.argv) == 1, "Expected a fixed preparation/compiler/installed entry or no-argument lifecycle entry")
             verify()
     except Exception as error:
-        print("Publisher check refused: " + failure_reason(error) + ". Preserve original evidence; no qualification.", file=sys.stderr)
+        private = sys.argv[1:] in (["installed-shell-compile"], ["installed-shell"]) \
+            or os.environ.get("MRK_INSTALLED_SHELL_TRANSPORT") == "android-same-job-local-v1"
+        print("Publisher check refused: " + failure_reason(error, private=private) + ". Preserve original evidence; no qualification.", file=sys.stderr)
         raise SystemExit(1)

@@ -4867,6 +4867,7 @@ impl Observation {
         r.guidance.proposal = sample;
     }
     pub(super) fn release_version_request(&self, body: &Value) {
+        if let Some(commands)=self.commands.as_ref().filter(|c|c.case.android()) { commands.android_version_request(body); return; }
         if self.case == Case::VersionSave { self.version_save_observe_request(body); return; }
         let Some(mut r) = self.record_at(Boundary::Request) else { return; };
         if self.case != Case::Positive || !saved_read_context(&r) || r.saved_reads.version_called
@@ -4875,6 +4876,7 @@ impl Observation {
         r.saved_reads.version_called = true;
     }
     pub(super) fn release_version(&self, result: &Result<crate::release_version_protocol::Observation, BridgeError>) {
+        if let Some(commands)=self.commands.as_ref().filter(|c|c.case.android()) { commands.android_version_result(result); return; }
         if self.case == Case::VersionSave { self.version_save_observed(result); return; }
         let sample = result.as_ref().ok().and_then(VersionSample::read);
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
@@ -9628,8 +9630,8 @@ pub(crate) fn main() -> std::process::ExitCode {
                 stdout.write_all(&report)?; return stdout.write_all(b"\n");
             }
             if let Some(commands) = &q.commands {
-                let report = commands.report().ok_or_else(|| std::io::Error::other("tools/offline receipt unavailable"))?;
-                stdout.write_all(b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=")?;
+                let report = commands.report().ok_or_else(|| std::io::Error::other("installed command receipt unavailable"))?;
+                stdout.write_all(if commands.case.android() { b"MRK_INSTALLED_SHELL_ANDROID_BUILD=" } else { b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE=" })?;
                 stdout.write_all(&report)?; return stdout.write_all(b"\n");
             }
             if case == Case::VersionSave {
@@ -9680,7 +9682,8 @@ pub(crate) fn main() -> std::process::ExitCode {
 // Metadata and finite directory rosters only. The outside publication owner
 // hashes the fictional bytes; SourceBook alone owns any open source original.
 // This object never opens a file body, repairs a fixture, or grants cleanup.
-const SESSION_FIXTURE_NAMESPACE: [&str; 20] = [
+const SESSION_FIXTURE_NAMESPACE: [&str; 24] = [
+    "android-build", "android-build-cancel", "android-build-failure", "android-build-refusals",
     "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative", "offline-pass", "offline-settlement",
     "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs", "session-ios-firebase", "session-loss", "session-refusals",
     "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project",

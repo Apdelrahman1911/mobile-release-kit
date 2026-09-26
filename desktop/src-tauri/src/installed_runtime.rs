@@ -42,6 +42,9 @@ pub(crate) const ENTRY_COUNT: usize = 8192;
 pub(crate) const TREE_DEPTH: usize = 16;
 const RECORD_COUNT: usize = ENTRY_COUNT + 64;
 const LIVE_COUNT: usize = 48;
+const ANDROID_LIVE_COUNT: usize = 32_768;
+const ANDROID_TOOL_RECORD_COUNT: usize = ANDROID_LIVE_COUNT + ANDROID_CONTROL_SLOTS;
+const ANDROID_NOFILE_FLOOR: u64 = 65_536;
 const BLOCK_SIZE: usize = 64 * 1024;
 const PREFIX_COUNT: usize = 7;
 const RETAINED_COUNT: usize = PREFIX_COUNT + 2;
@@ -450,6 +453,7 @@ pub(crate) struct OriginalDescriptorBook {
     unknown: bool,
     records: Vec<FdRecord>,
     budget: Option<Arc<AndroidDescriptorBudget>>,
+    android_toolset: bool,
     control_slots: usize,
     control_rounds: usize,
     entry_observations: usize,
@@ -481,17 +485,26 @@ pub(crate) struct InstalledRuntimeCustody {
 impl OriginalDescriptorBook {
     /// Pure allocation/initialization only; acquires no OS resource.
     pub(crate) fn new() -> Self {
+        Self::new_with_toolset_capacity(false)
+    }
+
+    // Two fixed allocation profiles inside this same owner, not a caller policy.
+    // The retained Python runtime keeps its ordinary inventory/record limits.
+    fn new_with_toolset_capacity(android_toolset: bool) -> Self {
+        let manifest_limit = if android_toolset { crate::android_toolchain::MANIFEST_LIMIT } else { MANIFEST_LIMIT };
+        let record_limit = if android_toolset { ANDROID_TOOL_RECORD_COUNT } else { RECORD_COUNT };
         Self {
             phase: Phase::New, operation: Operation::Idle, interrupted_at: None,
             failure: None, settlement_started: false, interrupted: false,
             unknown: false,
-            records: Vec::with_capacity(RECORD_COUNT), budget: None, control_slots: 0, control_rounds: 0, entry_observations: 0,
-            root: None, mount_namespace: None, hash_left: [TOTAL_LIMIT + MANIFEST_LIMIT as u64; 2],
+            records: Vec::with_capacity(record_limit), budget: None, android_toolset,
+            control_slots: 0, control_rounds: 0, entry_observations: 0,
+            root: None, mount_namespace: None, hash_left: [TOTAL_LIMIT + manifest_limit as u64; 2],
             audit_started: false, checkpoints: 0, original_stop: None,
             namespaces: [None; 2], root_mount: None, proc_mount: None, credentials: None,
             work: Work {
                 block: vec![0; BLOCK_SIZE], directory_buffer: vec![MaybeUninit::uninit(); BLOCK_SIZE],
-                data: Vec::with_capacity(MANIFEST_LIMIT.max(MOUNTINFO_LIMIT)), attribute_buffer: [0],
+                data: Vec::with_capacity(manifest_limit.max(MOUNTINFO_LIMIT)), attribute_buffer: [0],
                 hash: Sha256::new(), reader: None, read_bytes: 0, read_eof: false, last_digest: None,
                 directory: None,
             },
@@ -582,7 +595,8 @@ impl OriginalDescriptorBook {
     }
 
     fn arm(&mut self, purpose: Purpose) -> AdmissionResult<SlotId> {
-        if self.records.len() >= RECORD_COUNT
+        let record_limit = if self.android_toolset { ANDROID_TOOL_RECORD_COUNT } else { RECORD_COUNT };
+        if self.records.len() >= record_limit
             || self.budget.is_none() && self.records.iter().filter(|r| r.original.is_some()).count() >= LIVE_COUNT {
             return Err(AdmissionFailure::Bounds);
         }
@@ -1611,7 +1625,7 @@ impl OriginalDescriptorBook {
     fn inspect_kernel(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         self.begin(Operation::Kernel, end, stop)?;
         if self.budget.is_some() && rustix::process::getrlimit(rustix::process::Resource::Nofile)
-            .current.is_some_and(|limit| limit < 8192) { return Err(AdmissionFailure::Bounds); }
+            .current.is_some_and(|limit| limit < ANDROID_NOFILE_FLOOR) { return Err(AdmissionFailure::Bounds); }
         let actual = rustix::system::uname();
         self.operation = Operation::Idle;
         if !supported_kernel(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()) {
@@ -1967,7 +1981,7 @@ impl InstalledRuntimeCustody {
 
 // The only second consumer of these private primitives is the fixed Android
 // tool book. Two books precharge 64 kernel-control slots EACH; every other live
-// original (including ancestry and aliases) competes below the SAME 4096 cap.
+// original (including ancestry and aliases) competes below the SAME 32768 cap.
 const ANDROID_CONTROL_SLOTS: usize = 64;
 pub(crate) struct AndroidDescriptorBudget {
     live: AtomicUsize,
@@ -1984,7 +1998,7 @@ impl AndroidDescriptorBudget {
         Ok(end.min(*self.audit_cutoff.borrow()))
     }
     fn claim(&self) -> AdmissionResult<()> {
-        self.live.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < 4096).then_some(n + 1))
+        self.live.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < ANDROID_LIVE_COUNT).then_some(n + 1))
             .map(|_| ()).map_err(|_| AdmissionFailure::Bounds)
     }
     fn release(&self) { self.live.fetch_sub(1, Ordering::SeqCst); }
@@ -1993,6 +2007,9 @@ pub(crate) struct ProtectedEntry { pub(crate) name: String, pub(crate) inode: u6
 impl OriginalDescriptorBook {
     pub(crate) fn new_android(budget: Arc<AndroidDescriptorBudget>) -> Self {
         let mut book = Self::new(); book.budget = Some(budget); book
+    }
+    pub(crate) fn new_android_toolset(budget: Arc<AndroidDescriptorBudget>) -> Self {
+        let mut book = Self::new_with_toolset_capacity(true); book.budget = Some(budget); book
     }
     pub(crate) fn identity(&self, slot: SlotId) -> AdmissionResult<Identity> {
         let _ = fd_at(&self.records, slot)?;
@@ -2036,7 +2053,8 @@ impl OriginalDescriptorBook {
         self.inspect_protected(slot, FileType::RegularFile, None, end, stop)?;
         let size = u64::try_from(self.identity(slot)?.size).map_err(|_| AdmissionFailure::Bounds)?;
         if size == 0 { return Err(AdmissionFailure::Manifest); }
-        if hex(&self.read_original(slot, Some(size), MANIFEST_LIMIT as u64, true, end, stop)?) != expected {
+        let limit = if self.android_toolset { crate::android_toolchain::MANIFEST_LIMIT } else { MANIFEST_LIMIT };
+        if hex(&self.read_original(slot, Some(size), limit as u64, true, end, stop)?) != expected {
             return Err(AdmissionFailure::Manifest);
         }
         self.records[slot.0].digest = Some(expected.to_owned());
@@ -2074,7 +2092,8 @@ impl OriginalDescriptorBook {
                     if dotdot || kind != FileType::Directory || inode == 0 { return Err(AdmissionFailure::Inventory); }
                     dotdot = true; continue;
                 }
-                if self.entry_observations >= ENTRY_COUNT { return Err(AdmissionFailure::Bounds); }
+                let limit = if self.android_toolset { crate::android_toolchain::TOOL_ENTRY_COUNT } else { ENTRY_COUNT };
+                if self.entry_observations >= limit { return Err(AdmissionFailure::Bounds); }
                 self.entry_observations += 1;
                 if inode == 0 || !tool_component(name)
                     || !matches!(kind, FileType::Directory | FileType::RegularFile) { return Err(AdmissionFailure::Inventory); }
@@ -2722,9 +2741,9 @@ mod pure_tests {
         let (cutoff, receiver) = watch::channel(work);
         let budget = AndroidDescriptorBudget::new(receiver);
         assert_eq!(budget.live.load(Ordering::SeqCst), 128);
-        for _ in 128..4096 { assert_eq!(budget.claim(), Ok(())); }
+        for _ in 128..ANDROID_LIVE_COUNT { assert_eq!(budget.claim(), Ok(())); }
         assert_eq!(budget.claim(), Err(AdmissionFailure::Bounds));
-        assert_eq!(budget.live.load(Ordering::SeqCst), 4096);
+        assert_eq!(budget.live.load(Ordering::SeqCst), ANDROID_LIVE_COUNT);
         budget.release(); assert_eq!(budget.claim(), Ok(()));
         assert_eq!(budget.audit_end(work), Ok(work));
         let earlier = start + std::time::Duration::from_secs(11);
@@ -2732,6 +2751,42 @@ mod pure_tests {
         assert_eq!(budget.audit_end(work), Ok(earlier));
         assert_eq!(budget.audit_end(start), Ok(start)); // Never renew a supplied earlier bound.
         drop(cutoff); assert_eq!(budget.audit_end(work), Err(AdmissionFailure::Interrupted));
+    }
+
+    #[test]
+    fn android_tool_capacity_is_preallocated_without_widening_retained_runtime() {
+        let (_cutoff, receiver) = watch::channel(Instant::now());
+        let budget = Arc::new(AndroidDescriptorBudget::new(receiver));
+        let ordinary = OriginalDescriptorBook::new();
+        let runtime = InstalledRuntimeCustody::new_android(budget.clone());
+        let mut tools = OriginalDescriptorBook::new_android_toolset(budget.clone());
+        for book in [&ordinary, &runtime.book] {
+            assert!(!book.android_toolset);
+            assert_eq!(book.records.capacity(), RECORD_COUNT);
+            assert_eq!(book.work.data.capacity(), MANIFEST_LIMIT);
+            assert_eq!(book.hash_left, [TOTAL_LIMIT + MANIFEST_LIMIT as u64; 2]);
+            assert!(book.records.is_empty());
+        }
+        assert!(tools.android_toolset);
+        assert_eq!(tools.records.capacity(), ANDROID_TOOL_RECORD_COUNT);
+        assert_eq!(tools.work.data.capacity(), crate::android_toolchain::MANIFEST_LIMIT);
+        assert_eq!(tools.hash_left, [TOTAL_LIMIT + crate::android_toolchain::MANIFEST_LIMIT as u64; 2]);
+        assert_eq!((MANIFEST_LIMIT, FILE_COUNT, ENTRY_COUNT, RECORD_COUNT), (1024 * 1024, 2048, 8192, 8256));
+        assert_eq!((ANDROID_LIVE_COUNT, ANDROID_TOOL_RECORD_COUNT, ANDROID_NOFILE_FLOOR), (32768, 32832, 65536));
+        // Inert no-handle DATA only: no native open, fake FD, or positive close.
+        // Closed/no-handle records consume permanent capacity even though the
+        // original shared live charge has been returned. Capacity never grows.
+        let allocated = tools.records.capacity();
+        for _ in 0..ANDROID_TOOL_RECORD_COUNT {
+            let slot = tools.arm(Purpose::Payload).unwrap();
+            assert!(tools.receive_open(slot, Err(Errno::ACCESS)).is_err());
+            assert_eq!(tools.records[slot.0].acquisition, Acquisition::NoHandle);
+        }
+        assert_eq!(tools.records.capacity(), allocated);
+        assert_eq!(budget.live.load(Ordering::SeqCst), 2 * ANDROID_CONTROL_SLOTS);
+        assert_eq!(tools.arm(Purpose::Payload), Err(AdmissionFailure::Bounds));
+        assert_eq!(tools.settle_originals(), CloseOutcome::Settled);
+        assert!(tools.records.iter().all(|record| record.original.is_none()));
     }
 
     #[test]

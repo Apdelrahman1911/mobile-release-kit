@@ -110,6 +110,12 @@ zbus = { path = "../vendor/zbus-5.19.0" }
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", optional = true, features = [] }
+sha2 = "=0.10.9"
+
+# The hosted Android compile input is opened through ordinary no-follow APIs.
+# These already-locked dependencies do not enable an Android runtime profile.
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.build-dependencies]
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs"] }
 
 # Keep complete runtime byte hashing inside the original test admission clocks:
 # optimize the existing hash implementation, never omit checks or widen deadlines.

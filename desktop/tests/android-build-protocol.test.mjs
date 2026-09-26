@@ -507,3 +507,11 @@ test('missing skipped contradictory or foreign-mode findings cannot imply a save
   const basic = report(); Object.assign(basic, inspection([...prefix, ['signature', 'PASS'], ['signer', 'PASS']]));
   assert.equal(parseAndroidBuildResult(basic), null);
 });
+
+test('availability text does not turn a closed gate into missing-SDK diagnosis or an installer', () => {
+  assert.match(androidBuildAvailabilityText['runtime-unqualified'], /does not mean your JDK or SDK is missing/);
+  assert.match(androidBuildAvailabilityText['toolchain-unqualified'], /not selected, not inspected or not yet qualified/);
+  assert.match(androidBuildAvailabilityText['toolchain-unqualified'], /installs no tools and accepts no licenses/);
+  assert.match(androidBuildAvailabilityText['unsupported-platform'], /no fallback runner/);
+  assert.match(androidBuildAvailabilityText.available, /Saved-input review and explicit consent/);
+});

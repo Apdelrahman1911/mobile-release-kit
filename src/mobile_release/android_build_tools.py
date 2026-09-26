@@ -39,12 +39,15 @@ LAUNCH_CONTRACT = "gradle-posix-private-jvm-v1"
 PREFIX = "/opt/mobile-release-kit/android/"
 MANIFEST_NAME = "android-toolchain.json"
 OS_SHELL, OS_EXECUTABLE_DIRECTORY = "/usr/bin/dash", "/usr/bin"
-MAX_MANIFEST_BYTES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 1024**2, 512 * 1024**2, 1024**3
-MAX_TOOL_FILES, MAX_OS_FILES, MAX_ENTRIES, MAX_DESCRIPTORS = 2048, 128, 8192, 4096
-MIN_DESCRIPTOR_LIMIT = 8192  # Admission floor, NOT a claim of ambient headroom.
+MAX_MANIFEST_BYTES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 4 * 1024**2, 512 * 1024**2, 1024**3
+MAX_TOOL_FILES, MAX_OS_FILES, MAX_ENTRIES, MAX_DESCRIPTORS = 16_384, 256, 32_768, 32_768
+MAX_OS_HELPERS = 128
+MAX_MANIFEST_NODES = 150_000  # Closed schema maximum: 67 + 128 + 9 * (16384 + 256) = 149955.
+MAX_DIRECTORY_ADVANCES = 2 * MAX_ENTRIES  # Includes each original iterator's final next attempt.
+MIN_DESCRIPTOR_LIMIT = 65_536  # Admission floor, NOT a claim of ambient headroom.
 MAX_DEPTH, MAX_PATH_BYTES, READ_CHUNK = 16, 512, 64 * 1024
 MAX_SELECTION_BYTES, MAX_PROPERTY_LINES, MAX_PROPERTY_LINE = 512 * 1024, 4096, 4096
-MAX_CHECKPOINTS = 2_000_000
+MAX_CHECKPOINTS = 4_000_000  # Basic/upload inspection has14/23 metadata rounds; cleanup keeps its own cutoff.
 WORKERS = 2
 TOOL_ROLES = {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
               "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}
@@ -117,7 +120,7 @@ def _shape(value: object, depth: int = 0, count: list[int] | None = None) -> Non
     if count is None:
         count = [0]
     count[0] += 1
-    _need(depth <= 16 and count[0] <= 20_000, "input-limit")
+    _need(depth <= 16 and count[0] <= MAX_MANIFEST_NODES, "input-limit")
     if type(value) is dict:
         for key, item in value.items():
             _need(type(key) is str)
@@ -178,6 +181,28 @@ class _Profile:
     directories: tuple[str, ...]
 
 
+def _direct_file(path: str, directory: str, suffix: str) -> bool:
+    if not path.startswith(directory):
+        return False
+    name = path[len(directory):]
+    return len(name) > len(suffix) and "/" not in name and name.endswith(suffix)
+
+
+def _native_path(path: str) -> bool:
+    # _file_specs first applies the shared absolute-path/component grammar.
+    # These families admit only explicitly inventoried canonical regular files,
+    # never directory discovery or ambient font/resolver configuration.
+    return (path.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
+            or path in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf",
+                        "/etc/nsswitch.conf", "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"}
+            or any(_direct_file(path, directory, ".conf")
+                   for directory in ("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
+            or any(_direct_file(path, f"/usr/share/fonts/truetype/{family}/", ".ttf")
+                   for family in ("dejavu", "lato", "liberation", "noto"))
+            or path == "/var/cache/fontconfig/CACHEDIR.TAG"
+            or re.fullmatch(r"/var/cache/fontconfig/[0-9a-f]{32}-le64\.cache-9", path) is not None)
+
+
 def _file_specs(value: object, *, native: bool = False) -> tuple[_FileSpec, ...]:
     _need(type(value) is list and 1 <= len(value) <= (MAX_OS_FILES if native else MAX_TOOL_FILES), "input-limit")
     specs = []
@@ -187,8 +212,7 @@ def _file_specs(value: object, *, native: bool = False) -> tuple[_FileSpec, ...]
         if native:
             # Canonical regular objects only. Known loader/helper aliases are
             # bound by the separate native OS profile, not followed here.
-            _need(item["path"].startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
-                  or item["path"] in {"/etc/ld.so.cache", "/etc/ld.so.conf"})
+            _need(_native_path(item["path"]))
         else:
             _need(parts[0] in {"jdk", "gradle", "sdk", "bundletool"} and len(parts) >= 2)
         _need(_integer(item["size"], MAX_FILE_BYTES) and _text(item["sha256"], _SHA)
@@ -254,7 +278,7 @@ def _parse_manifest(raw: bytes, binding: _Binding) -> _Profile:
     _need(_text(os_profile["id"], _LABEL) and _text(os_profile["inventorySha256"], _SHA)
           and os_profile["shell"] == OS_SHELL and os_profile["executableDirectory"] == OS_EXECUTABLE_DIRECTORY)
     helpers = os_profile["helpers"]
-    _need(type(helpers) is list and 1 <= len(helpers) <= MAX_OS_FILES
+    _need(type(helpers) is list and 1 <= len(helpers) <= MAX_OS_HELPERS
           and all(_text(name, _COMPONENT) and name not in {".", ".."} for name in helpers))
     _need(helpers == sorted(set(helpers)) and {"sed", "uname", "xargs"}.issubset(helpers))
     native = _file_specs(os_profile["files"], native=True)
@@ -449,7 +473,7 @@ class _Entries:
                 raise
 
     def advance(self):
-        self.tools._charge("tool-directory-advances", 1, MAX_ENTRIES)
+        self.tools._charge("tool-directory-advances", 1, MAX_DIRECTORY_ADVANCES)
         _need(self.state == "OPEN" and self.close_state == "NOT_ATTEMPTED" and self.value is not None)
         result = next(self.value)
         self.tools._point()

@@ -48,10 +48,11 @@ EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_SESSION_CASES = ("session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase")
 SHELL_TOOLS_OFFLINE_CASES = ("tools-observed", "tools-cancel", "tools-settlement", "offline-pass", "offline-negative",
                            "offline-drift", "offline-cancel", "offline-settlement")
-# Preserve the twenty existing cases and their exact receipts; add one distinct iOS session witness.
+SHELL_ANDROID_CASES = ("android-build", "android-build-failure", "android-build-cancel", "android-build-refusals")
+# Preserve all twenty-one existing cases, including iOS Firebase, raw failure and saved version.
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
-               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save")
-SHELL_PUBLIC_FILE_LIMIT = 170  # Exact twenty-one-case root roster:168, exported:170; non-shell remains128.
+               *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save", *SHELL_ANDROID_CASES)
+SHELL_PUBLIC_FILE_LIMIT = 190  # Exact25-case root roster:188, exported:190; non-shell remains128.
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
 SHELL_PATH_FAILURE_FRAME_BOUND = 256
@@ -684,6 +685,393 @@ SHELL_SESSION_RECEIPTS = {case: {
 # Closed synthetic project DATA from the PF01/PF02/PF06 fixture recipes.
 # The configured interpreter is already an original lifecycle TOOLS input.
 # check.py is trusted project code, not a bootstrap, Gradle shim or isolation.
+# Fixed Android engineering successor. These are proposed interoperability
+# versions, NOT authenticated supplier material or native compatibility evidence.
+SHELL_ANDROID_MARKER = b"MRK_INSTALLED_SHELL_ANDROID_BUILD="
+SHELL_ANDROID_RECEIPT_LIMIT = 64 << 10
+SHELL_ANDROID_INVENTORY_LIMIT = 16 << 10
+# Deliberately absent until separate material/OS-closure review supplies ALL four
+# exact selectors. Never fill this from host environment, a cache or a download.
+# The complete AGP/plugin-marker/transitive file repository must already be
+# included under gradle/repository in the existing tool manifest and its caps.
+# Rust's separately reviewed OS_CONTRACT_BYTES is also required; this DATA is
+# neither custody nor qualification and cannot make that absent profile usable.
+SHELL_ANDROID_MATERIALS = None
+# Exact reviewed DATA, not acquisition instructions or an execution permit.
+# The three documents are supplied under the fixed task-local admitted-android
+# root. Never place the material rows themselves in the 1MiB service handoff.
+# This remains absent until the actual tool/OS/source documents and totals are
+# accepted together. No host/environment fallback may populate it.
+SHELL_ANDROID_PUBLICATION_DATA = None
+SHELL_ANDROID_DOCUMENT_NAMES = {"manifest": "android-toolchain.json", "osContract": "os-contract.json",
+                                "sources": "source-rows.json"}
+SHELL_ANDROID_DOCUMENT_LIMITS = {"manifest": 4 << 20, "osContract": 1 << 20, "sources": 4 << 20}
+SHELL_ANDROID_TOTAL_KEYS = {"toolFiles", "toolDirectories", "toolBytes", "osFiles", "osAliases", "osBytes"}
+SHELL_ANDROID_CONFIG = "{\"schemaVersion\":1,\"version\":{\"source\":\"release/version.properties\",\"nameKey\":\"VERSION_NAME\",\"buildKey\":\"BUILD_NUMBER\"},\"source\":{\"candidateBranch\":\"main\",\"productionBranch\":\"main\"},\"android\":{\"enabled\":true,\"module\":\":app\",\"variant\":\"release\",\"applicationId\":\"org.example.saved\",\"identityStatus\":\"unverified\"},\"ios\":{\"enabled\":false},\"metadata\":{\"root\":\"release/store\",\"androidLocales\":[\"en-US\"],\"iosLocales\":[]},\"services\":{\"androidFirebase\":\"disabled\",\"iosFirebase\":\"disabled\"},\"projectChecks\":{\"preflight\":[],\"androidArtifact\":[],\"iosArtifact\":[]}}\n".encode("ascii")
+SHELL_ANDROID_VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
+SHELL_ANDROID_VERSION_PATH = "project/release/version.properties"
+SHELL_ANDROID_TRACE = "project/native-stage.trace"
+SHELL_ANDROID_DIRECTORIES = (".", "project", "project/.git", "project/app", "project/app/build",
+    "project/app/src", "project/app/src/main", "project/app/src/main/java", "project/app/src/main/java/org",
+    "project/app/src/main/java/org/example", "project/app/src/main/java/org/example/saved", "project/build",
+    "project/gradle", "project/gradle/wrapper", "project/release")
+SHELL_ANDROID_GENERATED = ("project/.mobile-release", "project/app/build", "project/build")
+SHELL_ANDROID_SETTINGS = "pluginManagement {\n    // Set before any plugin resolution; this is fixture policy, not a sandbox.\n    gradle.startParameter.offline = true\n    repositories { maven { url = uri('{repository}') } }\n}\ndependencyResolutionManagement {\n    repositoriesMode.set(org.gradle.api.initialization.resolve.RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n    repositories { maven { url = uri('{repository}') } }\n}\nrootProject.name = 'InstalledAndroidFixture'\ninclude(':app')\n"
+SHELL_ANDROID_APP_PREFIX = "plugins { id 'com.android.application' version '8.9.2' }\nandroid {\n    namespace 'org.example.saved'\n    compileSdk 35\n    buildToolsVersion '35.0.0'\n    defaultConfig {\n        applicationId 'org.example.saved'\n        minSdk 23\n        targetSdk 35\n        versionCode Integer.parseInt(System.getenv('MOBILE_RELEASE_BUILD_NUMBER'))\n        versionName System.getenv('MOBILE_RELEASE_VERSION_NAME')\n    }\n    buildTypes { release { minifyEnabled false } }\n}\ntasks.register('mrkNativeBoundary') {\n    doLast {\n        new FileOutputStream(rootProject.file('native-stage.trace'), true).withCloseable { out ->\n            out.write('active\\n'.getBytes('US-ASCII'))\n            out.getFD().sync()\n        }\n"
+SHELL_ANDROID_APP_SUFFIX = "    }\n}\ntasks.matching { it.name == 'preReleaseBuild' }.configureEach { dependsOn tasks.named('mrkNativeBoundary') }\n"
+SHELL_ANDROID_STATIC_FILES = {
+    "project/.gitignore": "/.mobile-release/\n/.gradle/\n/build/\n/app/build/\n".encode("ascii"),
+    "project/gradlew": "#!/bin/sh\n# Desktop must use its protected Gradle, never this fallback.\nexit 70\n".encode("ascii"),
+    "project/app/src/main/AndroidManifest.xml": "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"><application android:label=\"Native Android\"><activity android:name=\".MainActivity\" android:exported=\"false\"/></application></manifest>\n".encode("ascii"),
+    "project/app/src/main/java/org/example/saved/MainActivity.java": "package org.example.saved;\npublic final class MainActivity extends android.app.Activity {}\n".encode("ascii"),
+    "project/release/mobile-release.json": SHELL_ANDROID_CONFIG,
+}
+SHELL_ANDROID_SELECTION = {"module": ":app", "variant": "release", "applicationId": "org.example.saved", "task": ":app:bundleRelease"}
+SHELL_ANDROID_CHECKS = ("aab-structure", "aab-manifest", "application-id", "build-number", "version-name",
+    "release-flags", "signer", "core-lifecycle", "other-core-finding")
+SHELL_ANDROID_LIMITATIONS = ["saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated",
+    "post-run-bytes-may-be-incremental-reused-or-stale", "source-binding-not-established", "artifact-signer-not-inspected",
+    "toolkit-signing-not-requested", "store-operation-not-requested", "release-readiness-not-assessed",
+    "local-output-observation-not-current-file-authority", "core-terminal-requires-original-native-finality"]
+SHELL_ANDROID_LIMITS = {key: False for key in ("normalActivation", "work3000Expiry", "privateJvmProfile",
+    "noAutoInstall", "allHelperNativeGates", "networkIsolated")}
+
+
+def shell_android_materials(materials=None):
+    """Closed source selector DATA, not a host search, installer or permit."""
+    value = SHELL_ANDROID_MATERIALS if materials is None else materials
+    need(type(value) is dict and set(value) == {"instance", "manifestSha256", "osContractSha256", "distributionSha256"},
+         "Android native material/OS-closure binding is pending; no Android fixture or tool may run")
+    need(type(value["instance"]) is str and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value["instance"]) is not None
+         and all(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{64}", value[key]) is not None
+                 for key in ("manifestSha256", "osContractSha256", "distributionSha256")),
+         "Fixed reviewed Android material selectors differ")
+    return dict(value)
+
+
+def shell_android_compile_environment(materials=None):
+    """The ONE normal+observer Cargo invocation receives identical selectors."""
+    value = shell_android_materials(materials)
+    return {"MRK_ANDROID_TOOL_INSTANCE": value["instance"], "MRK_ANDROID_TOOL_MANIFEST_SHA256": value["manifestSha256"],
+            "MRK_ANDROID_OS_CONTRACT_SHA256": value["osContractSha256"]}
+
+
+def shell_android_publication_data(materials=None, data=None):
+    """Closed source DATA; compilation and copying do not qualify this profile."""
+    materials = shell_android_materials(materials)
+    value = SHELL_ANDROID_PUBLICATION_DATA if data is None else data
+    need(type(value) is dict and set(value) == {"documents", "totals"},
+         "Android publication DATA is pending")
+    documents, totals = value["documents"], value["totals"]
+    need(type(documents) is dict and set(documents) == set(SHELL_ANDROID_DOCUMENT_NAMES),
+         "Android publication document roster differs")
+    for key, row in documents.items():
+        need(type(row) is dict and set(row) == {"size", "sha256"}
+             and type(row["size"]) is int and 0 < row["size"] <= SHELL_ANDROID_DOCUMENT_LIMITS[key]
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+             "Android publication document bound differs")
+    need(documents["manifest"]["sha256"] == materials["manifestSha256"]
+         and documents["osContract"]["sha256"] == materials["osContractSha256"],
+         "Android publication and compile anchors differ")
+    need(type(totals) is dict and set(totals) == SHELL_ANDROID_TOTAL_KEYS
+         and all(type(number) is int and number >= 0 for number in totals.values())
+         and 0 < totals["toolFiles"] <= 16384 and totals["toolDirectories"] > 0
+         and totals["toolFiles"] + totals["toolDirectories"] + 1 <= 32768
+         and 0 < totals["osFiles"] <= 256 and totals["osAliases"] <= 128
+         and 0 < totals["toolBytes"] + totals["osBytes"] <= 1 << 30,
+         "Android publication totals differ from unchanged profile bounds")
+    return deepcopy(value)
+
+
+def shell_android_publication_request(task_root, materials=None, data=None):
+    """Only fixed task-local references cross the original service transport."""
+    data = shell_android_publication_data(materials, data)
+    root = absolute(str(task_root)) / "work/admitted-android"
+    return {"sourceRoot": str(root / "tools"), "totals": data["totals"],
+            "documents": {key: {"path": str(root / SHELL_ANDROID_DOCUMENT_NAMES[key]), **row}
+                          for key, row in data["documents"].items()}}
+
+
+def bind_shell_android_profile(materials, publication):
+    """Bind already-validated original preparation DATA, never ambient inputs.
+
+    The compiler calls this only after preparation validation. The root calls it
+    only after the protected source-pinned validator independently rechecks the
+    same original material/context/host. This is not permission to execute and
+    never changes an ordinary qualification flag.
+    """
+    global SHELL_ANDROID_MATERIALS, SHELL_ANDROID_PUBLICATION_DATA
+    material = shell_android_materials(materials)
+    data = shell_android_publication_data(material, publication)
+    need((SHELL_ANDROID_MATERIALS is None and SHELL_ANDROID_PUBLICATION_DATA is None)
+         or (SHELL_ANDROID_MATERIALS == material and SHELL_ANDROID_PUBLICATION_DATA == data),
+         "Android profile cannot replace a previously bound original")
+    SHELL_ANDROID_MATERIALS, SHELL_ANDROID_PUBLICATION_DATA = material, data
+
+
+def _android_handoff_profile(value):
+    """Pure compact DATA checks; this does not bind a profile or read a host."""
+    shell = value["shell"]
+    if "localTransport" not in shell:
+        return shell_android_materials(), shell_android_publication_data()
+    compiler = shell["compiler"]
+    need(type(compiler) is dict and type(compiler.get("androidBuildMaterials")) is dict
+         and type(compiler.get("androidBuildPublication")) is dict, "Android original compact profile is missing")
+    materials = shell_android_materials(compiler["androidBuildMaterials"])
+    return materials, shell_android_publication_data(materials, compiler["androidBuildPublication"])
+
+
+def shell_transport_provenance(shell):
+    """Distinct closed provenance variants; never fabricate an artifact ID."""
+    return ({"shellLocalTransport": deepcopy(shell["localTransport"])} if "localTransport" in shell
+            else {"shellArtifactId": shell["artifactId"]})
+
+
+def _android_local_transport(value):
+    """Pure same-job envelope validation, also usable by cleanup-only StopPost.
+
+    Reading/validating live preparation and binding the profile happens ONLY in
+    _android_original_preparation after the protected source copy. This parser
+    cannot renew the compiler endpoint or turn StopPost into preparation work.
+    """
+    shell, compiler = value["shell"], value["shell"]["compiler"]
+    envelope = shell["localTransport"]
+    need(type(envelope) is dict and set(envelope) == {"path", "size", "sha256", "record"},
+         "Android local transport envelope differs")
+    task = absolute(value["taskRoot"])
+    stem = "mrk-desktop-ubuntu-publisher-" + value["runId"] + "-" + value["attempt"]
+    need(task.name == stem + "-observe", "Android local native task identity differs")
+    root = task.parent / (stem + "-compile")
+    material = task.parent / ("mrk-android-material-" + value["runId"] + "-" + value["attempt"])
+    transport = envelope["record"]
+    need(type(transport) is dict and set(transport) == {"schemaVersion", "kind", "context", "compilerRoot",
+         "compilerEvidence", "materialRoot", "compilerRoster", "materialRecord"}
+         and type(transport["schemaVersion"]) is int and transport["schemaVersion"] == 1
+         and transport["kind"] == "android-same-job-local-v1", "Android original transport schema differs")
+    def pin(row, path, limit):
+        need(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == str(path)
+             and type(row["size"]) is int and 0 < row["size"] <= limit
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+             "Android original fixed transport reference differs")
+    pin({key: envelope[key] for key in ("path", "size", "sha256")}, root / "android-local-transport.json", 64 << 10)
+    raw = canonical(transport)
+    need(len(raw) == envelope["size"] and hashlib.sha256(raw).hexdigest() == envelope["sha256"],
+         "Android transport body/envelope correspondence differs")
+    context = transport["context"]
+    need(type(context) is dict and set(context) == {"sourceCommit", "sourceTree", "runId", "runAttempt", "job", "preparation"}
+         and context["sourceCommit"] == value["sourceSha"] and context["sourceTree"] == compiler.get("sourceTree")
+         and type(context["sourceTree"]) is str and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+         and (context["runId"], context["runAttempt"], context["job"])
+             == (value["runId"], value["attempt"], "compile")
+         and shell["producerAttempt"] == value["attempt"], "Android source/tree/run/attempt/job differs")
+    pin(context["preparation"], root / "preparation.json", 16384)
+    for key, path in (("compilerRoot", root), ("compilerEvidence", root / "private-compiler"), ("materialRoot", material)):
+        row = transport[key]
+        need(type(row) is dict and set(row) == {"path", "identity"} and row["path"] == str(path)
+             and type(row["identity"]) is list and len(row["identity"]) == 5
+             and all(type(item) is int for item in row["identity"])
+             and row["identity"][2:] == [stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]],
+             "Android original private transport directory differs")
+    pin(transport["compilerRoster"], root / "private-compiler/shell-roster.json", 512 << 10)
+    pin(transport["materialRecord"], material / "private/prepared.json", 64 << 10)
+    materials, data = _android_handoff_profile(value)
+    need(transport["compilerRoster"]["sha256"] == shell["rosterSha256"]
+         and compiler.get("androidPreparation") == transport["materialRecord"]
+         and compiler.get("androidOsContractInput") == {"path": str(material / "os-contract.json"), **data["documents"]["osContract"]},
+         "Android original compiler inputs/roster differ from its local transport")
+    return transport
+
+
+def _android_relative(value):
+    need(type(value) is str and 0 < len(value) <= 512 and not value.startswith("/"),
+         "Android material relative path differs")
+    parts = value.split("/")
+    need(1 < len(parts) <= 16 and parts[0] in {"jdk", "gradle", "sdk", "bundletool"}
+         and all(0 < len(part) <= 255 and part not in {".", ".."} and not part.endswith(".")
+                 and re.fullmatch(r"[A-Za-z0-9_+@.,=\-]+", part) is not None for part in parts),
+         "Android material path escaped its fixed tool families")
+    return value
+
+
+def _android_directories(paths):
+    directories = {str(parent) for name in paths for parent in Path(name).parents if str(parent) != "."}
+    names = set(paths) | directories | {"android-toolchain.json"}
+    need(not set(paths).intersection(directories) and len(names) <= 32768
+         and len({name.casefold() for name in names}) == len(names), "Android material entry collision/bound")
+    return sorted(directories, key=lambda name: (name.count("/"), name))
+
+
+def _android_absolute(value):
+    path = absolute(value)
+    need(len(value) <= 512 and len(path.parts) - 1 <= 16
+         and all(len(part) <= 255 and not part.endswith(".") for part in path.parts[1:]),
+         "Android OS path component/bound differs")
+    return path
+
+
+def _android_native_path(value):
+    _android_absolute(value)
+    def direct(directory, suffix):
+        tail = value.removeprefix(directory)
+        return value.startswith(directory) and "/" not in tail and len(tail) > len(suffix) and tail.endswith(suffix)
+    return (value.startswith(("/usr/bin/", "/usr/lib/", "/usr/lib64/", "/etc/ld.so.conf.d/"))
+            or value in {"/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/fonts/fonts.conf", "/etc/nsswitch.conf",
+                         "/etc/host.conf", "/etc/hosts", "/etc/resolv.conf", "/etc/gai.conf"}
+            or direct("/etc/fonts/conf.avail/", ".conf") or direct("/usr/share/fontconfig/conf.avail/", ".conf")
+            or any(direct("/usr/share/fonts/truetype/" + family + "/", ".ttf") for family in ("dejavu", "lato", "liberation", "noto"))
+            or value == "/var/cache/fontconfig/CACHEDIR.TAG"
+            or re.fullmatch(r"/var/cache/fontconfig/[0-9a-f]{32}-le64\.cache-9", value) is not None)
+
+
+def _android_publication_plan(raw):
+    """Parse pinned DATA only. Native core/Rust schema checks remain mandatory."""
+    data, materials = shell_android_publication_data(), shell_android_materials()
+    need(type(raw) is dict and set(raw) == set(data["documents"]), "Android material documents missing")
+    documents = {}
+    for key, pin in data["documents"].items():
+        body = raw[key]
+        need(type(body) is bytes and len(body) == pin["size"] and hashlib.sha256(body).hexdigest() == pin["sha256"],
+             "Android material document bytes differ")
+        documents[key] = decode(body, SHELL_ANDROID_DOCUMENT_LIMITS[key])
+    manifest, contract, sources = (documents[key] for key in ("manifest", "osContract", "sources"))
+    need(type(manifest) is dict and set(manifest) == {"schemaVersion", "profile", "target", "instance", "launchContract",
+         "versions", "gradleDistribution", "bundletool", "roles", "files", "osProfile"}
+         and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
+         and manifest["profile"] == "android-local-linux-gnu-x86_64-v1" and manifest["target"] == "linux-gnu-x86_64"
+         and manifest["instance"] == materials["instance"] and manifest["launchContract"] == "gradle-posix-private-jvm-v1",
+         "Android material manifest profile differs")
+    need(type(contract) is dict and set(contract) == {"schemaVersion", "id", "closure", "files", "aliases"}
+         and type(contract["schemaVersion"]) is int and contract["schemaVersion"] == 1
+         and contract["closure"] == "python-jdk-sdk-gradle-shell-loader-v1"
+         and type(contract["id"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}", contract["id"]) is not None,
+         "Android exact OS contract differs")
+    files = manifest["files"]
+    need(type(files) is list and 0 < len(files) <= 16384, "Android material file bound differs")
+    for row in files:
+        need(type(row) is dict and set(row) == {"path", "size", "sha256", "mode"}, "Android material file fields differ")
+        _android_relative(row["path"])
+        need(type(row["size"]) is int and 0 <= row["size"] <= 512 << 20 and type(row["mode"]) is int
+             and row["mode"] in {0o444, 0o555} and type(row["sha256"]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None, "Android material file facts differ")
+    names = [row["path"] for row in files]
+    need(names == sorted(set(names)), "Android material ordering/duplicates differ")
+    directories = _android_directories(names)
+    need(manifest["roles"] == {"java": "jdk/bin/java", "javac": "jdk/bin/javac", "gradle": "gradle/bin/gradle",
+                               "bundletool": "bundletool/bundletool.jar", "sdk": "sdk"}
+         and all(name in names for name in ("jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle", "bundletool/bundletool.jar"))
+         and any(name.startswith("sdk/") for name in names), "Android material fixed roles differ")
+    by_name = {row["path"]: row for row in files}
+    need(all(by_name[name]["size"] > 0 and by_name[name]["mode"] == 0o555
+             for name in ("jdk/bin/java", "jdk/bin/javac", "gradle/bin/gradle")), "Android executable role mode/size differs")
+    versions = manifest["versions"]
+    need(type(versions) is dict and set(versions) == {"jdkVendor", "jdkVersion", "gradleVersion", "agpVersion",
+         "sdkPlatform", "sdkPlatformRevision", "sdkBuildToolsVersion"}
+         and all(type(item) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,63}", item) is not None
+                 for item in versions.values()) and versions["gradleVersion"] == "8.14.5"
+         and versions["agpVersion"] == "8.9.2" and versions["sdkPlatform"] == "android-35"
+         and versions["sdkBuildToolsVersion"] == "35.0.0", "Android selected version tuple differs")
+    need(type(manifest["gradleDistribution"]) is dict
+         and set(manifest["gradleDistribution"]) == {"url", "sha256"}
+         and manifest["gradleDistribution"]["sha256"] == materials["distributionSha256"]
+         and manifest["gradleDistribution"]["url"] in {"https://" + host + "/distributions/gradle-8.14.5-bin.zip"
+                                                       for host in ("services.gradle.org", "downloads.gradle.org")},
+         "Android material Gradle distribution differs")
+    bundletool = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+    need(manifest["bundletool"] == {"version": "1.18.3", "sha256": bundletool}
+         and by_name["bundletool/bundletool.jar"]["sha256"] == bundletool
+         and 0 < by_name["bundletool/bundletool.jar"]["size"] <= 32520401, "Android bundletool binding differs")
+    os_profile = manifest["osProfile"]
+    need(type(os_profile) is dict and set(os_profile) == {"id", "inventorySha256", "shell", "executableDirectory", "helpers", "files"}
+         and os_profile["id"] == contract["id"] and os_profile["inventorySha256"] == materials["osContractSha256"]
+         and os_profile["files"] == contract["files"] and os_profile["shell"] == "/usr/bin/dash"
+         and os_profile["executableDirectory"] == "/usr/bin", "Android manifest/OS correspondence differs")
+    os_files, aliases = contract["files"], contract["aliases"]
+    need(type(os_files) is list and 0 < len(os_files) <= 256 and type(aliases) is list and len(aliases) <= 128,
+         "Android OS file/alias bounds differ")
+    for row in os_files:
+        need(type(row) is dict and set(row) == {"path", "size", "sha256", "mode"}
+             and type(row["size"]) is int and 0 <= row["size"] <= 512 << 20
+             and type(row["mode"]) is int and 0 <= row["mode"] <= 0o777 and not row["mode"] & 0o022
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+             "Android OS file fields differ")
+        need(_android_native_path(row["path"]), "Android OS file escaped its explicit supported families")
+    need([row["path"] for row in os_files] == sorted({row["path"] for row in os_files}), "Android OS duplicate/order differs")
+    helpers = os_profile["helpers"]
+    need(type(helpers) is list and 0 < len(helpers) <= 128
+         and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_+@.,=\-]{1,255}", name) is not None
+                 and name not in {".", ".."} and not name.endswith(".") for name in helpers)
+         and helpers == sorted(set(helpers)) and {"sed", "uname", "xargs"} <= set(helpers), "Android helper roster differs")
+    need(all(any(row["path"] == command and row["size"] > 0 and row["mode"] & 0o111 for row in os_files)
+             for command in ["/usr/bin/dash", *("/usr/bin/" + name for name in helpers)]), "Android helper OS body missing")
+    os_names = {row["path"] for row in os_files}
+    os_names |= {str(parent) for name in os_names.copy() for parent in Path(name).parents}
+    seen_aliases = set()
+    for alias in aliases:
+        need(type(alias) is dict and set(alias) == {"path", "target", "canonical"}
+             and type(alias["target"]) is str and 0 < len(alias["target"]) <= 512, "Android OS alias fields differ")
+        _android_absolute(alias["path"]); _android_absolute(alias["canonical"])
+        destination = [] if alias["target"].startswith("/") else alias["path"].split("/")[1:-1]
+        for part in alias["target"].removeprefix("/").split("/"):
+            if part == "..":
+                need(bool(destination), "Android OS alias traverses above root")
+                destination.pop()
+            elif part != ".":
+                need(0 < len(part) <= 255 and not part.endswith(".")
+                     and re.fullmatch(r"[A-Za-z0-9_+@.,=\-]+", part) is not None,
+                     "Android OS alias target component differs")
+                destination.append(part)
+            need(len(destination) <= 16, "Android OS alias target depth differs")
+        loader_alias = alias["canonical"].startswith("/usr/") and (alias["path"] in {"/bin", "/lib", "/lib64"}
+                                                                               or alias["path"].startswith("/usr/"))
+        font_alias = (alias["path"].startswith("/etc/fonts/conf.d/") and "/" not in alias["path"].removeprefix("/etc/fonts/conf.d/")
+                      and alias["path"].endswith(".conf") and alias["canonical"] in {row["path"] for row in os_files}
+                      and alias["canonical"].startswith(("/etc/fonts/conf.avail/", "/usr/share/fontconfig/conf.avail/"))
+                      and alias["canonical"].endswith(".conf"))
+        need((loader_alias or font_alias) and alias["path"] not in os_names and alias["path"].casefold() not in seen_aliases
+             and alias["canonical"] in os_names and "/" + "/".join(destination) == alias["canonical"],
+             "Android OS alias escapes its exact canonical contract")
+        seen_aliases.add(alias["path"].casefold())
+    need(type(sources) is dict and set(sources) == {"schemaVersion", "files"}
+         and type(sources["schemaVersion"]) is int and sources["schemaVersion"] == 1
+         and type(sources["files"]) is list and len(sources["files"]) == len(files), "Android source rows differ")
+    for row in sources["files"]:
+        need(type(row) is dict and set(row) == {"path", "source"}, "Android source row fields differ")
+        _android_relative(row["path"]); _android_relative(row["source"])
+    need([row["path"] for row in sources["files"]] == names
+         and len({row["source"].casefold() for row in sources["files"]}) == len(files), "Android source mapping is incomplete or aliases")
+    _android_directories([row["source"] for row in sources["files"]])
+    totals = {"toolFiles": len(files), "toolDirectories": len(directories), "toolBytes": sum(row["size"] for row in files),
+              "osFiles": len(os_files), "osAliases": len(aliases), "osBytes": sum(row["size"] for row in os_files)}
+    need(totals == data["totals"], "Android measured totals differ from reviewed combined fit")
+    return {"files": files, "directories": directories, "sources": sources["files"], "osFiles": os_files,
+            "aliases": aliases, "totals": totals, "materials": materials, "documents": data["documents"]}
+
+
+def _shell_android_content(raw):
+    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _shell_android_version(after=False):
+    return {"source": "release/version.properties", **_shell_android_content(SHELL_ANDROID_VERSION + (b"\n" if after else b"")),
+            "name": "1.2.3", "build": 7}
+
+
+def _shell_android_files(case, after=False, materials=None):
+    need(type(case) is str and case in SHELL_ANDROID_CASES and type(after) is bool, "Different fixed Android fixture/phase")
+    material = shell_android_materials(materials)
+    repository = "/opt/mobile-release-kit/android/" + material["instance"] + "/gradle/repository"
+    action = ("        throw new GradleException('Fixed trusted native fixture failure')\n" if case == "android-build-failure" else
+              "        Thread.sleep(20000)\n" if case == "android-build-cancel" else "")
+    return {**SHELL_ANDROID_STATIC_FILES,
+        "project/settings.gradle": SHELL_ANDROID_SETTINGS.replace("{repository}", repository).encode("ascii"),
+        "project/app/build.gradle": (SHELL_ANDROID_APP_PREFIX + action + SHELL_ANDROID_APP_SUFFIX).encode("ascii"),
+        "project/gradle/wrapper/gradle-wrapper.properties": (
+            "distributionUrl=https://services.gradle.org/distributions/gradle-8.14.5-bin.zip\n"
+            "distributionSha256Sum=" + material["distributionSha256"] + "\n").encode("ascii"),
+        SHELL_ANDROID_VERSION_PATH: SHELL_ANDROID_VERSION + (b"\n" if after and case == "android-build-refusals" else b""),
+        SHELL_ANDROID_TRACE: b"active\n" if after and case != "android-build-refusals" else b""}
+
+
 SHELL_TOOLS_OFFLINE_MARKER = b"MRK_INSTALLED_SHELL_TOOLS_OFFLINE="
 SHELL_TOOLS_OFFLINE_RECEIPT_LIMIT = 64 << 10
 SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT = 16 << 10
@@ -1709,6 +2097,7 @@ LIMIT, JSON_LIMIT, FILE_LIMIT, TOTAL_LIMIT = 2 << 20, 1 << 20, 512 << 20, 32 << 
 # GUI shared-memory working files are not captured output. This finite per-file
 # headroom is independent of the unchanged combined capture/evidence bounds.
 SHELL_WORK_FILE_LIMIT = 64 << 20
+SHELL_DESCRIPTOR_LIMIT = 65_536  # The retained Android tool/runtime books require this inherited floor.
 CLIENT_RESERVATION = 40  # start10 + stop10 + StopPost10 + original-client10
 PROPERTIES = {
     "User": "root", "Group": "root", "WorkingDirectory": "/", "UMask": "0077",
@@ -1752,6 +2141,23 @@ CORE_PINS = {
     "errors.py": (749, "26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"),
 }
 DATA_PIN = (19198, "b22b83554231bef19178fbb8723acfed71e4476df14048bd9b4c763b937743d5")
+# Filled only from the coherent source-reviewed preparation helper, original
+# ELF parser/dependency and six exact DATA documents. Missing pins refuse the dynamic Android path; legacy
+# non-Android source/owner imports remain unchanged.
+ANDROID_PREPARATION_PINS = None
+
+
+def _android_source_pins():
+    names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+             "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
+             for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
+    need(type(ANDROID_PREPARATION_PINS) is dict and set(ANDROID_PREPARATION_PINS) == names,
+         "Android protected preparation source pins are pending")
+    for pin in ANDROID_PREPARATION_PINS.values():
+        need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int and 0 < pin[0] <= 8 << 20
+             and type(pin[1]) is str and re.fullmatch(r"[0-9a-f]{64}", pin[1]) is not None,
+             "Android protected preparation source pin differs")
+    return dict(ANDROID_PREPARATION_PINS)
 
 # The workflow carries these exact bytes in MRK_UBUNTU_LIFECYCLE_BOOTSTRAP.
 # Only the entry digest is fixed separately, so there is no self-hash cycle.
@@ -1805,6 +2211,8 @@ _COMMANDS, _FILES = [], []
 _TOTAL = 0
 _FAILED = False
 _PHASE = "entry"
+_ANDROID_PUBLICATION = None
+_ANDROID_PUBLISHED = None
 
 
 class Refused(ValueError):
@@ -1881,10 +2289,12 @@ def read(path, limit=JSON_LIMIT):
     return record(path, limit, content=True)[1]
 
 
-def check_source_pins(source):
+def check_source_pins(source, *, android=False):
     """Refuse stale source before compilation; never initialize a lifecycle."""
     expected = {"src/mobile_release/" + name: pin for name, pin in CORE_PINS.items()}
     expected["desktop/tools/conventional_runtime_data.py"] = DATA_PIN
+    if android:
+        expected.update(_android_source_pins())
     for relative, (size, digest) in expected.items():
         path = source / relative
         try:
@@ -1921,6 +2331,294 @@ def copy_pinned(source, target, expected, mode=0o444):
     need(record(target, expected["size"]) == {**expected, "path": str(target)}
          and target.stat().st_uid == target.stat().st_gid == 0 and stat.S_IMODE(target.stat().st_mode) == mode
          and (target.stat().st_dev, target.stat().st_ino) != (before.st_dev, before.st_ino), "Protected copy readback differs")
+
+
+def _android_point():
+    need(not _FAILED and time.monotonic() < _END, "Android publication endpoint expired or failed")
+
+
+def _android_node(path, *, owner, device, is_directory, mode=None):
+    _android_point()
+    item = path.lstat()
+    need((stat.S_ISDIR(item.st_mode) if is_directory else stat.S_ISREG(item.st_mode))
+         and (item.st_uid, item.st_gid) == owner and item.st_dev == device and not item.st_mode & 0o7022
+         and (is_directory or item.st_nlink == 1) and (mode is None or stat.S_IMODE(item.st_mode) == mode),
+         "Android material owner/device/type/mode/link differs")
+    _xattrs(path, is_directory)
+    need(identity(path.lstat()) == identity(item), "Android material node changed during admission")
+    return identity(item)
+
+
+def _android_ancestors(path, device):
+    """Every protected canonical ancestor shares the consumer's root device."""
+    originals = {}
+    for parent in reversed((path, *path.parents)):
+        item = _android_node(parent, owner=(0, 0), device=device, is_directory=True)
+        need(item[2] & 0o555 == 0o555, "Android protected ancestor is not readable/searchable by the consumer")
+        originals[str(parent)] = item[:5]
+    return originals
+
+
+def _android_merge_originals(originals, observed):
+    for name, item in observed.items():
+        need(name not in originals or originals[name] == item, "Android original ancestor binding changed")
+        originals.setdefault(name, item)
+
+
+def _android_directory_mode(path, original, mode):
+    """Change only an original directory, never a substituted named object."""
+    before = _android_node(path, owner=(0, 0), device=original[0], is_directory=True)
+    need(before[:len(original)] == original, "Android original directory changed before mode establishment")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        need(identity(os.fstat(fd)) == before, "Android directory changed before original open")
+        os.fchmod(fd, mode)
+        after = identity(os.fstat(fd))
+        need(after[:2] == before[:2] and after[2] == stat.S_IFDIR | mode and after[3:8] == before[3:8]
+             and identity(path.lstat()) == after, "Android original directory changed during mode establishment")
+    finally:
+        os.close(fd)
+    need(identity(path.lstat()) == after, "Android directory changed after original close")
+    return after
+
+
+def _android_mkdir(path, device):
+    # main's umask077 is intentional. Establish0755 explicitly only after
+    # exclusive creation and original-owner/device/mode admission.
+    path.mkdir(mode=0o700)
+    original = _android_node(path, owner=(0, 0), device=device, is_directory=True, mode=0o700)
+    return _android_directory_mode(path, original, 0o755)
+
+
+def _android_tree(root, files, directories, *, owner, device, source=False, manifest=False, hashes=True, root_mode=0o555):
+    """Android-only complete finite readback; ordinary runtime _tree is unchanged."""
+    expected = {row["path"]: row for row in files}
+    directories = set(directories)
+    wanted = set(expected) | directories | {""}
+    need(len(wanted) <= 32769, "Android tree exceeds its existing entry bound")
+    pending, rows, pairs = [(root, "")], {}, set()
+    while pending:
+        path, name = pending.pop()
+        need(name in wanted and name not in rows, "Extra or repeated Android material entry")
+        is_directory = name == "" or name in directories
+        spec = None if is_directory else expected[name]
+        mode = 0o700 if source and is_directory else (root_mode if name == "" else 0o555) if is_directory else spec["mode"]
+        if source and not is_directory:
+            mode = 0o500 if mode & 0o111 else 0o400
+        item = _android_node(path, owner=owner, device=device, is_directory=is_directory, mode=mode)
+        need(item[:2] not in pairs, "Android material inode aliases another entry")
+        pairs.add(item[:2])
+        if is_directory:
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    _android_point()
+                    need(len(children) + len(pending) + len(rows) < len(wanted), "Android enumeration count exceeded")
+                    children.append((path / entry.name, name + "/" + entry.name if name else entry.name))
+            pending.extend(sorted(children, reverse=True))
+        else:
+            need(item[6] == spec["size"], "Android material size differs")
+            if hashes:
+                need(record(path, spec["size"]) == {"path": str(path), "size": spec["size"], "sha256": spec["sha256"]},
+                     "Android material body differs")
+        need(identity(path.lstat()) == item, "Android material identity changed during traversal")
+        rows[name] = item
+    need(set(rows) == wanted, "Android material membership incomplete")
+    for name, item in rows.items():
+        need(identity((root / name).lstat()) == item, "Android original changed after complete readback")
+    need(source or manifest or "android-toolchain.json" not in rows, "Android manifest published before payload acceptance")
+    return rows
+
+
+def _android_os_check(plan, device):
+    originals = {}
+    canonical = {row["path"] for row in plan["osFiles"]}
+    canonical |= {str(parent) for name in canonical.copy() for parent in Path(name).parents}
+    for row in plan["osFiles"]:
+        path = absolute(row["path"])
+        _android_merge_originals(originals, _android_ancestors(path.parent, device))
+        before = _android_node(path, owner=(0, 0), device=device, is_directory=False, mode=row["mode"])
+        need(record(path, row["size"]) == {key: row[key] for key in ("path", "size", "sha256")},
+             "Android current OS file differs from exact contract")
+        need(identity(path.lstat()) == before, "Android current OS file changed during readback")
+        originals[str(path)] = before
+    seen = set()
+    for row in plan["aliases"]:
+        path, destination = absolute(row["path"]), absolute(row["canonical"])
+        need(str(path) not in canonical and str(path).casefold() not in seen and str(destination) in canonical
+             and os.path.normpath(str(path.parent / row["target"])) == str(destination), "Android OS alias destination differs")
+        seen.add(str(path).casefold())
+        _android_merge_originals(originals, _android_ancestors(path.parent, device))
+        before = path.lstat()
+        need(stat.S_ISLNK(before.st_mode) and before.st_uid == before.st_gid == 0 and before.st_dev == device
+             and before.st_nlink == 1 and os.readlink(path) == row["target"], "Android OS alias owner/body differs")
+        _xattrs(path, False)
+        need(identity(path.lstat()) == identity(before), "Android OS alias changed during readback")
+        originals[str(path)] = identity(before)
+    for name, before in originals.items():
+        actual = identity(Path(name).lstat())
+        need(actual[:len(before)] == before, "Android OS original/name changed after readback")
+    return originals
+
+
+def _android_source_documents(value):
+    request = value["shell"]["androidPublication"]
+    need(request == shell_android_publication_request(value["taskRoot"]), "Android source request differs")
+    raw, originals = {}, {}
+    for key, row in request["documents"].items():
+        path = absolute(row["path"])
+        directory(path.parent)
+        before = path.lstat()
+        need((before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and stat.S_IMODE(before.st_mode) == 0o400, "Android source document owner/mode differs")
+        _xattrs(path, False)
+        observed, body = record(path, row["size"], content=True)
+        need(observed == row and identity(path.lstat()) == identity(before), "Android source document drift")
+        raw[key], originals[str(path)] = body, identity(before)
+    return _android_publication_plan(raw), originals
+
+
+def _android_publication_summary():
+    return deepcopy(_ANDROID_PUBLICATION)
+
+
+def _publish_android(value):
+    """One root-service branch; no acquisition, generic publisher, or cleanup."""
+    global _ANDROID_PUBLICATION, _ANDROID_PUBLISHED, _PHASE
+    need(_ANDROID_PUBLICATION is None and _ANDROID_PUBLISHED is None, "Android publication cannot be retried")
+    _PHASE = "android-publication-inputs"
+    _android_point()
+    plan, documents = _android_source_documents(value)
+    materials = plan["materials"]
+    target = Path("/opt/mobile-release-kit/android") / materials["instance"]
+    source = absolute(value["shell"]["androidPublication"]["sourceRoot"])
+    directory(source)
+    device = Path("/").lstat().st_dev
+    source_device = source.lstat().st_dev
+    specs = {row["path"]: row for row in plan["files"]}
+    source_files = [{**specs[row["path"]], "path": row["source"]} for row in plan["sources"]]
+    source_directories = _android_directories([row["path"] for row in source_files])
+    source_before = _android_tree(source, source_files, source_directories,
+        owner=(value["runnerUid"], value["runnerGid"]), device=source_device, source=True, hashes=False)
+    # Record current source ancestry identities, not historical material receipts.
+    ancestry = {str(path): identity(path.lstat())[:5] for path in (source, *source.parents)}
+    _ANDROID_PUBLICATION = {"state": "preparing", "instance": materials["instance"], "materials": materials,
+        "documents": plan["documents"], "totals": plan["totals"], "createdDirectories": 0,
+        "verifiedFiles": 0, "verifiedBytes": 0, "manifestPublished": False, "uncertainEntry": None,
+        "qualified": False, "cleanupClaimed": False}
+    _absent(target)  # Refuse an existing instance before touching any prefix.
+    ancestors = {}
+    for path in (Path("/opt"), target.parent.parent, target.parent):
+        _android_point()
+        if not path.exists() and not path.is_symlink():
+            need(path != Path("/opt"), "Android OS /opt prerequisite missing")
+            _ANDROID_PUBLICATION["uncertainEntry"] = str(path)
+            _android_mkdir(path, device)
+            _ANDROID_PUBLICATION["createdDirectories"] += 1
+            _ANDROID_PUBLICATION["uncertainEntry"] = None
+        _android_merge_originals(ancestors, _android_ancestors(path, device))
+    _ANDROID_PUBLICATION["uncertainEntry"] = str(target)
+    original = _android_mkdir(target, device)
+    _ANDROID_PUBLICATION["createdDirectories"] += 1
+    created = {"": original[:2]}
+    created_pairs = set(created.values())
+    _ANDROID_PUBLICATION["uncertainEntry"] = None
+    _PHASE = "android-publication-copy"
+    for name in plan["directories"]:
+        _android_point()
+        _ANDROID_PUBLICATION["uncertainEntry"] = name
+        path = target / name
+        created[name] = _android_mkdir(path, device)[:2]
+        need(created[name] not in created_pairs, "Android directory inode aliases another original")
+        created_pairs.add(created[name])
+        _ANDROID_PUBLICATION["createdDirectories"] += 1
+        _ANDROID_PUBLICATION["uncertainEntry"] = None
+    for mapping in plan["sources"]:
+        _android_point()
+        row, original = specs[mapping["path"]], source / mapping["source"]
+        need(identity(original.lstat()) == source_before[mapping["source"]], "Android copy source changed before use")
+        _ANDROID_PUBLICATION["uncertainEntry"] = row["path"]
+        copy_pinned(original, target / row["path"], {"path": str(original), **{key: row[key] for key in ("size", "sha256")}}, row["mode"])
+        item = _android_node(target / row["path"], owner=(0, 0), device=device, is_directory=False, mode=row["mode"])
+        need(item[:2] not in created_pairs and item[:2] != source_before[mapping["source"]][:2], "Android copy did not create a distinct original")
+        created[row["path"]] = item[:2]
+        created_pairs.add(item[:2])
+        _ANDROID_PUBLICATION["verifiedFiles"] += 1
+        _ANDROID_PUBLICATION["verifiedBytes"] += row["size"]
+        _ANDROID_PUBLICATION["uncertainEntry"] = None
+    for name in reversed(plan["directories"]):
+        _android_directory_mode(target / name, created[name], 0o555)
+    _PHASE = "android-publication-readback"
+    before = _android_tree(target, plan["files"], plan["directories"], owner=(0, 0), device=device, root_mode=0o755)
+    need(all(before[name][:2] == item for name, item in created.items()), "Android original output was replaced")
+    need(_android_ancestors(target.parent, device) == ancestors, "Android publication prefix original changed")
+    os_before = _android_os_check(plan, device)
+    need(_android_tree(source, source_files, source_directories, owner=(value["runnerUid"], value["runnerGid"]),
+         device=source_device, source=True, hashes=False) == source_before, "Android original source tree changed during copy")
+    for name, item in {**ancestry, **documents}.items():
+        need(identity(Path(name).lstat())[:len(item)] == item, "Android original source/document binding changed")
+    _PHASE = "android-publication-manifest"
+    row = value["shell"]["androidPublication"]["documents"]["manifest"]
+    _ANDROID_PUBLICATION["uncertainEntry"] = "android-toolchain.json"
+    copy_pinned(absolute(row["path"]), target / "android-toolchain.json", row)
+    _android_directory_mode(target, before[""][:5], 0o555)
+    manifest_row = {"path": "android-toolchain.json", "size": row["size"], "sha256": row["sha256"], "mode": 0o444}
+    files = [*plan["files"], manifest_row]
+    # Only metadata needs another pass: payload bytes were just checked while
+    # the root-owned tree was closed to the nonroot consumer; manifest copied last.
+    final = _android_tree(target, files, plan["directories"], owner=(0, 0), device=device, manifest=True, hashes=False)
+    need(final[""][:2] == before[""][:2] and final[""][3:5] == before[""][3:5],
+         "Android original root changed while publishing manifest")
+    need(all(final[name] == item for name, item in before.items() if name), "Android payload changed while publishing manifest")
+    # Sync every new namespace edge as well as the final closed tool tree.
+    # Prefixes may pre-exist, but syncing does not adopt or change their contents.
+    syncs = [(target / name, final[name]) for name in (*reversed(plan["directories"]), "")]
+    parents = _android_ancestors(target.parent, device)
+    need(parents == ancestors, "Android publication prefix changed before sync")
+    syncs.extend((Path(name), item) for name, item in reversed(tuple(parents.items())))
+    for path, expected in syncs:
+        _android_point()
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            need(identity(os.fstat(fd))[:len(expected)] == expected, "Android directory changed before sync")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    _android_point()
+    _ANDROID_PUBLICATION.update(state="published", manifestPublished=True, uncertainEntry=None)
+    _ANDROID_PUBLISHED = (target, plan, files, final, os_before, device, ancestors)
+    return _android_publication_summary()
+
+
+def _finish_android_publication(value):
+    need(_ANDROID_PUBLISHED is not None and _ANDROID_PUBLICATION is not None
+         and _ANDROID_PUBLICATION["state"] == "published", "Android publication was not completed")
+    target, plan, files, before, os_before, device, ancestors = _ANDROID_PUBLISHED
+    need(_android_tree(target, files, plan["directories"], owner=(0, 0), device=device, manifest=True) == before
+         and _android_os_check(plan, device) == os_before, "Android protected profile changed during native consumers")
+    need(_android_ancestors(target.parent, device) == ancestors, "Android original publication prefix changed during consumers")
+    need(value["shell"]["androidPublication"] == shell_android_publication_request(value["taskRoot"]),
+         "Android publication/source correspondence changed")
+    _ANDROID_PUBLICATION["state"] = "verified-after-consumers"
+    return _android_publication_summary()
+
+
+def _android_closed_publication(value, receipt):
+    """Correspondence after original service/client finality, not a new permit."""
+    data, materials = shell_android_publication_data(), shell_android_materials()
+    totals = data["totals"]
+    need(value["shell"].get("androidPublication") == shell_android_publication_request(value["taskRoot"])
+         and type(receipt) is dict and set(receipt) == {"state", "instance", "materials", "documents", "totals",
+         "createdDirectories", "verifiedFiles", "verifiedBytes", "manifestPublished", "uncertainEntry", "qualified", "cleanupClaimed"},
+         "Closed Android publication record missing or different")
+    need(receipt["state"] == "verified-after-consumers" and receipt["instance"] == materials["instance"]
+         and receipt["materials"] == materials and receipt["documents"] == data["documents"] and receipt["totals"] == totals
+         and type(receipt["createdDirectories"]) is int and totals["toolDirectories"] + 1 <= receipt["createdDirectories"] <= totals["toolDirectories"] + 3
+         and type(receipt["verifiedFiles"]) is int and receipt["verifiedFiles"] == totals["toolFiles"]
+         and type(receipt["verifiedBytes"]) is int and receipt["verifiedBytes"] == totals["toolBytes"]
+         and receipt["manifestPublished"] is True and receipt["uncertainEntry"] is None
+         and receipt["qualified"] is receipt["cleanupClaimed"] is False, "Closed Android publication result differs")
+    return deepcopy(receipt)
 
 
 def handoff(path, digest):
@@ -3706,10 +4404,18 @@ def shell_handoff(value, original_paths):
     """The fixed connection is neither J's libtest nor a new package source."""
     shell = value["shell"]
     need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
-         "artifactId", "acceptedU", "loaderPolicy"} | ({"githubReadOnly"} if "githubReadOnly" in shell else set()),
+         "acceptedU", "loaderPolicy"} | ({"localTransport"} if "localTransport" in shell else {"artifactId"})
+         | ({"githubReadOnly"} if "githubReadOnly" in shell else {"androidPublication"}),
          "Fixed shell handoff fields differ")
+    if shell_github(value):
+        need("localTransport" not in shell, "GitHub route cannot adopt Android local transport")
+    else:
+        materials, publication = _android_handoff_profile(value)
+        need(shell["androidPublication"] == shell_android_publication_request(value["taskRoot"], materials, publication),
+             "Fixed Android publication handoff differs")
     need(all(type(shell[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", shell[key]) is not None
-             for key in ("producerAttempt", "artifactId")) and int(shell["producerAttempt"]) <= int(value["attempt"])
+             for key in (("producerAttempt",) if "localTransport" in shell else ("producerAttempt", "artifactId")))
+         and int(shell["producerAttempt"]) <= int(value["attempt"])
          and type(shell["rosterSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", shell["rosterSha256"]) is not None,
          "Original shell producer/roster binding differs")
     if shell_github(value):
@@ -3733,6 +4439,18 @@ def shell_handoff(value, original_paths):
          and all(compiler["exportedArtifacts"][role][key] == row[key]
                  for role, row in binaries.items() for key in ("size", "sha256")),
          "Original normal/observer source, features or output bytes differ")
+    if shell_github(value):
+        need(compiler.get("androidBuildMaterials") is None
+             and compiler.get("androidBuildBindings") == {}
+             and compiler.get("androidBuildPublication") is None,
+             "GitHub shell cannot adopt an Android compile profile")
+    else:
+        need(compiler.get("androidBuildMaterials") == materials
+             and compiler.get("androidBuildBindings") == shell_android_compile_environment(materials)
+             and compiler.get("androidBuildPublication") == publication,
+             "Original Android compiled profile/publication correspondence differs")
+    if "localTransport" in shell:
+        _android_local_transport(value)
     need(type(accepted) is dict and set(accepted) == {"sourceSha", "runId", "attempt", "artifactId"}
          and accepted["sourceSha"] == value["compilerRecords"]["sourceSha"]
          and re.fullmatch(r"[0-9a-f]{40}", accepted["sourceSha"]) is not None
@@ -3777,6 +4495,8 @@ def service_argv(handoff_path, handoff_sha256, entry_sha256):
     need(type(entry_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", entry_sha256) is not None
          and record(entry, JSON_LIMIT)["sha256"] == entry_sha256, "Workflow entry pin differs")
     properties = {**service_properties(value["deadline"]), "TasksMax": service_task_limit(value)}
+    if "shell" in value and not shell_github(value):
+        properties["LimitNOFILE"] = str(SHELL_DESCRIPTOR_LIMIT)
     return _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties)
 
 
@@ -3890,6 +4610,105 @@ def _modules(root, *, owner):
         _OWNER = owned_process
 
 
+def _android_material_engine(root):
+    """Import only the existing source-pinned, root-protected DATA validator."""
+    base = root / "source"
+    for relative, (size, digest) in _android_source_pins().items():
+        path = base / relative
+        directory(path.parent, protected=True)
+        item = path.lstat()
+        need(record(path, size) == {"path": str(path), "size": size, "sha256": digest}
+             and item.st_uid == item.st_gid == 0 and stat.S_IMODE(item.st_mode) == 0o444
+             and not os.listxattr(path, follow_symlinks=False), "Android protected validator source differs")
+    spec = importlib.util.spec_from_file_location("_root_android_material_preparation",
+        base / "desktop/tools/android_material_preparation.py")
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    # Reuse this already authenticated root loader DATA implementation. The
+    # material validator never imports a second lifecycle/owner or self-hash.
+    engine._PROVIDER_LOADER_DATA = {name: globals()[name] for name in (
+        "loader_diagnostics", "loader_cache", "shell_loader_candidates", "loader_selected", "DEFAULT_LIBRARY_DIRS", "HWCAPS")}
+    return engine
+
+
+def _android_original_preparation(value):
+    """Root revalidation before profile binding, publication or loader/app GO.
+
+    No acquisition or command API is reachable here. The existing native end is
+    used; the original compiler end may legitimately have elapsed after compile.
+    StopPost never calls this function or adopts an expired compiler owner.
+    """
+    need(_ROOT == root_path(value) and not _FAILED and time.monotonic() < _END,
+         "Android root preparation role/endpoint differs")
+    transport = _android_local_transport(value)
+    envelope, compiler = value["shell"]["localTransport"], value["shell"]["compiler"]
+    originals = {}
+    def original_document(pin, limit, mode):
+        path = absolute(pin["path"])
+        directory(path.parent)
+        item = path.lstat()
+        need(time.monotonic() < _END and stat.S_ISREG(item.st_mode) and item.st_nlink == 1
+             and (item.st_uid, item.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and stat.S_IMODE(item.st_mode) == mode and not os.listxattr(path, follow_symlinks=False),
+             "Android original private document custody differs")
+        observed, body = record(path, pin["size"], content=True)
+        need(observed == pin and identity(path.lstat()) == identity(item), "Android original private document changed")
+        originals[path] = (identity(item), pin)
+        return decode(body, limit)
+    envelope_pin = {key: envelope[key] for key in ("path", "size", "sha256")}
+    need(original_document(envelope_pin, 64 << 10, 0o400) == transport,
+         "Android original local transport changed before root admission")
+    for key in ("compilerRoot", "compilerEvidence", "materialRoot"):
+        original = transport[key]
+        directory(absolute(original["path"]))
+        need(list(identity(absolute(original["path"]).lstat())[:5]) == original["identity"],
+             "Android same-job original directory changed before root admission")
+    preparation_pin = transport["context"]["preparation"]
+    original = original_document(preparation_pin, 16384, 0o600)
+    need(original.get("source") == value["source"]
+         and (original.get("runnerUid"), original.get("runnerGid")) == (value["runnerUid"], value["runnerGid"]),
+         "Android original compiler source/owner differs from native preparation")
+    engine = _android_material_engine(_ROOT)
+    prepared_pin = transport["materialRecord"]
+    prepared_path = absolute(prepared_pin["path"])
+    prepared = original_document(prepared_pin, 64 << 10, 0o400)
+    host_pin = prepared["provenance"]["documents"]["host"]
+    need(type(host_pin) is dict and set(host_pin) == {"path", "size", "sha256"} and host_pin["path"] == "host.json"
+         and type(host_pin["size"]) is int and 0 < host_pin["size"] <= 32 << 20,
+         "Android fixed private host reference differs")
+    host_path = absolute(transport["materialRoot"]["path"]) / "private/host.json"
+    host = original_document({**host_pin, "path": str(host_path)}, 32 << 20, 0o400)
+    checked = engine.read_record(prepared_path, {key: prepared_pin[key] for key in ("size", "sha256")},
+        context=transport["context"], host=host, deadline=_END)
+    materials, publication = _android_handoff_profile(value)
+    need(checked == prepared and checked["materials"] == materials and checked["publication"] == publication,
+         "Android root-validated original profile differs from compiler")
+    roster_pin = transport["compilerRoster"]
+    roster = original_document(roster_pin, 512 << 10, 0o600)
+    original_pin = compiler.get("originalRecord")
+    need(type(original_pin) is dict and set(original_pin) == {"path", "size", "sha256"}
+         and original_pin["path"] == "compiler.json" and type(original_pin["size"]) is int
+         and 0 < original_pin["size"] <= 8 << 20, "Android original compiler record pin differs")
+    original_compiler = absolute(transport["compilerEvidence"]["path"]) / "compiler.json"
+    need(type(roster) is dict and set(roster) == {"sourceSha", "sourceTree", "runId", "attempt", "files"}
+         and all(roster.get(key) == compiler.get(key) for key in ("sourceSha", "sourceTree", "runId", "attempt"))
+         and type(roster["files"]) is list and len(roster["files"]) <= 1536
+         and [row for row in roster["files"] if type(row) is dict and row.get("path") == "compiler.json"] == [original_pin],
+         "Android root compiler record differs from the complete original roster")
+    full = original_document({**original_pin, "path": str(original_compiler)}, 8 << 20, 0o600)
+    need(all(full.get(key) == item for key, item in compiler.items() if key != "originalRecord")
+         and time.monotonic() < _END, "Android root compiler projection differs or closed late")
+    for key in ("compilerRoot", "compilerEvidence", "materialRoot"):
+        row = transport[key]
+        need(list(identity(absolute(row["path"]).lstat())[:5]) == row["identity"],
+             "Android original transport directory changed during root admission")
+    for path, (before, pin) in originals.items():
+        need(time.monotonic() < _END and identity(path.lstat()) == before
+             and record(path, pin["size"]) == pin and identity(path.lstat()) == before,
+             "Android original private document changed during root admission")
+    bind_shell_android_profile(materials, publication)
+
+
 def _context(*, copying=False):
     global _ROOT, _END
     root = Path(__file__).absolute().parent
@@ -3915,6 +4734,14 @@ def _context(*, copying=False):
         relative = "desktop/tools/conventional_runtime_data.py"
         copy_pinned(source / relative, root / "source" / relative,
                     {"path": str(source / relative), "size": DATA_PIN[0], "sha256": DATA_PIN[1]})
+        android = "localTransport" in value.get("shell", {})
+        if android:
+            data_directory = root / "source/desktop/tools/android_material_data"
+            data_directory.mkdir(mode=0o700)
+            for relative, (size, digest) in _android_source_pins().items():
+                copy_pinned(source / relative, root / "source" / relative,
+                            {"path": str(source / relative), "size": size, "sha256": digest})
+            os.chmod(data_directory, 0o555)
         candidates = [("candidate", value["installed"]["candidate"], root / "installed-tests", 0o555)] if "installed" in value else []
         if "shell" in value:
             candidates = [(role, row, root / ("shell-" + role), 0o555) for role, row in value["shell"]["binaries"].items()]
@@ -3953,6 +4780,9 @@ def _capacity(value):
         # One write-only failure leaf per observer. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
         required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
+        _, android_data = _android_handoff_profile(value)
+        android_totals = android_data["totals"]
+        required += android_totals["toolBytes"] + android_data["documents"]["manifest"]["size"]
         required += sum(map(len, SHELL_WORKFLOW_CALLERS.values())) + len(SHELL_WORKFLOW_IGNORE) + len(SHELL_WORKFLOW_SIBLING) \
             + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
         required += sum(len(data) for _, mode, _, data in _shell_metadata_roster(value, True) if stat.S_ISREG(mode)) \
@@ -3963,15 +4793,18 @@ def _capacity(value):
         required += sum(len(row[3]) for row in session_nodes if not stat.S_ISDIR(row[1]))
         tools_offline_nodes = [row for case in SHELL_TOOLS_OFFLINE_CASES for row in _shell_tools_offline_roster(value, case, True)]
         required += sum(len(row[3]) for row in tools_offline_nodes if stat.S_ISREG(row[1]))
+        android_nodes = [row for case in SHELL_ANDROID_CASES for row in _shell_android_roster(value, case, True)]
+        required += sum(len(row[3]) for row in android_nodes if stat.S_ISREG(row[1]))
         # Each added existing GUI route creates eight directories, auth and
-        # bus-config files, its log, and a bus socket. The shell-only170 output
-        # slots cover the168 root originals; TOTAL_LIMIT is unchanged.
-        # Settled-failure and version-save are outside both fixture groups:
+        # bus-config files, its log, and a bus socket. The shell-only190 output
+        # slots cover the188 root originals; TOTAL_LIMIT is unchanged.
+        # Settled-failure and version-save are outside the three fixture groups:
         # each needs twelve GUI environment nodes in block/inode accounting.
-        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + 2)
+        session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + len(SHELL_ANDROID_CASES) + 2)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (shell_public_limit(value) if "shell" in value else 128)
     if "shell" in value and not shell_github(value):
-        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes
+        inodes += len(SHELL_CASES[1:]) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + session_environment_nodes
+        inodes += android_totals["toolFiles"] + android_totals["toolDirectories"] + 4  # manifest and at most three new directories.
     if shell_github(value):
         count = len(shell_cases(value))
         # Two distinct complete D copies, the fixed peer/project, and the
@@ -3984,7 +4817,8 @@ def _capacity(value):
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     if "shell" in value and not shell_github(value):
-        required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+        required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
+        required += (android_totals["toolFiles"] + android_totals["toolDirectories"] + 4) * space.f_frsize
     if shell_github(value):
         required += github_nodes * space.f_frsize
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
@@ -4151,7 +4985,8 @@ def seconds_value(value):
 
 def _domain(value, label):
     unit = root_path(value).name + ".service"
-    result = command(label + "-unit-show", ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(SHOW), unit], maximum=3)
+    show = SHOW + (("LimitNOFILE", "LimitNOFILESoft") if "shell" in value and not shell_github(value) else ())
+    result = command(label + "-unit-show", ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), unit], maximum=3)
     observation = _domain_events(_domain_admission(value, result.stdout))
     _no_denials(observation)
     return observation
@@ -4160,10 +4995,11 @@ def _domain(value, label):
 def _domain_admission(value, raw, *, stop_boundary=False):
     """Ownership/domain admission is not the later zero-denial success verdict."""
     unit = root_path(value).name + ".service"
+    show = SHOW + (("LimitNOFILE", "LimitNOFILESoft") if "shell" in value and not shell_github(value) else ())
     rows = raw.decode("ascii").splitlines()
     props = dict(line.split("=", 1) for line in rows)
     extra = ("ActiveState", "SubState", "ControlPID", "MainPID") if stop_boundary else ()
-    need(len(props) == len(rows) and set(props) == set(SHOW) | set(extra)
+    need(len(props) == len(rows) and set(props) == set(show) | set(extra)
          and props["Id"] == unit and props["Type"] == "exec", "Original service properties incomplete")
     if stop_boundary:
         need(props["ActiveState"] == "deactivating" and props["SubState"] == "stop-post"
@@ -4190,6 +5026,11 @@ def _domain_admission(value, raw, *, stop_boundary=False):
     need(props["MemoryMax"] == effective["memory.max"] == str(6 << 30) and props["MemorySwapMax"] == effective["memory.swap.max"] == "0"
          and props["TasksMax"] == effective["pids.max"] == service_task_limit(value)
          and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
+    if "shell" in value and not shell_github(value):
+        nofile = resource.getrlimit(resource.RLIMIT_NOFILE)
+        need(props["LimitNOFILE"] == props["LimitNOFILESoft"] == str(SHELL_DESCRIPTOR_LIMIT)
+             and nofile == (SHELL_DESCRIPTOR_LIMIT, SHELL_DESCRIPTOR_LIMIT), "Inherited shell descriptor limits differ")
+        effective["nofile"] = list(nofile)
     quota, period = effective["cpu.max"].split()
     need(quota.isdecimal() and period.isdecimal() and int(period) > 0 and int(quota) == 2 * int(period), "Effective CPU ceiling differs")
     return {"sourceSha": value["sourceSha"], "unit": props, "invocationId": invocation, "effective": effective}
@@ -4747,6 +5588,7 @@ def public_files(value):
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_SESSION_CASES for phase in ("before", "after")} \
             | {"shell-" + case + "-" + phase + ".json" for case in SHELL_TOOLS_OFFLINE_CASES for phase in ("before", "after")} \
+            | {"shell-" + case + "-" + phase + ".json" for case in SHELL_ANDROID_CASES for phase in ("before", "after")} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -6440,7 +7282,7 @@ def _shell_log_capture(value, case, original, result):
     return raw
 
 
-SHELL_FIXTURE_CHILDREN = ("candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
+SHELL_FIXTURE_CHILDREN = ("android-build", "android-build-cancel", "android-build-failure", "android-build-refusals", "candidate-evidence", "metadata-project", "offline-cancel", "offline-drift", "offline-negative",
     "offline-pass", "offline-settlement", "path-outside", "path-project", "positive-project", "session-deadline", "session-inputs",
     "session-ios-firebase", "session-loss", "session-refusals", "tools-cancel", "tools-observed", "tools-settlement", "version-project", "workflow-project")
 
@@ -7272,6 +8114,194 @@ def shell_github_fixture(value, before_raw, after_raw):
             "releaseConfigCreated": False, "sourceSha": value["sourceSha"]}
 
 
+def _shell_android_object(value, fields, message):
+    need(type(value) is dict and set(value) == set(fields), message)
+    return value
+
+
+def _shell_android_roster(value, case, after=False):
+    """Exactly25 original controls; generated output bodies are not controls."""
+    materials = _android_handoff_profile(value)[0] if "localTransport" in value.get("shell", {}) else None
+    files = _shell_android_files(case, after, materials)
+    nodes = [*SHELL_ANDROID_DIRECTORIES[1:], *files]
+    owners = value["runnerUid"], value["runnerGid"]
+    rows = []
+    for name in SHELL_ANDROID_DIRECTORIES:
+        children = sorted(Path(child).name for child in nodes if str(Path(child).parent) == name)
+        if after and name in SHELL_ANDROID_GENERATED[1:]:
+            children = None  # No generated output traversal, even after Exit.
+        elif after and name == "project" and case != "android-build-refusals":
+            children = sorted([*children, ".mobile-release"])
+        rows.append((name, stat.S_IFDIR | 0o700, owners, children))
+    rows.extend((name, stat.S_IFREG | 0o600, owners, files[name]) for name in sorted(files))
+    need(len(rows) == 25 and all(len(data) <= 2048 for _, mode, _, data in rows if stat.S_ISREG(mode)),
+         "Fixed Android original control roster exceeds its bound")
+    return tuple(rows)
+
+
+def _shell_android_fixtures_prepare(value, root):
+    """Only fresh fixed source controls; no SDK/repository download or adoption."""
+    need(_ROOT == root_path(value) and root == shell_fixture_root(value), "Different fresh Android fixture route")
+    shell_android_materials()  # Refuse absent material BEFORE creating a case.
+    for case in SHELL_ANDROID_CASES:
+        base = root / case
+        for relative, mode, owners, expected in _shell_android_roster(value, case):
+            path = base if relative == "." else base / relative
+            if stat.S_ISDIR(mode):
+                path.mkdir(mode=0o700)
+            else:
+                _D.write(path, expected, 0o600)
+            os.chown(path, *owners, follow_symlinks=False)
+            _xattrs(path, stat.S_ISDIR(mode))
+
+
+def _shell_android_identity(value, original, mode, device):
+    need(type(original) is list and len(original) == 9
+         and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+         and original[0] == device and original[0] > 0 and original[1] > 0 and original[2] == mode
+         and original[3:5] == [value["runnerUid"], value["runnerGid"]]
+         and (0 < original[5] <= 16 and original[6] <= 1 << 20 if stat.S_ISDIR(mode) else
+              original[5] == 1 and original[6] <= 2048), "Android source control identity differs")
+
+
+def _shell_android_inventory(value, namespace, case, *, after=False):
+    """Pre-launch or ordinary observed Exit only. Never scan live/failed work."""
+    need(_ROOT == root_path(value), "Different original Android service root")
+    roster = _shell_android_roster(value, case, after)
+    binding = namespace
+    namespace = _shell_namespace_check(value, binding)
+    root = shell_fixture_root(value) / case
+    rows, originals = [], []
+    # Parent names are admitted before descendants. The three generated scopes
+    # are never exported; after Exit only their fixed root metadata is observed.
+    for relative, mode, owners, expected in roster:
+        path = root if relative == "." else root / relative
+        before = identity(path.lstat())
+        _shell_android_identity(value, list(before), mode, namespace["identity"][0])
+        _xattrs(path, stat.S_ISDIR(mode))
+        if stat.S_ISDIR(mode):
+            directory(path)
+            if expected is not None:
+                found = []
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        need(len(found) < len(expected) and entry.name in expected, "Unexpected Android source control entry")
+                        found.append(entry.name)
+                need(sorted(found) == expected, "Android source control roster differs")
+            row = {"path": relative, "kind": "directory", "identity": list(before),
+                   "children": expected, "contentsInspected": expected is not None}
+        else:
+            observed = record(path, len(expected))
+            need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest(),
+                 "Android source control bytes differ")
+            row = {**observed, "path": relative, "kind": "file", "identity": list(before)}
+        need(identity(path.lstat()) == before, "Android source control changed during inventory")
+        rows.append(row)
+        originals.append((path, before))
+    generated = None
+    if after and case != "android-build-refusals":
+        path = root / SHELL_ANDROID_GENERATED[0]
+        before = identity(path.lstat())
+        _shell_android_identity(value, list(before), stat.S_IFDIR | 0o700, namespace["identity"][0])
+        _xattrs(path, True)
+        need(identity(path.lstat()) == before, "Android generated namespace metadata changed")
+        generated = {"path": SHELL_ANDROID_GENERATED[0], "kind": "directory", "identity": list(before), "contentsInspected": False}
+        originals.append((path, before))  # Metadata only, never children/logs/AAB.
+    identities = [row["identity"] for row in rows] + ([generated["identity"]] if generated is not None else [])
+    reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+    need(len({tuple(row[:2]) for row in identities}) == len(identities)
+         and all(tuple(row[:2]) not in reserved for row in identities)
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Android source controls alias or changed during inventory")
+    _shell_namespace_check(value, binding)
+    document = {"schemaVersion": 1, "fixture": "installed-android-build-fixture-v1", "case": case,
+        "root": str(root), "after": after, "entries": rows, "generatedNamespace": generated,
+        "generatedScopesNotExported": list(SHELL_ANDROID_GENERATED), "namespace": namespace, "materials": shell_android_materials()}
+    need(len(canonical(document)) <= SHELL_ANDROID_INVENTORY_LIMIT, "Android inventory exceeds its fixed bound")
+    return document
+
+
+def _shell_android_native_fixture(case):
+    need(type(case) is str and case in SHELL_ANDROID_CASES, "Different Android fixture case")
+    return {"sourceControlsAccounted": True, "savedVersionChanged": case == "android-build-refusals",
+            "gradleBoundary": "" if case == "android-build-refusals" else "active\n",
+            "generatedScopesNotExported": list(SHELL_ANDROID_GENERATED)}
+
+
+def _shell_android_fixture_facts(case):
+    drift = case == "android-build-refusals"
+    return {"fixture": "installed-android-build-fixture-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+        **_shell_android_native_fixture(case), "beforeCount": 25, "afterCount": 25,
+        "mutations": [SHELL_ANDROID_VERSION_PATH if drift else SHELL_ANDROID_TRACE],
+        "generatedNamespacePresent": not drift, "materials": shell_android_materials(),
+        "savedConfig": _shell_android_content(SHELL_ANDROID_CONFIG),
+        "savedVersionBefore": _shell_android_version(), "savedVersionAfter": _shell_android_version(drift)}
+
+
+def shell_android_fixture(value, case, before_raw, after_raw):
+    """Closed DATA correspondence, not permission to inspect a failed/live tree."""
+    inventories, namespaces = [], []
+    for raw, after in ((before_raw, False), (after_raw, True)):
+        roster = _shell_android_roster(value, case, after)
+        document = decode(raw, SHELL_ANDROID_INVENTORY_LIMIT)
+        _shell_android_object(document, {"schemaVersion", "fixture", "case", "root", "after", "entries",
+            "generatedNamespace", "generatedScopesNotExported", "namespace", "materials"}, "Android inventory shape differs")
+        need(canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "installed-android-build-fixture-v1" and document["case"] == case
+             and document["root"] == str(shell_fixture_root(value) / case) and document["after"] is after
+             and document["generatedScopesNotExported"] == list(SHELL_ANDROID_GENERATED)
+             and canonical(document["materials"]) == canonical(shell_android_materials()), "Android inventory route/phase/material differs")
+        namespace = _shell_namespace_data(value, document["namespace"])
+        namespaces.append(namespace)
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster) == 25, "Android original control count differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            _shell_android_object(row, {"path", "kind", "identity"} | ({"children", "contentsInspected"} if is_directory else
+                {"size", "sha256"}), "Android source control fields differ")
+            need(row["path"] == relative and row["kind"] == ("directory" if is_directory else "file")
+                 and relative not in observed, "Android source control name/kind differs")
+            _shell_android_identity(value, row["identity"], mode, namespace["identity"][0])
+            if is_directory:
+                need(row["children"] == expected and row["contentsInspected"] is (expected is not None),
+                     "Android source control children or output exclusion differs")
+            else:
+                need(row["identity"][6] == len(expected) and type(row["size"]) is int and row["size"] == len(expected)
+                     and row["sha256"] == hashlib.sha256(expected).hexdigest(), "Android original source bytes differ")
+            observed[relative] = row
+        generated = document["generatedNamespace"]
+        if after and case != "android-build-refusals":
+            _shell_android_object(generated, {"path", "kind", "identity", "contentsInspected"}, "Android namespace metadata is missing")
+            need(generated["path"] == SHELL_ANDROID_GENERATED[0] and generated["kind"] == "directory"
+                 and generated["contentsInspected"] is False, "Android output body was scanned/exported")
+            _shell_android_identity(value, generated["identity"], stat.S_IFDIR | 0o700, namespace["identity"][0])
+        else:
+            need(generated is None, "Android prebuild/refusal created a generated namespace")
+        all_rows = [*rows, *([generated] if generated is not None else [])]
+        reserved = {tuple(row["identity"][:2]) for row in [namespace, namespace["control"], *namespace["ancestors"]]}
+        need(len({tuple(row["identity"][:2]) for row in all_rows}) == len(all_rows)
+             and all(tuple(row["identity"][:2]) not in reserved for row in all_rows), "Android control/namespace aliases")
+        inventories.append(observed)
+    first, last = inventories
+    need(namespaces[0] == namespaces[1] and set(first) == set(last), "Android original namespace or control roster changed")
+    mutation = SHELL_ANDROID_VERSION_PATH if case == "android-build-refusals" else SHELL_ANDROID_TRACE
+    for name, row in last.items():
+        old = first[name]
+        if name == mutation:
+            need(old["identity"][:6] == row["identity"][:6] and row["identity"][7] >= old["identity"][7]
+                 and row["identity"][8] >= old["identity"][8], "Android changed source was replaced or moved backwards")
+        elif name in ("project", *SHELL_ANDROID_GENERATED[1:]):
+            need(old["identity"][:5] == row["identity"][:5] and row["identity"][7] >= old["identity"][7]
+                 and row["identity"][8] >= old["identity"][8], "Android original output parent was replaced")
+        else:
+            need(old == row, "Android changed an unrelated original source control")
+    need(before_raw != after_raw, "Android fixture lost its fixed in-place mutation")
+    return {**_shell_android_fixture_facts(case),
+        "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+        "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
 def _shell_fixture_ancestry(value):
     """Metadata only; the search-only control root and private contents stay put."""
     need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
@@ -7355,13 +8385,14 @@ def _shell_namespace_check(value, binding):
 
 
 def _shell_fixtures_prepare(value):
-    """Create the twenty fixed DATA trees once, retained on every failure.
+    """Create the24 fixed fixture trees once, retained on every failure.
 
     The sibling follows the existing disposable-runner retention policy; there
     is no deletion, cleanup scan, retry or permission repair of an old object.
     """
     if shell_github(value):
         return _shell_github_fixtures_prepare(value)
+    shell_android_materials()  # Missing binding refuses before any fresh namespace.
     ancestry = _shell_fixture_ancestry(value)
     root = shell_fixture_root(value)
     root.mkdir(mode=0o700)  # Exclusive. Do not inspect/adopt an occupied name.
@@ -7440,6 +8471,7 @@ def _shell_fixtures_prepare(value):
         _xattrs(path, stat.S_ISDIR(mode))
     _shell_session_fixtures_prepare(value, root)
     _shell_tools_offline_fixtures_prepare(value, root)
+    _shell_android_fixtures_prepare(value, root)
     _shell_namespace_roster(root)
     for name, kind in (("positive-project", True), ("positive-project/app", True),
                        ("positive-project/app/build.gradle.kts", False), ("positive-project/version.properties", False),
@@ -8228,6 +9260,150 @@ def shell_tools_offline_receipt(raw, case):
     return receipt
 
 
+def _shell_android_context(context):
+    _shell_android_object(context, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+        "platform", "operation"}, "Android original context fields differ")
+    need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["projectId"]) is not None
+         and all(type(context[key]) is int and 0 <= context[key] < (1 << 32) - 1 for key in ("draftRevision", "baselineGeneration"))
+         and context["platform"] == "android" and context["operation"] == "android-build-inspect"
+         and canonical(context["savedConfig"]) == canonical(_shell_android_content(SHELL_ANDROID_CONFIG))
+         and canonical(context["savedVersion"]) == canonical(_shell_android_version()),
+         "Android intent is not bound to the original saved configuration AND version bytes")
+
+
+def _shell_android_activity(activity):
+    _shell_android_object(activity, {"stage", "selection", "command", "findings", "summary"}, "Android actual activity fields differ")
+    need(activity["stage"] in ("accepted", "inputs-bound", "building", "capturing", "inspecting", "disposing-work"),
+         "Android actual stage differs")
+    need(activity["selection"] is None or canonical(activity["selection"]) == canonical(SHELL_ANDROID_SELECTION),
+         "Android fixed application selection differs")
+    command = _shell_android_object(activity["command"], {"outcome", "exitCode"}, "Android actual command fields differ")
+    need(command["outcome"] in ("not-dispatched", "exited", "unknown")
+         and (type(command["exitCode"]) is int and -(1 << 31) <= command["exitCode"] < 1 << 31 if command["outcome"] == "exited"
+              else command["exitCode"] is None), "Android original command exit is not typed or known as claimed")
+    zero = command["outcome"] == "exited" and command["exitCode"] == 0
+    if activity["stage"] in ("inputs-bound", "building", "capturing", "inspecting"):
+        need(activity["selection"] is not None, "Android stage lost its application selection")
+    if activity["stage"] in ("capturing", "inspecting"):
+        need(zero, "Android inspection preceded a known zero build return")
+    if command["outcome"] != "not-dispatched":
+        need(activity["selection"] is not None and activity["stage"] in ("building", "capturing", "inspecting", "disposing-work"),
+             "Android command was attributed to a prebuild stage")
+    summary = _shell_android_object(activity["summary"], {"total", "shown", "omitted", "counts"}, "Android summary fields differ")
+    counts = _shell_android_object(summary["counts"], SHELL_TOOLS_OFFLINE_STATUSES, "Android exact core status roster differs")
+    rows = activity["findings"]
+    need(type(rows) is list and len(rows) <= 128
+         and all(type(summary[key]) is int for key in ("total", "shown", "omitted"))
+         and summary["total"] == summary["shown"] == len(rows) and summary["omitted"] == 0
+         and all(type(n) is int and 0 <= n <= 128 for n in counts.values()), "Android bounded summary counts differ")
+    seen = {status: 0 for status in SHELL_TOOLS_OFFLINE_STATUSES}
+    for ordinal, row in enumerate(rows):
+        _shell_android_object(row, {"ordinal", "check", "status"}, "Android finding is not redacted closed DATA")
+        need(type(row["ordinal"]) is int and row["ordinal"] == ordinal and row["check"] in SHELL_ANDROID_CHECKS
+             and row["status"] in SHELL_TOOLS_OFFLINE_STATUSES and (row["check"] != "signer" or row["status"] == "SKIP"),
+             "Android finding status/order or signer claim differs")
+        seen[row["status"]] += 1
+        if row["check"] not in ("core-lifecycle", "other-core-finding"):
+            need(zero and activity["stage"] in ("inspecting", "disposing-work"), "Android artifact finding lacks a completed build")
+    need(counts == seen, "Android counts do not equal its actual bounded findings")
+
+
+def _shell_android_terminal(projection, case, original):
+    _shell_android_object(projection, {"operationId", "ownerGeneration", "context", "phase", "intentUsable",
+        "outcome", "reason", "stage", "activity", "disposition", "result"}, "Android actual typed projection fields differ")
+    expected_outcome, expected_reason = {
+        "android-build": ("complete", "none"), "android-build-failure": ("failed", "command-failed"),
+        "android-build-cancel": ("cancelled", "cancelled"), "android-build-refusals": ("refused", "saved-version-changed")}[case]
+    need(projection["operationId"] == original["id"] and projection["ownerGeneration"] == original["generation"]
+         and projection["phase"] == "terminal" and projection["intentUsable"] is False
+         and projection["outcome"] == expected_outcome and projection["reason"] == expected_reason,
+         "Android actual terminal belongs to another original or has not settled")
+    _shell_android_context(projection["context"])
+    activity = projection["activity"]
+    _shell_android_activity(activity)
+    need(projection["stage"] == activity["stage"], "Android native/core terminal stages differ")
+    refused, cancelled = case == "android-build-refusals", case == "android-build-cancel"
+    expected_disposition = {"work": "not-created" if refused else "removed",
+        "artifacts": "not-created" if refused else "retained-local-result" if case == "android-build" else "retained-incomplete"}
+    need(canonical(projection["disposition"]) == canonical(expected_disposition), "Android original disposition is not known as claimed")
+    command = activity["command"]
+    if refused:
+        need(activity["selection"] is None and command == {"outcome": "not-dispatched", "exitCode": None}
+             and activity["findings"] == [], "Saved-version drift dispatched a tool or advertised artifact inspection")
+    else:
+        need(canonical(activity["selection"]) == canonical(SHELL_ANDROID_SELECTION)
+             and command["outcome"] in ("exited", "unknown"), "Android native fixture did not dispatch its selected build")
+    if case != "android-build":
+        need(projection["result"] is None, "Failed/refused/cancelled Android case advertised a local result")
+        if not refused and not cancelled:
+            need(command["outcome"] == "exited" and command["exitCode"] != 0, "Android failure lacks its known nonzero build return")
+        return
+    need(activity["stage"] == "disposing-work" and canonical(command) == canonical({"outcome": "exited", "exitCode": 0}),
+         "Android complete result preceded actual build/finality")
+    result = _shell_android_object(projection["result"], {"schemaVersion", "scope", "usedConfig", "usedVersion", "selection",
+        "toolchainProfile", "command", "findings", "summary", "artifacts", "assurances", "limitations"}, "Android complete result fields differ")
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+         and result["scope"] == "local-post-build-artifact-observation" and result["toolchainProfile"] == "android-local-linux-gnu-x86_64-v1"
+         and canonical(result["usedConfig"]) == canonical(projection["context"]["savedConfig"])
+         and canonical(result["usedVersion"]) == canonical(projection["context"]["savedVersion"])
+         and all(canonical(result[key]) == canonical(activity[key]) for key in ("selection", "command", "findings", "summary"))
+         and result["limitations"] == SHELL_ANDROID_LIMITATIONS, "Android local result lost its original inputs/activity or limitations")
+    findings = result["findings"]
+    need([row["status"] for row in findings if row["check"] == "aab-structure"] == ["PASS"]
+         and [(row["check"], row["status"]) for row in findings if row["check"] in
+              ("aab-manifest", "application-id", "build-number", "version-name", "release-flags")] == [("aab-manifest", "PASS")]
+         and not any(row["check"] in ("core-lifecycle", "other-core-finding") for row in findings),
+         "Fixed real Android fixture did not pass structure AND native manifest/version inspection")
+    expected_assurances = {"structure": "passed", "nativeManifest": "passed", "applicationVersion": "native-checked",
+        "signer": "not-inspected", "toolkitSigning": "not-requested", "storeOperation": "not-requested",
+        "sourceBinding": "not-established", "releaseReadiness": "not-assessed"}
+    need(canonical(result["assurances"]) == canonical(expected_assurances), "Android local observation was relabelled as release authority")
+    artifacts = result["artifacts"]
+    need(type(artifacts) is list and len(artifacts) == 1, "Android required local AAB observation is missing/ambiguous")
+    artifact = _shell_android_object(artifacts[0], {"logicalName", "platform", "kind", "fileName", "size", "sha256",
+        "architectures", "unknownAbi", "freshness"}, "Android artifact contains extra/raw output fields")
+    fixed_artifact = {"logicalName": "android-aab", "platform": "android", "kind": "aab", "fileName": "app-release.aab",
+        "architectures": [], "unknownAbi": False, "freshness": "not-established"}
+    need(canonical({key: artifact[key] for key in fixed_artifact}) == canonical(fixed_artifact)
+         and type(artifact["size"]) is int and 0 < artifact["size"] <= 1 << 30
+         and type(artifact["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]) is not None,
+         "Android Java-only fixture artifact or bounded byte observation differs")
+
+
+def shell_android_receipt(raw, case):
+    """Four source-defined engineering cases; no normal activation/full native gates."""
+    need(type(case) is str and case in SHELL_ANDROID_CASES, "Different fixed Android receipt case")
+    receipt = decode(raw, SHELL_ANDROID_RECEIPT_LIMIT)
+    _shell_android_object(receipt, {"schema", "case", "qualificationOnly", "builder", "projectPicker", "savedObservation",
+        "savedVersionObservation", "requests", "ui", "busyObserved", "original", "toolsLedgerSettled", "nativeIntegrity",
+        "coreLifetime", "terminal", "fixture", "limits"}, "Android receipt fields differ")
+    need(raw == canonical(receipt), "Android receipt is not original canonical LF DATA")
+    cancelled, refused = case == "android-build-cancel", case == "android-build-refusals"
+    fixed = {"schema": "installed-android-build-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+        "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
+        "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
+        "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
+        "toolsLedgerSettled": True, "nativeIntegrity": True, "fixture": _shell_android_native_fixture(case), "limits": SHELL_ANDROID_LIMITS}
+    need(canonical({key: receipt[key] for key in fixed}) == canonical(fixed),
+         "Android original UI/consent/busy/fixture/native settlement or qualification limits differ")
+    flags = {key: True for key in ("inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed",
+        "stdoutEofClosed", "stderrEofClosed", "ioJoined", "coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined",
+        "driverJoined", "managerJoined", "observerJoined", "watchdogJoined", "retiredBeforeCutoff")}
+    flags.update(noChild=False, activeRetained=False, resourceUnknown=False)
+    original = _shell_android_object(receipt["original"], {"domain", "id", "generation", *flags}, "Android original fields differ")
+    need(original["domain"] == "android"
+         and all(type(original[key]) is str and re.fullmatch(r"[0-9a-f]{32}", original[key]) is not None for key in ("id", "generation"))
+         and canonical({key: original[key] for key in flags}) == canonical(flags),
+         "Android receipt lacks its OWN original inspection/child/waits/ledgers/joins")
+    commands = 0 if refused else 2 if case == "android-build" else 1
+    lifetime = {"complete": True, "fatal": False, "contained": True, "commandDispatched": not refused, "commands": commands,
+        "profileCalls": 0, "inputClosed": True, "handlersRestored": True, "invocationClosed": True, "artifactsClosed": True,
+        "toolsClosed": True, "namespaceClosed": True, "stopObserved": "cancelled" if cancelled else "none"}
+    need(canonical(receipt["coreLifetime"]) == canonical(lifetime), "Android ACTUAL parsed core lifetime is incomplete/different")
+    _shell_android_terminal(receipt["terminal"], case, original)
+    return receipt
+
+
 def _shell_path_roster(changed):
     return tuple((SHELL_PATH_MOVES.get(name, name) if changed else name, kind) for name, kind in SHELL_PATH_NODES) + (
         (("path-project/inputs/link-input", "symlink"),) if changed else ())
@@ -8393,6 +9569,8 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-version-save-before.json", canonical(_shell_version_inventory(value, namespace)))
     if case in SHELL_TOOLS_OFFLINE_CASES:
         _retain("shell-" + case + "-before.json", canonical(_shell_tools_offline_inventory(value, namespace, case)))
+    if case in SHELL_ANDROID_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_android_inventory(value, namespace, case)))
     return environment, log_binding
 
 
@@ -8431,6 +9609,10 @@ def _shell_fixtures_final(value, namespace):
         need(canonical(_shell_tools_offline_inventory(value, namespace, case, after=True))
              == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT),
              "Later shell observations changed an earlier original Tools/Offline fixture")
+    for case in SHELL_ANDROID_CASES:
+        need(canonical(_shell_android_inventory(value, namespace, case, after=True))
+             == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_ANDROID_INVENTORY_LIMIT),
+             "Later shell observations changed earlier Android source controls or fixed output-root metadata")
 
 
 def _shell_original_child_map(raw, expected):
@@ -8518,6 +9700,17 @@ def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
         receipt = receipt_reader(output[3][len(receipt_marker):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [],
                 field: receipt}
+    if case in SHELL_ANDROID_CASES:
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_ANDROID_MARKER) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Android original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_android_receipt(output[3][len(SHELL_ANDROID_MARKER):], case)
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "androidBuild": receipt}
     if case in SHELL_TOOLS_OFFLINE_CASES:
         output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
         diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
@@ -9222,13 +10415,15 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
     elif "shell" in value:
         shell = value["shell"]
         need(set(cases) == set(shell_cases(value)), "Original fixed shell case roster incomplete")
+        android_publication = None if shell_github(value) else _finish_android_publication(value)
         _shell_data_check(loader)
         _installed_loader_check(loader)
         _retain("loader-final.json", canonical(loader))
         _retain("shell-cases.json", canonical(cases))
         extra = {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
-                 "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
-                 "packageLifecycleQualified": False, "shellPackageBuilt": False}
+                 **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+                 "packageLifecycleQualified": False, "shellPackageBuilt": False,
+                 **({"androidPublication": android_publication} if not shell_github(value) else {})}
     if "installed" not in value or value["installed"]["case"] == "positive":
         _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
@@ -9242,6 +10437,8 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
 def unit_start():
     _root_ids()
     value, request_sha = _context(copying=True)
+    if "localTransport" in value.get("shell", {}):
+        _android_original_preparation(value)
     _D.write(_ROOT / "private/dpkg.log", b"", 0o600)
     namespaces = _namespaces(True)
     policy = dpkg_policy()
@@ -9254,6 +10451,8 @@ def unit_start():
     _retain("unit-start.json", canonical(start))
     _retain("inputs.json", canonical(value))
     _retain("dpkg-policy.json", canonical(policy))
+    if "shell" in value and not shell_github(value):
+        _publish_android(value)
     loader = (_installed_loader_start(value, namespaces) if "installed" in value
               else _shell_loader_start(value, namespaces) if "shell" in value else None)
     env = {**_environment(), "MRK_UBUNTU_PUBLICATION_NATIVE": "1", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
@@ -9404,6 +10603,11 @@ def unit_start():
                         _retain("shell-" + case + "-after.json", tools_offline_after)
                         shell_tools_offline_fixture(value, case,
                             read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT), tools_offline_after)
+                    if case in SHELL_ANDROID_CASES:
+                        android_after = canonical(_shell_android_inventory(value, namespace, case, after=True))
+                        _retain("shell-" + case + "-after.json", android_after)
+                        shell_android_fixture(value, case,
+                            read(_ROOT / "public" / ("shell-" + case + "-before.json"), SHELL_ANDROID_INVENTORY_LIMIT), android_after)
                 _shell_namespace_check(value, namespace)
                 if boundary is not None:
                     _github_boundary_finish(boundary, cases[case])
@@ -9698,13 +10902,18 @@ def shell_closed_result(value, outcome, raw_files):
     """Correspondence only, after the same original-client/StopPost gate."""
     shell = value["shell"]
     for key, field in (("shellRosterSha256", "rosterSha256"), ("shellProducerAttempt", "producerAttempt"),
-                       ("shellArtifactId", "artifactId"), ("acceptedU", "acceptedU")):
+                       ("acceptedU", "acceptedU")):
         need(outcome.get(key) == shell[field], "Closed shell original provenance differs")
+    provenance = shell_transport_provenance(shell)
+    need(all(outcome.get(key) == item for key, item in provenance.items())
+         and ("shellArtifactId" not in outcome if "localTransport" in shell else "shellLocalTransport" not in outcome),
+         "Closed shell transport provenance variant differs")
     need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("packageLifecycleQualified") is False
          and outcome.get("shellPackageBuilt") is False, "Connection was relabelled as a shell package qualification")
     expected = shell_closed_loader(value, raw_files)
     if shell_github(value):
         return shell_github_closed_result(value, outcome, raw_files, expected)
+    android_publication = _android_closed_publication(value, outcome.get("androidPublication"))
     cases = decode(raw_files["shell-cases.json"])
     need(type(cases) is dict and set(cases) == set(SHELL_CASES), "Closed original shell case roster differs")
     commands = {row["phase"]: row for row in outcome["commands"]}
@@ -9733,11 +10942,19 @@ def shell_closed_result(value, outcome, raw_files):
     need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
              for key in ("scriptTrace", "laterTrace", "savedConfigChanged")}) for pair in tools_offline.values()),
          "Tools/Offline original native fixture observations differ from the outer inventories")
+    android = {case: {"native": cases[case]["androidBuild"],
+        "fixture": shell_android_fixture(value, case, raw_files["shell-" + case + "-before.json"], raw_files["shell-" + case + "-after.json"])}
+        for case in SHELL_ANDROID_CASES}
+    need(all(canonical(pair["native"]["fixture"]) == canonical({key: pair["fixture"][key]
+             for key in _shell_android_native_fixture(case)}) for case, pair in android.items()),
+         "Android original native controls differ from the outer inventories")
     namespaces = [decode(raw_files[name], 8192)["namespace"] for name in
                   ("shell-positive-project-before.json", "shell-positive-candidate-before.json", "shell-project-paths-before.json", "shell-workflow-apply-before.json",
                    *("shell-" + case + "-before.json" for case in SHELL_SESSION_CASES), "shell-metadata-save-before.json", "shell-version-save-before.json")]
     namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)["namespace"]
                       for case in SHELL_TOOLS_OFFLINE_CASES)
+    namespaces.extend(decode(raw_files["shell-" + case + "-before.json"], SHELL_ANDROID_INVENTORY_LIMIT)["namespace"]
+                      for case in SHELL_ANDROID_CASES)
     need(all(namespace == namespaces[0] for namespace in namespaces), "Closed shell fixture families have different original namespaces")
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
@@ -9753,7 +10970,7 @@ def shell_closed_result(value, outcome, raw_files):
          and decode(raw_files["published-before-upgrade.txt"], LIMIT) == p0["published"],
          "Original unchanged P0 publication observation differs")
     return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
-            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
             "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
             "lifecycleDocuments": {"native": cases["positive"]["lifecycleDocuments"], "fixture": candidate},
             "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
@@ -9761,7 +10978,7 @@ def shell_closed_result(value, outcome, raw_files):
             "sessionInputs": sessions,
             "metadataSave": {"native": cases["metadata-save"]["metadataSave"], "fixture": metadata},
             "versionSave": {"native": cases["version-save"]["versionSave"], "fixture": version},
-            "toolsOffline": tools_offline,
+            "toolsOffline": tools_offline, "androidBuild": android, "androidPublication": android_publication,
             "settledFailure": cases["settled-failure"],
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
@@ -9781,6 +10998,8 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     need(len(runtime) == 1 and re.fullmatch(r"[1-9][0-9]{0,3}s", runtime[0]) is not None and int(runtime[0][:-1]) < 1200,
          "Original client finite lifetime argument missing")
     properties = {**PROPERTIES, "TasksMax": service_task_limit(value), "RuntimeMaxSec": runtime[0]}
+    if "shell" in value and not shell_github(value):
+        properties["LimitNOFILE"] = str(SHELL_DESCRIPTOR_LIMIT)
     need(client_result.args == _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties), "Original service client argv differs")
     root = root_path(value)
     directory(root / "public", protected=True)
@@ -9885,6 +11104,7 @@ def main():
                 _retain(role + "-error.json", canonical({"phase": phase, "reason": reason, "errorType": type(error).__name__,
                     "commands": list(_COMMANDS), "files": list(_FILES), "laterLaunchesClosed": True, "cleanupProven": False,
                     "normalBoundaryDisposition": _GITHUB_BOUNDARY_STOP, "normalBoundaryCleanupErrors": list(_GITHUB_BOUNDARY_BODY_ERRORS),
+                    "androidPublication": _android_publication_summary(),
                     "completion": {name: os.environ.get(name, "")[:128] for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
                                   if role == "unit-stop" else None}))
             except BaseException:
