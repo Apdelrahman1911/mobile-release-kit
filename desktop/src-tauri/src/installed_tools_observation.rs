@@ -175,6 +175,7 @@ impl Control {
             || !claim_once(self.case, self.admitted.load(Ordering::SeqCst), &self.claimed, domain) { return Err(BridgeError::invalid()); }
         Ok(())
     }
+    #[track_caller]
     fn fail(&self) { self.failed.store(true, Ordering::SeqCst); if let Ok(q) = self.original() { q.fail(); } }
     pub(crate) fn unavailable_witness(&self) { self.fail(); }
     pub(crate) fn permits_android(&self) -> bool {
@@ -469,6 +470,25 @@ pub(super) fn script(step: Step, case: Case) -> Option<String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step { Navigate, ReadVersion, Ready, Prepare, Review, Acknowledge, Confirmed, Start, Work,
     Reciprocal, ReadReciprocal, Cancel, WaitFinal, Return, Terminal }
+impl Step {
+    pub(super) fn failure_token(self) -> &'static [u8] { match self {
+        Self::Navigate => b"Navigate",
+        Self::ReadVersion => b"ReadVersion",
+        Self::Ready => b"Ready",
+        Self::Prepare => b"Prepare",
+        Self::Review => b"Review",
+        Self::Acknowledge => b"Acknowledge",
+        Self::Confirmed => b"Confirmed",
+        Self::Start => b"Start",
+        Self::Work => b"Work",
+        Self::Reciprocal => b"Reciprocal",
+        Self::ReadReciprocal => b"ReadReciprocal",
+        Self::Cancel => b"Cancel",
+        Self::WaitFinal => b"WaitFinal",
+        Self::Return => b"Return",
+        Self::Terminal => b"Terminal",
+    } }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command { ToolsStart, ToolsCancel, OfflinePrepare, OfflineStart, OfflineCancel, AndroidPrepare, AndroidStart, AndroidCancel }
 impl Command {

@@ -7090,6 +7090,30 @@ class FailureLabelSinkContracts(unittest.TestCase):
                     good + b"/private/injected\n", good + b"x" * 512, good.decode(), bytearray(good)):
             with self.subTest(kind=type(raw).__name__, length=len(raw)):
                 self.assertIsNone(L._shell_label_pair(raw))
+        legacy = b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n" + boundary + progress
+        expected = {"step": "ToolsOffline", "boundary": "request", "bootstrapProgress": "advanced"}
+        self.assertEqual(L._shell_label_pair(legacy), expected)  # Old records do not invent new facts.
+        prefix = b"MRK_INSTALLED_SHELL_COMMANDS_FAILURE=v1;site="
+        for inner in L.SHELL_COMMAND_FAILURE_STEPS:
+            for site, line in ((b"na", None), (b"1", 1), (b"65535", 65535)):
+                frame = prefix + site + b";step=" + inner + b"\n" + legacy
+                self.assertEqual(L._shell_label_pair(frame), {**expected,
+                    "commandsFailure": {"sourceLine": line, "step": inner.decode("ascii")}})
+        frame = prefix + b"65535;step=ReadReciprocal\n" + legacy
+        self.assertLessEqual(len(frame), L.SHELL_FAILURE_LABEL_LIMIT)
+        for length in range(len(frame)):
+            with self.subTest(prefix=length):
+                self.assertIsNone(L._shell_label_pair(frame[:length]))
+        malformed = [frame.replace(b"65535", value) for value in
+            (b"0", b"01", b"65536", b"999999", b"-1", b"none", b"NA", b"")]
+        malformed += [frame.replace(b"ReadReciprocal", value) for value in
+            (b"readreciprocal", b"Unknown", b"Work;extra=1", b"Work/private", b"", b"Work\n")]
+        malformed += [frame.replace(b"ToolsOffline", b"PrepareSave"), frame.replace(b"v1;", b"v2;"),
+            frame + progress, legacy + frame.splitlines(keepends=True)[0],
+            frame.splitlines(keepends=True)[0] + frame, frame.replace(b"\n", b"\r\n")]
+        for raw in malformed:
+            with self.subTest(commands=raw[:100]):
+                self.assertIsNone(L._shell_label_pair(raw))
 
     def test_session_v6_selection_and_callback_facts_are_closed_versioned_and_bounded(self):
         def frame(step=b"SessionActivateFile", index=b"3", wait=b"gtk-selection-absent", callbacks=b"mp"):
@@ -7464,6 +7488,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("Ok(r) => (r.trace, r.bootstrap, r.session.diagnostic, r.paths.diagnostic, r.evidence_diagnostic,", report)
         self.assertIn("r.snapshot_diagnostic, self.failed.site(), r.metadata.open_failure, r.github_entry)", report)
         self.assertIn("snapshot_failure_frame(trace, progress, site, snapshot)", report)
+        self.assertIn("commands_failure_frame(trace, progress, site)", report)
         self.assertIn("failure_frame(trace, progress, session, path, evidence)", report)
         self.assertEqual(report.count("rustix::io::write"), 1)
         self.assertNotIn("retain_held_app_info", report)
@@ -7474,6 +7499,17 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("assert_failure_pair_contract();", source)
         for contract in ("assert_failure_latch_contract();", "assert_snapshot_rejection_contract();", "assert_snapshot_frame_contract();"):
             self.assertIn(contract, source.split("pub(crate) fn main()", 1)[1])
+        commands = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        domain = tuple(part.strip().encode("ascii") for part in commands.split("pub(super) enum Step {", 1)[1].split("}", 1)[0].split(","))
+        tokens = commands.split("pub(super) fn failure_token(self)", 1)[1].split("} }", 1)[0]
+        actual_tokens = tuple(ast.literal_eval(line.split("=>", 1)[1].strip().rstrip(","))
+                              for line in tokens.splitlines() if "=> b" in line)
+        self.assertEqual(domain, actual_tokens)
+        self.assertEqual(actual_tokens, L.SHELL_COMMAND_FAILURE_STEPS)
+        self.assertEqual(len(set(domain)), 15)  # Current Android join adds ReadVersion.
+        self.assertTrue(commands.split("fn fail(&self)", 1)[0].rstrip().endswith("#[track_caller]"))
+        self.assertTrue(source.split("fn fail(&self)", 1)[0].rstrip().endswith("#[track_caller]"))
+        self.assertIn("if let Ok(q) = self.original() { q.fail(); }", commands)
 
     def test_path_first_rejection_preserves_borrows_guard_order_and_first_winner(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()

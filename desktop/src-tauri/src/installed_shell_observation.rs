@@ -1549,6 +1549,31 @@ fn failure_frame(trace: (Step, Boundary), progress: BootstrapProgress, session: 
     Some((bytes, length))
 }
 
+fn commands_failure_frame(trace: (Step, Boundary), progress: BootstrapProgress,
+    site: Option<u16>) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+    let Step::Commands(step) = trace.0 else { return None; };
+    if site == Some(0) { return None; }
+    let (legacy, legacy_length) = failure_pair(trace, progress, None, None)?;
+    let mut digits = [b'0'; 5]; let mut begin = 4;
+    let token = if let Some(mut line) = site {
+        loop {
+            digits[begin] += (line % 10) as u8; line /= 10;
+            if line == 0 { break; }
+            begin -= 1;
+        }
+        &digits[begin..]
+    } else { b"na".as_slice() };
+    let mut bytes = [0_u8; FAILURE_PAIR_LIMIT]; let mut length = 0_usize;
+    // Prefix first: a partial write cannot become a complete legacy frame.
+    // The origin and inner step are already cached first-failure DATA only.
+    for part in [b"MRK_INSTALLED_SHELL_COMMANDS_FAILURE=v1;site=".as_slice(), token,
+        b";step=", step.failure_token(), b"\n", &legacy[..legacy_length]] {
+        let end = length.checked_add(part.len())?;
+        bytes.get_mut(length..end)?.copy_from_slice(part); length = end;
+    }
+    Some((bytes, length))
+}
+
 fn assert_failure_pair_contract() {
     // Pure byte contracts only; no open, write, GTK or process work.
     for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
@@ -1581,6 +1606,26 @@ fn assert_failure_pair_contract() {
         latch_failure(&failed, &mut trace, &mut progress, second.0, second.1);
         assert!(failed.load(Ordering::SeqCst) && trace == first.0 && progress == first.1);
     }
+    for step in [commands::Step::Navigate, commands::Step::ReadVersion, commands::Step::Ready,
+        commands::Step::Prepare, commands::Step::Review, commands::Step::Acknowledge, commands::Step::Confirmed,
+        commands::Step::Start, commands::Step::Work, commands::Step::Reciprocal, commands::Step::ReadReciprocal,
+        commands::Step::Cancel, commands::Step::WaitFinal, commands::Step::Return, commands::Step::Terminal] {
+        for (site, token) in [(None, b"na".as_slice()), (Some(1), b"1"), (Some(65535), b"65535")] {
+            let failed = FailureLatch::new(false);
+            let mut trace = (Step::Commands(step), Boundary::Settlement);
+            let mut progress = BootstrapProgress::AppInfoReturnedBeforeHold;
+            if let Some(line) = site { failed.mark_site(u32::from(line)); } else { failed.mark_unknown(); }
+            assert!(!latch_failure(&failed, &mut trace, &mut progress,
+                (Step::Exit, Boundary::Deadline), BootstrapProgress::NotSampled));
+            let expected = [b"MRK_INSTALLED_SHELL_COMMANDS_FAILURE=v1;site=".as_slice(), token,
+                b";step=", step.failure_token(), b"\n", trace.0.failure_line(), trace.1.failure_line(), progress.failure_line()].concat();
+            let (bytes, length) = commands_failure_frame(trace, progress, failed.site()).unwrap();
+            assert_eq!(&bytes[..length], expected.as_slice());
+            assert!(length <= FAILURE_PAIR_LIMIT && bytes[..length].iter().filter(|b| **b == b'\n').count() == 4);
+        }
+    }
+    assert!(commands_failure_frame((Step::Bootstrap, Boundary::Bootstrap), BootstrapProgress::NotSampled, None).is_none());
+    assert!(commands_failure_frame((Step::Commands(commands::Step::Work), Boundary::Settlement), BootstrapProgress::Advanced, Some(0)).is_none());
     let step = SessionStep::Read(63,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
     let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
@@ -4548,6 +4593,8 @@ impl Observation {
             snapshot_failure_frame(trace, progress, site, snapshot)
         } else if matches!(trace.0, Step::MetadataSave(MetadataStep::OpenText(_))) && session.is_none() && path.is_none() && evidence.is_none() {
             metadata_open_failure_frame(trace, progress, site, metadata)
+        } else if matches!(trace.0, Step::Commands(_)) {
+            commands_failure_frame(trace, progress, site)
         } else if trace.0 == Step::GitHubReadOnly(github::Step::Entry) {
             github::entry_failure_pair(trace, progress, github_entry)
         } else { failure_frame(trace, progress, session, path, evidence) };

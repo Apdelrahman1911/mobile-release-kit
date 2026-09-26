@@ -6910,6 +6910,10 @@ def _shell_github_entry_labels(lines):
                                     "repositoryExpected": repository, "helpContainerPresent": guide}}}
 
 
+SHELL_COMMAND_FAILURE_STEPS = (b"Navigate", b"ReadVersion", b"Ready", b"Prepare", b"Review", b"Acknowledge",
+    b"Confirmed", b"Start", b"Work", b"Reciprocal", b"ReadReciprocal", b"Cancel", b"WaitFinal", b"Return", b"Terminal")
+
+
 def _shell_label_pair(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
         return None
@@ -6918,8 +6922,12 @@ def _shell_label_pair(raw):
         # Only an entire prefix-first four-line GitHubEntry frame is admitted.
         return _shell_github_entry_labels(lines)
     path_detail = evidence_detail = snapshot_detail = None
-    metadata_open_detail = None
-    if lines[0].startswith(b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE="):
+    metadata_open_detail = commands_detail = None
+    if lines[0].startswith(b"MRK_INSTALLED_SHELL_COMMANDS_FAILURE="):
+        if len(lines) != 4:
+            return None
+        commands_detail, lines = lines[0], lines[1:]
+    elif lines[0].startswith(b"MRK_INSTALLED_SHELL_SNAPSHOT_FAILURE="):
         if len(lines) != 4:
             return None
         snapshot_detail, lines = lines[0], lines[1:]
@@ -6949,6 +6957,15 @@ def _shell_label_pair(raw):
     result = {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
               "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii"),
               "bootstrapProgress": lines[2][len(b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS="):-1].decode("ascii")}
+    if commands_detail is not None:
+        match = re.fullmatch(rb"MRK_INSTALLED_SHELL_COMMANDS_FAILURE=v1;site=(na|[1-9][0-9]{0,4});step=([A-Za-z]{1,20})\n", commands_detail)
+        if match is None or len(lines) != 3 or result["step"] != "ToolsOffline":
+            return None
+        site, step = match.groups()
+        if step not in SHELL_COMMAND_FAILURE_STEPS or site != b"na" and int(site) > 65535:
+            return None
+        result["commandsFailure"] = {"sourceLine": None if site == b"na" else int(site), "step": step.decode("ascii")}
+        return result  # Original cached DATA, never success/finality/cleanup authority.
     if snapshot_detail is not None:
         # This complete frame precedes legacy Session/Path requirements: an
         # actual wrong-stage rejection must not fabricate their old details.
