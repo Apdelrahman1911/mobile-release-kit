@@ -3332,7 +3332,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual((query_bound, worker_bound, complete_bound), (26, 14, 412))
         self.assertLessEqual(complete_bound, 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
-        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 507;", source)
+        self.assertIn("const SESSION_FAILURE_FRAME_BOUND: usize = 512;", source)
         callbacks = source.split("impl SessionGtkCallbacks {", 1)[1].split("// Map only cached public DATA", 1)[0]
         callback_tokens = tuple(value.encode("ascii") for value in re.findall(r'=> b"([a-z0-9]{2})"', callbacks))
         self.assertEqual(callback_tokens, lifecycle.SHELL_SESSION_GTK_CALLBACKS)
@@ -3341,6 +3341,18 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertLessEqual(max(map(len, lifecycle.SHELL_SESSION_V6_WAITS)), max(map(len, lifecycle.SHELL_SESSION_WAITS)))
         self.assertIn('append(&mut bytes, &mut length, b";eval=")?;', encoder)
         self.assertIn('append(&mut bytes, &mut length, diagnostic.gtk_callbacks.token())?;', encoder)
+        self.assertEqual(lifecycle.SHELL_SESSION_FAILURE_V7_FRAME_BOUND, lifecycle.SHELL_SESSION_FAILURE_V6_FRAME_BOUND + 5)
+        self.assertEqual(lifecycle.SHELL_SESSION_FAILURE_V7_FRAME_BOUND, 512)
+        self.assertIn('append(&mut bytes, &mut length, b";h=")?;', encoder)
+        self.assertIn('append(&mut bytes, &mut length, &diagnostic.gtk_picker.token())?;', encoder)
+        self.assertIn("!diagnostic.gtk_picker.valid(step,diagnostic.wait)", encoder)
+        picker = source.split("impl SessionPickerReadiness {", 1)[1].split("struct SessionDiagnostic {", 1)[0]
+        folder_tokens = re.findall(r"\((false|true),F::(Absent|TargetParent|Other)\) => b'([0-5])'", picker)
+        self.assertEqual(folder_tokens, [("false", "Absent", "0"), ("false", "TargetParent", "1"), ("false", "Other", "2"),
+                                        ("true", "Absent", "3"), ("true", "TargetParent", "4"), ("true", "Other", "5")])
+        selected_tokens = re.findall(r"S::(Absent|Target|TargetParent|FirebasePeer|Other) => b'([atpfo])'", picker)
+        self.assertEqual(selected_tokens, [("Absent", "a"), ("Target", "t"), ("TargetParent", "p"), ("FirebasePeer", "f"), ("Other", "o")])
+        self.assertIn('Self::NotSampled => *b"na"', picker)
         self.assertIn("fn assert_failure_pair_contract()", source)
         self.assertIn("    assert_failure_pair_contract();", source)
         self.assertLess(source.index("    assert_failure_pair_contract();"), source.index("let returned = super::run_builder("))
@@ -3523,9 +3535,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                     self.assertLessEqual(len(raw), lifecycle.SHELL_SESSION_FAILURE_V4_FRAME_BOUND)
         raw = frame()
         # Preserve the historical v4 parser fixture; the live shared pre-GTK
-        # Rust contract emits v6. Neither is an installed qualification receipt.
+        # Rust contract emits v7. Neither is an installed qualification receipt.
         rust = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
-        live = raw.replace(b"=v4;", b"=v6;").replace(b";evaluations=", b";eval=")[:-1] + b";u=na;g=na\n"
+        live = raw.replace(b"=v4;", b"=v7;").replace(b";evaluations=", b";eval=")[:-1] + b";u=na;g=na;h=na\n"
         self.assertIn(live[len(prefix):].decode("ascii").replace("\n", "\\n"), rust)
         self.assertEqual(lifecycle._shell_label_pair(live)["session"]["assessmentFailure"],
                          lifecycle._shell_label_pair(raw)["session"]["assessmentFailure"])
@@ -3605,7 +3617,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("fn unknown_boundary_token(self) -> &'static [u8] { self.boundary.token() }", query)
         self.assertIn("fn unknown_boundary_token(self) -> &'static [u8] { self.query.unknown_boundary_token() }", session)
         encoder = observed.split("fn failure_pair(", 1)[1].split("fn assert_failure_pair_contract", 1)[0]
-        self.assertIn('b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index="', encoder)
+        self.assertIn('b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index="', encoder)
         self.assertIn('append(&mut bytes, &mut length, b";af=")?;\n'
                       '            append(&mut bytes, &mut length, admission)?;\n'
                       '            append(&mut bytes, &mut length, b";u=")?;\n'
@@ -3792,15 +3804,25 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                 self.assertIn(readiness, activating)
                 # None/different selection waits; Cancel does not require a file.
                 self.assertLess(activating.index(guard), activating.index(readiness))
-                wait = activating.split(readiness, 1)[1].split("}", 1)[0]
+                wait = activating.split(readiness, 1)[1].split("if !file.equal(", 1)[0]
                 self.assertIn("return Ok(false)", wait)
                 if role == "session_file":
                     different = "if !file.equal(&gtk::gio::File::for_path(&path))"
-                    self.assertEqual(activating.count("file.equal("), 1)
+                    self.assertEqual(activating.count("file.equal("), 3)  # One original predicate, two diagnostic comparisons.
+                    self.assertEqual(activating.count("dialog.is_mapped()"), 1)
+                    self.assertEqual(activating.count("dialog.current_folder_file()"), 1)
+                    self.assertLess(activating.index("observed_session_file(app, q, index, true)?"), activating.index("dialog.is_mapped()"))
+                    self.assertLess(activating.index("dialog.is_mapped()"), activating.index("dialog.current_folder_file()"))
+                    self.assertLess(activating.index("dialog.current_folder_file()"), activating.index(readiness))
+                    self.assertIn("let parent = path.parent().map(gtk::gio::File::for_path);", activating)
+                    self.assertIn("q.session_file_firebase_peer()", activating)
+                    self.assertIn("q.session_file_wait(index, true, W::NotSampled, picker);", activating)
+                    for forbidden in (".path()", ".uri()", ".basename()", ".to_string", "read_to_string", "read_dir", "std::fs"):
+                        self.assertNotIn(forbidden, activating)
                     self.assertIn("W::GtkSelectionAbsent", wait)
                     self.assertLess(activating.index(readiness), activating.index(different))
                     self.assertLess(activating.index(different), activating.index("dialog.widget_for_response(response)"))
-                    other_wait = activating.split(different, 1)[1].split("}", 1)[0]
+                    other_wait = activating.split(different, 1)[1].split("picker = P::Sampled { mapped, folder, selected:S::Target };", 1)[0]
                     self.assertIn("W::GtkSelectionDifferent", other_wait)
                     self.assertIn("return Ok(false)", other_wait)
                     self.assertLess(activating.index("q.session_file_target(index)"), activating.index(readiness))
@@ -3821,9 +3843,13 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                 for forbidden in (".filename(", "native_path(", "selected_path(", ".response("):
                     self.assertNotIn(forbidden, selecting + activating)
         for name, token in (("GtkSelectionAbsent", "gtk-selection-absent"), ("GtkSelectionDifferent", "gtk-selection-different")):
-            self.assertIn("q.session_file_wait(index, true, W::" + name + "); return Ok(false);", source)
+            self.assertIn("q.session_file_wait(index, true, W::" + name + ", picker); return Ok(false);", source)
             self.assertIn('Self::' + name + ' => b"' + token + '"', observed)
         self.assertNotIn("GtkSelectionPending", observed)
+        peer = observed.split("pub(super) fn session_file_firebase_peer(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn('self.project_path()?.parent()?.join("sources").join("firebase.json")', peer)
+        for forbidden in ("fs::", "read_dir", "canonicalize", ".filename(", ".uri(", ".path("):
+            self.assertNotIn(forbidden, peer)
         self.assertEqual(source.count("let path = native_path(dialog, &call);"), 1)
         self.assertIn("path!=self.session_file_target(file.index).as_deref()", observed)
         self.assertIn("path != self.path_target(index as u8).as_deref()", observed)

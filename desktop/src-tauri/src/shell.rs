@@ -1622,7 +1622,7 @@ mod owned_gtk {
             Err(reason) => { q.session_file_failed(reason); return Err(()); },
         };
         let Some((id, dialog, context, call)) = original else {
-            q.session_file_wait(index, activating, W::GtkDialogAbsent); return Ok(None);
+            q.session_file_wait(index, activating, W::GtkDialogAbsent, installed_observation::SessionPickerReadiness::NotSampled); return Ok(None);
         };
         if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)) { q.session_file_failed(R::GtkDialogOriginal); return Err(()); }
         let Some(call) = call.upgrade() else { q.session_file_failed(R::GtkDialogOriginal); return Err(()); };
@@ -1666,18 +1666,36 @@ mod owned_gtk {
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn activate_observed_session_file(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, index: u8) -> Result<bool, ()> {
-        use installed_observation::{SessionRejection as R, SessionWait as W};
+        use installed_observation::{SessionRejection as R, SessionWait as W,
+            SessionPickerReadiness as P, SessionPickerFolder as F, SessionPickerSelection as S};
         let Some((id, dialog, select)) = observed_session_file(app, q, index, true)? else { return Ok(false); };
+        let mut picker = P::NotSampled;
         if select {
             let Some(path) = q.session_file_target(index) else { q.session_file_failed(R::GtkSelectionState); return Err(()); };
-            // Observe only readiness on the original chooser. The accepted
-            // production callback still owns the sole native_path transfer.
+            // Closed diagnostic getters only; none becomes an activation predicate.
+            // These ordered observations are not an atomic GTK snapshot.
+            let mapped = dialog.is_mapped();
+            let parent = path.parent().map(gtk::gio::File::for_path);
+            let folder = match dialog.current_folder_file() {
+                None => F::Absent,
+                Some(actual) if parent.as_ref().is_some_and(|target| actual.equal(target)) => F::TargetParent,
+                Some(_) => F::Other,
+            };
+            // Reuse the original GFile getter/equality readiness conditions.
+            // The production callback still owns the sole native_path transfer.
             let Some(file) = dialog.file() else {
-                q.session_file_wait(index, true, W::GtkSelectionAbsent); return Ok(false);
+                picker = P::Sampled { mapped, folder, selected:S::Absent };
+                q.session_file_wait(index, true, W::GtkSelectionAbsent, picker); return Ok(false);
             };
             if !file.equal(&gtk::gio::File::for_path(&path)) {
-                q.session_file_wait(index, true, W::GtkSelectionDifferent); return Ok(false);
+                let selected = if parent.as_ref().is_some_and(|target| file.equal(target)) { S::TargetParent }
+                    else if q.session_file_firebase_peer().is_some_and(|peer| file.equal(&gtk::gio::File::for_path(peer))) { S::FirebasePeer }
+                    else { S::Other };
+                picker = P::Sampled { mapped, folder, selected };
+                q.session_file_wait(index, true, W::GtkSelectionDifferent, picker); return Ok(false);
             }
+            picker = P::Sampled { mapped, folder, selected:S::Target };
+            q.session_file_wait(index, true, W::NotSampled, picker);
         }
         let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
         let button = match dialog.widget_for_response(response).and_then(|widget| widget.downcast::<gtk::Button>().ok()) {
@@ -1686,7 +1704,7 @@ mod owned_gtk {
         };
         if !button.is_visible() || dialog.response_for_widget(&button) != response
             || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { q.session_file_failed(R::GtkActionWidget); return Err(()); }
-        if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive); return Ok(false); }
+        if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive, picker); return Ok(false); }
         q.session_file_activation(id, index)?;
         // The existing GtkDialog handler emits the response. No direct
         // response/begin_response call or second filename read is permitted.

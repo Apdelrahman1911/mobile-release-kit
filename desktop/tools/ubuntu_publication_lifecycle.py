@@ -59,6 +59,7 @@ SHELL_SESSION_FAILURE_FRAME_BOUND = 466  # v3 only; historical v1/v2 admission s
 SHELL_SESSION_FAILURE_V4_FRAME_BOUND = 492  # Same 512B sink; ;af= plus at most 22B.
 SHELL_SESSION_FAILURE_V5_FRAME_BOUND = 509  # v4 plus ;u= and at most 14B; no larger sink.
 SHELL_SESSION_FAILURE_V6_FRAME_BOUND = 507  # v5 - 7B (eval) + 5B (;g= and two closed bytes).
+SHELL_SESSION_FAILURE_V7_FRAME_BOUND = 512  # v6 + exactly 5B (;h= and two closed bytes); same sink.
 SHELL_EVIDENCE_CHECKS = (
     b"status-pending", b"bridge", b"case", b"observe-pending", b"observe-returned", b"observe-requests",
     b"revision", b"schema", b"availability", b"previous-revision", b"equal-revision", b"operation-order",
@@ -343,6 +344,15 @@ SHELL_SESSION_V6_WAITS = (
     b"gtk-dialog-absent", b"gtk-action-insensitive", b"gtk-selection-absent", b"gtk-selection-different",
 )
 SHELL_SESSION_GTK_CALLBACKS = (b"na", b"0i", b"0p", b"0w", b"1i", b"1p", b"1w", b"mi", b"mp", b"mw")
+# First byte: mapped flag/current-folder relation. Second: selected GFile relation.
+# na alone means not sampled; false/absent are real observations, not unknown.
+SHELL_SESSION_PICKER_FOLDERS = {
+    b"0": (False, "absent"), b"1": (False, "target-parent"), b"2": (False, "other"),
+    b"3": (True, "absent"), b"4": (True, "target-parent"), b"5": (True, "other"),
+}
+SHELL_SESSION_PICKER_SELECTIONS = {
+    b"a": "absent", b"t": "target", b"p": "target-parent", b"f": "firebase-peer", b"o": "other",
+}
 # v2 first document transition, plus a single later cached original R1 sample.
 # Neither association nor none-recorded establishes causation or settlement.
 SHELL_SESSION_ORIGINS = (
@@ -4145,7 +4155,7 @@ def _shell_label_pair(raw):
         path_detail, lines = lines[0], lines[1:]
     # Session traces require their complete fourth record. Historical v1/v2
     # keep their prior shape, with no invented assessmentFailure metadata.
-    # Never admit a proper prefix of v3/v4/v5/v6 as a complete historical frame.
+    # Never admit a proper prefix of v3/v4/v5/v6/v7 as a complete historical frame.
     if (len(lines) not in (3, 4) or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES
             or lines[2] not in SHELL_BOOTSTRAP_PROGRESS):
         return None
@@ -4263,19 +4273,25 @@ def _shell_label_pair(raw):
             version = b"v6"
             if len(raw) > SHELL_SESSION_FAILURE_V6_FRAME_BOUND:
                 return None
+        elif lines[3].startswith(b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;"):
+            version = b"v7"
+            if len(raw) > SHELL_SESSION_FAILURE_V7_FRAME_BOUND:
+                return None
         else:
             return None
         suffix = b"" if version == b"v1" else rb";o=([a-z-]{1,19});d=([a-z-]{1,15});a=([a-z-]{1,12});q=([a-z.-]{1,26});w=([a-z-]{1,14})"
-        if version in (b"v3", b"v4", b"v5", b"v6"):
+        if version in (b"v3", b"v4", b"v5", b"v6", b"v7"):
             suffix += rb";ao=([a-z-]{1,7});ac=([a-z-]{1,24});ax=([a-z-]{1,11})"
-        if version in (b"v4", b"v5", b"v6"):
+        if version in (b"v4", b"v5", b"v6", b"v7"):
             suffix += rb";af=([a-z-]{1,22})"
-        if version in (b"v5", b"v6"):
+        if version in (b"v5", b"v6", b"v7"):
             suffix += rb";u=([a-z-]{1,14})"
-        if version == b"v6":
+        if version in (b"v6", b"v7"):
             suffix += rb";g=([a-z0-9]{2})"
+        if version == b"v7":
+            suffix += rb";h=(na|[0-5][atpfo])"
         suffix += rb"\n"
-        evaluations_key = rb"eval" if version == b"v6" else rb"evaluations"
+        evaluations_key = rb"eval" if version in (b"v6", b"v7") else rb"evaluations"
         match = re.fullmatch(rb"MRK_INSTALLED_SHELL_SESSION_FAILURE=" + version + rb";index=(none|0|[1-9][0-9]?);"
                              + evaluations_key + rb"=(0|[1-9][0-9]{0,2});reject=([a-z-]{1,32});wait=([a-z-]{1,32})" + suffix, lines[3])
         if match is None:
@@ -4285,7 +4301,7 @@ def _shell_label_pair(raw):
         evaluations = int(evaluations_raw)
         unindexed = {"SessionNavigate", "SessionReload", "SessionLoss", "SessionDeadline", "SessionQuitPreserved"}
         mixed = {"SessionQuitCancel", "SessionFinality"}
-        waits = SHELL_SESSION_V6_WAITS if version == b"v6" else SHELL_SESSION_WAITS
+        waits = SHELL_SESSION_V6_WAITS if version in (b"v6", b"v7") else SHELL_SESSION_WAITS
         if (index is not None and index >= 64 or evaluations > 128 or rejection not in SHELL_SESSION_REJECTIONS
                 or wait not in waits or rejection == b"evaluation-budget" and evaluations != 128
                 or result["step"] in unindexed and index is not None
@@ -4297,19 +4313,19 @@ def _shell_label_pair(raw):
             first_origin = _shell_session_first_origin(*match.groups()[4:9])
             if first_origin is None:
                 return None
-            if version in (b"v5", b"v6"):
+            if version in (b"v5", b"v6", b"v7"):
                 unknown_boundary = _shell_session_unknown_boundary(
                     match.groups()[6], match.groups()[7], match.groups()[8], match.groups()[13])
                 if unknown_boundary is None:
                     return None
                 first_origin["unknownBoundary"] = unknown_boundary
             result["session"]["firstOrigin"] = first_origin
-        if version in (b"v3", b"v4", b"v5", b"v6"):
+        if version in (b"v3", b"v4", b"v5", b"v6", b"v7"):
             origin, classification, cause = match.groups()[9:12]
             assessment_failure = _shell_session_assessment_failure(rejection, origin, classification, cause)
             if assessment_failure is None:
                 return None
-            if version in (b"v4", b"v5", b"v6"):
+            if version in (b"v4", b"v5", b"v6", b"v7"):
                 admission = match.groups()[12]
                 if (admission not in SHELL_SESSION_ASSESSMENT_ADMISSIONS
                         or admission != b"na" and not (origin == b"bridge" and cause in (b"inspection", b"capability", b"prepare", b"final-claim"))
@@ -4317,7 +4333,7 @@ def _shell_label_pair(raw):
                     return None
                 assessment_failure["admission"] = admission.decode("ascii")
             result["session"]["assessmentFailure"] = assessment_failure
-        if version == b"v6":
+        if version in (b"v6", b"v7"):
             callbacks = match.groups()[14]
             gtk_role = result["step"] in ("SessionSetFile", "SessionActivateFile")
             if (callbacks not in SHELL_SESSION_GTK_CALLBACKS or (callbacks == b"na") == gtk_role
@@ -4328,6 +4344,19 @@ def _shell_label_pair(raw):
             result["session"]["gtkCallbacks"] = None if callbacks == b"na" else {
                 "returns": {b"0": "none", b"1": "one", b"m": "multiple"}[callbacks[:1]],
                 "phase": {b"i": "idle", b"p": "pending", b"w": "wait-observed"}[callbacks[1:]]}
+        if version == b"v7":
+            picker = match.groups()[15]
+            result["session"]["gtkPicker"] = None
+            if picker != b"na":
+                selected = picker[1:]
+                allowed_waits = ((b"not-sampled", b"gtk-action-insensitive") if selected == b"t"
+                                 else (b"gtk-selection-absent",) if selected == b"a"
+                                 else (b"gtk-selection-different",))
+                if result["step"] != "SessionActivateFile" or wait not in allowed_waits:
+                    return None
+                mapped, folder = SHELL_SESSION_PICKER_FOLDERS[picker[:1]]
+                result["session"]["gtkPicker"] = {
+                    "mapped": mapped, "folder": folder, "selected": SHELL_SESSION_PICKER_SELECTIONS[selected]}
 
     return result
 

@@ -5604,6 +5604,80 @@ class FailureLabelSinkContracts(unittest.TestCase):
         for wait in (b"gtk-selection-absent", b"gtk-selection-different"):
             self.assertIsNone(L._shell_label_pair(historical.replace(b"native-reply-pending", wait)))
 
+    def test_session_v7_picker_relations_are_closed_and_do_not_certify_readiness(self):
+        def frame(picker=b"4f", step=b"SessionActivateFile", index=b"9",
+                  wait=b"gtk-selection-different", callbacks=b"mw"):
+            return (b"MRK_INSTALLED_SHELL_FAILURE_STEP=" + step + b"\n"
+                    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n"
+                    b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
+                    b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=" + index + b";eval=30;"
+                    b"reject=not-recorded;wait=" + wait
+                    + b";o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g="
+                    + callbacks + b";h=" + picker + b"\n")
+        folders = {b"0": (False, "absent"), b"1": (False, "target-parent"), b"2": (False, "other"),
+                   b"3": (True, "absent"), b"4": (True, "target-parent"), b"5": (True, "other")}
+        selections = {b"a": "absent", b"t": "target", b"p": "target-parent", b"f": "firebase-peer", b"o": "other"}
+        self.assertEqual(L.SHELL_SESSION_PICKER_FOLDERS, folders)
+        self.assertEqual(L.SHELL_SESSION_PICKER_SELECTIONS, selections)
+        tokens = set()
+        for folder_token, (mapped, folder) in folders.items():
+            for selected_token, selected in selections.items():
+                token = folder_token + selected_token
+                tokens.add(token)
+                allowed = ((b"not-sampled", b"gtk-action-insensitive") if selected == "target"
+                           else (b"gtk-selection-absent",) if selected == "absent"
+                           else (b"gtk-selection-different",))
+                for wait in (b"not-sampled", b"gtk-dialog-absent", b"gtk-selection-absent",
+                             b"gtk-selection-different", b"gtk-action-insensitive"):
+                    with self.subTest(token=token, wait=wait):
+                        value = L._shell_label_pair(frame(picker=token, wait=wait))
+                        if wait not in allowed:
+                            self.assertIsNone(value)
+                        else:
+                            self.assertEqual(value["session"]["gtkPicker"],
+                                             {"mapped": mapped, "folder": folder, "selected": selected})
+                            self.assertEqual(value["session"]["recipeIndex"], 9)
+                            self.assertEqual(value["session"]["evaluations"], 30)  # Still DOM evaluations.
+                            self.assertEqual(value["session"]["gtkCallbacks"], {"returns": "multiple", "phase": "wait-observed"})
+                self.assertIsNone(L._shell_label_pair(frame(picker=token, step=b"SessionSetFile", wait=allowed[0])))
+        self.assertEqual(len(tokens), 30)
+        self.assertNotIn(b"na", tokens)
+        absent = L._shell_label_pair(frame(picker=b"0a", wait=b"gtk-selection-absent"))["session"]["gtkPicker"]
+        self.assertEqual(absent, {"mapped": False, "folder": "absent", "selected": "absent"})
+        self.assertIsNone(L._shell_label_pair(frame(picker=b"na"))["session"]["gtkPicker"])
+        for step, callbacks, wait in ((b"SessionSetFile", b"0p", b"gtk-dialog-absent"),
+                                      (b"SessionReview", b"na", b"native-reply-pending")):
+            self.assertIsNone(L._shell_label_pair(frame(picker=b"na", step=step, callbacks=callbacks, wait=wait))["session"]["gtkPicker"])
+            self.assertIsNone(L._shell_label_pair(frame(step=step, callbacks=callbacks, wait=wait)))
+        raw = frame()
+        self.assertEqual(raw.count(b"\n"), 4)
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V7_FRAME_BOUND, L.SHELL_SESSION_FAILURE_V6_FRAME_BOUND + 5)
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V7_FRAME_BOUND, L.SHELL_FAILURE_LABEL_LIMIT)
+        self.assertEqual(L.SHELL_FAILURE_LABEL_LIMIT, 512)
+        self.assertLessEqual(len(raw), L.SHELL_SESSION_FAILURE_V7_FRAME_BOUND)
+        with patch.object(L, "SHELL_SESSION_FAILURE_V7_FRAME_BOUND", len(raw) - 1):
+            self.assertIsNone(L._shell_label_pair(raw))
+        for end in range(len(raw)):
+            self.assertIsNone(L._shell_label_pair(raw[:end]))
+            if end < len(raw) - 1:
+                self.assertIsNone(L._shell_label_pair(raw[:end] + b"\n"))
+        bad = [frame(index=b"none"), frame(index=b"64"), frame(index=b"09"), frame(callbacks=b"na"),
+               raw.replace(b";h=4f", b""), raw.replace(b";h=4f", b";h=4f;h=4f"),
+               raw.replace(b";g=mw;h=4f", b";h=4f;g=mw"), raw.replace(b";h=4f", b";picker=4f"),
+               raw.replace(b";eval=30;", b";evaluations=30;"), raw + b"\n", raw + raw, raw + b"x" * 512,
+               raw.replace(b"\n", b"\r\n"), raw.replace(b";h=4f", b";h=4f;path=/private/inert.json")]
+        for token in (b"", b"n", b"n0", b"0", b"4", b"6f", b"4x", b"4F", b"44f", b"Na",
+                      b"4f/private/inert.json", b"file:///private/inert.json", b"4f\x00", b"4f\n"):
+            bad.append(frame(picker=token))
+        for version in (b"v1", b"v2", b"v3", b"v4", b"v5", b"v6", b"v8"):
+            bad.append(raw.replace(b"=v7;", b"=" + version + b";"))
+        for value in bad:
+            self.assertIsNone(L._shell_label_pair(value))
+        historical = raw.replace(b"=v7;", b"=v6;").replace(b";h=4f", b"")
+        self.assertNotIn("gtkPicker", L._shell_label_pair(historical)["session"])
+        self.assertEqual(L.SHELL_SESSION_FAILURE_V6_FRAME_BOUND, 507)
+        # Exact closed DATA projection, not a load-complete or native-finality receipt.
+
     def test_preparation_exclusively_binds_original_fd_and_preserves_preparation_failure(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
         root = L.root_path(value)
@@ -5971,12 +6045,21 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("SessionWait::NotSampled", sample)
         self.assertIn("SessionGtkCallbacks::initial(step)", sample)
         self.assertIn("|old| old.gtk_callbacks", sample)
+        self.assertIn("gtk_picker: previous.filter(|old| old.step == step)", sample)
+        self.assertIn(".map_or(SessionPickerReadiness::NotSampled, |old| old.gtk_picker)", sample)
+        file_wait = sample.split("fn file_wait(", 1)[1].split("\n    }", 1)[0]
+        self.assertLess(file_wait.index("if !picker.valid(self.step,wait) { return false; }"),
+                        file_wait.index("self.wait = wait; self.gtk_picker = picker;"))
+        self.assertIn("if wait != SessionWait::NotSampled { self.gtk_callbacks.wait_observed(); }", file_wait)
+        generic_wait = source.split("fn session_wait(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("diagnostic.wait = wait; diagnostic.gtk_picker = SessionPickerReadiness::NotSampled;", generic_wait)
+        self.assertLess(generic_wait.index("if !self.failed.load(Ordering::SeqCst)"), generic_wait.index("diagnostic.gtk_picker ="))
         dispatch = source.split("if matches!(step,SessionStep::SetFile(_) | SessionStep::ActivateFile(_)) {", 1)[1].split("if step==SessionStep::QuitCancel", 1)[0]
         ordered = ("if self.failed.load", "if r.pending.is_some()", "r.pending=Some", "diagnostic.gtk_callbacks.reserved()", "window.run_on_main_thread", "q.session_file_returned(step,result)")
         self.assertEqual([dispatch.index(part) for part in ordered], sorted(dispatch.index(part) for part in ordered))
         wait = source.split("pub(super) fn session_file_wait(", 1)[1].split("pub(super) fn session_file_created(", 1)[0]
-        self.assertLess(wait.index("session_file_wait_pending(r.step,r.pending,index,activating)"), wait.index("diagnostic.gtk_callbacks.wait_observed()"))
-        self.assertLess(wait.index("if !self.failed.load"), wait.index("diagnostic.gtk_callbacks.wait_observed()"))
+        self.assertLess(wait.index("session_file_wait_pending(r.step,r.pending,index,activating)"), wait.index("diagnostic.file_wait(wait,picker)"))
+        self.assertLess(wait.index("if !self.failed.load"), wait.index("diagnostic.file_wait(wait,picker)"))
         returned = source.split("fn session_file_returned(", 1)[1].split("pub(super) fn quit_selects_ok(", 1)[0]
         ordered = ("r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step)",
                    "let index=match step", "if !self.failed.load", "diagnostic.gtk_callbacks.returned()", "r.session.files.last_mut()", "match result")
@@ -6059,14 +6142,14 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertIn("self.record()", waiting); self.assertNotIn("record_at", waiting)
         gate = "if !session_file_wait_pending(r.step,r.pending,index,activating) || self.failed.load(Ordering::SeqCst) { return; }"
         self.assertLess(waiting.index(gate), waiting.index("r.trace=(r.step,Boundary::Gtk)"))
-        self.assertLess(waiting.index(gate), waiting.index("self.session_wait(&mut r,wait)"))
+        self.assertLess(waiting.index(gate), waiting.index("diagnostic.file_wait(wait,picker)"))
         helper = body(shell, "observed_session_file")
         borrowed = helper.split("let original = DIALOG.with(|book| {", 1)[1].split("        });", 1)[0]
         self.assertIn("map_err(|_| R::GtkDialogBook)", borrowed)
         self.assertIn("Err(R::GtkDialogOriginal)", borrowed)
         self.assertNotIn("q.", borrowed); self.assertNotIn(".facts()", borrowed)
         self.assertLess(helper.index("        });"), helper.index("Err(reason) => { q.session_file_failed(reason); return Err(()); }"))
-        self.assertIn("q.session_file_wait(index, activating, W::GtkDialogAbsent); return Ok(None);", helper)
+        self.assertIn("q.session_file_wait(index, activating, W::GtkDialogAbsent, installed_observation::SessionPickerReadiness::NotSampled); return Ok(None);", helper)
         guards = ["gtk::is_initialized_main_thread()", "DIALOG.with", "context.upgrade()", "call.upgrade()",
                   "call.owner()", "owner.id != id", "owner.interrupted()", "let original_facts = call.facts()",
                   "if !original_facts", "q.session_file_dialog(id, index)?", "app.get_webview_window(MAIN_WINDOW)", "dialog.title()"]
@@ -6081,7 +6164,7 @@ class FailureLabelSinkContracts(unittest.TestCase):
         self.assertEqual(selecting.count("dialog.set_filename(&path)"), 1)
         self.assertLess(selecting.index("q.session_file_selection(id, index)?"), selecting.index("dialog.set_filename(&path)"))
         self.assertIn("if !dialog.set_filename(&path) { q.session_file_failed(R::GtkSelectionSetter); return Err(()); }", selecting)
-        insensitive = "if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive); return Ok(false); }"
+        insensitive = "if !button.is_sensitive() { q.session_file_wait(index, true, W::GtkActionInsensitive, picker); return Ok(false); }"
         self.assertLess(activating.index(insensitive), activating.index("q.session_file_activation(id, index)?"))
         self.assertLess(activating.index("q.session_file_activation(id, index)?"), activating.index("button.emit_clicked()"))
         self.assertEqual(activating.count("button.emit_clicked()"), 1)
@@ -6110,7 +6193,26 @@ class FailureLabelSinkContracts(unittest.TestCase):
         returned = body(source, "session_file_returned")
         self.assertIn("r.pending.take()!=Some(Pending::Dom(Step::Session(step))) || r.step!=Step::Session(step)", returned)
         self.assertEqual(returned.count(".activation_returned(result)"), 1)
-        self.assertNotIn("self.failed.load", returned)
+        # First-failure diagnostics freeze, but original return/lifecycle bookkeeping
+        # must still run after a failure. Only this exact counter update is guarded.
+        diagnostic_only = """        if !self.failed.load(Ordering::SeqCst) {
+            if let Some(diagnostic) = r.session.diagnostic.as_mut() { diagnostic.gtk_callbacks.returned(); }
+        }
+"""
+        self.assertEqual(returned.count(diagnostic_only), 1)
+        before_diagnostic, lifecycle = returned.split(diagnostic_only)
+        self.assertNotIn("self.failed.load", before_diagnostic + lifecycle)
+        self.assertLess(before_diagnostic.index("r.pending.take()"), before_diagnostic.index("let index=match step"))
+        self.assertEqual(lifecycle, """        let Some(file)=r.session.files.last_mut().filter(|file| file.index==index) else {
+            if result!=Ok(false) { self.session_fail(&mut r,SessionRejection::GtkReturnState); } return;
+        };
+        match result {
+            Ok(false) if !file.picker.activated && (step!=SessionStep::SetFile(index) || !file.picker.selected)=>{},
+            Ok(true) if step==SessionStep::SetFile(index) && file.picker.selected && !file.picker.activated=>r.step=Step::Session(SessionStep::ActivateFile(index)),
+            Ok(true) if step==SessionStep::ActivateFile(index)=>{
+                if !file.picker.activation_returned(result) { self.session_fail(&mut r,SessionRejection::GtkReturnState); return; } r.step=Step::Session(SessionStep::Capture(index));
+            }, _=>self.session_fail(&mut r,SessionRejection::GtkReturnState),
+        }""")
         self.assertNotIn(".responded", returned)
         self.assertLess(returned.index("r.pending.take()"), returned.index(".activation_returned(result)"))
         # Source ordering and parser contracts are not executed GTK/native finality.

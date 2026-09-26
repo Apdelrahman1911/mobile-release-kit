@@ -427,10 +427,48 @@ impl SessionWait {
         }
     }
 }
+// Closed last-sample DATA from the already-authenticated activation chooser.
+// Ordered GTK getters, not an atomic snapshot or a readiness/owner certificate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionPickerFolder { Absent, TargetParent, Other }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionPickerSelection { Absent, Target, TargetParent, FirebasePeer, Other }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionPickerReadiness {
+    NotSampled,
+    Sampled { mapped: bool, folder: SessionPickerFolder, selected: SessionPickerSelection },
+}
+impl SessionPickerReadiness {
+    fn token(self) -> [u8; 2] {
+        use SessionPickerFolder as F;
+        use SessionPickerSelection as S;
+        match self {
+            Self::NotSampled => *b"na",
+            Self::Sampled { mapped, folder, selected } => [
+                match (mapped, folder) {
+                    (false,F::Absent) => b'0', (false,F::TargetParent) => b'1', (false,F::Other) => b'2',
+                    (true,F::Absent) => b'3', (true,F::TargetParent) => b'4', (true,F::Other) => b'5',
+                },
+                match selected { S::Absent => b'a', S::Target => b't', S::TargetParent => b'p',
+                    S::FirebasePeer => b'f', S::Other => b'o' },
+            ],
+        }
+    }
+    fn valid(self, step: SessionStep, wait: SessionWait) -> bool {
+        let Self::Sampled { selected, .. } = self else { return true; };
+        if !matches!(step,SessionStep::ActivateFile(_)) { return false; }
+        match selected {
+            SessionPickerSelection::Absent => wait == SessionWait::GtkSelectionAbsent,
+            SessionPickerSelection::Target => matches!(wait,SessionWait::NotSampled | SessionWait::GtkActionInsensitive),
+            SessionPickerSelection::TargetParent | SessionPickerSelection::FirebasePeer | SessionPickerSelection::Other
+                => wait == SessionWait::GtkSelectionDifferent,
+        }
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SessionDiagnostic {
     step: SessionStep, evaluations: u16, rejection: SessionRejection, wait: SessionWait, first_failure: InstalledSessionFailure,
-    assessment: InstalledAssessmentFailure, gtk_callbacks: SessionGtkCallbacks,
+    assessment: InstalledAssessmentFailure, gtk_callbacks: SessionGtkCallbacks, gtk_picker: SessionPickerReadiness,
 }
 impl SessionDiagnostic {
     fn sample(step: Step, evaluations: u16, previous: Option<Self>) -> Option<Self> {
@@ -439,7 +477,16 @@ impl SessionDiagnostic {
             wait: previous.filter(|old| old.step == step).map_or(SessionWait::NotSampled, |old| old.wait),
             first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none(),
             gtk_callbacks: previous.filter(|old| old.step == step)
-                .map_or_else(|| SessionGtkCallbacks::initial(step), |old| old.gtk_callbacks) })
+                .map_or_else(|| SessionGtkCallbacks::initial(step), |old| old.gtk_callbacks),
+            gtk_picker: previous.filter(|old| old.step == step)
+                .map_or(SessionPickerReadiness::NotSampled, |old| old.gtk_picker) })
+    }
+    fn file_wait(&mut self, wait: SessionWait, picker: SessionPickerReadiness) -> bool {
+        if !picker.valid(self.step,wait) { return false; }
+        self.wait = wait; self.gtk_picker = picker;
+        // The new ready sample is not a wait or a helper-return notification.
+        if wait != SessionWait::NotSampled { self.gtk_callbacks.wait_observed(); }
+        true
     }
 }
 
@@ -936,7 +983,7 @@ fn assert_failure_quit_contract() {
     let mut progress = BootstrapProgress::Advanced;
     let failed = FailureLatch::new(false);
     let first = SessionDiagnostic { step, evaluations: 25, rejection: SessionRejection::ReplyAssessmentUnavailable,
-        wait: SessionWait::ReplyPending, first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
+        wait: SessionWait::ReplyPending, first_failure: InstalledSessionFailure::not_recorded(), assessment: InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
     let mut diagnostic = None;
     latch_session_diagnostic(&failed, &mut diagnostic, first);
     let frame = failure_pair(trace, progress, diagnostic, None);
@@ -1222,7 +1269,8 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
 const FAILURE_PAIR_LIMIT: usize = 512;
 // v6 keeps every v5 field: eval saves 7B, ;g= plus its closed token adds 5B.
 // Never omit/truncate a field to fit the unchanged 512B sink.
-const SESSION_FAILURE_FRAME_BOUND: usize = 507;
+// v7 adds exactly ;h= plus two closed bytes: 507 + 5 = 512.
+const SESSION_FAILURE_FRAME_BOUND: usize = 512;
 // Path v2 retains the three lines and adds bounded timing/callback/wait DATA.
 // The historical v1 reader keeps its 256B bound; the common sink is unchanged.
 const PATH_FAILURE_FRAME_BOUND: usize = 384;
@@ -1286,9 +1334,10 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             if diagnostic.evaluations > 128 || step.recipe_index().is_some_and(|index| index >= 64)
                 || diagnostic.rejection == SessionRejection::EvaluationBudget && diagnostic.evaluations != 128
                 || !diagnostic.gtk_callbacks.matches_step(step)
+                || !diagnostic.gtk_picker.valid(step,diagnostic.wait)
                 || matches!(diagnostic.wait, SessionWait::GtkSelectionAbsent | SessionWait::GtkSelectionDifferent)
                     && !matches!(step, SessionStep::ActivateFile(_)) { return None; }
-            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=")?;
+            append(&mut bytes, &mut length, b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=")?;
             if let Some(index) = step.recipe_index() {
                 let (digits, begin) = decimal(u16::from(index))?; append(&mut bytes, &mut length, &digits[begin..])?;
             } else { append(&mut bytes, &mut length, b"none")?; }
@@ -1322,6 +1371,8 @@ fn failure_pair(trace: (Step, Boundary), progress: BootstrapProgress, session: O
             append(&mut bytes, &mut length, diagnostic.first_failure.unknown_boundary_token())?;
             append(&mut bytes, &mut length, b";g=")?;
             append(&mut bytes, &mut length, diagnostic.gtk_callbacks.token())?;
+            append(&mut bytes, &mut length, b";h=")?;
+            append(&mut bytes, &mut length, &diagnostic.gtk_picker.token())?;
             append(&mut bytes, &mut length, b"\n")?;
             if length > SESSION_FAILURE_FRAME_BOUND { return None; }
         },
@@ -1385,31 +1436,31 @@ fn assert_failure_pair_contract() {
     }
     let step = SessionStep::Read(63,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
-    let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
+    let first = SessionDiagnostic { step, evaluations:128, rejection:SessionRejection::EvaluationBudget, wait:SessionWait::DisplayMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
     let expected = [step.failure_line(), Boundary::Settlement.failure_line(), BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=63;eval=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=63;eval=128;reject=evaluation-budget;wait=rendered-display-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na;h=na\n"].concat();
     assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(first),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let longest = SessionDiagnostic { step:SessionStep::QuitPreserved,evaluations:128,
-        rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
+        rejection:SessionRejection::UnavailableScript,wait:SessionWait::ControlsMismatch, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
     let expected = [longest.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=none;eval=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=none;eval=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na;h=na\n"].concat();
     assert!(failure_pair((Step::Session(longest.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(longest),None)
         .is_some_and(|(bytes,length)|length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let bound = SessionDiagnostic { first_failure:InstalledSessionFailure::contract_sample(), ..longest };
     let expected = [bound.step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::AppInfoReturnedBeforeHold.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=none;eval=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na;u=settlement;g=na\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=none;eval=128;reject=unavailable-projection-script;wait=rendered-control-mismatch;o=supervisor-disabled;d=none;a=bound;q=unavailable.spawn-other.xf;w=settle-unknown;ao=none;ac=na;ax=none;af=na;u=settlement;g=na;h=na\n"].concat();
     assert!(failure_pair((Step::Session(bound.step),Boundary::Settlement),BootstrapProgress::AppInfoReturnedBeforeHold,Some(bound),None)
         .is_some_and(|(bytes,length)|length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())
             && bytes[..length].is_ascii() && bytes[..length].iter().filter(|byte| **byte == b'\n').count() == 4));
     let (origin_bound, class_bound, cause_bound, admission_bound) = InstalledAssessmentFailure::token_bounds();
     assert!(origin_bound <= 7 && class_bound <= 24 && cause_bound <= 11 && admission_bound <= 22);
-    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22 + 3 + 14 - 7 + 5, SESSION_FAILURE_FRAME_BOUND);
-    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 5);
+    assert_eq!(311 + 5 * 3 + 19 + 15 + 12 + 26 + 14 + 3 * 4 + 7 + 24 + 11 + 4 + 22 + 3 + 14 - 7 + 5 + 5, SESSION_FAILURE_FRAME_BOUND);
+    assert_eq!(FAILURE_PAIR_LIMIT - SESSION_FAILURE_FRAME_BOUND, 0);
     for evaluations in [0,9,10,99,100,128] {
         for step in [SessionStep::Navigate,SessionStep::Read(0,SA::Prepare("android-keystore","save")),SessionStep::Read(63,SA::ReviewRemoval(1))] {
-            let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
-            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index={};eval={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n",
+            let diagnostic = SessionDiagnostic { step,evaluations,rejection:SessionRejection::NotRecorded,wait:SessionWait::NotSampled, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
+            let expected = format!("MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index={};eval={evaluations};reject=not-recorded;wait=not-sampled;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na;h=na\n",
                 step.recipe_index().map_or_else(|| "none".to_owned(),|index|index.to_string()));
             assert!(failure_pair((Step::Session(step),Boundary::Settlement),BootstrapProgress::Advanced,Some(diagnostic),None)
                 .is_some_and(|(bytes,length)|bytes[..length].ends_with(expected.as_bytes())));
@@ -1458,10 +1509,10 @@ fn assert_failure_pair_contract() {
     let mut gtk_callbacks = SessionGtkCallbacks::initial(SessionStep::ActivateFile(3));
     gtk_callbacks.reserved(); gtk_callbacks.wait_observed();
     let gtk = SessionDiagnostic { step:SessionStep::ActivateFile(3),evaluations:16,
-        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks };
+        rejection:SessionRejection::GtkObserverEndpoint,wait:SessionWait::GtkActionInsensitive, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks, gtk_picker:SessionPickerReadiness::NotSampled };
     let gtk_trace = (Step::Session(gtk.step),Boundary::Gtk);
     let expected = [gtk.step.failure_line(),Boundary::Gtk.failure_line(),BootstrapProgress::Advanced.failure_line(),
-        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=3;eval=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=0w\n"].concat();
+        b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=3;eval=16;reject=gtk-observer-endpoint;wait=gtk-action-insensitive;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=0w;h=na\n"].concat();
     assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(gtk),None).is_some_and(|(bytes,length)|
         length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     let same = SessionDiagnostic::sample(gtk_trace.0,16,Some(gtk)).unwrap();
@@ -1534,7 +1585,7 @@ fn assert_failure_pair_contract() {
     for wait in [SessionWait::GtkSelectionAbsent,SessionWait::GtkSelectionDifferent] {
         let diagnostic = SessionDiagnostic { wait,..gtk };
         assert!(failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
-            length <= SESSION_FAILURE_FRAME_BOUND && bytes[..length].ends_with(b";u=na;g=0w\n")));
+            length <= SESSION_FAILURE_FRAME_BOUND && bytes[..length].ends_with(b";u=na;g=0w;h=na\n")));
         let wrong_role = SessionDiagnostic { step:SessionStep::SetFile(3),..diagnostic };
         assert!(failure_pair((Step::Session(wrong_role.step),Boundary::Gtk),BootstrapProgress::Advanced,Some(wrong_role),None).is_none());
     }
@@ -1555,6 +1606,85 @@ fn assert_failure_pair_contract() {
         assert!(retained == frozen);
         assert_eq!(retained.unwrap().gtk_callbacks.token(),if deadline_first { b"0w" } else { b"1i" });
     }
+    // All 30 closed observations are distinct from the not-sampled state.
+    use SessionPickerFolder as PF;
+    use SessionPickerSelection as PS;
+    use SessionPickerReadiness as PR;
+    assert_eq!(PR::NotSampled.token(), *b"na");
+    let mut tokens = [[0u8; 2]; 30];
+    let mut count = 0usize;
+    for mapped in [false,true] {
+        for (folder,no,yes) in [(PF::Absent,b'0',b'3'),(PF::TargetParent,b'1',b'4'),(PF::Other,b'2',b'5')] {
+            for (selected,code,wait) in [
+                (PS::Absent,b'a',SessionWait::GtkSelectionAbsent),
+                (PS::Target,b't',SessionWait::GtkActionInsensitive),
+                (PS::TargetParent,b'p',SessionWait::GtkSelectionDifferent),
+                (PS::FirebasePeer,b'f',SessionWait::GtkSelectionDifferent),
+                (PS::Other,b'o',SessionWait::GtkSelectionDifferent),
+            ] {
+                let picker = PR::Sampled { mapped,folder,selected };
+                let token = picker.token();
+                assert_eq!(token, [if mapped { yes } else { no },code]);
+                assert!(token != PR::NotSampled.token() && !tokens[..count].contains(&token));
+                tokens[count] = token; count += 1;
+                let diagnostic = SessionDiagnostic { wait,gtk_picker:picker,..gtk };
+                let (bytes,length) = failure_pair(gtk_trace,BootstrapProgress::Advanced,Some(diagnostic),None).unwrap();
+                assert!(length <= SESSION_FAILURE_FRAME_BOUND);
+                assert_eq!(bytes[..length].iter().filter(|&&byte| byte == b'\n').count(),4);
+                assert_eq!(&bytes[length-6..length], &[b';',b'h',b'=',token[0],token[1],b'\n']);
+                for candidate in [SessionWait::NotSampled,SessionWait::GtkDialogAbsent,
+                    SessionWait::GtkSelectionAbsent,SessionWait::GtkSelectionDifferent,SessionWait::GtkActionInsensitive] {
+                    let valid = candidate == wait || selected == PS::Target && candidate == SessionWait::NotSampled;
+                    assert_eq!(picker.valid(gtk.step,candidate),valid);
+                    assert_eq!(failure_pair(gtk_trace,BootstrapProgress::Advanced,
+                        Some(SessionDiagnostic { wait:candidate,..diagnostic }),None).is_some(),valid);
+                }
+                for other in [SessionStep::SetFile(3),SessionStep::Capture(3),SessionStep::Navigate] {
+                    assert!(!picker.valid(other,wait));
+                }
+                assert!(SessionDiagnostic::sample(gtk_trace.0,17,Some(diagnostic)).unwrap().gtk_picker == picker);
+                for other in [SessionStep::SetFile(3),SessionStep::ActivateFile(4)] {
+                    assert!(SessionDiagnostic::sample(Step::Session(other),17,Some(diagnostic)).unwrap().gtk_picker == PR::NotSampled);
+                }
+                let mut cleared = diagnostic;
+                assert!(cleared.file_wait(SessionWait::GtkDialogAbsent,PR::NotSampled));
+                assert!(cleared.wait == SessionWait::GtkDialogAbsent && cleared.gtk_picker == PR::NotSampled);
+                let saved = cleared;
+                assert!(!cleared.file_wait(SessionWait::GtkDialogAbsent,picker));
+                assert!(cleared == saved); // Invalid pairs cannot partially update the cache.
+            }
+        }
+    }
+    assert_eq!(count,30);
+    assert_eq!(SESSION_FAILURE_FRAME_BOUND,507+5);
+    let target = PR::Sampled { mapped:true,folder:PF::TargetParent,selected:PS::Target };
+    let peer = PR::Sampled { mapped:true,folder:PF::TargetParent,selected:PS::FirebasePeer };
+    let mut ready = SessionDiagnostic { gtk_callbacks:SessionGtkCallbacks::initial(gtk.step),..gtk };
+    ready.gtk_callbacks.reserved();
+    let callbacks_before = ready.gtk_callbacks;
+    assert!(ready.file_wait(SessionWait::NotSampled,target));
+    assert!(ready.gtk_callbacks == callbacks_before && ready.gtk_picker == target);
+    assert!(ready.file_wait(SessionWait::GtkActionInsensitive,target));
+    assert_eq!(ready.gtk_callbacks.token(),b"0w");
+    let mismatch = SessionDiagnostic { wait:SessionWait::GtkSelectionDifferent,gtk_picker:peer,..gtk };
+    for deadline_first in [false,true] {
+        let failed = FailureLatch::new(false);
+        let mut trace = gtk_trace; let mut progress = BootstrapProgress::Advanced;
+        let mut retained = Some(mismatch);
+        if deadline_first {
+            assert!(latch_failure(&failed,&mut trace,&mut progress,(gtk_trace.0,Boundary::Deadline),BootstrapProgress::Advanced));
+        } else {
+            latch_session_diagnostic(&failed,&mut retained,mismatch);
+        }
+        let frozen = retained;
+        if !failed.load(Ordering::SeqCst) {
+            retained.as_mut().unwrap().file_wait(SessionWait::NotSampled,target);
+            retained.as_mut().unwrap().gtk_callbacks.returned();
+        }
+        latch_session_diagnostic(&failed,&mut retained,ready);
+        assert!(!latch_failure(&failed,&mut trace,&mut progress,(gtk_trace.0,Boundary::Deadline),BootstrapProgress::NotSampled));
+        assert!(retained == frozen && retained.unwrap().gtk_picker == peer);
+    }
     // Inert codes only: these contracts do not identify a historical failure.
     for (code, rejection) in [("asset_deadline",SessionRejection::ReplyAssetDeadline),
         ("assessment_context_stale",SessionRejection::ReplyAssessmentContextStale),
@@ -1572,7 +1702,7 @@ fn assert_failure_pair_contract() {
     }
     let step = SessionStep::Read(29,SA::Prepare("android-keystore","save"));
     let trace = (Step::Session(step),Boundary::Settlement);
-    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
+    let pending = SessionDiagnostic { step,evaluations:73,rejection:SessionRejection::NotRecorded,wait:SessionWait::ReplyPending, first_failure:InstalledSessionFailure::not_recorded(), assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
     let sampled = SessionDiagnostic::sample(trace.0,73,Some(pending)).unwrap();
     assert!(sampled.wait == SessionWait::ReplyPending && sampled.rejection == SessionRejection::NotRecorded);
     assert!(SessionRejection::ReplyAssessmentInvalidRequest.token().len() == 32);
@@ -1580,8 +1710,8 @@ fn assert_failure_pair_contract() {
         SessionRejection::ReplyCodeUnavailable,SessionRejection::CapabilityUnavailable] {
         let diagnostic = SessionDiagnostic { rejection,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=29;eval=73;reject=",rejection.token(),
-            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=29;eval=73;reject=",rejection.token(),
+            b";wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=none;ac=na;ax=none;af=na;u=na;g=na;h=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(diagnostic),None).is_some_and(|(bytes,length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
     }
@@ -1621,11 +1751,11 @@ fn assert_failure_pair_contract() {
     for action in [SA::Prepare("android-keystore","missing"),SA::Reassess(0,"android-keystore")] {
         let step = SessionStep::Read(6,action); let trace = (Step::Session(step),Boundary::Settlement);
         let pending = SessionDiagnostic { step,evaluations:13,wait:SessionWait::ReplyPending,
-            rejection:SessionRejection::NotRecorded,first_failure:InstalledSessionFailure::not_recorded(),assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable };
+            rejection:SessionRejection::NotRecorded,first_failure:InstalledSessionFailure::not_recorded(),assessment:InstalledAssessmentFailure::none(), gtk_callbacks:SessionGtkCallbacks::NotApplicable, gtk_picker:SessionPickerReadiness::NotSampled };
         let sampled = SessionDiagnostic::sample(trace.0,13,Some(pending)).unwrap();
         let rejected = SessionDiagnostic { rejection:original.rejection,assessment:original.assessment,..sampled };
         let expected = [step.failure_line(),Boundary::Settlement.failure_line(),BootstrapProgress::Advanced.failure_line(),
-            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v6;index=6;eval=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=na;g=na\n"].concat();
+            b"MRK_INSTALLED_SHELL_SESSION_FAILURE=v7;index=6;eval=13;reject=reply-assessment-unavailable;wait=native-reply-pending;o=not-recorded;d=none;a=unassociated;q=na;w=na;ao=bridge;ac=runtime-unavailable;ax=prepare;af=missing-compile-anchor;u=na;g=na;h=na\n"].concat();
         assert!(failure_pair(trace,BootstrapProgress::Advanced,Some(rejected),None).is_some_and(|(bytes,length)|
             length <= SESSION_FAILURE_FRAME_BOUND && bytes.get(..length) == Some(expected.as_slice())));
         assert!(SessionDiagnostic::sample(trace.0,13,Some(rejected)).unwrap().assessment == InstalledAssessmentFailure::none());
@@ -3823,7 +3953,8 @@ impl Observation {
     fn session_wait(&self, r: &mut Record, wait: SessionWait) {
         if !self.failed.load(Ordering::SeqCst) {
             if let Some(mut diagnostic) = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic) {
-                diagnostic.wait = wait; r.session.diagnostic = Some(diagnostic);
+                diagnostic.wait = wait; diagnostic.gtk_picker = SessionPickerReadiness::NotSampled;
+                r.session.diagnostic = Some(diagnostic);
             }
         }
     }
@@ -7167,7 +7298,7 @@ impl Observation {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return; };
         self.session_fail(&mut r,rejection);
     }
-    pub(super) fn session_file_wait(&self, index: u8, activating: bool, wait: SessionWait) {
+    pub(super) fn session_file_wait(&self, index: u8, activating: bool, wait: SessionWait, picker: SessionPickerReadiness) {
         // Authenticate the actual pending role AND index before sampling. A late
         // SetFile callback cannot attach a wait to ActivateFile at the same index.
         let Some(mut r)=self.record() else { return; };
@@ -7175,8 +7306,7 @@ impl Observation {
         r.trace=(r.step,Boundary::Gtk);
         if !self.failed.load(Ordering::SeqCst) {
             if let Some(mut diagnostic) = SessionDiagnostic::sample(r.step,r.evaluations,r.session.diagnostic) {
-                diagnostic.wait = wait; diagnostic.gtk_callbacks.wait_observed();
-                r.session.diagnostic = Some(diagnostic);
+                if diagnostic.file_wait(wait,picker) { r.session.diagnostic = Some(diagnostic); }
             }
         }
     }
@@ -7205,6 +7335,10 @@ impl Observation {
         if file.is_empty() { return None; }
         let project=self.project_path()?;
         Some(if file=="overlap.jks" { project.join(file) } else { project.parent()?.join("sources").join(file) })
+    }
+    pub(super) fn session_file_firebase_peer(&self) -> Option<PathBuf> {
+        self.case.session()?;
+        Some(self.project_path()?.parent()?.join("sources").join("firebase.json"))
     }
     pub(super) fn session_file_selection(&self, id: u32, index: u8) -> Result<(),()> {
         let Some(mut r)=self.record_at(Boundary::Gtk) else { return Err(()); };
