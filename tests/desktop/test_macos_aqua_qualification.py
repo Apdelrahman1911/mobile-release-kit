@@ -556,7 +556,7 @@ class AquaDataTests(unittest.TestCase):
         expected = M.IGNORE_RULES.decode("ascii").splitlines()
         self.assertEqual(int(fixture.group(1)), len(expected))
         self.assertEqual(M.re.findall(r'"([^"]+)"', fixture.group(2)), expected)
-        script = observer.split("fn script(case: Case, step: Step)", 1)[1].split("\nfn route(", 1)[0]
+        script = observer.split("fn script(case: Case, step: Step)", 1)[1].split("\n}\n", 1)[0] + "\n}"
         self.assertIn("if let Step::Session(step) = step { return session::script(step); }", script)
         self.assertEqual(script.count("if(ignore.length>{ignore_limit}||counts.length!==3)throw 0;"), 1,
                          "review-ignore-count-bound")

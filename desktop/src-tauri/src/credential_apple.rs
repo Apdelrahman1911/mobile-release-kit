@@ -251,7 +251,9 @@ mod tests {
         let suffix = reader.read_slice(reader.remaining_len()).unwrap();
         let mut changed = 2u8.to_der().unwrap(); changed.extend_from_slice(suffix);
         assert_eq!(wire(FileKind::AppleP12, &tlv(Tag::Sequence, &changed)), json!({"status":"unavailable","reason":"unsupported-variant"}));
-        for (kind, wrong) in [(FileKind::AppleP12, pfx_fixture(ObjectIdentifier::new_unwrap("1.2.3"), Any::null())),
+        let unknown_oid_pfx = pfx_fixture(ObjectIdentifier::new_unwrap("1.2.3.4"), Any::null());
+        assert!(Pfx::from_der(&unknown_oid_pfx).is_ok());
+        for (kind, wrong) in [(FileKind::AppleP12, unknown_oid_pfx),
             (FileKind::AppleProfile, profile_fixture(DATA, Any::new(Tag::OctetString, CANARY.to_vec()).unwrap()))] {
             assert_eq!(wire(kind, &wrong), json!({"status":"unavailable","reason":"unsupported-variant"}));
         }
