@@ -17,14 +17,14 @@ jobs:
   aqua:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-aqua'
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
-      # Deliberately non-runnable until the new DATA originals are accepted.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 071bbdd31b1a9c690a80f4f72e7d18343edc252dc282b4043b00c133bc0e7127
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: eee96fd283f9fc072a359d54b4def56219c23ee4f3ffc9852a936e3e978e951d
-      MRK_BUNDLED_PROTOCOL_SHA256: 860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e
+      # Exact independently accepted current-payload DATA; not native qualification.
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 6b6376420b79bc9a60f6b549700e0e539f1e204d97e1bd07aea8032e3616e7ee
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 81fb5b6babb560b27a7a42c69883de2bd65763d1faec4d215df057396dc76169
+      MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
@@ -39,8 +39,8 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
           # Supplier reuse does not qualify a historical core as current source.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 071bbdd31b1a9c690a80f4f72e7d18343edc252dc282b4043b00c133bc0e7127 ]]
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == eee96fd283f9fc072a359d54b4def56219c23ee4f3ffc9852a936e3e978e951d ]]
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 6b6376420b79bc9a60f6b549700e0e539f1e204d97e1bd07aea8032e3616e7ee ]]
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 81fb5b6babb560b27a7a42c69883de2bd65763d1faec4d215df057396dc76169 ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
       - name: Check out exact reviewed source without retained credentials
@@ -87,7 +87,8 @@ jobs:
               ("node", ["node", "--version"]),
               ("python", [sys.executable, "-I", "-S", "-B", "--version"]),
           ):
-              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
+              result = subprocess.run(command, cwd="desktop" if name in ("rustc", "cargo") else None,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
               if not result.stdout or len(result.stdout) > 4096: raise ValueError("tool version output refused")
               tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
           value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
@@ -96,8 +97,8 @@ jobs:
                     "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
                     "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
                     "reusedSupplierOnly": True,
-                   "scope": "five-fixed-unsigned-ios-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
-                   "caseNames": ["ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
+                   "scope": "nine-fixed-current-ios-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
+                   "caseNames": ["ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality", "ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel", "ios-recovery-empty"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "not-yet-executed", "shippingBinaryQualified": False, "distributionQualified": False}
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 65536: raise ValueError("source/tool binding size refused")
@@ -110,6 +111,83 @@ jobs:
               os.fsync(fd)
           finally: os.close(fd)
           PY
+      - name: Diagnose the real full-Xcode layout before compilation, separately from CLT
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_XCODE'
+          import json, os, pathlib, re, stat, subprocess
+          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          value = {"schemaVersion": 1, "scope": "full-xcode-layout-diagnostic-not-native-custody",
+                   "source": os.environ["GITHUB_SHA"], "compilerDeveloperDir": os.environ["DEVELOPER_DIR"],
+                   "layout": [], "tools": {}, "passed": False}
+          def observe(path, kind):
+              s = path.lstat()
+              value["layout"].append({"path": str(path), "mode": s.st_mode, "uid": s.st_uid,
+                                      "gid": s.st_gid, "device": s.st_dev, "inode": s.st_ino})
+              # A symlink's permission bits are not its target's access mode.
+              # Match the original native one-sibling alias policy; the real
+              # target and every descendant must still be protected objects.
+              alias = stat.S_ISLNK(s.st_mode)
+              if s.st_uid != 0 or (not alias and s.st_mode & 0o022) or not kind(s.st_mode):
+                  raise ValueError("full-xcode-protected-layout")
+              if alias and (s.st_nlink != 1 or not 1 <= s.st_size <= 1024):
+                  raise ValueError("full-xcode-alias-shape")
+          try:
+              app = pathlib.Path("/Applications/Xcode.app")
+              observe(pathlib.Path("/"), stat.S_ISDIR)
+              observe(app.parent, stat.S_ISDIR)
+              if app.is_symlink():
+                  observe(app, stat.S_ISLNK)
+                  target = os.readlink(app)
+                  sibling = target.removeprefix("/Applications/")
+                  if sibling == "Xcode.app" or not re.fullmatch(r"Xcode[A-Za-z0-9._+-]*\.app", sibling) or len(sibling) > 255:
+                      raise ValueError("full-xcode-single-sibling-alias")
+                  value["selectedAlias"] = target
+                  app = app.parent / sibling
+              observe(app, stat.S_ISDIR)
+              developer = app
+              for part in ("Contents", "Developer"):
+                  developer /= part
+                  observe(developer, stat.S_ISDIR)
+              tool = developer
+              for part in ("usr", "bin"):
+                  tool /= part
+                  observe(tool, stat.S_ISDIR)
+              tool /= "xcodebuild"
+              observe(tool, stat.S_ISREG)
+              if not tool.lstat().st_mode & 0o111: raise ValueError("full-xcode-executable")
+              sdk = developer
+              for part in ("Platforms", "iPhoneOS.platform", "Developer", "SDKs", "iPhoneOS.sdk"):
+                  sdk /= part
+                  observe(sdk, stat.S_ISDIR)
+              home = root / "xcode-diagnostic-home"
+              home.mkdir(mode=0o700)
+              environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
+                             "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "DEVELOPER_DIR": str(developer)}
+              for name, arguments in (("fullXcodeVersion", ["-version"]),
+                                      ("fullIPhoneOSVersion", ["-version", "-sdk", "iphoneos", "SDKVersion"])):
+                  command = [str(tool), *arguments]
+                  result = subprocess.run(command, env=environment, cwd=root, stdin=subprocess.DEVNULL,
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15, check=False)
+                  if len(result.stdout) > 4096: raise ValueError("full-xcode-version-output-bound")
+                  value["tools"][name] = {"command": command, "returncode": result.returncode,
+                                          "output": result.stdout.decode("utf-8", "strict").strip()}
+                  if result.returncode or not result.stdout: raise ValueError("full-xcode-version-refused")
+              value["passed"] = True
+          except (OSError, ValueError, subprocess.SubprocessError) as error:
+              value["failure"] = type(error).__name__
+              raise
+          finally:
+              data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+              if len(data) > 16384: raise ValueError("full-xcode-diagnostic-bound")
+              fd = os.open(root / "xcode-layout.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+              with os.fdopen(fd, "wb") as stream:
+                  stream.write(data)
+                  stream.flush()
+                  os.fsync(stream.fileno())
+          PY_XCODE
       - name: Bind the complete reviewed first-party checkout before compilation
         shell: bash
         run: |
@@ -172,6 +250,155 @@ jobs:
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS
+      - name: Compile headless Mac library and run six exact DATA regressions first
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Cargo must see desktop/rust-toolchain.toml, not the host default.
+          cd desktop/src-tauri
+          set +e
+          cargo test --locked --no-default-features --jobs 2 --target aarch64-apple-darwin \
+            --lib --no-run --message-format=json \
+            > "$MRK_MACOS_WORK/headless-build.jsonl" 2> "$MRK_MACOS_WORK/headless-build.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/headless-build.status"
+          [[ $status == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PY_HEADLESS'
+          import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys
+          work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          names = (
+              "asset_source::macos::tests::private_asset_suffixes_never_enable_android_or_bare_profile_plists",
+              "asset_source::macos::tests::root_aliases_are_exact_and_physical_protection_is_not_path_text",
+              "asset_source::macos::tests::entered_native_checks_remain_uncertain_after_descriptor_book_retirement",
+              "asset_source::macos::tests::protected_objects_are_recognized_even_from_another_firmlink_parent_role",
+              "asset_source::macos::tests::complete_alias_rosters_are_bounded_before_any_native_acquisition",
+              "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
+          )
+          receipt = {"schemaVersion": 1, "scope": "six-exact-macos-headless-data-regressions",
+                     "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                     "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
+                     "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "names": names,
+                     "originalReturned": False, "artifactOriginalUnchanged": False, "passed": False,
+                     "shippingBinaryQualified": False, "distributionQualified": False}
+          def sig(s):
+              return (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          def regular(s, limit):
+              if (not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_uid != os.getuid()
+                      or s.st_mode & 0o022 or not 0 <= s.st_size <= limit):
+                  raise ValueError("headless-original-file-shape")
+          def read_bound(path, limit):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  regular(before, limit)
+                  data = os.pread(fd, before.st_size, 0)
+                  if len(data) != before.st_size or sig(before) != sig(os.fstat(fd)) or sig(before) != sig(path.lstat()):
+                      raise ValueError("headless-original-file-changed")
+                  return data
+              finally: os.close(fd)
+          def publish(name, data):
+              fd = os.open(work / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+              with os.fdopen(fd, "wb") as stream:
+                  stream.write(data)
+                  stream.flush()
+                  os.fsync(stream.fileno())
+          binary_fd = None
+          stage = "original-compiler"
+          try:
+              if read_bound(work / "headless-build.status", 4) != b"0\n":
+                  raise ValueError("headless-original-compiler-status")
+              raw = read_bound(work / "headless-build.jsonl", 4 * 1024 * 1024)
+              rows = [json.loads(line) for line in raw.splitlines()]
+              if any(type(row) is not dict for row in rows): raise ValueError("headless-compiler-json-shape")
+              if [r.get("success") for r in rows if r.get("reason") == "build-finished"] != [True]:
+                  raise ValueError("headless-original-compiler-finish")
+              targets = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("executable") is not None]
+              if len(targets) != 1: raise ValueError("headless-one-original-artifact")
+              target = targets[0]
+              if (target.get("target", {}).get("name") != "mobile_release_desktop"
+                      or target["target"].get("kind") != ["lib"]
+                      or target["target"].get("src_path") != str(checkout / "desktop/src-tauri/src/lib.rs")
+                      or target.get("profile", {}).get("test") is not True or target.get("features") != []):
+                  raise ValueError("headless-fixed-feature-off-library")
+              binary = pathlib.Path(target["executable"])
+              expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/deps"
+              if binary.parent != expected or not re.fullmatch(r"mobile_release_desktop-[0-9a-f]+", binary.name):
+                  raise ValueError("headless-original-artifact-path")
+              binary_fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              before = os.fstat(binary_fd)
+              regular(before, 1024 * 1024 * 1024)
+              if not before.st_mode & 0o111: raise ValueError("headless-original-not-executable")
+              digest, remaining = hashlib.sha256(), before.st_size
+              while remaining:
+                  block = os.read(binary_fd, min(remaining, 1024 * 1024))
+                  if not block: raise ValueError("headless-original-artifact-short")
+                  digest.update(block)
+                  remaining -= len(block)
+              if os.read(binary_fd, 1): raise ValueError("headless-original-artifact-grew")
+              def original_unchanged():
+                  if sig(before) != sig(os.fstat(binary_fd)) or sig(before) != sig(binary.lstat()):
+                      raise ValueError("headless-original-artifact-changed")
+              original_unchanged()
+              receipt.update(compilerJsonSha256=hashlib.sha256(raw).hexdigest(),
+                             artifact={"path": str(binary), "sha256": digest.hexdigest(), "identity": sig(before)})
+              stage = "owner-admission"
+              spec = importlib.util.spec_from_file_location("_mrk_macos_headless_owner", checkout / "desktop/tools/macos_aqua_qualification.py")
+              qualification = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = qualification
+              spec.loader.exec_module(qualification)
+              owner = qualification.load_owner(checkout)
+              home, tmp = work / "headless-home", work / "headless-tmp"
+              home.mkdir(mode=0o700)
+              tmp.mkdir(mode=0o700)
+              original_unchanged()
+              stage = "original-test-invocation"
+              result = owner.run_owned(
+                  [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *names],
+                  environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(tmp),
+                           "LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
+                  cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024,
+              )
+              if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
+                      or type(result.stdout) is not bytes or type(result.stderr) is not bytes
+                      or len(result.stdout) + len(result.stderr) > 64 * 1024):
+                  raise ValueError("headless-original-return-contract")
+              receipt.update(originalReturned=True, returncode=result.returncode,
+                             stdoutSha256=hashlib.sha256(result.stdout).hexdigest(),
+                             stderrSha256=hashlib.sha256(result.stderr).hexdigest())
+              # Preserve the original return before testing its status/content.
+              publish("headless-tests.stdout", result.stdout)
+              publish("headless-tests.stderr", result.stderr)
+              publish("headless-tests.status", (str(result.returncode) + "\n").encode("ascii"))
+              original_unchanged()
+              receipt["artifactOriginalUnchanged"] = True
+              stage = "empty-test-directory-retirement"
+              home.rmdir()
+              tmp.rmdir()
+              stage = "exact-six-test-result"
+              if result.returncode != 0 or result.stderr: raise ValueError("headless-tests-returned-failure")
+              lines = [line for line in result.stdout.decode("utf-8", "strict").splitlines() if line]
+              expected_rows = {"test " + name + " ... ok" for name in names}
+              if (len(names) != 6 or len(expected_rows) != 6 or len(lines) != 8 or lines[0] != "running 6 tests"
+                      or len(set(lines[1:7])) != 6 or set(lines[1:7]) != expected_rows):
+                  raise ValueError("headless-exact-six-results-required")
+              summary = re.fullmatch(r"test result: ok\. 6 passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+              if summary is None: raise ValueError("headless-six-test-summary")
+              receipt.update(passed=True, tests=6, failed=0, ignored=0, measured=0, filtered=int(summary[1]))
+          except BaseException as error:
+              receipt["failure"] = {"stage": stage, "type": type(error).__name__}
+              raise
+          finally:
+              if binary_fd is not None: os.close(binary_fd)
+              # No exception-path directory cleanup or fabricated finality.
+              data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+              if len(data) > 16384: raise ValueError("headless-receipt-bound")
+              publish("headless-tests.receipt.json", data)
+          PY_HEADLESS
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         timeout-minutes: 2
         shell: bash
@@ -301,6 +528,7 @@ jobs:
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
+            --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/input" > "$MRK_MACOS_WORK/input-result.json"
           inventory=$("$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/input-result.json" <<'PY'
@@ -429,9 +657,9 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
-          printf '%s\n' 'Instrumented engineering installation only; the five unsigned-iOS Aqua cases must separately pass, prerequisite first.'
-      - name: Five serial unsigned-iOS Aqua cases through the reviewed original invocation owner
-        timeout-minutes: 28
+          printf '%s\n' 'Instrumented engineering installation only; all nine current-iOS Aqua cases must separately pass, prerequisite first.'
+      - name: Nine serial current-iOS Aqua cases through the reviewed original invocation owner
+        timeout-minutes: 50
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -442,7 +670,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
           set +e
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-unsigned-archive \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope ios-current-synthetic \
             > "$MRK_MACOS_WORK/aqua-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-failure.jsonl"
           status=$?
           set -e
@@ -509,6 +737,8 @@ jobs:
                   os.fsync(stream.fileno())
           records = []
           for original, status_name, limit, output, tail in (
+              ("headless-build.jsonl", "headless-build.status", 4 * 1024 * 1024, "headless-build.admitted.jsonl", False),
+              ("headless-build.stderr", "headless-build.status", 64 * 1024, "headless-build.stderr.tail.txt", True),
               ("observer-build.jsonl", "observer-build.status", 4 * 1024 * 1024, "observer-build.admitted.jsonl", False),
               ("observer-build.stderr", "observer-build.status", 64 * 1024, "observer-build.stderr.tail.txt", True),
               ("installer-output.txt", "installer-output.status", 64 * 1024, "installer-output.tail.txt", True),
@@ -541,6 +771,7 @@ jobs:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/xcode-layout.json
             ${{ steps.work.outputs.root }}/package-format-input.json
             ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
             ${{ steps.work.outputs.root }}/package-format-prepare.json
@@ -550,6 +781,13 @@ jobs:
             ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
             ${{ steps.work.outputs.root }}/source-inventory.json
             ${{ steps.work.outputs.root }}/runtime-result.json
+            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl
+            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt
+            ${{ steps.work.outputs.root }}/headless-build.status
+            ${{ steps.work.outputs.root }}/headless-tests.stdout
+            ${{ steps.work.outputs.root }}/headless-tests.stderr
+            ${{ steps.work.outputs.root }}/headless-tests.status
+            ${{ steps.work.outputs.root }}/headless-tests.receipt.json
             ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl
             ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt
             ${{ steps.work.outputs.root }}/bounded-diagnostics.json

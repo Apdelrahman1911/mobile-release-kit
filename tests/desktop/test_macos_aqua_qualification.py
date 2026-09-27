@@ -150,6 +150,23 @@ def binding_context_data(case="first-save"):
             "accessibilityBinding": deepcopy(M.expected_result(BINDING, case)["native"]["projectOpenBinding"])}
 
 
+def file_failure_context_data(case, index, panel_id):
+    # Caller-supplied literal original IDs, not the decoder's roster as oracle.
+    # File OpenInput keeps its legacy label; the saved native dispatch does not.
+    value = accessibility_context_data()
+    step = f"Session(Native({index}))"
+    value.update(snapshotSource="record")
+    value["nativeHandler"]["step"] = step
+    value["lastPanel"].update(step=step, id=panel_id, kind="file")
+    value["accessibility"]["id"] = panel_id
+    value["accessibilityBinding"] = binding_context_data()["accessibilityBinding"]
+    value["completionSelection"] = completion_context_data()["completionSelection"]
+    for field in ("accessibilityBinding", "completionSelection"):
+        value[field].update(case=case, id=panel_id, kind="file")
+    value["accessibilityBinding"]["configuration"].update(fileNameSetterEntered=True, fileNameSetterReturned=True)
+    return value
+
+
 def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
     """Literal DATA-only body rebound below; no owner import or command call."""
     global recursion
@@ -312,7 +329,8 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         position = workflow.index(label)
         self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
-        for later in ("Fail fast on native Scripts ownership and package format (never Installer)",
+        for later in ("Compile headless Mac library and run six exact DATA regressions first",
+                      "Fail fast on native Scripts ownership and package format (never Installer)",
                       "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
                       "Standard Installer only is privileged; never execute the app or Python as root"):
@@ -329,6 +347,53 @@ class AquaDataTests(unittest.TestCase):
             self.assertIn(required, step)
         self.assertNotIn("discover(", step)
         self.assertNotIn("loadTestsFrom", step)
+
+        headless_label = "      - name: Compile headless Mac library and run six exact DATA regressions first\n"
+        self.assertEqual(workflow.count(headless_label), 1)
+        self.assertLess(workflow.index(headless_label), workflow.index(
+            "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
+        headless = workflow.split(headless_label, 1)[1].split("\n      - name:", 1)[0]
+        self.assertLess(headless.index("cd desktop/src-tauri"), headless.index("cargo test --locked --no-default-features"))
+        self.assertIn("--lib --no-run --message-format=json", headless)
+        self.assertNotIn("--manifest-path", headless)
+        self.assertNotIn("--features", headless)
+        self.assertIn('cwd="desktop" if name in ("rustc", "cargo") else None', workflow)
+        names = headless.split("          names = (\n", 1)[1].split("          )\n", 1)[0]
+        self.assertCountEqual(M.re.findall(r'"([^"]+)"', names), (
+            "asset_source::macos::tests::private_asset_suffixes_never_enable_android_or_bare_profile_plists",
+            "asset_source::macos::tests::root_aliases_are_exact_and_physical_protection_is_not_path_text",
+            "asset_source::macos::tests::entered_native_checks_remain_uncertain_after_descriptor_book_retirement",
+            "asset_source::macos::tests::protected_objects_are_recognized_even_from_another_firmlink_parent_role",
+            "asset_source::macos::tests::complete_alias_rosters_are_bounded_before_any_native_acquisition",
+            "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
+        ))
+        self.assertEqual(headless.count("owner.run_owned("), 1)
+        for required in ('[str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *names]',
+                         "cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024",
+                         "type(result) is not subprocess.CompletedProcess", "type(result.stdout) is not bytes",
+                         "type(result.stderr) is not bytes", "len(result.stdout) + len(result.stderr) > 64 * 1024",
+                         "len(names) != 6", "len(expected_rows) != 6", "len(lines) != 8",
+                         "len(set(lines[1:7])) != 6", "set(lines[1:7]) != expected_rows",
+                         "6 passed; 0 failed; 0 ignored; 0 measured;"):
+            self.assertIn(required, headless)
+        reject = headless.index('if result.returncode != 0 or result.stderr:')
+        for output in ("stdout", "stderr", "status"):
+            self.assertLess(headless.index('publish("headless-tests.' + output + '"'), reject)
+        self.assertLess(headless.index('raise ValueError("headless-original-return-contract")'), headless.index("home.rmdir()"))
+        self.assertNotIn(".rmdir()", headless.split("          finally:\n", 1)[1])
+        exporter = workflow.split("      - name: Export bounded diagnostics without altering original command evidence\n", 1)[1]
+        for required in ('("headless-build.jsonl", "headless-build.status", 4 * 1024 * 1024, "headless-build.admitted.jsonl", False)',
+                         '("headless-build.stderr", "headless-build.status", 64 * 1024, "headless-build.stderr.tail.txt", True)',
+                         '"unavailable-original-status-missing-or-invalid"'):
+            self.assertIn(required, exporter)
+        self.assertLess(exporter.index("status, status_meta = snapshot(status_name, 4)"),
+                        exporter.index("data, metadata = snapshot(original, limit, tail)"))
+        upload = exporter.split("          path: |\n", 1)[1]
+        for output in ("headless-build.admitted.jsonl", "headless-build.stderr.tail.txt", "headless-build.status",
+                       "headless-tests.stdout", "headless-tests.stderr", "headless-tests.status", "headless-tests.receipt.json"):
+            self.assertIn("${{ steps.work.outputs.root }}/" + output + "\n", upload)
+        for unbounded in ("headless-build.jsonl\n", "headless-build.stderr\n", "cargo-target", "*", "**"):
+            self.assertNotIn(unbounded, upload)
 
     def test_new_directory_group_normalization_precedes_widening(self):
         for gid in (GID, 0):
@@ -491,7 +556,8 @@ class AquaDataTests(unittest.TestCase):
         expected = M.IGNORE_RULES.decode("ascii").splitlines()
         self.assertEqual(int(fixture.group(1)), len(expected))
         self.assertEqual(M.re.findall(r'"([^"]+)"', fixture.group(2)), expected)
-        script = observer.split("fn script(step: Step)", 1)[1].split("\nfn route(", 1)[0]
+        script = observer.split("fn script(case: Case, step: Step)", 1)[1].split("\nfn route(", 1)[0]
+        self.assertIn("if let Step::Session(step) = step { return session::script(step); }", script)
         self.assertEqual(script.count("if(ignore.length>{ignore_limit}||counts.length!==3)throw 0;"), 1,
                          "review-ignore-count-bound")
         self.assertEqual(script.count('Some(format!(r#"'), 1)
@@ -637,13 +703,13 @@ class AquaDataTests(unittest.TestCase):
         historical = context_data()
         self.assertEqual(M.failure_context(context_row(historical), b"", "first-save"), historical)
         # Full current context plus the longest new labels stays within the
-        # stricter unchanged decoder limit, not just the producer's ceiling.
+        # bounded decoder limit shared with the producer's ceiling.
         full = accessibility_context_data()
         full.update(snapshotSource="record", originalWindow=deepcopy(M.expected_result(BINDING, "first-save")["native"]["originalWindow"]),
                     accessibilityBinding=deepcopy(M.expected_result(BINDING, "first-save")["native"]["projectOpenBinding"]),
                     projectSelection=project_selection_context_data("inconsistent-original-data", "captured-object-metadata-changed")["projectSelection"])
         self.assertEqual(M.failure_context(b"", project_selection_row(full), "first-save"), full)
-        self.assertEqual(M.FAILURE_CONTEXT_LIMIT, 4096)
+        self.assertEqual(M.FAILURE_CONTEXT_LIMIT, 8192)
         self.assertLessEqual(len(context_row(full).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
         self.assertLessEqual(len(project_selection_row(full)), 8448)
 
@@ -1105,7 +1171,11 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
 
     def test_completion_context_and_result_envelopes_remain_bounded(self):
-        self.assertEqual((M.FAILURE_CONTEXT_LIMIT, M.JSON_LIMIT), (4096, 16383))
+        self.assertEqual((M.FAILURE_CONTEXT_LIMIT, M.JSON_LIMIT), (8192, 16383))
+        prefix, payload = context_row(context_data())[:-1].split(b"=", 1)
+        bounded = prefix + b"=" + payload + b" " * (8192 - len(payload)) + b"\n"
+        self.assertEqual(M.failure_context(b"", bounded), context_data())
+        self.assertIsNone(M.failure_context(b"", bounded[:-1] + b" \n"))
         for selected, unknown, poll in (("ordinary-path-disagreement", False, "responded"), ("multiple", False, "responded"),
                                         (None, True, "error"), ("different", True, "invalid-return")):
             detail = accessibility_context_data(); detail["snapshotSource"] = "record"
@@ -1422,7 +1492,7 @@ class AquaDataTests(unittest.TestCase):
 
     def test_native_action_closed_sites_cover_three_remaining_original_actions(self):
         self.assertEqual(set(M.NATIVE_ACTION_STEPS), {"CancelProject", "QuitCancel", "Quit"})
-        self.assertEqual(len(M.NATIVE_ACTION_SITES), 35)
+        self.assertEqual(len(M.NATIVE_ACTION_SITES), 36)
         for step, (_, _, _, mask) in M.NATIVE_ACTION_STEPS.items():
             for site, (native_error, actions, exception) in M.NATIVE_ACTION_SITES.items():
                 for domain, error, admitted in (
@@ -1681,9 +1751,14 @@ class AquaDataTests(unittest.TestCase):
         ordinary = document.split("fn gate(&self,", 1)[1].split("fn project_path_gate(", 1)[0]
         self.assertLess(ordinary.index("self.common_gate(state, session)?"), ordinary.index("ordinary_asset_platform_gate()?"))
         self.assertLess(ordinary.index("ordinary_asset_platform_gate()?"), ordinary.index("self.native_qualified()"))
-        predicate = document.split("fn ordinary_asset_platform_gate()", 1)[1].split("fn preflight_document_gate(", 1)[0]
-        self.assertIn('cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))', predicate)
+        predicate = document.split("fn ordinary_asset_platform_gate()", 1)[1].split("fn session_kind_gate(", 1)[0]
+        self.assertIn('cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),', predicate)
+        self.assertIn('all(target_os = "macos", target_arch = "aarch64")))', predicate)
         self.assertIn("Reason::UnsupportedPlatform", predicate)
+        kinds = document.split("fn session_kind_gate(", 1)[1].split("fn preflight_document_gate(", 1)[0]
+        self.assertIn('cfg!(all(target_os = "macos", target_arch = "aarch64"))', kinds)
+        self.assertIn("Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken", kinds)
+        self.assertIn("Reason::UnsupportedFormat", kinds)
         contract = document.split("pub(crate) fn assert_project_selection_gate_contract()", 1)[1].split("pub(crate) fn assert_installed_evidence_gate_contract()", 1)[0]
         self.assertIn("assert_eq!(reason(&ready), None)", contract)
         self.assertIn("ordinary_asset_platform_gate().err().map(|error| error.reason), platform", contract)
@@ -1720,8 +1795,10 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("else { native.directory_bound || native.directory_returned || native.directory_ready }", readiness)
         self.assertIn("if same_action_returned || unexpected_setup", readiness)
         action = observer.split("fn native_step(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
-        self.assertLess(action.index("if !panel_readiness("), action.index("r.panel_attached[(id - 1) as usize] = true"))
-        self.assertLess(action.index("r.panel_attached[(id - 1) as usize] = true"), action.index("observe_panel_action(id,action)"))
+        for attachment in ("r.panel_attached[self.case.panel_index(step).ok_or(\"native-step\")?] = true",
+                           "r.file_attached[usize::from(i)] = true"):
+            self.assertLess(action.index("if !panel_readiness("), action.index(attachment))
+            self.assertLess(action.index(attachment), action.index("observe_panel_action(id,action)"))
         self.assertIn('if let Err(reason) = result { self.fail_with(reason); }', action)
         self.assertNotIn("r.pending.take()", action)
         self.assertLess(action.index("let timely = self.timely()"), action.index("let result = self.native_step_body("))
@@ -1729,6 +1806,13 @@ class AquaDataTests(unittest.TestCase):
         body = action.split("fn native_step_body(", 1)[1]
         entry = "if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }"
         self.assertLess(body.index(entry), body.index("observed_panel()"))
+        self.assertIn("fn quit_id(self) -> u32 { if self.inputs() { 12 } else if self == Self::FirstSave { 4 } else { 2 } }", observer)
+        for branch in ("Step::OpenProject => (self.case.selected_id(),PanelKind::Project)",
+                       'Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File)',
+                       "Step::Quit => (self.case.quit_id(),PanelKind::Quit)",
+                       "Step::CancelProject => PanelAction::ProjectCancel",
+                       "Step::Session(session::Step::Native(6)) => PanelAction::FileCancel"):
+            self.assertIn(branch, body)
         admission = observer.split("fn native_step_entry(", 1)[1].split("fn retire_returned_native(", 1)[0]
         self.assertLess(admission.index('if !on_main { return Err("native-wrong-thread"); }'), admission.index("Ok(timely)"))
         self.assertIn('if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }', action)
@@ -1753,7 +1837,7 @@ class AquaDataTests(unittest.TestCase):
         table = rust.split("const ACTION_SITES:", 1)[1].split("];", 1)[0]
         rows = M.re.findall(r'\("([a-z-]+)", (-?[0-9]+), ([0-9]+), (true|false)\)', table)
         errors = {-1: None, 0: "none", 1: "permission-denied", 5: "io", 22: "invalid-input", 35: "would-block"}
-        self.assertEqual(len(rows), 35)
+        self.assertEqual(len(rows), 36)
         self.assertEqual({site: (errors[int(status)], int(actions), exception == "true")
                           for site, status, actions, exception in rows}, M.NATIVE_ACTION_SITES)
         action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
@@ -1764,7 +1848,7 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(action.count(call), 1, call)
         self.assertLess(action.index("[s->alert buttons]"), action.index("if (!s->alert)"))
         self.assertLess(action.index("[button isEnabled]"), action.index("[button isHidden]"))
-        self.assertIn("action != 1 && action != 4 && action != 5", action)
+        self.assertIn("action != 1 && action != 4 && action != 5 && action != 6", action)
         self.assertIn("if (directory != NULL)", action)
         self.assertNotIn("setDirectoryURL:", action)
         self.assertNotIn("PanelAction::ProjectDirectory", rust)
@@ -1944,8 +2028,16 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(timeout.index("AXUIElementSetMessagingTimeout"), timeout.index("mrk_ax_admit(s, timeout.required_ns"))
         entry = native.split("void mrk_observation_prompt_press(", 1)[1]
         self.assertIn("if (pthread_main_np())", entry)
-        self.assertIn("atomic_flag_test_and_set(&mrk_prompt_claimed)", entry)
-        self.assertNotIn("atomic_flag_clear", entry)
+        self.assertIn("static MRKPrompt mrk_prompt_originals[8]", native)
+        self.assertIn("atomic_load(&mrk_prompt_unknown) || atomic_flag_test_and_set(&mrk_prompt_active)", entry)
+        self.assertIn("index >= 8 || !atomic_compare_exchange_strong(&mrk_prompt_next, &index, index + 1)", entry)
+        self.assertLess(entry.index("atomic_compare_exchange_strong(&mrk_prompt_next"), entry.index("MRKPrompt *s = &mrk_prompt_originals[index]"))
+        # A serial successor receives another original ledger, never the old
+        # Project ledger. Clearing active must not reset the monotonic roster.
+        self.assertIn("if (!(s->result.flags & MRK_OPEN_KNOWN)) atomic_store(&mrk_prompt_unknown, true)", entry)
+        self.assertLess(entry.index("*out = s->result"), entry.index("atomic_flag_clear(&mrk_prompt_active)"))
+        self.assertNotIn("atomic_store(&mrk_prompt_next", entry)
+        self.assertNotIn("atomic_store(&mrk_prompt_unknown, false)", entry)
         cleanup = entry.split("for (unsigned left = s->count; left; --left)", 1)[1]
         self.assertLess(cleanup.index("mrk_ax_admit(s, 0,"), cleanup.index("CFRelease(slot->value)"))
         self.assertLess(cleanup.index("if (!s->cleanupKnown) break;"), cleanup.index("CFRelease(slot->value)"))
@@ -2028,7 +2120,9 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(construct.index("panel.installed_arm_open_identity(target)"), construct.index("panel.start(choice)"))
         scope = observer.split("pub(super) fn open_identity_scope(", 1)[1].split("pub(super) fn completion_returned(", 1)[0]
         self.assertIn("self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
-        self.assertIn("matches!(kind, mrk_macos_installed_native::PanelKind::Project)", scope)
+        self.assertIn("PanelKind::Project => self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
+        self.assertIn("PanelKind::File => self.case.file_index(id).is_some_and(|i| i != 6)", scope)
+        self.assertIn("PanelKind::Quit => false", scope)
         self.assertIn("self.project_path.as_path()", scope)
         configured = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split("static BOOL mrk_original_eligible(", 1)[0]
         self.assertEqual(native.count("setDirectoryURL:"), 1)
@@ -2039,11 +2133,11 @@ class AquaDataTests(unittest.TestCase):
         start = native.split("int mrk_panel_start(", 1)[1].split("int mrk_panel_poll(", 1)[0]
         self.assertIn("#ifdef MRK_INSTALLED_OBSERVATION\n        if ((s->observationIdentity.flags & MRK_ID_ARMED)", start)
         self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
-        for options in ("[panel setCanChooseFiles:NO]", "[panel setCanChooseDirectories:YES]",
+        for options in ("[panel setCanChooseFiles:kind == 3]", "[panel setCanChooseDirectories:kind == 1]",
                         "[panel setAllowsMultipleSelection:NO]", "[panel setResolvesAliases:NO]"):
             self.assertIn(options, start)
         action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
-        self.assertIn("action != 1 && action != 4 && action != 5", action)
+        self.assertIn("action != 1 && action != 4 && action != 5 && action != 6", action)
         self.assertNotIn("setDirectoryURL:", action)
         for retired in ("mrk_ax_row_target(", "mrk_ax_selection_roster(", "mrk_ax_select_row(", "MRKSelectionPass",
                         "kAXRowsAttribute", "kAXURLAttribute", "AXUIElementIsAttributeSettable(", "AXUIElementSetAttributeValue("):
@@ -2092,11 +2186,18 @@ class AquaDataTests(unittest.TestCase):
                           "s->response =", "s->unknown = NO", "dispatch_", "sleep(", "ok:"):
             self.assertNotIn(forbidden, completed)
         configuration = rust.split("fn identity_configuration(", 1)[1].split("pub(super) fn identity_start_return(", 1)[0]
-        for gate in ("w.flags & !511", "(8, 2 | 14) => w.flags == 111", "(9, 14) => w.flags == 239",
-                     "(5, 0) => w.flags == 511 && c.complete()"):
+        for gate in ("w.flags & !4095", "let base_flags = w.flags & 511", "(8, 2 | 14) => base_flags == 111",
+                     "(9, 14) => base_flags == 239", "(5, 0) => base_flags == 511 && c.complete()",
+                     "10 => file_flags == (512 | 1024) && base_flags == 495 && w.error == 14",
+                     "11 => file_flags == (512 | 1024 | 2048) && base_flags == 495 && matches!(w.error, 13 | 14)"):
             self.assertIn(gate, configuration)
+        identity_checks = rust.split("fn identity_data_check()", 1)[1].split("struct CompletionWire", 1)[0]
+        for gate in ("IdentityWire { flags: 511, parent, prompt: 2, site: 5", "c.complete() && !c.file_panel",
+                     "IdentityWire { flags: 4095, ..configured }", "c.file_name_setter_entered && c.file_name_setter_returned",
+                     "[(2031, 10, 14), (4079, 11, 14), (4079, 11, 13)]"):
+            self.assertIn(gate, identity_checks)
         for rejected in ("flags: 127", "flags: 255", "flags: 1023"):
-            self.assertIn(rejected, rust.split("fn identity_data_check()", 1)[1].split("struct CompletionWire", 1)[0])
+            self.assertIn(rejected, identity_checks)
 
     def test_completion_source_captures_original_poll_errors_before_release_without_guards(self):
         desktop = PATH.parents[1]
@@ -2150,7 +2251,7 @@ class AquaDataTests(unittest.TestCase):
         for forbidden in ("PANEL.with", ".facts()", "panel.poll()", "panel.release()", "panel.close_once()"):
             self.assertNotIn(forbidden, publish)
         once = observer.split("fn publish_completion(", 1)[1].split("struct NativeDispatch", 1)[0]
-        self.assertIn("case == Case::PickerLoss || id != case.selected_id() || slot.is_some()", once)
+        self.assertIn("case == Case::PickerLoss || (id != case.selected_id() && !case.file_index(id).is_some_and(|i| i != 6)) || slot.is_some()", once)
         self.assertLess(once.index('return Err("native-completion-custody")'), once.index("*slot = Some(CompletionSample"))
         published = observer.split("pub(super) fn completion_returned(", 1)[1].split("pub(super) fn identity_start_returned(", 1)[0]
         self.assertIn("let timely = Instant::now() < self.end", published)
@@ -2168,12 +2269,24 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('self.fail_with("native-completion-selection")', gate)
         finish = observer.split("fn finish(&self)", 1)[1].split("fn observe(q:", 1)[0]
         self.assertIn("r.completion_selection.is_none()", finish)
-        self.assertIn("r.completion_selection.is_some_and(|sample| sample.succeeded(self.case.selected_id()))", finish)
-        self.assertIn('"projectCompletionSelection":r.completion_selection.map(CompletionSample::value)', finish)
+        self.assertIn("let project_open = r.project_open();", finish)
+        self.assertIn("let completion_selection = project_open.map(|p| p.2);", finish)
+        self.assertIn("completion_selection.is_some_and(|sample| sample.succeeded(self.case.selected_id()))", finish)
+        self.assertIn('"projectCompletionSelection":completion_selection.map(CompletionSample::value)', finish)
+        history = observer.split("fn project_open(&self)", 1)[1].split("fn open_sample(&self)", 1)[0]
+        self.assertIn("if let Some(original) = self.panel_history.first()", history)
+        self.assertIn("original.sample.reconciled(original.progress.snapshot()), original.identity, original.completion", history)
+        self.assertIn("Some((self.open_sample()?, self.identity_binding?, self.completion_selection?))", history)
+        for gate in ("self.panel_history.len() >= 7", "self.panel_history.iter().any(|p| p.sample.id == id)",
+                     "self.pending.is_some() || self.prepared_open.is_some()", "!sample.succeeded() || sample.id != id",
+                     '!identity.succeeded(id) || !completion.succeeded(id) || progress.snapshot().state != "retired"'):
+            self.assertIn(gate, history)
+        self.assertIn("accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())", finish)
+        self.assertIn("identity_binding.is_some_and(|sample| sample.succeeded(self.case.selected_id()))", finish)
         self.assertIn("!completion_ownership_data_check()", observer)
         for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_CONTROL_NODES = 17", "MRK_CONTROL_DEPTH = 8"):
             self.assertIn(bound, native)
-        self.assertIn("let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(_)) { 315 } else { 45 });", observer)
+        self.assertIn("let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(c) if c != ios::Case::SigningInputs) { 315 } else { 45 });", observer)
         self.assertIn("let end = self.end.min(Instant::now() + Duration::from_secs(2));", observer)
         self.assertIn("timeout=case_timeout(case), capture=True, text=False, output_limit=OUTPUT_LIMIT", qualification)
         self.assertEqual([M.case_timeout(case) for case in M.CASES], [60] * 4)
@@ -2329,7 +2442,7 @@ class AquaDataTests(unittest.TestCase):
         for forbidden in ("Instant::now", "not_created(", "begin_response(", "selected_path(", "owner.id ==", "state.unknown = false"):
             self.assertNotIn(forbidden, transition)
         native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
-        release = native.split("int mrk_panel_release(", 1)[1].split("// Observation helpers", 1)[0]
+        release = native.split("int mrk_panel_release(", 1)[1].split("#ifdef MRK_INSTALLED_OBSERVATION\n// No separate window lookup:", 1)[0]
         self.assertIn("s->unknown || s->callbackActive || !s->closed", release)
         self.assertLess(release.index("Block_release(s->completion)"), release.index("[s->window release]"))
         self.assertNotIn("observationDefaultElement", release)
@@ -2376,7 +2489,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(body.count("if !self.timely() { return; }"), 4)
         for label in ("dom-callback-size", "dom-callback-json", "dom-callback-object", "dom-callback-state"):
             self.assertIn(f'self.fail_with("{label}")', body)
-        # Legacy and iOS branches both retain the original DOM wrapper/cutoff.
+        # Legacy, iOS and session branches retain the original DOM wrapper/cutoff.
         # iOS validates a comparison-DATA candidate; only a timely commit may
         # publish ready flags, and it never clones owner/native custody.
         ios = body.split("if let Step::Ios(step) = step {", 1)[1].split("let review_round =", 1)[0]
@@ -2385,6 +2498,9 @@ class AquaDataTests(unittest.TestCase):
         next_commit, final_commit = ios.split("Ok(None) =>", 1)
         for commit in (next_commit, final_commit):
             self.assertLess(commit.index("if !self.timely() { return; }"), commit.index("r.ios_record = Some(observed)"))
+        session = body.split("if let Step::Session(step) = step {", 1)[1].split("let review_round =", 1)[0]
+        self.assertIn("let mut observed = session.clone();", session)
+        self.assertIn("Ok(next) if self.timely() => { r.session_record = Some(observed); r.step = Step::Session(next); }", session)
         before_transition = body.split("let review_round =", 1)[1].split("r.step = match step", 1)[0]
         self.assertTrue(before_transition.rstrip().endswith("if !self.timely() { return; }"))
         self.assertNotRegex(before_transition, r"r\.[a-z_]+\s*(?:\+=|=(?!=))")
@@ -2913,6 +3029,8 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertEqual(M.selected_cases(), M.CASES)
         self.assertEqual(M.argument_scope(["--scope", "ios-unsigned-archive"]), "ios-unsigned-archive")
         self.assertEqual(M.selected_cases("ios-unsigned-archive"), M.IOS_CASES)
+        self.assertEqual(M.argument_scope(["--scope", "ios-current-synthetic"]), "ios-current-synthetic")
+        self.assertEqual(M.selected_cases("ios-current-synthetic"), M.IOS_CURRENT_CASES)
         for argv in (["ios-unsigned-archive"], ["--scope", "ios-cancel"], ["--scope", "ios-unsigned-archive", "--timeout", "999"],
                      ["--scope", "ios-unsigned-archive", "--scope", "ios-unsigned-archive"], ("--scope", "ios-unsigned-archive"), None):
             with self.subTest(argv=argv), self.assertRaises(M.Refused):
@@ -2921,7 +3039,7 @@ class IOSAquaDataTests(unittest.TestCase):
             with self.assertRaises(M.Refused):
                 M.case_timeout(case)
         source = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        self.assertIn("Duration::from_secs(if matches!(case, Case::Ios(_)) { 315 } else { 45 })", source)
+        self.assertIn("Duration::from_secs(if matches!(case, Case::Ios(c) if c != ios::Case::SigningInputs) { 315 } else { 45 })", source)
         self.assertIn("!ios::data_checks()", source)
         child = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos_ios.rs").read_text()
         data_check = child.split("pub(super) fn data_checks()", 1)[1].split("pub(super) fn snapshot_failure", 1)[0]
@@ -2933,8 +3051,8 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertNotIn(".lock()", permits)
         self.assertIn("self.claimed.compare_exchange(false, true", child)
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        self.assertIn("macos_aqua_qualification.py --scope ios-unsigned-archive", workflow)
-        self.assertIn('"caseNames": ' + json.dumps(list(M.IOS_CASES)), workflow)
+        self.assertIn("macos_aqua_qualification.py --scope ios-current-synthetic", workflow)
+        self.assertIn('"caseNames": ' + json.dumps(list(M.IOS_CURRENT_CASES)), workflow)
 
     def test_five_reports_and_dynamic_original_ids_are_closed_and_bounded(self):
         for case in M.IOS_CASES:
@@ -3171,6 +3289,299 @@ class IOSAquaDataTests(unittest.TestCase):
                     with self.assertRaises(M.Refused):
                         data.fixtures._archive_readback(data.fd, data.result)
                 self.assertEqual(data.fixtures.fds, {data.fd})
+
+
+class CurrentIOSAquaDataTests(unittest.TestCase):
+    def test_file_failure_samples_are_case_bound_without_widening_project_success(self):
+        for case, index, panel_id in (("ios-signing-inputs", 0, 2), ("ios-signed-refusal", 1, 7),
+                                      ("ios-signed-cancel", 1, 7)):
+            with self.subTest(case=case):
+                value = file_failure_context_data(case, index, panel_id)
+                self.assertEqual(M.failure_context(b"", context_row(value), case), value)
+                self.assertLessEqual(len(context_row(value).split(b"=", 1)[1]) - 1, M.FAILURE_CONTEXT_LIMIT)
+                self.assertEqual(value["accessibility"]["step"], "OpenProject")
+                for field, result_field, decoder in (
+                    ("accessibilityBinding", "projectOpenBinding", M._accessibility_binding_context),
+                    ("completionSelection", "projectCompletionSelection", M._completion_selection_context),
+                ):
+                    self.assertIsNone(decoder(value[field], case))  # Default admission is still Project-only.
+                    result = M.expected_result(BINDING, case)
+                    result["native"][result_field] = deepcopy(value[field])
+                    with self.assertRaises(M.Refused):
+                        M.parse_result(captured(result), b"", BINDING, case)
+                bad = deepcopy(value); bad["accessibility"]["step"] = bad["nativeHandler"]["step"]
+                expected = deepcopy(bad); expected["accessibility"] = None
+                self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+                for field in ("accessibilityBinding", "completionSelection"):
+                    bad = deepcopy(value); bad[field]["case"] = "first-save"
+                    expected = deepcopy(bad); expected[field] = None
+                    self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+        value = file_failure_context_data("ios-signing-inputs", 0, 2)
+        for mutation in (lambda v: v["lastPanel"].update(id=7),
+                         lambda v: v["lastPanel"].update(kind="project"),
+                         lambda v: v["nativeHandler"].update(step="OpenProject")):
+            bad = deepcopy(value); mutation(bad)
+            self.assertIsNone(M.failure_context(b"", context_row(bad), "ios-signing-inputs"))
+
+    def test_file_prearm_and_partial_identity_keep_only_saved_original_data(self):
+        case = "ios-signing-inputs"
+        value = file_failure_context_data(case, 0, 2)
+        del value["completionSelection"]
+        value.update(snapshotSource="prearm-open-progress", pending={"kind": "accessibility", "step": "OpenProject"})
+        value["accessibility"].update(state="queued", bodyEntered=None, nativeEntered=None, bodyReturned=False,
+            receiptJoined=False, workerJoined=False, rechecksSettled=None, barrierRetired=False,
+            expired=True, timely=False, custodyKnown=None, attempted=None, pressReturned=None, triggered=None,
+            initialOriginalProof=None, originalProof=None, promptChecks={"initial": None, "final": None},
+            promptButton=None, site=None, error=None)
+        self.assertEqual(M.failure_context(b"", context_row(value), case), value)
+        for mutation in (lambda v: v["pending"].update(step="Session(Native(0))"),
+                         lambda v: v.update(nativeHandler=None, lastPanel=None),
+                         lambda v: v["nativeHandler"].update(returned=False),
+                         lambda v: v.update(completionSelection=None)):
+            bad = deepcopy(value); mutation(bad)
+            self.assertIsNone(M.failure_context(b"", context_row(bad), case))
+
+        # Identity-start failure is earlier: no native-handler, panel, Press or
+        # completion receipt may be invented to make these diagnostics decode.
+        for changes in (
+            {"site": "initial-directory-set", "error": "objc-exception", "initialDirectorySetterReturned": False,
+             "fileNameSetterEntered": False, "fileNameSetterReturned": False},
+            {"site": "file-name-set", "error": "objc-exception", "fileNameSetterReturned": False},
+            {"site": "file-name-get", "error": "changed"},
+        ):
+            partial = binding_context_data(); partial["snapshotSource"] = "record"
+            partial["accessibilityBinding"] = file_failure_context_data(case, 0, 2)["accessibilityBinding"]
+            sample = partial["accessibilityBinding"]
+            sample["start"]["result"] = "io"; sample["binding"] = None
+            sample["configuration"].update(changes)
+            self.assertEqual(M.failure_context(b"", context_row(partial), case), partial)
+            bad = deepcopy(partial); bad["accessibilityBinding"]["configuration"]["fileNameSetterEntered"] = 1
+            expected = deepcopy(bad); expected["accessibilityBinding"] = None
+            self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+        for field in ("fileNameSetterEntered", "fileNameSetterReturned"):
+            bad = deepcopy(partial); del bad["accessibilityBinding"]["configuration"][field]
+            expected = deepcopy(bad); expected["accessibilityBinding"] = None
+            self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+
+    def test_file_cancel_and_session_quit_diagnostics_do_not_invent_open_receipts(self):
+        case, step = "ios-signing-inputs", "Session(Native(6))"
+        cancel = action_context_data(site="file-cancel")
+        cancel.update(snapshotSource="record")
+        cancel["nativeHandler"]["step"] = step
+        cancel["lastPanel"].update(step=step, id=11, kind="file")
+        cancel["nativeAction"].update(step=step, id=11, action="file-cancel")
+        self.assertEqual(M.failure_context(b"", context_row(cancel), case), cancel)
+        for field in ("accessibility", "accessibilityBinding", "completionSelection"):
+            self.assertNotIn(field, cancel)
+        # Native(6)/11 is Cancel, never an armed File Open original. Optional
+        # forged File-11 receipts lose only their own diagnostic subframes.
+        bad = deepcopy(cancel); foreign = file_failure_context_data(case, 6, 11)
+        expected = deepcopy(cancel)
+        for field in ("accessibility", "accessibilityBinding", "completionSelection"):
+            bad[field] = foreign[field]; expected[field] = None
+        self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+        bad = deepcopy(cancel); bad["nativeHandler"]["returned"] = False
+        expected = deepcopy(bad); expected["nativeAction"] = None
+        self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+        self.assertIsNone(M.failure_context(b"", context_row(cancel), "ios-signed-cancel"))
+        for case in ("ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel"):
+            value = action_context_data("Quit")
+            value["lastPanel"]["id"] = value["nativeAction"]["id"] = 12
+            self.assertEqual(M.failure_context(b"", context_row(value), case), value)
+            bad = deepcopy(value); bad["nativeAction"]["id"] = 4
+            expected = deepcopy(bad); expected["nativeAction"] = None
+            self.assertEqual(M.failure_context(b"", context_row(bad), case), expected)
+            bad = deepcopy(value); bad["lastPanel"]["id"] = 4
+            self.assertIsNone(M.failure_context(b"", context_row(bad), case))
+
+    def test_current_reports_are_closed_bounded_and_do_not_claim_successful_signing(self):
+        for case in M.IOS_CURRENT_CASES[len(M.IOS_CASES):]:
+            with self.subTest(case=case):
+                value = M.expected_result(BINDING, case)
+                self.assertEqual(M.parse_result(captured(value), b"", BINDING, case), value)
+                self.assertLessEqual(len(captured(value)), M.JSON_LIMIT)
+                self.assertIs(value["shippingBinaryQualified"], False)
+                self.assertIs(value["distributionQualified"], False)
+                if case == "ios-signing-inputs":
+                    self.assertNotIn("iosArchive", value)
+                    self.assertEqual(value["signingInputs"]["rows"][-1]["source"], "pending")
+                    self.assertIsNone(value["signingInputs"]["rows"][-1]["exactNativeSelection"])
+                elif case in M.IOS_SIGNED_CASES:
+                    self.assertIn(value["iosArchive"]["original"]["terminal"]["outcome"], ("failed", "cancelled"))
+                    self.assertIsNone(value["iosArchive"]["original"]["terminal"]["result"])
+                else:
+                    self.assertIsNone(value["iosArchive"]["savedVersionObservation"])
+                    self.assertNotIn("result", value["iosArchive"]["original"]["terminal"])
+                for name in ("sourceCommit", "case"):
+                    bad = deepcopy(value); bad[name] = "unrelated"
+                    with self.assertRaises(M.Refused):
+                        M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_file_originals_and_retained_signing_records_cannot_be_substituted(self):
+        for case in M.IOS_SESSION_CASES:
+            good = M.expected_result(BINDING, case)
+            for mutation in (
+                lambda v: v.update(originalOperations=11),
+                lambda v: v.update(memorySessionLocked=False),
+                lambda v: v.update(allOriginalsSettled=False),
+                lambda v: v.update(originalProjectAndQuitSettled=False),
+                lambda v: v["rows"][0].update(operationId=3),
+                lambda v: v["rows"][0].update(originalWorkerAndNativeSettled=False),
+                lambda v: v["rows"][0].update(openInputJoined=False),
+                lambda v: v["rows"][0]["assessment"].update(state="valid"),
+                lambda v: v["rows"][0].update(recordId="/private/material.p12"),
+            ):
+                bad = deepcopy(good); mutation(bad["signingInputs"])
+                with self.subTest(case=case), self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+        for case in M.IOS_SIGNED_CASES:
+            good = M.expected_result(BINDING, case)
+            # The two actual opaque IDs may vary together, not independently
+            # in retained input rows and the original signed-operation context.
+            for index, token in enumerate(("1" * 32, "2" * 32)):
+                good["signingInputs"]["rows"][index]["recordId"] = token
+                good["iosArchive"]["context"]["signing"]["assignments"][index]["recordId"] = token
+            self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+            for mutation in (
+                lambda v: v["signingInputs"]["rows"][0].update(recordId="3" * 32),
+                lambda v: v["iosArchive"]["context"]["signing"]["assignments"][0].update(recordId="4" * 32),
+                lambda v: v["signingInputs"]["rows"][1].update(recordId="1" * 32),
+                lambda v: v["signingInputs"]["rows"][0].update(assignedContextRevision=2),
+                lambda v: v["signingInputs"]["rows"][0].update(keptRevision=True),
+            ):
+                bad = deepcopy(good); mutation(bad)
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+        bad = M.expected_result(BINDING, "ios-signing-inputs")
+        bad["signingInputs"]["rows"][-1]["source"] = "refused"
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(bad), b"", BINDING, "ios-signing-inputs")
+
+    def test_signed_failure_hold_requires_original_material_and_all_final_joins(self):
+        case = "ios-signed-refusal"
+        good = M.expected_result(BINDING, case)
+        for location in (("original", "facts"), ("original", "terminal", "lifetime"), ("hold", "original", "facts")):
+            cursor = good["iosArchive"]
+            for part in location:
+                cursor = cursor[part]
+            for field, actual in cursor.items():
+                if type(actual) is not bool:
+                    continue
+                bad = deepcopy(good); target = bad["iosArchive"]
+                for part in location:
+                    target = target[part]
+                target[field] = not actual
+                with self.subTest(location=location, field=field), self.assertRaises(M.Refused):
+                    M.parse_result(captured(bad), b"", BINDING, case)
+        for mutate in (
+            lambda v: v.update(hold=None),
+            lambda v: v.update(cleanupMs=240001),
+            lambda v: v["original"]["terminal"].update(outcome="complete", reason="none"),
+            lambda v: v["original"]["terminal"]["activity"]["commands"]["export"].update(outcome="exited", exitCode=0),
+            lambda v: v["original"]["terminal"]["activity"].update(findings=[]),
+        ):
+            bad = deepcopy(good); mutate(bad["iosArchive"])
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(bad), b"", BINDING, case)
+        bad = deepcopy(good)
+        bad["iosArchive"]["hold"]["original"]["terminal"] = deepcopy(bad["iosArchive"]["original"]["terminal"])
+        bad["iosArchive"]["hold"]["original"]["terminal"]["lifetime"]["commands"] += 1
+        with self.assertRaises(M.Refused):
+            M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_signed_cancel_binds_actual_boundary_without_inventing_renderer_timing(self):
+        case = "ios-signed-cancel"
+        good = M.expected_result(BINDING, case)
+        value = good["iosArchive"]
+        # The renderer may lag the original stream, but it cannot observe a
+        # later stage than that same original's eventual terminal frame.
+        value["cancel"]["stageAtClick"] = "inputs-bound"
+        terminal = value["original"]["terminal"]
+        terminal["activity"]["stage"] = "checking-xcode"
+        terminal["activity"]["commands"]["xcode-version"] = {"outcome": "unknown", "exitCode": None}
+        terminal["lifetime"].update(commands=1, commandDispatched=True)
+        terminal["disposition"].update(work="removed", output="retained-incomplete",
+            relativeDirectory=".mobile-release/desktop-ios-archive/" + value["original"]["facts"]["operationId"])
+        self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+        for mutation in (
+            lambda v: v["cancel"].update(stageAtClick="archiving"),
+            lambda v: v["cancel"].update(stageAtClick="accepted"),
+            lambda v: v["cancel"].update(stageAtClick="validating-signing"),
+            lambda v: v["cancel"].update(trigger="renderer-state"),
+            lambda v: v["cancel"]["boundary"].update(operationId="f" * 32),
+            lambda v: v["cancel"]["boundary"].update(ownerGeneration="f" * 32),
+            lambda v: v["cancel"]["boundary"].update(originalTypedFrame=False),
+            lambda v: v["original"]["terminal"]["lifetime"].update(stopObserved="none"),
+            lambda v: v["original"]["terminal"]["lifetime"].update(materialRetired=False),
+            lambda v: v["original"]["terminal"]["lifetime"].update(profileCalls=1),
+            lambda v: v["original"]["terminal"]["activity"].update(stage="inputs-bound"),
+            lambda v: v["original"]["terminal"]["activity"].update(stage="validating-signing"),
+            lambda v: v["original"]["terminal"]["activity"].update(findings=[{"check": "profile-material", "status": "INVALID"}]),
+            lambda v: v["original"]["terminal"]["activity"]["commands"]["ios-sdk"].update(outcome="unknown"),
+            lambda v: v["original"]["terminal"]["activity"].update(stage="materializing-signing"),
+            lambda v: v["original"]["terminal"]["disposition"].update(output="retained-local-result"),
+        ):
+            bad = deepcopy(good); mutation(bad["iosArchive"])
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_empty_recovery_is_config_free_and_never_claims_a_mutation(self):
+        case = "ios-recovery-empty"
+        good = M.expected_result(BINDING, case)
+        for mutation in (
+            lambda v: v["context"].update(savedConfig={"bytes": 1, "sha256": "a" * 64}),
+            lambda v: v["context"]["recovery"].update(action="account", session="a" * 32),
+            lambda v: v["recoveryActions"].update(foreignMutationAttempted=True),
+            lambda v: v["recoveryActions"].update(recoveryMutationClaimed=True),
+            lambda v: v["recoveryActions"].update(ordinaryButtonsDisabled=False),
+            lambda v: v["original"]["terminal"]["report"]["account"].update(status="recovered"),
+            lambda v: v["original"]["terminal"]["report"]["project"].update(session="a" * 32),
+            lambda v: v["original"]["terminal"].update(result=None),
+            lambda v: v["original"]["terminal"]["lifetime"].update(signingClosed=False),
+            lambda v: v["original"]["terminal"]["lifetime"].update(profileCalls=1),
+        ):
+            bad = deepcopy(good); mutation(bad["iosArchive"])
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(bad), b"", BINDING, case)
+        files, directories = M.ios_fixture_data(case, False)
+        self.assertEqual(set(files), {".gitignore", "keep.txt"})
+        self.assertEqual(set(directories), {"."})
+        self.assertEqual(M.ios_fixture_data(case, True), (files, directories))
+        with self.assertRaises(M.Refused):
+            M.signing_fixture_inputs(case)
+
+    def test_current_scope_routes_only_fixed_calls_and_preserves_external_inputs(self):
+        fixtures, calls, emitted = InertFixtures(), [], []
+        fixtures.cases = M.IOS_CURRENT_CASES
+        def runner(argv, **options):
+            calls.append((argv, options))
+            return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, argv[1])), b"")
+        M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append, "ios-current-synthetic")
+        self.assertEqual(fixtures.before, list(M.IOS_CURRENT_CASES))
+        self.assertEqual(fixtures.reads, fixtures.before)
+        self.assertEqual(len(emitted), 9)
+        for (argv, options), case in zip(calls, M.IOS_CURRENT_CASES):
+            self.assertEqual(argv, [M.EXECUTABLE, case])
+            self.assertEqual(options["timeout"], 60 if case == "ios-signing-inputs" else 325)
+            self.assertEqual(options["environ"], M.app_environment(options["cwd"], UID, "runner"))
+        for case in M.IOS_SESSION_CASES:
+            files, links = M.signing_fixture_inputs(case)
+            self.assertEqual(files["synthetic.p12"], (M.IOS_SYNTHETIC_P12, 0o600))
+            self.assertEqual(files["synthetic.mobileprovision"], (M.IOS_SYNTHETIC_PROFILE, 0o600))
+            project, _ = M.ios_fixture_data(case, False)
+            self.assertNotIn("synthetic.p12", project)
+            self.assertNotIn("synthetic.mobileprovision", project)
+            if case == "ios-signing-inputs":
+                self.assertEqual(files["public.p12"][1], 0o644)
+                self.assertEqual(links, {"linked.p12": "synthetic.p12"})
+                self.assertEqual(project["overlap.p12"], M.IOS_SYNTHETIC_P12)
+            else:
+                self.assertEqual(links, {})
+                with self.assertRaises(M.Refused):
+                    M.ios_fixture_data(case, True)
+                for output in (True, False):
+                    _, directories = M.ios_fixture_data(case, True, output_created=output)
+                    self.assertEqual(".mobile-release" in directories, output)
 
 
 if __name__ == "__main__":

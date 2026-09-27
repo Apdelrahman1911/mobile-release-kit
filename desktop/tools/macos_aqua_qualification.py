@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two fixed, source-bound installed Mac Aqua scopes; never a general runner.
+"""Fixed, source-bound installed Mac Aqua scopes; never a general runner.
 
 Importing this module loads only stdlib DATA/parsers. The native main alone
 admits the hosted user/source, prepares exclusive synthetic fixtures, and loads
@@ -23,7 +23,15 @@ from types import FunctionType, ModuleType
 
 CASES = ("first-save", "noop-stale", "picker-loss", "save-loss")
 IOS_CASES = ("ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality")
-ALL_CASES = CASES + IOS_CASES
+IOS_SIGNED_CASES = ("ios-signed-refusal", "ios-signed-cancel")
+IOS_SESSION_CASES = ("ios-signing-inputs", *IOS_SIGNED_CASES)
+IOS_INPUT_IDS = {"ios-signing-inputs": (2, 4, 6, 8, 9, 10, 11),
+                 "ios-signed-refusal": (2, 7), "ios-signed-cancel": (2, 7)}
+FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, identifier in enumerate(ids)}
+                      for case, ids in IOS_INPUT_IDS.items()}
+IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
+IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty",)
+ALL_CASES = CASES + IOS_CURRENT_CASES
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -31,7 +39,7 @@ WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-aqua.yml@" + REF
 MARKER = b"MRK_MACOS_AQUA_RESULT="
 OUTPUT_LIMIT = 2 * 1024 * 1024
 JSON_LIMIT = 16383
-FAILURE_CONTEXT_LIMIT = 4096
+FAILURE_CONTEXT_LIMIT = 8192
 TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
 FAILURE_STEPS = frozenset((
@@ -44,8 +52,15 @@ FAILURE_STEPS = frozenset((
 ).split()) | frozenset(f"{name}({number})" for name in (
     "Prepare", "Review", "OpenConfirmation", "Confirmation", "Acknowledge", "Acknowledged", "Apply", "Applied") for number in (0, 1))
 FAILURE_STEPS |= frozenset(f"Ios({name})" for name in (
-    "Navigate ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final"
+    "Navigate SignedMode ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final"
 ).split())
+FAILURE_STEPS |= frozenset(f"Session({name})" for name in (
+    "Navigate Platform Purpose Open Ready Archive LockPage Lock ConfirmLock Locked Done"
+).split()) | frozenset(f"Session({name}({number}))" for name in (
+    "Kind Choose Native Chosen Fields Prepare Prepared Keep Kept Reassess Reassessed Bind Bound"
+).split() for number in range(7)) | frozenset(
+    f"Session({name}({number}, {kept}))" for name in ("Discard", "Discarded")
+    for number in range(7) for kept in ("true", "false"))
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
@@ -79,7 +94,8 @@ FAILURE_REASONS = frozenset((
     "project-result-path-sibling project-result-path-tmp-spelling project-result-path-data-spelling "
     "native-completion-custody native-completion-data native-completion-unknown native-completion-selection "
     "ios-original-witness ios-request-contract ios-status-contract ios-version-contract "
-    "ios-finality-contract ios-fixture-contract ios-dom-contract"
+    "ios-finality-contract ios-fixture-contract ios-dom-contract "
+    "session-request-contract session-result-contract session-original-contract session-dom-contract"
 ).split())
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
@@ -107,14 +123,14 @@ NATIVE_ACTION_STEPS = {
 # site: (original native-return error, permitted action mask, can catch ObjC).
 # None denotes an exception-only site. Keep aligned with the native decoder.
 NATIVE_ACTION_SITES = {
-    "main-thread": ("invalid-input", 31, False), "state-pointer": ("invalid-input", 31, False),
-    "action-code": ("invalid-input", 31, False), "directory-argument": ("invalid-input", 31, False),
-    "original-unknown": ("io", 31, False), "not-started": ("permission-denied", 31, False),
-    "window-absent": ("permission-denied", 31, False), "parent-absent": ("permission-denied", 31, False),
-    "completion-absent": ("permission-denied", 31, False), "responded": ("permission-denied", 31, False),
-    "callback-active": ("permission-denied", 31, False), "close-attempted": ("permission-denied", 31, False),
-    "closed": ("permission-denied", 31, False), "action-attempted": ("permission-denied", 31, False),
-    "panel-kind": ("permission-denied", 31, False), "attachment": ("would-block", 31, True),
+    "main-thread": ("invalid-input", 63, False), "state-pointer": ("invalid-input", 63, False),
+    "action-code": ("invalid-input", 63, False), "directory-argument": ("invalid-input", 63, False),
+    "original-unknown": ("io", 63, False), "not-started": ("permission-denied", 63, False),
+    "window-absent": ("permission-denied", 63, False), "parent-absent": ("permission-denied", 63, False),
+    "completion-absent": ("permission-denied", 63, False), "responded": ("permission-denied", 63, False),
+    "callback-active": ("permission-denied", 63, False), "close-attempted": ("permission-denied", 63, False),
+    "closed": ("permission-denied", 63, False), "action-attempted": ("permission-denied", 63, False),
+    "panel-kind": ("permission-denied", 63, False), "attachment": ("would-block", 63, True),
     "directory-already-bound": ("permission-denied", 2, False), "directory-path": ("invalid-input", 2, False),
     "directory-text": ("invalid-input", 2, True), "directory-url": ("invalid-input", 2, True),
     "directory-set": ("none", 2, True), "directory-unbound": ("permission-denied", 4, False),
@@ -124,6 +140,7 @@ NATIVE_ACTION_SITES = {
     "button-window": ("permission-denied", 24, True), "button-enabled": ("would-block", 24, True),
     "button-hidden": ("would-block", 24, True), "project-cancel": ("none", 1, True),
     "project-open": ("none", 4, True), "quit-cancel": ("none", 8, True), "quit-confirm": ("none", 16, True),
+    "file-cancel": ("none", 32, True),
 }
 ACCESSIBILITY_CONTROL_LIMIT_SITES = frozenset((
     "control-title-limit control-child-count-limit control-child-copy-limit control-node-limit control-depth-limit"
@@ -142,6 +159,7 @@ ACCESSIBILITY_BINDING_CLASSES = frozenset(("nil", "match", "different", "type-in
 ACCESSIBILITY_BINDING_SITES = frozenset((
     "objects", "parent-tag", "parent-set", "parent-get", "prompt-set", "prompt-get", "complete",
     "initial-directory-url", "initial-directory-set",
+    "file-name-set", "file-name-get",
 ))
 ACCESSIBILITY_PANEL_CLASSES = frozenset((
     "nil", "type-invalid", "empty", "byte-limit", "nul", "encoding-invalid", "valid", "match", "different",
@@ -353,6 +371,40 @@ IOS_CONFIG_CANCEL = b'''{
   }
 }
 '''
+# Fixed mechanical inputs, not valid Apple signing material or trust evidence.
+# Same signature-less DER structures as credential_apple.rs's reviewed fixtures.
+IOS_SYNTHETIC_P12 = bytes.fromhex(
+    "3030020103302b06092a864886f70d010701a01e041c"
+    "707269766174652d656e76656c6f70652d6f6e6c792d63616e617279")
+IOS_SYNTHETIC_PROFILE = bytes.fromhex(
+    "304306092a864886f70d010702a03630340201013100302b06092a864886f70d010701a01e041c"
+    "707269766174652d656e76656c6f70652d6f6e6c792d63616e6172793100")
+IOS_SYNTHETIC_FIREBASE = b'''<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>BUNDLE_ID</key><string>org.example.mrk.observed</string></dict></plist>
+'''
+IOS_CONFIG_SIGNED = b'''{
+  "android": {"enabled": false},
+  "ios": {
+    "archiveConfiguration": "Release",
+    "bundleId": "org.example.mrk.observed",
+    "distributionCertificateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "enabled": true,
+    "identityStatus": "unverified",
+    "project": "ios/MRKObserved.xcodeproj",
+    "scheme": "MRKObserved",
+    "symbols": {"policy": "retain"},
+    "teamId": "INERT12345"
+  },
+  "metadata": {"androidLocales": [], "iosLocales": ["en-US"], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
+  "source": {"candidateBranch": "main", "productionBranch": "main"},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+'''
+IOS_CONFIG_INPUTS = IOS_CONFIG_SIGNED.replace(b'"iosFirebase": "disabled"', b'"iosFirebase": "required"')
+
 IOS_PROJECT = b'''// !$*UTF8*$!
 {
  archiveVersion = 1;
@@ -507,23 +559,30 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive"), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic"), "scope-not-supported")
+    if scope == "ios-current-synthetic":
+        return IOS_CURRENT_CASES
     return IOS_CASES if scope == "ios-unsigned-archive" else CASES
 
 
 def argument_scope(argv):
-    # Exactly one new fixed scope; no executable/path/env/timeout passthrough.
-    need(type(argv) is list and (argv == [] or argv == ["--scope", "ios-unsigned-archive"]), "arguments-not-supported")
-    return "ios-unsigned-archive" if argv else None
+    # Closed scopes only; no executable/path/env/timeout passthrough.
+    need(type(argv) is list and (argv == [] or argv == ["--scope", "ios-unsigned-archive"]
+                               or argv == ["--scope", "ios-current-synthetic"]), "arguments-not-supported")
+    return argv[1] if argv else None
 
 
 def case_timeout(case):
     need(type(case) is str and case in ALL_CASES, "case-binding")
-    return 325 if case in IOS_CASES else 60
+    return 325 if case in IOS_OPERATION_CASES else 60
 
 
 def ios_config(case):
-    need(case in IOS_CASES, "ios-case")
+    need(case in IOS_CURRENT_CASES and case != "ios-recovery-empty", "ios-case")
+    if case in IOS_SIGNED_CASES:
+        return IOS_CONFIG_SIGNED
+    if case == "ios-signing-inputs":
+        return IOS_CONFIG_INPUTS
     return IOS_CONFIG_PREREQUISITE if case == IOS_CASES[0] else IOS_CONFIG_CANCEL if case == "ios-cancel" else IOS_CONFIG
 
 
@@ -537,6 +596,64 @@ def _ios_version_observation(case):
             "savedVersion": {"bytes": len(VERSION), "sha256": digest(VERSION)}}
 
 
+def _expected_signing_inputs(case):
+    """Literal parser-test DATA; never substitutes for original native inputs."""
+    need(case in IOS_SESSION_CASES, "signing-inputs-case")
+    signed = case in IOS_SIGNED_CASES
+    roles = ("p12", "profile") if signed else ("p12", "profile", "firebase", "overlap", "link", "public", "cancel")
+    ids = IOS_INPUT_IDS[case]
+    rows = []
+    for index, (role, operation) in enumerate(zip(roles, ids)):
+        assessment = None if index >= 3 else {
+            "state": "format-valid" if index == 2 else "configured",
+            "identity": "match" if index == 2 else "not-applicable",
+            "fieldScopes": (("pfx-envelope", "value-admission"), ("cms-signed-data-envelope",),
+                            ("plist-document", "firebase-shape", "application-identity"))[index]}
+        if assessment is not None:
+            assessment["fieldScopes"] = list(assessment["fieldScopes"])
+        rows.append({"role": role, "kind": "apple-profile" if index == 1 else "ios-firebase" if index == 2 else "apple-p12",
+                     "operationId": operation, "nativeResponse": "decline" if index == 6 else "accept",
+                     "exactNativeSelection": None if index == 6 else True,
+                     "source": "captured" if index < 3 else "pending" if index == 6 else "refused",
+                     "reason": "none" if index < 3 else "project-overlap" if index == 3
+                         else "user-cancelled" if index == 6 else "source-refused",
+                     "originalWorkerAndNativeSettled": True,
+                     "openIdentityMatched": None if index == 6 else True,
+                     "openInputJoined": None if index == 6 else True,
+                     "assessment": assessment, "recordId": ("d" if index == 0 else "e") * 32 if signed else None,
+                     "keptRevision": 1 if signed else None, "assignedContextRevision": 1 if signed else None})
+    return {"schemaVersion": 1, "oneUseOriginalDocumentAdmission": True, "mode": "session",
+            "context": {"platform": "ios", "stage": "candidate", "purpose": "signing"}, "rows": rows,
+            "originalOperations": 12, "allOriginalsSettled": True, "memorySessionLocked": True,
+            "originalProjectAndQuitSettled": True, "observationMs": 315000 if signed else 45000,
+            "outerInvocationMs": 325000 if signed else 60000}
+
+
+def _signing_inputs(value, case):
+    need(type(value) is dict, "signing-inputs-report")
+    expected = _expected_signing_inputs(case)
+    if case in IOS_SIGNED_CASES:
+        try:
+            rows = value["rows"]
+            need(type(rows) is list and len(rows) == 2, "signing-inputs-rows")
+            ids = [row["recordId"] for row in rows]
+            need(all(type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) for v in ids)
+                 and len(set(ids)) == 2, "signing-inputs-records")
+            for expected_row, record_id in zip(expected["rows"], ids):
+                expected_row["recordId"] = record_id
+        except (KeyError, TypeError, AttributeError) as error:
+            raise Refused("signing-inputs-shape") from error
+    _exact(value, expected, ("signingInputs",))
+    return value
+
+
+def _signing_policy_from_inputs(value):
+    return {"teamId": "INERT12345", "distributionCertificateSha256": "c" * 64,
+            "assignments": [{"kind": row["kind"], "recordId": row["recordId"],
+                             "recordRevision": row["keptRevision"], "contextRevision": row["assignedContextRevision"]}
+                            for row in value["rows"]]}
+
+
 IOS_LIMITATIONS = ["saved-inputs-not-atomic", "project-build-code-is-trusted", "not-network-isolated",
                   "unsigned-archive-not-an-ipa", "signing-and-profile-not-validated", "ipa-correspondence-not-validated",
                   "source-provenance-not-authenticated", "store-operation-not-requested", "release-readiness-not-assessed",
@@ -545,6 +662,9 @@ IOS_LIMITATIONS = ["saved-inputs-not-atomic", "project-build-code-is-trusted", "
 
 def _expected_ios_report(case):
     """Literal parser-test DATA, never a native receipt or a success producer."""
+    if case in IOS_SIGNED_CASES or case == "ios-recovery-empty":
+        return _expected_ios_account_report(case)
+    need(case in IOS_CASES, "ios-report-case")
     version = _ios_version_observation(case)
     stale, cancel = case == "ios-version-stale", case == "ios-cancel"
     complete = case in ("ios-unsigned-archive", "ios-finality")
@@ -599,16 +719,143 @@ def _expected_ios_report(case):
             "workMs": 300000, "hardMs": 310000, "observationMs": 315000, "outerInvocationMs": 325000}
 
 
+def _expected_ios_account_report(case):
+    """Closed synthetic refusal/recovery DATA, not successful signing evidence."""
+    expected = _expected_ios_report("ios-toolchain-prerequisite")
+    recovery, cancel = case == "ios-recovery-empty", case == "ios-signed-cancel"
+    expected.update(protocol="mrk-ios-archive/3" if recovery else "mrk-ios-archive/2",
+                    savedVersionObservation=None if recovery else _ios_version_observation(case),
+                    prerequisiteOnly=False, workMs=120000, cleanupMs=240000, hardMs=250000)
+    facts = expected["original"]["facts"]
+    facts.update(workMs=120000, cleanupMs=240000, hardMs=250000, materialLoanPresent=False, materialLoanRetired=True)
+    context = {"projectId": "inert-ios-parser", "platform": "ios", "operation": "ios-local-recovery",
+               "recovery": {"action": "inspect"}} if recovery else {
+        **expected["context"], "operation": "ios-signed-export", "savedConfig": expected["savedVersionObservation"]["savedConfig"],
+        "signing": _signing_policy_from_inputs(_expected_signing_inputs(case))}
+    expected["context"] = context
+    lifetime = {**expected["original"]["terminal"]["lifetime"], "commandDispatched": not (recovery or cancel),
+                "commands": 0 if recovery or cancel else 3, "profileCalls": 0 if recovery or cancel else 1,
+                "stopObserved": "cancelled" if cancel else "none",
+                "signingClosed": True, "buildInputsClosed": True, "materialRetired": True}
+    if recovery:
+        terminal = {"schemaVersion": 1, "context": context, "outcome": "complete", "reason": "none",
+                    "activity": {"stage": "disposing-work"}, "lifetime": lifetime,
+                    "report": {"schemaVersion": 1, "scope": "local-ios-recovery",
+                               "account": {"status": "idle", "session": None, "next": "none"},
+                               "project": {"status": "idle", "session": None, "next": "none"},
+                               "limitations": ["local-recovery-only", "manual-recovery-not-supported",
+                                               "user-confirmation-is-not-worker-finality", "no-store-operation"]}}
+        expected["recoveryActions"] = {"idleRowsVisible": True, "ordinaryButtonsDisabled": True,
+                                       "foreignMutationAttempted": False, "recoveryMutationClaimed": False}
+    else:
+        no = {"outcome": "not-dispatched", "exitCode": None}
+        zero = {"outcome": "exited", "exitCode": 0}
+        terminal = {"schemaVersion": 1, "context": context,
+                    "outcome": "cancelled" if cancel else "failed", "reason": "cancelled" if cancel else "signing-validation-failed",
+                    "activity": {"stage": "inputs-bound" if cancel else "validating-signing",
+                                 "selection": {"containerKind": "project", "container": "ios/MRKObserved.xcodeproj",
+                                               "scheme": "MRKObserved", "configuration": "Release",
+                                               "bundleId": "org.example.mrk.observed", "symbolsPolicy": "retain",
+                                               "preparationConfigured": False},
+                                 "commands": {"xcode-version": dict(no if cancel else zero), "ios-sdk": dict(no if cancel else zero),
+                                              "prepare": {"outcome": "not-configured", "exitCode": None},
+                                              "archive": dict(no), "export": dict(no)},
+                                 "findings": [] if cancel else [{"check": "profile-material", "status": "INVALID"}]},
+                    "disposition": {"snapshot": "not-created", "work": "not-created" if cancel else "removed",
+                                    "output": "not-created" if cancel else "retained-incomplete",
+                                    "relativeDirectory": None if cancel else f".mobile-release/desktop-ios-archive/{facts['operationId']}"},
+                    "result": None, "lifetime": lifetime}
+        if cancel:
+            expected["cancel"] = {"requestedOnce": True, "returned": True, "stageAtClick": "inputs-bound",
+                                  "trigger": "original-inputs-bound", "boundary": {"stage": "inputs-bound",
+                                      "operationId": facts["operationId"], "ownerGeneration": facts["ownerGeneration"], "originalTypedFrame": True},
+                                  "activeCommandKillClaimed": False}
+        else:
+            held = {**facts, "observerJoined": False, "watchdogJoined": False, "retiredBeforeCutoff": False,
+                    "activeRetained": True, "materialLoanPresent": True, "materialLoanRetired": False}
+            expected["hold"] = {"original": {"facts": held, "terminal": terminal}, "publicSuccessHidden": True,
+                                "conflictingUiBlocked": True, "environmentDiagnosticsBlocked": True, "originalReleasedOnce": True}
+    expected["original"]["terminal"] = terminal
+    return expected
+
+
+def _ios_account_facts(value, expected, case, operation, generation):
+    """Admit actual bounded varying counters; never accept unknown finality."""
+    terminal, out = value["original"]["terminal"], expected["original"]["terminal"]
+    lifetime = terminal["lifetime"]
+    recovery, cancel = case == "ios-recovery-empty", case == "ios-signed-cancel"
+    count, profiles, dispatched = lifetime["commands"], lifetime["profileCalls"], lifetime["commandDispatched"]
+    need(type(count) is int and 0 <= count <= (32 if recovery else 4096)
+         and type(profiles) is int and 0 <= profiles <= (0 if recovery else 1024)
+         and type(dispatched) is bool and (count > 0 if dispatched else count <= 1), "ios-account-command-accounting")
+    if recovery:
+        out["lifetime"].update(commands=count, profileCalls=profiles, commandDispatched=dispatched)
+        return
+    policy = value["context"]["signing"]
+    need(type(policy) is dict and type(policy.get("assignments")) is list and len(policy["assignments"]) == 2,
+         "ios-signing-policy")
+    ids = [row["recordId"] for row in policy["assignments"]]
+    need(all(type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) for v in ids) and len(set(ids)) == 2, "ios-signing-records")
+    for row, record_id in zip(expected["context"]["signing"]["assignments"], ids):
+        row["recordId"] = record_id
+    if cancel:
+        stages = ("inputs-bound", "checking-xcode", "validating-signing")
+        stage = terminal["activity"]["stage"]
+        need(stage in stages, "ios-signed-cancel-stage")
+        out["activity"]["stage"] = stage
+        clicked = value["cancel"]["stageAtClick"]
+        need(clicked in stages and stages.index(clicked) <= stages.index(stage), "ios-signed-cancel-click")
+        expected["cancel"]["stageAtClick"] = clicked
+        expected["cancel"]["boundary"].update(operationId=operation, ownerGeneration=generation)
+        for role in ("xcode-version", "ios-sdk"):
+            command = terminal["activity"]["commands"][role]
+            need(type(command) is dict and set(command) == {"outcome", "exitCode"}
+                 and ((command["outcome"] in ("not-dispatched", "unknown") and command["exitCode"] is None)
+                      or (command["outcome"] == "exited" and type(command["exitCode"]) is int and 0 <= command["exitCode"] <= 255)),
+                 "ios-signed-cancel-command")
+            out["activity"]["commands"][role] = dict(command)
+        output, work = terminal["disposition"]["output"], terminal["disposition"]["work"]
+        need(output in ("not-created", "retained-incomplete") and work in ("not-created", "removed")
+             and (output != "not-created" or work == "not-created"), "ios-signed-cancel-output")
+        out["disposition"].update(output=output, work=work,
+            relativeDirectory=None if output == "not-created" else f".mobile-release/desktop-ios-archive/{operation}")
+        # If cancellation raced with the material checker, retain its exact
+        # known-invalid synthetic-profile finding, never an artifact check.
+        findings = terminal["activity"]["findings"]
+        need(findings in ([], [{"check": "profile-material", "status": "INVALID"}]), "ios-signed-cancel-findings")
+        no = {"outcome": "not-dispatched", "exitCode": None}
+        zero = {"outcome": "exited", "exitCode": 0}
+        xcode, sdk = (out["activity"]["commands"][role] for role in ("xcode-version", "ios-sdk"))
+        # Actual stage progression supplies prerequisites, not exact lifetime
+        # command totals. A clicked UI stage may lag, but never lead, terminal.
+        need(sdk == no or xcode == zero, "ios-signed-cancel-role-order")
+        if stage == "inputs-bound":
+            need(xcode == sdk == no, "ios-signed-cancel-before-xcode")
+        if stage != "validating-signing":
+            need(profiles == 0 and not findings, "ios-signed-cancel-before-validation")
+        else:
+            need(xcode == sdk == zero, "ios-signed-cancel-xcode-prerequisite")
+        need(not findings or profiles >= 1, "ios-signed-cancel-profile-accounting")
+        out["activity"]["findings"] = findings
+    else:
+        need(dispatched and count >= 2 and profiles >= 1, "ios-signing-validation-accounting")
+    commands = out["activity"]["commands"].values()
+    need(sum(command["outcome"] == "exited" for command in commands) <= count
+         and (dispatched or all(command["outcome"] in ("not-dispatched", "not-configured") for command in commands)),
+         "ios-signed-command-dispatch")
+    out["lifetime"].update(commands=count, profileCalls=profiles, commandDispatched=dispatched)
+
+
 def _ios_report(value, case):
     """Closed independent DATA parser. Only bounded actual varying facts vary."""
-    need(type(value) is dict and case in IOS_CASES, "ios-report")
+    need(type(value) is dict and case in IOS_OPERATION_CASES, "ios-report")
     expected = _expected_ios_report(case)
     try:
         facts, context, terminal = value["original"]["facts"], value["context"], value["original"]["terminal"]
         operation, generation = facts["operationId"], facts["ownerGeneration"]
         need(all(type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) for v in (operation, generation)), "ios-original-identity")
         need(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", context["projectId"]), "ios-project-identity")
-        for name in ("draftRevision", "baselineGeneration"):
+        for name in (() if case == "ios-recovery-empty" else ("draftRevision", "baselineGeneration")):
             need(type(context[name]) is int and 0 <= context[name] < 2**32 - 1, "ios-context-generation")
             expected["context"][name] = context[name]
         expected["context"]["projectId"] = context["projectId"]
@@ -617,7 +864,7 @@ def _ios_report(value, case):
         need(type(value["statusCallsReturned"]) is int and 0 <= value["statusCallsReturned"] <= 64, "ios-status-calls")
         expected["statusCallsReturned"] = value["statusCallsReturned"]
         out = expected["original"]["terminal"]
-        if out["disposition"]["relativeDirectory"] is not None:
+        if case != "ios-recovery-empty" and out["disposition"]["relativeDirectory"] is not None:
             out["disposition"]["relativeDirectory"] = f".mobile-release/desktop-ios-archive/{operation}"
         if case in ("ios-unsigned-archive", "ios-finality"):
             result = terminal["result"]
@@ -639,6 +886,8 @@ def _ios_report(value, case):
             out["activity"]["commands"]["prepare"] = dict(prepare)
             out["lifetime"]["commands"] = count
             expected["cancel"]["prepareOutcome"] = dict(prepare)
+        if case in IOS_SIGNED_CASES or case == "ios-recovery-empty":
+            _ios_account_facts(value, expected, case, operation, generation)
         _exact(value, expected, ("iosArchive",))
     except (KeyError, TypeError, AttributeError) as error:
         raise Refused("ios-report-shape") from error
@@ -648,10 +897,13 @@ def _ios_report(value, case):
 def expected_result(binding, case):
     binding.checked()
     need(case in ALL_CASES, "case-binding")
-    if case in IOS_CASES:
+    if case in IOS_CURRENT_CASES:
         value = expected_result(binding, "noop-stale")
-        value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False,
-                     iosArchive=_expected_ios_report(case))
+        value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
+        if case in IOS_OPERATION_CASES:
+            value["iosArchive"] = _expected_ios_report(case)
+        if case in IOS_SESSION_CASES:
+            value.update(methods="ten-passive-with-session-assessment", signingInputs=_expected_signing_inputs(case))
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
         return value
@@ -760,6 +1012,15 @@ RESULT_LOCATION_KEYS |= frozenset((
     "lifetime complete fatal contained commandDispatched profileCalls stopObserved inputClosed handlersRestored "
     "invocationClosed snapshotClosed filesClosed namespaceClosed"
 ).split())
+RESULT_LOCATION_KEYS |= frozenset((
+    "signingInputs oneUseOriginalDocumentAdmission mode rows role nativeResponse exactNativeSelection "
+    "originalWorkerAndNativeSettled openIdentityMatched openInputJoined assessment identity fieldScopes "
+    "recordId keptRevision assignedContextRevision originalOperations allOriginalsSettled memorySessionLocked "
+    "originalProjectAndQuitSettled signing teamId distributionCertificateSha256 assignments recordRevision "
+    "contextRevision purpose cleanupMs materialLoanPresent materialLoanRetired trigger boundary originalTypedFrame "
+    "signingClosed buildInputsClosed materialRetired export recovery recoveryActions idleRowsVisible "
+    "ordinaryButtonsDisabled foreignMutationAttempted recoveryMutationClaimed report account project session next"
+).split())
 
 
 def _result_location(parts):
@@ -815,9 +1076,15 @@ def parse_result(stdout, stderr, binding, case):
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
-    if case in IOS_CASES:
+    if case in IOS_OPERATION_CASES:
         need(type(value) is dict and "iosArchive" in value, "ios-report")
         expected["iosArchive"] = _ios_report(value["iosArchive"], case)
+    if case in IOS_SESSION_CASES:
+        need(type(value) is dict and "signingInputs" in value, "signing-inputs-report")
+        expected["signingInputs"] = _signing_inputs(value["signingInputs"], case)
+        if case in IOS_SIGNED_CASES:
+            _exact(value["iosArchive"]["context"]["signing"], _signing_policy_from_inputs(value["signingInputs"]),
+                   ("iosArchive", "context", "signing"))
     if case != "picker-loss":
         need(type(value) is dict and type(value.get("native")) is dict, "native-object")
         identity = _accessibility_binding_context(value["native"].get("projectOpenBinding"), case)
@@ -892,7 +1159,25 @@ def failure_reason(stdout, stderr):
     return label if label in FAILURE_REASONS else None
 
 
-def _native_action_context(value, native, panel):
+def _file_native_panels(case):
+    return FILE_NATIVE_PANELS.get(case, {}) if type(case) is str else {}
+
+
+def _file_open_step(case, identifier):
+    # The seventh File panel is genuine Cancel, never an armed Open original.
+    return next((step for step, original in _file_native_panels(case).items()
+                 if original == identifier and step != "Session(Native(6))"), None)
+
+
+def _open_sample_kind(case, identifier, *, allow_files=False):
+    if type(case) is not str or case not in ALL_CASES or case == "picker-loss" or type(identifier) is not int:
+        return None
+    if identifier == (2 if case == "first-save" else 1):
+        return "project"
+    return "file" if allow_files and _file_open_step(case, identifier) is not None else None
+
+
+def _native_action_context(value, native, panel, *, case=None):
     # Missing/malformed new DATA loses only this diagnostic. Never replace the
     # existing context, first error, original return or unknown-finality facts.
     if value is None:
@@ -902,6 +1187,10 @@ def _native_action_context(value, native, panel):
         need(all(type(value[key]) is str for key in ("step", "action", "domain", "site", "error"))
              and type(value["id"]) is int, "native-action-data")
         spec = NATIVE_ACTION_STEPS.get(value["step"])
+        if value["step"] == "Quit" and type(case) is str and case in IOS_SESSION_CASES:
+            spec = ("quit-confirm", "quit", (12,), 16)
+        elif value["step"] == "Session(Native(6))" and case == "ios-signing-inputs":
+            spec = ("file-cancel", "file", (11,), 32)
         need(spec is not None and value["action"] == spec[0] and value["id"] in spec[2], "native-action-data")
         need(native is not None and native["entered"] and native["returned"] and native["step"] == value["step"]
              and panel is not None and panel["step"] == value["step"] and panel["id"] == value["id"]
@@ -1001,7 +1290,7 @@ def _accessibility_succeeded(value):
             and value["promptButton"]["cfSlotsRetired"] == value["promptButton"]["cfSlots"])
 
 
-def _accessibility_context(value, native, panel, *, expected_id=None):
+def _accessibility_context(value, native, panel, *, expected_id=None, case=None):
     if value is None:
         return None
     label = "accessibility-data"
@@ -1012,9 +1301,18 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
              "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed}, label)
         need(value["mechanism"] == "accessibility-preconfigured-original-press-v5" and value["step"] == "OpenProject"
-             and type(value["id"]) is int and value["id"] in (1, 2), label)
+             and type(value["id"]) is int, label)
+        # The actual File OpenInput projection retains its historical
+        # OpenProject label. Only failure DATA with an exact case/ID/native
+        # panel binding may describe File; Project success callers stay closed.
+        file_step = _file_open_step(case, value["id"]) if expected_id is None else None
+        need(value["id"] in (1, 2) or file_step is not None, label)
         if expected_id is not None:
             need(value["id"] == expected_id, label)
+        elif file_step is not None:
+            need(native is not None and native["step"] == file_step and native["entered"] and native["returned"]
+                 and panel is not None and panel["step"] == file_step and panel["kind"] == "file"
+                 and panel["id"] == value["id"], label)
         else:
             need(native is not None, label)
             if native["step"] == "OpenProject":
@@ -1143,7 +1441,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None):
         return None
 
 
-def _accessibility_binding_context(value, case):
+def _accessibility_binding_context(value, case, *, allow_files=False):
     """Closed original-return DATA; never a permission, action or finality fact."""
     if value is None:
         return None
@@ -1152,24 +1450,30 @@ def _accessibility_binding_context(value, case):
         need(type(case) is str and case in ALL_CASES and case != "picker-loss", label)
         need(type(value) is dict and set(value) == {
             "mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
+        kind = _open_sample_kind(case, value["id"], allow_files=allow_files)
         need(value["mechanism"] == "preconfigured-original-sheet-v2" and value["case"] == case
-             and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
-             and value["kind"] == "project", label)
+             and kind is not None and value["kind"] == kind, label)
         start, configured, bound = value["start"], value["configuration"], value["binding"]
         need(type(start) is dict and set(start) == {"returned", "result"} and start["returned"] is True
              and type(start["result"]) is str
              and start["result"] in ("ok", "permission-denied", "io", "invalid-input", "already", "other"), label)
         flags = ("parentSetterEntered", "parentSetterReturned", "promptSetterEntered", "promptSetterReturned",
                  "initialDirectorySetterEntered", "initialDirectorySetterReturned")
-        need(type(configured) is dict and set(configured) == {"attempted", *flags, "parent", "prompt", "site", "error"}
-             and all(type(configured[key]) is bool for key in ("attempted", *flags)), label)
+        file_flags = ("fileNameSetterEntered", "fileNameSetterReturned") if kind == "file" else ()
+        need(type(configured) is dict and set(configured) == {"attempted", *flags, *file_flags, "parent", "prompt", "site", "error"}
+             and all(type(configured[key]) is bool for key in ("attempted", *flags, *file_flags)), label)
         parent, prompt, site, error = (configured[key] for key in ("parent", "prompt", "site", "error"))
         need(parent is None or type(parent) is str and parent in ACCESSIBILITY_BINDING_CLASSES, label)
         need(prompt is None or type(prompt) is str and prompt in ACCESSIBILITY_BINDING_CLASSES, label)
         need(site is None or type(site) is str and site in ACCESSIBILITY_BINDING_SITES, label)
         need(error is None or type(error) is str and error in ACCESSIBILITY_ERRORS, label)
         bits = tuple(configured[key] for key in flags)
-        need(all(not flag or all(bits[:index]) for index, flag in enumerate(bits)), label)
+        file_bits = tuple(configured[key] for key in file_flags)
+        all_bits = bits + file_bits
+        need(all(not flag or all(all_bits[:index]) for index, flag in enumerate(all_bits)), label)
+        if kind == "file":
+            need(configured["attempted"] and (site in ("file-name-set", "file-name-get", "complete")
+                 or file_bits == (False, False)), label)
         if not configured["attempted"]:
             need(not any(bits) and parent is prompt is site is error is None and start["result"] != "ok", label)
         else:
@@ -1192,8 +1496,14 @@ def _accessibility_binding_context(value, case):
             elif site == "initial-directory-set":
                 need(bits == (True, True, True, True, True, False) and parent is not None and prompt == "match"
                      and error == "objc-exception", label)
+            elif site == "file-name-set":
+                need(kind == "file" and all(bits) and file_bits == (True, False) and parent is not None
+                     and prompt == "match" and error == "objc-exception", label)
+            elif site == "file-name-get":
+                need(kind == "file" and all(bits) and file_bits == (True, True) and parent is not None
+                     and prompt == "match" and error in ("changed", "objc-exception"), label)
             else:
-                need(site == "complete" and all(bits) and parent is not None and prompt == "match" and error == "none", label)
+                need(site == "complete" and all(all_bits) and parent is not None and prompt == "match" and error == "none", label)
             if start["result"] == "ok":
                 need(site == "complete" and error == "none", label)
         if bound is not None:
@@ -1204,7 +1514,7 @@ def _accessibility_binding_context(value, case):
         return None
 
 
-def _completion_selection_context(value, case):
+def _completion_selection_context(value, case, *, allow_files=False):
     """Saved same-original poll DATA, including returned errors, never a join."""
     if value is None:
         return None
@@ -1213,9 +1523,9 @@ def _completion_selection_context(value, case):
         need(type(case) is str and case in ALL_CASES and case != "picker-loss", label)
         need(type(value) is dict and set(value) == {
             "mechanism", "case", "id", "kind", "pollReturned", "pollResult", "timely", "facts"}, label)
+        kind = _open_sample_kind(case, value["id"], allow_files=allow_files)
         need(value["mechanism"] == "original-ok-singleton-selection-v1" and value["case"] == case
-             and type(value["id"]) is int and value["id"] == (2 if case == "first-save" else 1)
-             and value["kind"] == "project" and value["pollReturned"] is True
+             and kind is not None and value["kind"] == kind and value["pollReturned"] is True
              and type(value["timely"]) is bool and type(value["pollResult"]) is str
              and value["pollResult"] in ("showing", "responded", "closed", "error", "invalid-return"), label)
         facts = value["facts"]
@@ -1326,45 +1636,54 @@ def failure_context(stdout, stderr, case=None):
         if "completionSelection" in value:
             # Only the saved original Record can carry this post-poll sample.
             # No native handler/Press receipt is invented to fill missing DATA.
-            value["completionSelection"] = (_completion_selection_context(value["completionSelection"], case)
+            value["completionSelection"] = (_completion_selection_context(value["completionSelection"], case, allow_files=True)
                                              if value.get("snapshotSource") == "record" else None)
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
+        file_panels = _file_native_panels(case)
+        native_steps = NATIVE_STEPS | file_panels.keys()
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
                  and type(pending["kind"]) is str, "failure-context")
             kind, step = pending["kind"], pending["step"]
-            allowed = {"dom": FAILURE_STEPS, "native": NATIVE_STEPS, "accessibility": {"OpenProject"},
+            allowed = {"dom": FAILURE_STEPS, "native": native_steps, "accessibility": {"OpenProject"},
                        "close": {"Close", "CloseCancel"}}
             need(kind in ("reload", "failure-close") and step is None
                  or kind in allowed and type(step) is str and step in allowed[kind], "failure-context")
         if native is not None:
             need(type(native) is dict and set(native) == {"step", "entered", "returned"}
-                 and type(native["step"]) is str and native["step"] in NATIVE_STEPS
+                 and type(native["step"]) is str and native["step"] in native_steps
                  and type(native["entered"]) is bool and type(native["returned"]) is bool
                  and (not native["returned"] or native["entered"]), "failure-context")
         if panel is not None:
             need(type(panel) is dict and set(panel) == {"step", "id", "kind", "parentPresent", "panelPresent",
                                                       "parentReferencesPanel", "panelReferencesParent", "panelVisible"}
                  and native is not None and native["entered"] and panel["step"] == native["step"]
-                 and type(panel["id"]) is int and 1 <= panel["id"] <= 4
-                 and type(panel["kind"]) is str and panel["kind"] in ("project", "quit")
+                 and type(panel["id"]) is int and type(panel["kind"]) is str
                  and type(panel["parentPresent"]) is bool and type(panel["panelPresent"]) is bool, "failure-context")
+            if panel["kind"] == "file" or panel["step"] in file_panels:
+                need(panel["kind"] == "file" and panel["step"] in file_panels
+                     and panel["id"] == file_panels[panel["step"]], "failure-context")
+            elif panel["step"] == "Quit" and type(case) is str and case in IOS_SESSION_CASES:
+                need(panel["kind"] == "quit" and panel["id"] == 12, "failure-context")
+            else:
+                need(1 <= panel["id"] <= 4 and panel["kind"] in ("project", "quit"), "failure-context")
             both = panel["parentPresent"] and panel["panelPresent"]
             need(all(type(panel[key]) is bool if both else panel[key] is None
                      for key in ("parentReferencesPanel", "panelReferencesParent"))
                  and (type(panel["panelVisible"]) is bool if panel["panelPresent"] else panel["panelVisible"] is None),
                  "failure-context")
         if "nativeAction" in value:
-            value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel)
+            value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel, case=case)
         if "accessibility" in value:
-            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel)
+            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel, case=case)
         if value.get("snapshotSource") == "prearm-open-progress":
             sample = value.get("accessibility")
+            native_step = (_file_open_step(case, sample["id"]) if sample is not None else None) or "OpenProject"
             # The fixed pre-arm original fields are historical, while only the
             # one atomic progress/expiry sample was refreshed at the deadline.
             need(pending == {"kind": "accessibility", "step": "OpenProject"}
                  and "projectSelection" not in value and "completionSelection" not in value
-                 and native == {"step": "OpenProject", "entered": True, "returned": True}
+                 and native == {"step": native_step, "entered": True, "returned": True}
                  and sample is not None and sample["prepared"] and sample["requested"]
                  and sample["expired"] and sample["timely"] is False
                  and all(sample[key] is None for key in ("nativeEntered", "attempted", "pressReturned", "triggered",
@@ -1373,7 +1692,7 @@ def failure_context(stdout, stderr, case=None):
         if "accessibilityBinding" in value:
             # Early start failure legitimately has no nativeHandler/lastPanel
             # or Press sample. Bind to the known case, not to invented actions.
-            value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case)
+            value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case, allow_files=True)
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
         return None
@@ -1471,10 +1790,11 @@ def signature(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def fixture_data(case, final):
+def fixture_data(case, final, *, ios_output_created=None):
     need(case in ALL_CASES and type(final) is bool, "fixture-case")
-    if case in IOS_CASES:
-        return ios_fixture_data(case, final)
+    if case in IOS_CURRENT_CASES:
+        return ios_fixture_data(case, final, output_created=ios_output_created)
+    need(ios_output_created is None, "fixture-output-kind")
     saved = case == "noop-stale" or final and case == "first-save"
     files = {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
              ".gitignore": IGNORE_PREFIX + (IGNORE_RULES if saved else b"") + (STALE if final and case == "noop-stale" else b"")}
@@ -1487,8 +1807,15 @@ def fixture_data(case, final):
     return files, directories
 
 
-def ios_fixture_data(case, final):
-    need(case in IOS_CASES and type(final) is bool, "fixture-case")
+def ios_fixture_data(case, final, *, output_created=None):
+    need(case in IOS_CURRENT_CASES and type(final) is bool, "fixture-case")
+    need(output_created is None or type(output_created) is bool and final and case in IOS_SIGNED_CASES,
+         "fixture-output-kind")
+    if case == "ios-recovery-empty":
+        return {".gitignore": IGNORE_PREFIX + b".mobile-release/\n", "keep.txt": KEEP}, {
+            ".": (0o700, (".gitignore", "keep.txt"))}
+    if final and case in IOS_SIGNED_CASES:
+        need(type(output_created) is bool, "fixture-original-disposition-required")
     files = {".gitignore": IGNORE_PREFIX + b".mobile-release/\n", "keep.txt": KEEP,
              "version.properties": b"VERSION_NAME=1.2.3\nBUILD_NUMBER=8\n" if final and case == "ios-version-stale" else VERSION,
              "release/mobile-release.json": ios_config(case), "ios/MRKObserved.xcodeproj/project.pbxproj": IOS_PROJECT,
@@ -1496,7 +1823,10 @@ def ios_fixture_data(case, final):
              "ios/MRKObserved.xcodeproj/project.xcworkspace/contents.xcworkspacedata": IOS_WORKSPACE,
              "ios/MRKObserved/main.m": IOS_MAIN, "ios/MRKObserved/Info.plist": IOS_PLIST}
     root = (".gitignore", "ios", "keep.txt", "release", "version.properties")
-    if final and case != "ios-version-stale":
+    if case == "ios-signing-inputs":
+        files["overlap.p12"] = IOS_SYNTHETIC_P12
+        root = tuple(sorted((*root, "overlap.p12")))
+    if final and (case in IOS_CASES and case != "ios-version-stale" or output_created is True):
         root = tuple(sorted((*root, ".mobile-release")))
     directories = {".": (0o700, root), "ios": (0o700, ("MRKObserved", "MRKObserved.xcodeproj")),
         "ios/MRKObserved": (0o700, ("Info.plist", "main.m")),
@@ -1508,8 +1838,8 @@ def ios_fixture_data(case, final):
     return files, directories
 
 
-def _shape(snapshot, case, final, uid, gid):
-    files, directories = fixture_data(case, final)
+def _shape(snapshot, case, final, uid, gid, *, ios_output_created=None):
+    files, directories = fixture_data(case, final, ios_output_created=ios_output_created)
     need(type(snapshot) is dict and snapshot.keys() == files.keys() | directories.keys(), "fixture-roster")
     for path, node in snapshot.items():
         need(type(node) is Node and type(node.identity) is tuple and len(node.identity) == 9
@@ -1524,9 +1854,9 @@ def _shape(snapshot, case, final, uid, gid):
             need(facts[2] == stat.S_IFDIR | mode and node.sha256 is None and node.entries == entries, "fixture-directory")
 
 
-def validate_snapshot(original, current, case, final, uid, gid):
+def validate_snapshot(original, current, case, final, uid, gid, *, ios_output_created=None):
     _shape(original, case, False, uid, gid)
-    _shape(current, case, final, uid, gid)
+    _shape(current, case, final, uid, gid, ios_output_created=ios_output_created)
     for path, before in original.items():
         after = current[path]
         if before.entries is not None:
@@ -1540,7 +1870,8 @@ def validate_snapshot(original, current, case, final, uid, gid):
         else:
             need(after.identity == before.identity, "fixture-original-changed")
     return {"completeRoster": True, "expectedBytesAndModes": True, "originalIdentitiesMatched": True,
-            "transactionResidueAbsent": True, "files": len(fixture_data(case, final)[0]),
+            "transactionResidueAbsent": True,
+            "files": len(fixture_data(case, final, ios_output_created=ios_output_created)[0]),
             "configSha256": current.get("release/mobile-release.json").sha256 if "release/mobile-release.json" in current else None,
             "ignoreSha256": current[".gitignore"].sha256, "ignoreBytes": current[".gitignore"].identity[6]}
 
@@ -1551,6 +1882,17 @@ def app_environment(state, uid, username):
     return {"HOME": str(state / "home"), "TMPDIR": str(state / "tmp") + "/",
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC",
             "USER": username, "LOGNAME": username, "__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"}
+
+
+def signing_fixture_inputs(case):
+    """Closed synthetic files outside the selected project; no real credential."""
+    need(case in IOS_SESSION_CASES, "signing-fixture-case")
+    files = {"synthetic.p12": (IOS_SYNTHETIC_P12, 0o600),
+             "synthetic.mobileprovision": (IOS_SYNTHETIC_PROFILE, 0o600)}
+    if case == "ios-signing-inputs":
+        files.update({"GoogleService-Info.plist": (IOS_SYNTHETIC_FIREBASE, 0o600),
+                      "public.p12": (IOS_SYNTHETIC_P12, 0o644)})
+    return files, {"linked.p12": "synthetic.p12"} if case == "ios-signing-inputs" else {}
 
 
 class Fixtures:
@@ -1569,7 +1911,7 @@ class Fixtures:
         self.inner_failure_context = self.inner_diagnostic_source = None
         self.case = None
         self.stage = "prepare"
-        self.projects, self.states, self.originals = {}, {}, {}
+        self.projects, self.states, self.originals, self.input_originals = {}, {}, {}, {}
 
     def _open(self, name, parent=None, *, directory=False, create=False):
         flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -1632,7 +1974,8 @@ class Fixtures:
         need(signature(before) == signature(info) and info.st_mode == stat.S_IFDIR | mode
              and (info.st_uid, info.st_gid) == (self.uid, self.gid), "fixture-directory-custody")
 
-    def _write(self, parent, name, body):
+    def _write(self, parent, name, body, *, mode=0o600):
+        need(mode in (0o600, 0o644), "fixture-write-mode")
         with self._temporary(self._open(name, parent, create=True)) as fd:
             info = os.fstat(fd)
             need(info.st_mode == stat.S_IFREG | 0o600 and info.st_nlink == 1
@@ -1642,6 +1985,14 @@ class Fixtures:
                 count = os.write(fd, body[offset:])
                 need(count > 0, "fixture-write")
                 offset += count
+            if mode == 0o644:
+                # Only this exclusively created synthetic permission-refusal
+                # fixture is public. Never repair or change a supplied input.
+                os.fchmod(fd, mode)
+            current = os.fstat(fd)
+            need(current.st_mode == stat.S_IFREG | mode
+                 and signature(current) == signature(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+                 "fixture-write-original")
 
     def prepare(self):
         self.parent = self._open("/private/tmp", directory=True)
@@ -1670,6 +2021,14 @@ class Fixtures:
             for child in ("home", "tmp"):
                 with self._temporary(self._mkdir(state, child)):
                     pass
+            if case in IOS_SESSION_CASES:
+                with self._temporary(self._mkdir(state, "inputs")) as inputs:
+                    external_files, links = signing_fixture_inputs(case)
+                    for name, (body, mode) in external_files.items():
+                        self._write(inputs, name, body, mode=mode)
+                    for name, target in links.items():
+                        os.symlink(target, name, dir_fd=inputs)
+                self.input_originals[case] = self._capture_inputs(case)
             self.originals[case] = self._capture(case, False)
         self._namespace()
 
@@ -1714,9 +2073,10 @@ class Fixtures:
                     if original_error is None:
                         raise
 
-    def _file(self, parent, name, body):
+    def _file(self, parent, name, body, *, mode=0o600):
         before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        need(before.st_mode == stat.S_IFREG | 0o600 and before.st_nlink == 1 and before.st_size == len(body), "fixture-file-shape")
+        need(before.st_mode == stat.S_IFREG | mode and before.st_nlink == 1 and before.st_size == len(body)
+             and (before.st_uid, before.st_gid) == (self.uid, self.gid), "fixture-file-shape")
         with self._temporary(self._open(name, parent)) as fd:
             original = signature(before)
             need(signature(os.fstat(fd)) == original, "fixture-file-open-race")
@@ -1732,8 +2092,35 @@ class Fixtures:
                  and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == original, "fixture-file-readback")
             return Node(original, digest(actual), None)
 
-    def _capture(self, case, final):
-        files, directories = fixture_data(case, final)
+    def _capture_inputs(self, case):
+        files, links = signing_fixture_inputs(case)
+        result = {}
+        with self._temporary(self._open("inputs", self.states[case], directory=True)) as inputs:
+            self._named(self.states[case], "inputs", inputs, 0o700)
+            original = signature(os.fstat(inputs))
+            names = self._roster(inputs, (*files, *links), "signing-fixture-roster")
+            result["."] = Node(original, None, names)
+            for name, (body, mode) in files.items():
+                result[name] = self._file(inputs, name, body, mode=mode)
+            for name, target in links.items():
+                before = os.stat(name, dir_fd=inputs, follow_symlinks=False)
+                need(stat.S_ISLNK(before.st_mode) and before.st_nlink == 1
+                     and (before.st_uid, before.st_gid) == (self.uid, self.gid)
+                     and os.readlink(name, dir_fd=inputs) == target,
+                     "signing-fixture-link")
+                need(signature(os.stat(name, dir_fd=inputs, follow_symlinks=False)) == signature(before)
+                     and os.readlink(name, dir_fd=inputs) == target, "signing-fixture-link-race")
+                result[name] = Node(signature(before), digest(target.encode("ascii")), None)
+            need(signature(os.fstat(inputs)) == original, "signing-fixture-directory-race")
+            self._named(self.states[case], "inputs", inputs, 0o700)
+        return result
+
+    def _inputs_unchanged(self, case):
+        if case in IOS_SESSION_CASES:
+            need(self._capture_inputs(case) == self.input_originals[case], "signing-fixture-original-changed")
+
+    def _capture(self, case, final, *, ios_output_created=None):
+        files, directories = fixture_data(case, final, ios_output_created=ios_output_created)
         snapshot = {}
         project = self.projects[case]
         with ExitStack() as children:
@@ -1758,7 +2145,7 @@ class Fixtures:
                 if path != ".":
                     parent, _, leaf = path.rpartition("/")
                     self._named(opened[parent or "."], leaf, opened[path], mode)
-        _shape(snapshot, case, final, self.uid, self.gid)
+        _shape(snapshot, case, final, self.uid, self.gid, ios_output_created=ios_output_created)
         return snapshot
 
     def before_call(self, case):
@@ -1766,26 +2153,32 @@ class Fixtures:
         self._namespace()
         validate_snapshot(self.originals[case], self._capture(case, False), case, False, self.uid, self.gid)
         state = self.states[case]
-        self._roster(state, ("home", "tmp"), "fresh-state-roster")
+        self._roster(state, ("home", "tmp", "inputs") if case in IOS_SESSION_CASES else ("home", "tmp"), "fresh-state-roster")
+        self._inputs_unchanged(case)
         for name in ("home", "tmp"):
             with self._temporary(self._open(name, state, directory=True)) as fd:
                 self._named(state, name, fd, 0o700)
                 self._roster(fd, (), "fresh-state-not-empty")
 
-    def readback(self, case):
+    def readback(self, case, *, ios_output_created=None):
         need(not self.inflight and self.last_returned, "readback-without-return")
         self.stage = "independent-readback"
         self._namespace()
-        return validate_snapshot(self.originals[case], self._capture(case, True), case, True, self.uid, self.gid)
+        self._inputs_unchanged(case)
+        return validate_snapshot(self.originals[case], self._capture(case, True, ios_output_created=ios_output_created),
+                                 case, True, self.uid, self.gid, ios_output_created=ios_output_created)
 
     def readback_ios(self, case, report):
-        need(case in IOS_CASES and case in self.cases and not self.inflight and self.last_returned, "ios-readback-order")
+        need(case in IOS_OPERATION_CASES and case in self.cases and not self.inflight and self.last_returned, "ios-readback-order")
         # Parser DATA bounds the spelling; this independent original-project
         # descriptor supplies the filesystem authority. Never open a report path.
         _ios_report(report, case)
-        source = self.readback(case)
+        if case == "ios-recovery-empty":
+            return {**self.readback(case), "iosRecovery": {"emptyAccountAndProjectObserved": True, "mutationRequested": False}}
         original = report["original"]
         disposition = original["terminal"]["disposition"]
+        output_created = disposition["output"] != "not-created" if case in IOS_SIGNED_CASES else None
+        source = self.readback(case, ios_output_created=output_created)
         if disposition["output"] == "not-created":
             return {**source, "iosOutput": {"state": "not-created", "archiveObserved": False}}
         operation = original["facts"]["operationId"]
@@ -1806,7 +2199,9 @@ class Fixtures:
             self._named(project, ".mobile-release", private, 0o700)
         # Source readback is repeated only after reading the newly declared
         # output so a concurrent replacement cannot license either observation.
-        validate_snapshot(self.originals[case], self._capture(case, True), case, True, self.uid, self.gid)
+        validate_snapshot(self.originals[case], self._capture(case, True, ios_output_created=output_created),
+                          case, True, self.uid, self.gid, ios_output_created=output_created)
+        self._inputs_unchanged(case)
         return {**source, "iosOutput": {"state": disposition["output"], "archiveObserved": complete,
                                         "workAbsent": True, "archive": observed}}
 
@@ -1972,7 +2367,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         fixtures.inner_diagnostic_source = "completed-output"
         need(result.returncode == 0, "app-return")
         report = parse_result(result.stdout, result.stderr, binding, case)
-        readback = fixtures.readback_ios(case, report["iosArchive"]) if case in IOS_CASES else fixtures.readback(case)
+        readback = fixtures.readback_ios(case, report["iosArchive"]) if case in IOS_OPERATION_CASES else fixtures.readback(case)
         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
               "originalCallReturned": True, "observer": report, "independentReadback": readback})
 

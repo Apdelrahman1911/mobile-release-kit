@@ -18,6 +18,8 @@ pub(super) struct Startup {
     user_data: OnceLock<PathBuf>,
     thread: std::thread::ThreadId,
     publication: native::StartupPublication,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    observer_diagnostic: OnceLock<Arc<mrk_windows_installed_native::ObserverDiagnostic>>,
 }
 #[derive(Clone, Copy)]
 enum Entered { Callback, Reply(ReplyKind), Navigation, WindowRelease }
@@ -54,10 +56,25 @@ impl Drop for OriginalCall<'_> {
             Entered::Navigation => (Event::NavigateAbandoned, 0),
             Entered::WindowRelease => (Event::WindowReleaseAbandoned, 0),
         };
-        self.startup.refuse(event, detail, true);
+        // Preserve the original loss/property behavior. Do not add append I/O
+        // to an abandoned call's Drop or use unwinding as a journal publisher.
+        self.startup.with_order(|book| book.refuse(event, detail, true));
+        self.startup.publish_property();
     } }
 }
 impl Startup {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    pub(super) fn bind_observer_diagnostic(&self, diagnostic: Option<Arc<mrk_windows_installed_native::ObserverDiagnostic>>) {
+        if let Some(diagnostic) = diagnostic {
+            if let Err(diagnostic) = self.observer_diagnostic.set(diagnostic) { diagnostic.unavailable(); }
+        }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    fn observer_word(&self, word: u64) {
+        if let Some(diagnostic) = self.observer_diagnostic.get() {
+            diagnostic.startup(word, &|| self.diagnostic_end().is_some());
+        }
+    }
     fn with_order<T>(&self, action: impl FnOnce(&mut StartupBook) -> T) -> T {
         let (value, lost) = {
             let mut book = match self.order.lock() {
@@ -81,12 +98,18 @@ impl Startup {
         Some(end)
     }
     fn publish(&self) {
-        if self.diagnostic_end().is_none() { return; }
+        let word = self.publish_property();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if let Some(word) = word { self.observer_word(word); }
+        let _ = word;
+    }
+    fn publish_property(&self) -> Option<u64> {
+        if self.diagnostic_end().is_none() { return None; }
         match self.with_order(|book| book.diagnostic().encode()) {
             // The borrowed checkpoint refreshes the ORIGINAL endpoint before
             // each property effect; it creates no endpoint, owner or retry.
-            Some(word) => self.publication.publish(word, &|| self.diagnostic_end().is_some()),
-            None => self.publication.seal(),
+            Some(word) => { self.publication.publish(word, &|| self.diagnostic_end().is_some()); Some(word) },
+            None => { self.publication.seal(); None },
         }
     }
     fn bind_publication(&self, window: &tauri::WebviewWindow) {
@@ -98,6 +121,8 @@ impl Startup {
             Ok(hwnd) => self.publication.bind(hwnd.0 as usize, word, &|| self.diagnostic_end().is_some()),
             Err(_) => self.publication.seal(),
         }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        self.observer_word(word); // Only after original registration/adoption and property binding.
     }
     fn refuse(&self, event: Event, detail: u8, unknown: bool) {
         self.with_order(|book| book.refuse(event, detail, unknown));
@@ -347,6 +372,8 @@ fn startup_refusal(error: native::UiError) {
 }
 pub(super) fn startup() -> Arc<Startup> {
     Arc::new(Startup { document: OnceLock::new(), order: Mutex::new(StartupBook::default()),
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        observer_diagnostic: OnceLock::new(),
         user_data: OnceLock::new(), thread: std::thread::current().id(), publication: native::StartupPublication::default() })
 }
 pub(super) fn before_webview(startup: &Startup) -> Result<(), native::UiError> {
@@ -531,10 +558,17 @@ fn native_event(call: &Arc<GuiCall>, event: native::DialogEvent, quit: bool) {
             } else { call.failed(Reason::CleanupUnknown); }
         }
         native::DialogEvent::Unknown => call.failed(Reason::CleanupUnknown),
+        #[cfg(feature = "windows-installed-observation")]
+        native::DialogEvent::ObservationTurn => return, // Never a GUI fact/change notification.
     }
     call.changed();
 }
-fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::DialogKind) -> Result<Option<PathBuf>, Reason> {
+fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::DialogKind,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    observation: Option<(Arc<super::installed_observation::Observation>, tauri::AppHandle)>,
+) -> Result<Option<PathBuf>, Reason> {
     let Some(owner) = call.owner() else { call.not_created(Reason::DocumentLost); return Err(Reason::DocumentLost); };
     if owner.interrupted() { call.not_created(Reason::UserCancelled); return Err(Reason::UserCancelled); }
     let parent = match SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
@@ -543,7 +577,20 @@ fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::D
         Err(_) => { call.not_created(Reason::SourceRefused); return Err(Reason::SourceRefused); }
     };
     let events = call.clone();
-    let original = Rc::new(native::Dialog::new(kind, control, Box::new(move |event| native_event(&events, event, kind == native::DialogKind::Quit))));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    let id = owner.id;
+    let original = Rc::new(native::Dialog::new(kind, control, Box::new(move |event| {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer")))]
+        if event == native::DialogEvent::ObservationTurn {
+            if let Some((q, app)) = &observation { q.modal_turn(app, id, kind, &events); }
+            return;
+        }
+        native_event(&events, event, kind == native::DialogKind::Quit);
+    })));
     let reserved = DIALOG.with(|slot| {
         let mut slot = slot.try_borrow_mut().map_err(|_| Reason::CleanupUnknown)?;
         if slot.is_some() { return Err(Reason::Busy); }
@@ -593,8 +640,20 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
         facts.dispatched = true; facts.constructing = true;
     }
     let control = Arc::new(native::DialogControl::new());
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+        not(feature = "macos-installed-installer")))]
+    let observation = app.try_state::<Arc<super::installed_observation::Observation>>().map(|q| (q.inner().clone(), app.clone()));
     let creating = call.clone(); let closing = control.clone(); let (done, mut joined) = oneshot::channel();
-    if app.run_on_main_thread(move || { let result = show(creating, closing, kind); let _ = done.send(result); }).is_err() {
+    if app.run_on_main_thread(move || {
+        let result = show(creating, closing, kind,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+                not(feature = "macos-installed-installer")))]
+            observation,
+        );
+        let _ = done.send(result);
+    }).is_err() {
         call.failed(Reason::CleanupUnknown); std::future::pending::<()>().await;
     }
     loop {
@@ -619,7 +678,7 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     not(feature = "macos-installed-installer")))]
 pub(super) mod observation {
     use super::*;
-    pub(crate) use native::{DialogAction, DialogKind, DialogObservation, DialogResponse};
+    pub(crate) use native::{DialogAction, DialogActionFailure, DialogActionSite, DialogKind, DialogObservation, DialogResponse};
     pub(crate) struct ObservedDialog {
         pub(crate) id: u32,
         pub(crate) native: DialogObservation,
@@ -651,9 +710,10 @@ pub(super) mod observation {
         let native = original.installed_observation()?;
         Ok(Some(ObservedDialog { id, native, action_allowed, call }))
     }
-    pub(crate) fn observe_dialog_action(id: u32, action: DialogAction<'_>) -> Result<bool, native::UiError> {
-        let Some((actual, original, call, owner)) = original()? else { return Err(native::UiError::State); };
-        if actual != id || !allowed(&call, &owner)? || owner.interrupted() { return Err(native::UiError::State); }
+    pub(crate) fn observe_dialog_action(id: u32, action: DialogAction<'_>) -> Result<bool, DialogActionFailure> {
+        let binding = |error| DialogActionFailure { site: DialogActionSite::Binding, error };
+        let Some((actual, original, call, owner)) = original().map_err(binding)? else { return Err(binding(native::UiError::State)); };
+        if actual != id || !allowed(&call, &owner).map_err(binding)? || owner.interrupted() { return Err(binding(native::UiError::State)); }
         // No DIALOG/GuiFacts borrow held across reentrant native button/folder
         // calls. The original Show/event/release path is the sole result owner.
         original.installed_action(action)

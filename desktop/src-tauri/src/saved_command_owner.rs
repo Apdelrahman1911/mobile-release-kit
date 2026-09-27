@@ -1581,7 +1581,7 @@ impl Inner {
         if self.domain == SavedCommandDomain::IOSArchive && self.runtime.ios_archive_installed_profile_available()
             && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
                 [ios_wire::Operation::IOSUnsignedArchive, ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]
-                    .into_iter().any(|operation| o.control.permits_mode(operation))))) { return true; }
+                    .into_iter().any(|operation| o.control.permits_mode(operation)))) { return true; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.domain == SavedCommandDomain::AndroidBuild
             && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)

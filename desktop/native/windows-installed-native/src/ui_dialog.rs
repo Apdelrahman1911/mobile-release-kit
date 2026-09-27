@@ -13,28 +13,40 @@ const CLASS: &[u16] = &[77,82,75,46,79,114,105,103,105,110,97,108,68,105,97,108,
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogResponse { Accept, Decline }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DialogEvent { Created, ShowEntered, Presented, Response(DialogResponse), ShowReturned, Releasing, Settled, Unknown }
+pub enum DialogEvent { Created, ShowEntered, Presented, Response(DialogResponse), ShowReturned, Releasing, Settled, Unknown,
+    #[cfg(feature = "windows-installed-observation")]
+    ObservationTurn,
+}
 pub struct DialogResult { pub created: bool, pub response: Option<DialogResponse>, pub selected: Option<PathBuf> }
 #[cfg(feature = "windows-installed-observation")]
 #[derive(Clone, Copy)]
 pub enum DialogAction<'a> { ChooseFolder(&'a Path), Accept, Decline }
 #[cfg(feature = "windows-installed-observation")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DialogActionSite { Binding, FolderInput, FolderSet, FolderRead, FolderCompare,
+    FolderDifferent, FolderInvalidated, State }
+#[cfg(feature = "windows-installed-observation")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DialogActionFailure { pub site: DialogActionSite, pub error: UiError }
+#[cfg(feature = "windows-installed-observation")]
 #[derive(Clone, Debug)]
 pub struct DialogObservation {
     pub kind: DialogKind, pub created: bool, pub showing: bool, pub visible: bool, pub presented: bool,
-    pub response: Option<DialogResponse>, pub show_returned: bool, pub callbacks_active: bool,
-    pub stopped: bool, pub close_entered: bool, pub settled: bool, pub folder_ready: bool,
+    pub response: Option<DialogResponse>, pub show_returned: bool, pub callbacks_active: bool, pub observation_turn: bool,
+    pub stopped: bool, pub close_entered: bool, pub settled: bool, pub folder_navigation_observed: bool,
 }
 #[cfg(feature = "windows-installed-observation")]
+use super::folder_navigation::FolderNavigation;
+#[cfg(feature = "windows-installed-observation")]
 struct FolderAction {
-    requested: Cell<bool>, ready: Cell<bool>, input: OnceCell<Vec<u16>>,
+    requested: Cell<bool>, navigation: FolderNavigation, input: OnceCell<Vec<u16>>,
     item_output: UnsafeCell<*mut std::ffi::c_void>, item: OnceCell<ComOriginal<IShellItem>>,
     readback_outputs: [UnsafeCell<*mut std::ffi::c_void>; 2],
     readbacks: [OnceCell<ComOriginal<IShellItem>>; 2], comparisons: [UnsafeCell<i32>; 2],
 }
 #[cfg(feature = "windows-installed-observation")]
 impl FolderAction {
-    fn new() -> Self { Self { requested: Cell::new(false), ready: Cell::new(false), input: OnceCell::new(),
+    fn new() -> Self { Self { requested: Cell::new(false), navigation: FolderNavigation::default(), input: OnceCell::new(),
         item_output: UnsafeCell::new(null_mut()), item: OnceCell::new(),
         readback_outputs: std::array::from_fn(|_| UnsafeCell::new(null_mut())),
         readbacks: std::array::from_fn(|_| OnceCell::new()), comparisons: std::array::from_fn(|_| UnsafeCell::new(i32::MIN)) } }
@@ -82,6 +94,8 @@ pub struct Dialog {
     folder: FolderAction,
     #[cfg(feature = "windows-installed-observation")]
     quit_action: QuitAction,
+    #[cfg(feature = "windows-installed-observation")]
+    observation_entered: Cell<bool>,
 }
 impl Dialog {
     pub fn new(kind: DialogKind, control: Arc<DialogControl>, on_event: Box<dyn Fn(DialogEvent)>) -> Self {
@@ -101,6 +115,8 @@ impl Dialog {
             folder: FolderAction::new(),
             #[cfg(feature = "windows-installed-observation")]
             quit_action: QuitAction::new(),
+            #[cfg(feature = "windows-installed-observation")]
+            observation_entered: Cell::new(false),
         }
     }
     fn event(&self, event: DialogEvent) {
@@ -337,6 +353,20 @@ impl Dialog {
     pub fn created(&self) -> bool { self.created.get() }
 
     #[cfg(feature = "windows-installed-observation")]
+    fn observation_turn_ready(&self) -> bool {
+        self.depth.get() == 1 && self.created.get() && self.presented.get() && self.showing.get()
+            && !self.show_returned.get() && self.response.get().is_none() && !self.control.stopped.load(Ordering::SeqCst)
+            && !self.close_entered.get() && !self.settled.get() && !self.unknown.get()
+    }
+    #[cfg(feature = "windows-installed-observation")]
+    fn enter_observation_turn(&self) -> Option<ObservationTurnReturn<'_>> {
+        if !self.observation_turn_ready() || self.observation_entered.replace(true) { return None; }
+        Some(ObservationTurnReturn(self))
+    }
+    #[cfg(feature = "windows-installed-observation")]
+    fn observation_turn_active(&self) -> bool { self.observation_entered.get() && self.observation_turn_ready() }
+
+    #[cfg(feature = "windows-installed-observation")]
     pub fn installed_observation(&self) -> UiResult<DialogObservation> {
         self.check()?;
         let visible = if self.showing.get() {
@@ -344,11 +374,14 @@ impl Dialog {
         } else { false };
         Ok(DialogObservation { kind: self.kind, created: self.created.get(), showing: self.showing.get(), visible,
             presented: self.presented.get(), response: self.response.get(), show_returned: self.show_returned.get(),
-            callbacks_active: self.depth.get() != 0, stopped: self.control.stopped.load(Ordering::SeqCst),
-            close_entered: self.close_entered.get(), settled: self.settled(), folder_ready: self.folder.ready.get() })
+            callbacks_active: self.depth.get() != 0, observation_turn: self.observation_turn_active(),
+            stopped: self.control.stopped.load(Ordering::SeqCst),
+            close_entered: self.close_entered.get(), settled: self.settled(),
+            folder_navigation_observed: self.folder.navigation.observed() })
     }
     #[cfg(feature = "windows-installed-observation")]
-    fn folder_readback(&self, index: usize) -> UiResult<()> {
+    fn folder_readback(&self, index: usize, site: &mut DialogActionSite) -> UiResult<()> {
+        *site = DialogActionSite::FolderRead;
         let file = self.file.get().ok_or(UiError::State)?.get()?;
         let original = self.folder.item.get().ok_or(UiError::State)?.get()?;
         let slot = self.folder.readbacks.get(index).filter(|slot| slot.get().is_none()).ok_or(UiError::State)?;
@@ -360,16 +393,27 @@ impl Dialog {
         if pointer.is_null() { return self.uncertain(); }
         slot.set(ComOriginal::new(unsafe { IShellItem::from_raw(pointer) })).map_err(|_| UiError::State)?;
         let current = slot.get().ok_or(UiError::State)?.get()?;
+        *site = DialogActionSite::FolderCompare;
         let compared = unsafe { (current.vtable().Compare)(current.as_raw(), original.as_raw(),
             SICHINT_CANONICAL.0 as u32, self.folder.comparisons[index].get()) };
         if compared.0 == HRESULT_PENDING { return self.uncertain(); }
         hresult(compared.ok())?;
-        if unsafe { *self.folder.comparisons[index].get() } != 0 { return Err(UiError::State); }
-        self.folder.ready.set(true); Ok(())
+        if unsafe { *self.folder.comparisons[index].get() } != 0 {
+            *site = DialogActionSite::FolderDifferent; return Err(UiError::State);
+        }
+        Ok(())
     }
     #[cfg(feature = "windows-installed-observation")]
-    pub fn installed_action(&self, action: DialogAction<'_>) -> UiResult<bool> {
+    pub fn installed_action(&self, action: DialogAction<'_>) -> std::result::Result<bool, DialogActionFailure> {
+        let mut site = DialogActionSite::State;
+        // Only closed DATA travels with this same synchronous return. Native
+        // errors and their original Unknown/retention effects are unchanged.
+        self.installed_action_body(action, &mut site).map_err(|error| DialogActionFailure { site, error })
+    }
+    #[cfg(feature = "windows-installed-observation")]
+    fn installed_action_body(&self, action: DialogAction<'_>, site: &mut DialogActionSite) -> UiResult<bool> {
         self.check()?;
+        if !self.observation_turn_active() { return Err(UiError::State); }
         if self.kind == DialogKind::Quit { self.quit_action.check()?; }
         if !self.created.get() || !self.showing.get() || self.show_returned.get() || self.response.get().is_some()
             || self.control.stopped.load(Ordering::SeqCst) || self.close_entered.get() || self.settled.get() {
@@ -379,6 +423,7 @@ impl Dialog {
         if unsafe { W::IsWindowVisible(window) } == 0 { return Ok(false); }
         if let DialogAction::ChooseFolder(path) = action {
             if self.kind != DialogKind::Project || self.folder.requested.replace(true) { return Err(UiError::State); }
+            *site = DialogActionSite::FolderInput;
             let path = path.to_str().filter(|value| value.encode_utf16().count() < NAME_UNITS).ok_or(UiError::State)?;
             mapped(project_path_hint(path), UiError::State)?;
             self.folder.input.set(wide(path)).map_err(|_| UiError::State)?;
@@ -392,12 +437,19 @@ impl Dialog {
             if pointer.is_null() { return self.uncertain(); }
             self.folder.item.set(ComOriginal::new(unsafe { IShellItem::from_raw(pointer) })).map_err(|_| UiError::State)?;
             let item = self.folder.item.get().ok_or(UiError::State)?.get()?;
-            let returned = unsafe { self.file.get().ok_or(UiError::State)?.get()?.SetFolder(item) };
+            *site = DialogActionSite::State;
+            let file = self.file.get().ok_or(UiError::State)?.get()?;
+            if !self.observation_turn_active() { return Err(UiError::State); }
+            self.folder.navigation.arm()?;
+            *site = DialogActionSite::FolderSet;
+            let returned = unsafe { file.SetFolder(item) };
             if returned.as_ref().is_err_and(|error| error.code().0 == HRESULT_PENDING) { return self.uncertain(); }
             hresult(returned)?;
-            // After an effectful SetFolder there is no false/not-ready/retry.
-            // Read back the actual current folder before any Accept is allowed.
-            self.folder_readback(0)?; return Ok(true);
+            *site = DialogActionSite::State;
+            self.check()?;
+            // This is the actual request return, not navigation completion.
+            // Never repeat SetFolder or consume a readback slot while waiting.
+            return Ok(true);
         }
         let accept = matches!(action, DialogAction::Accept);
         if self.kind == DialogKind::Quit {
@@ -410,6 +462,7 @@ impl Dialog {
             if !self.created.get() || self.task_destroyed.get() || !self.showing.get() || self.show_returned.get()
                 || self.response.get().is_some() || self.control.stopped.load(Ordering::SeqCst)
                 || self.close_entered.get() || self.settled.get() { return Err(UiError::State); }
+            if !self.observation_turn_active() { return Err(UiError::State); }
             return self.quit_action.request(|| {
                 // Entry consumes the one-shot latch before any reentrant call.
                 // The send result is not a response, Show-return or finality fact.
@@ -418,7 +471,15 @@ impl Dialog {
                 self.check()
             });
         }
-        if accept && self.kind == DialogKind::Project { self.folder_readback(1)?; }
+        if accept && self.kind == DialogKind::Project {
+            if !self.observation_turn_active() { return Err(UiError::State); }
+            *site = DialogActionSite::FolderInvalidated;
+            self.folder.navigation.begin_accept()?; // Spend before reentrant COM work.
+            self.folder_readback(0, site)?;
+            *site = DialogActionSite::FolderInvalidated;
+            self.folder.navigation.check_accept()?;
+        }
+        *site = DialogActionSite::State;
         let button = unsafe { W::GetDlgItem(window, if accept { W::IDOK } else { W::IDCANCEL }) };
         let mut process = 0;
         if button.is_null() || unsafe { W::IsChild(window, button) } == 0
@@ -430,12 +491,24 @@ impl Dialog {
         }
         // The actual native button owns the response. No GuiFacts/result setter
         // or arbitrary HWND/message/PID control is exposed to the observer.
+        if accept && self.kind == DialogKind::Project {
+            if !self.observation_turn_active() { return Err(UiError::State); }
+            self.folder_readback(1, site)?; // Final exact read after actual button checks.
+            *site = DialogActionSite::FolderInvalidated;
+            self.folder.navigation.check_accept()?;
+        }
+        *site = DialogActionSite::State;
+        if !self.observation_turn_active() { return Err(UiError::State); }
         unsafe { W::SendMessageW(button, W::BM_CLICK, 0, 0); }
         self.check()?; Ok(true)
     }
 }
 struct DialogReturn<'a>(&'a Dialog);
 impl Drop for DialogReturn<'_> { fn drop(&mut self) { self.0.depth.set(self.0.depth.get().saturating_sub(1)); } }
+#[cfg(feature = "windows-installed-observation")]
+struct ObservationTurnReturn<'a>(&'a Dialog);
+#[cfg(feature = "windows-installed-observation")]
+impl Drop for ObservationTurnReturn<'_> { fn drop(&mut self) { self.0.observation_entered.set(false); } }
 
 fn register_class() -> UiResult<u16> {
     static CLASS_ATOM: OnceLock<UiResult<u16>> = OnceLock::new();
@@ -476,6 +549,12 @@ unsafe extern "system" fn control_window(window: F::HWND, message: u32, wparam: 
         if message == W::WM_TIMER && wparam == TIMER {
             original.visible();
             if original.control.stopped.load(Ordering::SeqCst) { original.close_on_sta(); }
+            // The original DialogReturn remains live throughout this event.
+            // Nested timers/native callbacks cannot enter a second own turn.
+            #[cfg(feature = "windows-installed-observation")]
+            if let Some(_turn_returned) = original.enter_observation_turn() {
+                original.event(DialogEvent::ObservationTurn);
+            }
             return 0;
         }
         if message == W::WM_NCDESTROY {
@@ -521,11 +600,14 @@ impl IFileDialogEvents_Impl for FileEvents_Impl {
     fn OnFolderChanging(&self, _: Ref<'_, IFileDialog>, _: Ref<'_, IShellItem>) -> windows::core::Result<()> {
         let _returned = self.dialog.enter();
         #[cfg(feature = "windows-installed-observation")]
-        self.dialog.folder.ready.set(false);
+        self.dialog.folder.navigation.changing();
         Ok(())
     }
     fn OnFolderChange(&self, _: Ref<'_, IFileDialog>) -> windows::core::Result<()> {
-        let _returned = self.dialog.enter(); self.dialog.visible(); Ok(())
+        let _returned = self.dialog.enter();
+        #[cfg(feature = "windows-installed-observation")]
+        self.dialog.folder.navigation.changed();
+        self.dialog.visible(); Ok(())
     }
     fn OnSelectionChange(&self, _: Ref<'_, IFileDialog>) -> windows::core::Result<()> { let _returned = self.dialog.enter(); Ok(()) }
     fn OnShareViolation(&self, _: Ref<'_, IFileDialog>, _: Ref<'_, IShellItem>) -> windows::core::Result<FDE_SHAREVIOLATION_RESPONSE> { let _returned = self.dialog.enter(); Ok(FDESVR_REFUSE) }
@@ -543,6 +625,21 @@ mod tests {
         assert!(control.stopped.load(Ordering::SeqCst));
         let route = control.route.lock().map_err(|_| UiError::CleanupUnknown)?;
         assert!(!route.bound); assert!(!route.posted); assert_eq!(route.window, 0);
+        #[cfg(feature = "windows-installed-observation")]
+        {
+            let dialog = Dialog::new(DialogKind::Project, Arc::new(DialogControl::new()), Box::new(|_| {}));
+            assert!(dialog.enter_observation_turn().is_none());
+            dialog.created.set(true); dialog.presented.set(true); dialog.showing.set(true); dialog.depth.set(1);
+            let turn = dialog.enter_observation_turn().ok_or(UiError::State)?;
+            assert!(dialog.observation_turn_active()); assert_eq!(dialog.depth.get(), 1);
+            assert!(dialog.enter_observation_turn().is_none());
+            dialog.depth.set(2);
+            assert!(!dialog.observation_turn_active()); assert!(dialog.enter_observation_turn().is_none());
+            dialog.depth.set(1); assert!(dialog.observation_turn_active());
+            drop(turn); assert!(!dialog.observation_turn_active()); assert_eq!(dialog.depth.get(), 1);
+            dialog.control.stopped.store(true, Ordering::SeqCst);
+            assert!(dialog.enter_observation_turn().is_none());
+        }
         Ok(())
     }
     #[test]
@@ -550,6 +647,19 @@ mod tests {
         let control = DialogControl::new();
         { let mut route = control.route.lock().map_err(|_| UiError::CleanupUnknown)?; route.bound = true; route.retired = true; }
         assert!(control.request_stop().is_ok()); assert!(!control.route.lock().map_err(|_| UiError::CleanupUnknown)?.posted);
+        #[cfg(feature = "windows-installed-observation")]
+        {
+            let dialog = Dialog::new(DialogKind::Project, Arc::new(DialogControl::new()), Box::new(|_| {}));
+            dialog.created.set(true); dialog.presented.set(true); dialog.showing.set(true); dialog.depth.set(1);
+            for condition in [&dialog.unknown, &dialog.show_returned, &dialog.settled, &dialog.close_entered] {
+                condition.set(true); assert!(dialog.enter_observation_turn().is_none()); condition.set(false);
+            }
+            dialog.response.set(Some(DialogResponse::Decline)); assert!(dialog.enter_observation_turn().is_none());
+            dialog.response.set(None); dialog.showing.set(false); assert!(dialog.enter_observation_turn().is_none());
+            dialog.showing.set(true); dialog.depth.set(0); assert!(dialog.enter_observation_turn().is_none());
+            dialog.depth.set(1); assert!(dialog.enter_observation_turn().is_some());
+            assert!(!dialog.observation_entered.get());
+        }
         Ok(())
     }
 }

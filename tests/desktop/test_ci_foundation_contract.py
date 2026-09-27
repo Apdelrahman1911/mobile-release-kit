@@ -12994,8 +12994,8 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         value, lock, source, root = self.graph_data()
         graph = helper.windows_normal_ui_native_graph(value, lock, source=source, root=root)
         self.assertEqual(len(graph["nodes"]), 24)
-        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 19)
-        self.assertEqual(len(set(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)), 19)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+        self.assertEqual(len(set(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)), 24)
         self.assertEqual(helper.windows_installed_features(self.context(), "native"), ["desktop-ui"])
         native = graph["nativeId"]
         executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"
@@ -13124,6 +13124,17 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
                 helper.windows_normal_ui_prerequisite_fault_frame(self.prerequisite_frame(
                     api="ReadFile", kind="bool", value="0", status="win32", code=value))
         raw = self.prerequisite_frame()
+        # The new returned NormalSmoke line is diagnostic-only and must not be
+        # admitted by the historical prerequisite-only consumer.
+        smoke = raw.replace(b"MRK_WINDOWS_UI_PREREQUISITE_FAULT_V1=", b"MRK_WINDOWS_UI_NORMAL_SMOKE_FAULT_V1=", 1)
+        smoke = smoke.replace(b"ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract",
+                              b"ordinary_owner::hosted_normal_ui_smoke_original_handle_contract", 1)
+        smoke = smoke.replace(b";mode=prerequisite-only;", b";mode=normal-smoke;", 1)
+        self.assertEqual(len(smoke) + 12, len(raw))
+        for wrong in (smoke, raw.replace(b"PREREQUISITE_FAULT_V1=", b"NORMAL_SMOKE_FAULT_V1=", 1),
+                      self.prerequisite_frame(owner="ordinary_owner::hosted_normal_ui_smoke_original_handle_contract"),
+                      self.prerequisite_frame(mode="normal-smoke")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_prerequisite_fault_frame(wrong)
         for wrong in (raw[1:], raw[:-1], raw.replace(b"\n", b"\r\n"), b"\x1b[31m" + raw,
                       raw.replace(b";check=n03;", b";check=n03;check=n03;"),
                       raw.replace(b";stage=account-profile;check=n03;", b";check=n03;stage=account-profile;"),
@@ -13704,6 +13715,65 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
                 self.assertEqual((result["guiCasesExecuted"], result["verifiedMethods"], result["guiCases"]), (0, 0, []))
                 self.assertEqual(result["notVerified"], list(helper.WINDOWS_NORMAL_UI_NOT_VERIFIED))
 
+    def test_hive_unload_pending_is_only_predelete_and_keeps_original_clock_close_and_strict_probes(self):
+        text = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ordinary_owner_ui.rs").read_text()
+        production, tests = text.split("// Inert regressions.", 1)
+        self.assertIn("enum KeyOpenPurpose { Strict, HiveUnload }", production)
+        self.assertIn("enum KeyPresence { Present, Absent, Pending }", production)
+        strict = production.split("fn open_traced(", 1)[1].split("fn open_with_purpose_traced(", 1)[0]
+        self.assertIn("self.open_with_purpose_traced(KeyOpenPurpose::Strict, clock, trace)?", strict)
+        self.assertIn("KeyPresence::Pending => Err(Error::State)", strict)
+        call = production.split("fn open_with_purpose_traced(", 1)[1].split("fn observe_open_return_traced(", 1)[0]
+        markers = ("need(self.state == SlotState::Reserved", "clock.effect_traced(trace)?;",
+                   "self.state = SlotState::Acquiring; self.active = true;", "R::RegOpenKeyExW(self.root, self.name.as_ptr(), 0,",
+                   "let original = self.observe_open_return_traced(purpose, trace);",
+                   "if matches!(self.state, SlotState::Owned | SlotState::NoHandle) { clock.effect_traced(trace)?; }")
+        self.assertEqual([call.index(marker) for marker in markers], sorted(call.index(marker) for marker in markers))
+        self.assertIn("purpose == KeyOpenPurpose::Strict || self.root == R::HKEY_USERS", call)
+        self.assertIn("R::KEY_READ | R::KEY_WOW64_64KEY, &mut self.handle", call)
+        returned = production.split("fn observe_open_return_traced(", 1)[1].split("fn profile_path(", 1)[0]
+        self.assertIn("need(self.state == SlotState::Acquiring && self.active)?;", returned)
+        self.assertIn("self.handle.is_null() && self.status != F::ERROR_SUCCESS && self.status != F::ERROR_IO_PENDING", returned)
+        self.assertLess(returned.index("self.active = false; self.state = SlotState::NoHandle;"), returned.index("Ok(KeyPresence::Pending)"))
+        self.assertIn("self.status == F::ERROR_KEY_DELETED && purpose == KeyOpenPurpose::HiveUnload && self.root == R::HKEY_USERS", returned)
+        self.assertIn("if self.status == F::ERROR_FILE_NOT_FOUND { Ok(KeyPresence::Absent) }", returned)
+        self.assertNotIn("ERROR_PATH_NOT_FOUND", returned)
+        self.assertIn("self.state = SlotState::Unknown; Err(Error::Unknown)", returned)
+        self.assertIn("trace.prerequisite_native_result(PrerequisiteCheck::K01, original,", returned)
+        for forbidden in ("R::RegOpenKeyExW(", "R::RegCloseKey(", "GetLastError", "clock.", "std::thread::"):
+            self.assertNotIn(forbidden, returned)
+        profile = production.split("impl Profile {", 1)[1].split("\n}\n", 1)[0]
+        strict_probes = profile[profile.index("    fn key(&mut self,"):profile.index("    fn unloading_hives_absent_traced(")]
+        self.assertEqual(hashlib.sha256(strict_probes.encode()).hexdigest(), "b31c1dcec407b989724a6a990356478679de9a0a2c43d25b4f33b46fa405f61b")
+        unload = profile.split("fn unloading_hives_absent_traced(", 1)[1].split("fn absence(", 1)[0]
+        self.assertIn("need(self.prestate && self.exact && !self.unknown && !self.delete_entered && !self.settled)?;", unload)
+        self.assertIn('for name in [sid.clone(), format!("{sid}_Classes")]', unload)
+        self.assertIn("need(self.keys.len() < 64)?;", unload)
+        registered = "self.keys.push(Box::new(Key::new(R::HKEY_USERS, &name)))"
+        observed = "self.keys[index].open_with_purpose_traced(KeyOpenPurpose::HiveUnload, clock, trace)?"
+        closed = "self.keys[index].close_traced(trace)?;"
+        absent = "absent &= observed == KeyPresence::Absent;"
+        self.assertEqual([unload.index(marker) for marker in (registered, observed, closed, absent)],
+                         sorted(unload.index(marker) for marker in (registered, observed, closed, absent)))
+        self.assertEqual(production.count(".open_with_purpose_traced(KeyOpenPurpose::HiveUnload,"), 1)
+        self.assertEqual(production.count("self.unloading_hives_absent_traced(clock, trace)?"), 1)
+        retire = profile[profile.index("    fn retire(&mut self,"):profile.index("    fn settle(&mut self)")]
+        prior = retire.replace("self.unloading_hives_absent_traced(clock, trace)?", "self.hives_absent_traced(clock, trace)?", 1)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), "64d95cddae0660fd651a1a0377cff265b26bcad455c2a46b9e6d2b91dfb8ac3b")
+        close = production[production.index("    fn close(&mut self) -> Result<()> { self.close_traced"):production.index("// These are two different lifecycle observations")]
+        self.assertEqual(hashlib.sha256(close.encode()).hexdigest(), "80d3eb445ec8a7949b20e407274a453bb809720aaaa2d33478e6a9923a46cd71")
+        clock = production[production.index("struct Clock {"):production.index("\n#[derive(Default)]\nstruct ObserverCapture")]
+        self.assertEqual(hashlib.sha256(clock.encode()).hexdigest(), "2531bf905015df0beb876446e4c87f5e22cce8c196f2b8501f1db6ccbb058a81")
+        cases = tests.split("fn hive_unload_original_return_cases()", 1)[1].split("#[test]", 1)[0]
+        for required in ("for purpose in [Strict, HiveUnload]", "F::ERROR_KEY_DELETED", "F::ERROR_IO_PENDING", "F::ERROR_PATH_NOT_FOUND",
+                         "wrong_root.observe_open_return_traced(HiveUnload", "not_returned.observe_open_return_traced(HiveUnload",
+                         "key.close_traced(&mut trace), Err(Error::Unknown)"):
+            self.assertIn(required, cases)
+        selected = "ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow"
+        self.assertIn(selected, helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)
+        selected_body = tests.split("fn prerequisite_helper_decisions_preserve_native_control_flow()", 1)[1].split("#[test]", 1)[0]
+        self.assertEqual(selected_body.count("hive_unload_original_return_cases()?;"), 1)
+
     def test_prerequisite_fault_route_roster_is_explicit_and_legacy_smoke_sink_unchanged(self):
         expected = ('e01', 'e02', 'e03', 'e04', 'p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'a01', 'a02', 'a03', 'l01', 'l02', 'l03', 'l04', 'c01', 'c02', 'c03', 's01', 's02', 'r01', 'r02', 'z01', 'z02', 'u01', 'k01', 'k02', 'k03', 'b01', 'b02', 'b03', 'v01', 'v02', 'v03', 'v04', 'v05', 'v06', 'v07', 'v08', 'v09', 'v10', 'v11', 'f01', 'f02', 'f03', 'f04', 'f05', 'f06', 'f07', 'f08', 'f09', 'h01', 'q01', 'q02', 'q03', 'q04', 'q05', 'g01', 'g02', 'n01', 'n02', 'n03', 'n04', 'n05', 'n06', 'n07', 'd01', 'd02', 'd03', 'd04', 'd05', 'd06', 't01', 'o01', 'o02', 'o03', 'nb01', 'nb02', 'nb03', 'nb04', 'nb05', 'nb06', 'nb07', 'nb08', 'nb09', 'nb10', 'nb11', 'ht01')
         self.assertEqual(helper.WINDOWS_NORMAL_UI_PREREQUISITE_CHECKS, expected)
@@ -13717,38 +13787,93 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         self.assertIn("pub(super) prerequisite: Option<PrerequisiteRecord>", texts["qualification_result.rs"])
         self.assertIn("if record.first.is_none()", texts["qualification_result.rs"])
         self.assertIn("fn prerequisite_staged(&self)", texts["qualification_result.rs"])
-        self.assertIn("if role != UiRole::Prerequisite { diagnostic_smoke(stage,", texts["ordinary_owner_ui.rs"])
-        owner = texts["ordinary_owner_ui.rs"].split("fn run_prerequisite_traced(", 1)[1].split("mod contract_tests {", 1)[0]
+        ui = texts["ordinary_owner_ui.rs"]
+        self.assertIn("if role != UiRole::Prerequisite { diagnostic_smoke(stage,", ui)
+        owner = ui[ui.index("fn run_prerequisite_traced("):ui.index("// Inert regressions.")]
+        self.assertEqual(len(owner.encode("utf-8")), 30041)
+        self.assertEqual(hashlib.sha256(owner.encode("utf-8")).hexdigest(),
+                         "3c470aa11c189c5e15de5245187b6391eeae111b13a4e5223404ed731fc07130")
         self.assertIn("return observation; // Failed process/driver never permits profile/account deletion.", owner)
         self.assertIn("loop { std::thread::park();", owner)
-        self.assertNotIn("prerequisite_returned(", owner) # Only outside the genuine returned body.
-        for name, marker, expected_hash in (('ordinary_owner_ui.rs', 'fn diagnostic_smoke(', '21ec6a84cc5a514f7b47a24f4681d965b665a4322b74a7b6e64b7af83c8d3558'), ('qualification_result.rs', 'pub(super) fn diagnostic_data(', 'ab3529915977ff5f8ac4c1c174e72921e13342ee1bddceb5b5694b7d83872a1d'), ('hosted_tests.rs', 'pub(super) fn write_unavailable(', '8ae40ee83a61b59b27c1397ce715209ebfc33f8d5d41823d42d9a870dcdcfaa0')):
+        for outer_only in ("prerequisite_returned(", "normal_smoke_returned(", "returned_fault(", "returned_fault_frame(", "prerequisite_sink("):
+            self.assertNotIn(outer_only, owner) # Return-bound output stays outside the genuine native body.
+        smoke = ui[ui.index("struct SmokeTrace {"):ui.index("\n}\n", ui.index("impl SmokeTrace {")) + 4]
+        self.assertEqual(hashlib.sha256(smoke.encode("utf-8")).hexdigest(),
+                         "c9ef9faef3383a608d4e899fb6d6a302dfd1e5d0b9a055b056e156f92976e6a2")
+        self.assertIn("fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }", ui)
+        for name, marker, expected_hash in (('ordinary_owner_ui.rs', 'fn diagnostic_smoke(', '21ec6a84cc5a514f7b47a24f4681d965b665a4322b74a7b6e64b7af83c8d3558'), ('qualification_result.rs', 'pub(super) fn diagnostic_data(', 'ab3529915977ff5f8ac4c1c174e72921e13342ee1bddceb5b5694b7d83872a1d'), ('hosted_tests.rs', 'pub(super) fn write_unavailable(', '8ae40ee83a61b59b27c1397ce715209ebfc33f8d5d41823d42d9a870dcdcfaa0'), ('ordinary_owner_ui.rs', 'fn prerequisite_sink(', '17393a2ee3bd136e4b5f24f439ce654babf8460db90f525ba6b3c1f5ffb24f04')):
             source = texts[name]; begin = source.index(marker)
             end = source.index("\n}\n", begin) + 3
             self.assertEqual(hashlib.sha256(source[begin:end].encode("utf-8")).hexdigest(), expected_hash)
+        self.assertIn("enum ReturnedFaultRole { Prerequisite, NormalSmoke }", ui)
+        labels = ui.split("impl ReturnedFaultRole {", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(labels, """
+    fn labels(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Prerequisite => (PREREQUISITE_FAULT_PREFIX, PREREQUISITE_OWNER, "prerequisite-only"),
+            Self::NormalSmoke => (NORMAL_SMOKE_FAULT_PREFIX, NORMAL_SMOKE_OWNER, "normal-smoke"),
+        }
+    }""")
+        for role, wrapper, constant, owner_test in (("Prerequisite", "prerequisite_returned", "PREREQUISITE", "prerequisite"),
+                                                   ("NormalSmoke", "normal_smoke_returned", "NORMAL_SMOKE", "smoke")):
+            self.assertIn(f'const {constant}_FAULT_PREFIX: &str = "MRK_WINDOWS_UI_{constant}_FAULT_V1=";', ui)
+            self.assertIn(f'const {constant}_OWNER: &str = "ordinary_owner::hosted_normal_ui_{owner_test}_original_handle_contract";', ui)
+            guard = ui.split("fn " + wrapper + "(", 1)[1].split("\n}\n", 1)[0]
+            self.assertEqual(guard, "role: UiRole, original: Result<()>, trace: &mut InputTrace,\n"
+                "    binding: PrerequisiteBindings<'_>, output: &mut impl Write) -> (Result<()>, PrerequisiteDelivery) {\n"
+                f"    if role != UiRole::{role} {{ return (original, PrerequisiteDelivery::NotNeeded); }}\n"
+                f"    returned_fault(ReturnedFaultRole::{role}, original, trace, binding, output)")
+        run = ui.split("pub(super) fn run(", 1)[1].split("\nfn run_prerequisite_traced(", 1)[0]
+        enabled = "let mut trace = InputTrace::prerequisite_only(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke));"
+        invoked = "let original = run_prerequisite_traced(role, entry_tick, &mut trace, &mut capture);"
+        guarded = "if !matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke) || original.is_ok() { return original; }"
+        self.assertEqual(run.count("run_prerequisite_traced("), 1)
+        self.assertLess(run.index(enabled), run.index(invoked)); self.assertLess(run.index(invoked), run.index(guarded))
+        for role, wrapper in (("Prerequisite", "prerequisite_returned"), ("NormalSmoke", "normal_smoke_returned")):
+            call = f"UiRole::{role} => {wrapper}(role, original, &mut trace, binding, &mut output),"
+            self.assertEqual(run.count(call), 1); self.assertLess(run.index(guarded), run.index(call))
+        returned = ui[ui.index("fn returned_fault("):ui.index("pub(super) fn run(")]
+        for forbidden in ("Clock::", "Instant::", "GetTickCount", "GetLastError", "GetExitCodeProcess", "CreateProcess", "CloseHandle", "std::thread::", ".effect(", ".effect_traced("):
+            self.assertNotIn(forbidden, run + returned)
+        self.assertIn("Ok(()) => return (original, PrerequisiteDelivery::NotNeeded)", returned)
+        self.assertIn("trace.prerequisite_fault(PrerequisiteCheck::U01, error, None, None);", returned)
+        self.assertIn("(original, delivery) // Delivery has no native Error/Unknown/park authority.", returned)
+        self.assertIn("const PREREQUISITE_FAULT_FRAME_MAX_BYTES: usize = 664;", ui)
+        self.assertIn("const PREREQUISITE_FAULT_BUFFER_BYTES: usize = 2048;", ui)
+        self.assertIn("returned_fault_frame(ReturnedFaultRole::Prerequisite, record, returned, binding, output)", ui)
+        begin = ui.index("fn returned_fault_frame("); end = ui.index("\n}\n", begin) + 3
+        encoder = ui[begin:end]
+        # Invert only the fixed-label extraction; every old grammar/redaction/
+        # validation byte must still match the admitted prerequisite encoder.
+        legacy_encoder = encoder.replace("fn returned_fault_frame(role: ReturnedFaultRole, ", "fn prerequisite_fault_frame(", 1)
+        legacy_encoder = legacy_encoder.replace("returned: Error,\n    binding:", "returned: Error, binding:", 1)
+        legacy_encoder = legacy_encoder.replace("    let (prefix, owner, mode) = role.labels();\n", "", 1)
+        legacy_encoder = legacy_encoder.replace(r'\n{prefix}source={};tree={};run={};attempt=1;owner={owner};mode={mode};',
+            r'\n{PREREQUISITE_FAULT_PREFIX}source={};tree={};run={};attempt=1;owner={PREREQUISITE_OWNER};mode=prerequisite-only;', 1)
+        self.assertEqual(hashlib.sha256(legacy_encoder.encode("utf-8")).hexdigest(),
+                         "bacf582a730c5a04500efd3da181fb29f83cbe92bbc8b9b9a9705c3838b6ee67")
         for private in ("accountName", "accountSid", "password", "hProcess", "path.display", "std::env::var"):
-            encoder = texts["ordinary_owner_ui.rs"].split("fn prerequisite_fault_frame(", 1)[1].split("\n#[derive", 1)[0]
             self.assertNotIn(private, encoder)
 
     def test_prerequisite_diagnostic_source_graph_and_selected_inert_results_are_closed(self):
         added = ('ordinary_owner::normal_ui::contract_tests::prerequisite_first_fault_covers_return_routes_and_expected_negatives', 'ordinary_owner::normal_ui::contract_tests::prerequisite_first_fault_survives_secondary_clock_and_status_reuse', 'ordinary_owner::normal_ui::contract_tests::prerequisite_native_statuses_require_original_completed_observations', 'ordinary_owner::normal_ui::contract_tests::prerequisite_frame_is_closed_bounded_and_binding_exact', 'ordinary_owner::normal_ui::contract_tests::prerequisite_diagnostic_sink_checks_one_write_one_flush_without_outcome_change', 'ordinary_owner::normal_ui::contract_tests::prerequisite_return_guard_keeps_unknown_and_deadline_semantics', 'ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow')
         names = helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
-        self.assertEqual(names[-7:], added); self.assertEqual(len(names), 19)
+        self.assertEqual(names[12:19], added); self.assertEqual(len(names), 24)
         artifact = {"path": r"C:\inert\mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"}
         self.assertEqual(helper.windows_normal_ui_inert_argv(artifact),
                          [artifact["path"], *names, "--exact", "--nocapture", "--test-threads=1"])
-        lines = ["running 19 tests", *("test " + name + " ... ok" for name in names),
-                 "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s"]
+        lines = ["running 24 tests", *("test " + name + " ... ok" for name in names),
+                 "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s"]
         raw = ("\n".join(lines) + "\n").encode("ascii")
         result = helper.windows_normal_ui_inert_output(raw)
-        self.assertEqual(result["tests"], list(names)); self.assertEqual(result["passed"], 19)
-        for changed in (raw.replace(b"running 19 tests", b"running 12 tests"), raw.replace(b"19 passed", b"12 passed"),
+        self.assertEqual(result["tests"], list(names)); self.assertEqual(result["passed"], 24)
+        for changed in (raw.replace(b"running 24 tests", b"running 12 tests"), raw.replace(b"24 passed", b"12 passed"),
                         raw.replace(names[-1].encode("ascii"), b"foreign::test"), raw.replace(b" ... ok", b" ... FAILED", 1),
                         raw.replace((lines[1] + "\n").encode(), b""), raw.replace((lines[1] + "\n").encode(), (lines[2] + "\n").encode()),
                         raw + b"extra\n", raw.replace(b"0 ignored", b"1 ignored")):
             with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(changed)
         native = SOURCE / helper.WINDOWS_INSTALLED_CRATE
-        for leaf, expected_hash in (('Cargo.toml', '4b15cec0864795544fcca166c9c0537baf4ef26bdeaa39a5b10c10726a18ff53'), ('src/decode.rs', '40600d98709a0550e742701b2ede3378de8498ce561d32e3234c2c5b04db3eca'), ('src/security.rs', 'd28d42680c23ca389bfcc77d2d48457752f88919f6804f5f5e88966477e9acc6'), ('src/ui.rs', '6a6cae890c813da16d0ebc0c1ebbda36baeaaebd95259ff567743729d4143ab3')):
+        for leaf, expected_hash in (('Cargo.toml', '4b15cec0864795544fcca166c9c0537baf4ef26bdeaa39a5b10c10726a18ff53'), ('src/decode.rs', '40600d98709a0550e742701b2ede3378de8498ce561d32e3234c2c5b04db3eca'), ('src/security.rs', 'd28d42680c23ca389bfcc77d2d48457752f88919f6804f5f5e88966477e9acc6'), ('src/ui.rs', 'f4b747dcea9f28f87aed8f862b9c33aca9e51dea4d18adb45042036626923316')):
             self.assertEqual(hashlib.sha256((native / leaf).read_bytes()).hexdigest(), expected_hash)
         text = (native / "src/ordinary_owner_ui.rs").read_text(encoding="utf-8")
         tests = text.split("mod contract_tests {", 1)[1]
@@ -13800,7 +13925,7 @@ class WindowsNormalUiPolicyDiagnosticTests(unittest.TestCase):
 
     def test_selection_and_summary_must_be_complete_exact_and_unambiguous(self):
         context, out, err, name, _ = self.fixture()
-        for changed in (out.replace(b"running 19", b"running 0"), out.replace(b"18 passed", b"19 passed"),
+        for changed in (out.replace(b"running 24", b"running 0"), out.replace(b"23 passed", b"24 passed"),
                         out.replace(b"1 failed", b"0 failed"), out.replace(b"0 ignored", b"1 ignored"),
                         out.replace(b"test result: FAILED", b"test result: ok"), out + b"extra\n",
                         out.replace(name.encode(), (name + "_other").encode()),
@@ -14126,6 +14251,633 @@ class WindowsNormalUiSetupTests(unittest.TestCase):
             self.assertEqual(job.count("ci_foundation.py " + phase + "'"), 1)
         self.assertIn("MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME", blocks["retain"])
 
+
+class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
+    """Independent synthetic closed DATA; no journal, process or native fixture."""
+    OWNERS = {"project-draft": "ordinary_owner::hosted_normal_ui_project_original_handle_contract",
+              "quit-passive": "ordinary_owner::hosted_normal_ui_quit_original_handle_contract",
+              "document-loss": "ordinary_owner::hosted_normal_ui_document_original_handle_contract"}
+
+    @staticmethod
+    def frame_data(role="project-draft"):
+        return {"schema": 1, "source": "a" * 40, "tree": "b" * 40, "run": "123456", "attempt": 1,
+                "role": role, "request": "c" * 64, "diagnosticOnly": True,
+                "projection": {"bytes": 200, "records": 1, "reason": 0,
+                               "last": {"sequence": 1, "event": 1, "step": 1, "pending": 0, "pendingStep": 0,
+                                        "dispatch": 0, "flags": 0, "startup": None, "refusal": 0, "coverageIncomplete": False},
+                               "observerRefusal": None, "startupRefusal": None}}
+
+    @classmethod
+    def frame(cls, data=None):
+        # Stdlib fixture encoder, not a candidate serializer.
+        return b"\nMRK_WINDOWS_UI_OBSERVER_DIAGNOSTIC_V1=" + json.dumps(
+            cls.frame_data() if data is None else data, separators=(",", ":")).encode("ascii") + b"\n"
+
+    def test_native_folder_sites_are_closed_data_and_never_gui_credit(self):
+        names = ("NativePrecondition", "NativeActionBinding", "NativeFolderInput", "NativeFolderSet",
+                 "NativeFolderRead", "NativeFolderCompare", "NativeFolderDifferent", "NativeFolderInvalidated",
+                 "NativeActionState")
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_observer_diagnostic_data.rs").read_text()
+        block = source.split("codes!(Refusal {", 1)[1].split("});", 1)[0]
+        roster = [(name, int(code)) for name, code in __import__("re").findall(r"(\w+)=(\d+)", block)]
+        self.assertEqual(len(roster), 34)
+        self.assertEqual(roster[-9:], list(zip(names, range(26, 35))))
+        self.assertEqual([code for _, code in roster], list(range(1, 35)))
+        for code in range(26, 35):
+            frame = self.frame_data()
+            row = frame["projection"]["last"]
+            row.update(event=5, step=11 if 30 <= code <= 33 else 10, refusal=code)
+            frame["projection"]["observerRefusal"] = deepcopy(row)
+            raw = self.frame(frame)
+            self.assertLessEqual(len(raw), 4096)
+            with self.subTest(code=code):
+                self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+                parts = list(self.original_log())
+                parts[0] = parts[0].replace(self.frame()[1:-1], raw[1:-1])
+                parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+                data = self.joined(parts)
+                self.assertEqual(data["joinState"], "verified")
+                self.assertTrue(data["observerDiagnosticOnly"])
+                self.assertFalse(data["nativeQualified"])
+                self.assertFalse(data["combinedPassed"])
+                self.assertEqual(data["guiCasesExecuted"], 0)
+                self.assertEqual(data["verifiedMethods"], 0)
+        for code in (-1, True, 35, 255):
+            frame = self.frame_data(); frame["projection"]["last"]["refusal"] = code
+            with self.subTest(unknown=code), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_folder_navigation_keeps_original_request_readbacks_and_callback_order(self):
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        action = source.split("    fn installed_action_body(", 1)[1].split("\nstruct DialogReturn", 1)[0]
+        request, accept = action.split("        let accept = matches!", 1)
+        self.assertEqual(request.count(".SetFolder(item)"), 1)
+        self.assertLess(request.index("self.folder.requested.replace(true)"), request.index("SH::SHCreateItemFromParsingName"))
+        self.assertLess(request.index("self.folder.item.set(ComOriginal::new"), request.index("self.folder.navigation.arm()?"))
+        self.assertLess(request.index("self.folder.navigation.arm()?"), request.index(".SetFolder(item)"))
+        self.assertLess(request.index("hresult(returned)?"), request.index("return Ok(true)"))
+        self.assertNotIn("folder_readback", request)
+        self.assertNotIn("GetFolder", request)
+        self.assertLess(accept.index("self.folder.navigation.begin_accept()?"), accept.index("self.folder_readback(0, site)?"))
+        self.assertLess(accept.index("self.folder_readback(0, site)?"), accept.index("W::GetDlgItem"))
+        self.assertLess(accept.index("IsWindowEnabled(button)"), accept.index("self.folder_readback(1, site)?"))
+        self.assertLess(accept.index("self.folder_readback(1, site)?"), accept.rindex("self.folder.navigation.check_accept()?"))
+        self.assertLess(accept.rindex("self.folder.navigation.check_accept()?"), accept.rindex("self.observation_turn_active()"))
+        self.assertLess(accept.rindex("self.observation_turn_active()"), accept.index("W::SendMessageW(button, W::BM_CLICK"))
+        self.assertEqual(accept.count("self.folder_readback(0, site)?"), 1)
+        self.assertEqual(accept.count("self.folder_readback(1, site)?"), 1)
+        readback = source.split("    fn folder_readback(", 1)[1].split("    pub fn installed_action(", 1)[0]
+        for required in ("readbacks.get(index).filter(|slot| slot.get().is_none())", "base__.GetFolder",
+                         "slot.set(ComOriginal::new", "SICHINT_CANONICAL", "comparisons[index].get() } != 0",
+                         "DialogActionSite::FolderRead", "DialogActionSite::FolderCompare", "DialogActionSite::FolderDifferent"):
+            self.assertIn(required, readback)
+        self.assertEqual(readback.count("HRESULT_PENDING"), 2)
+        self.assertIn("readbacks: [OnceCell<ComOriginal<IShellItem>>; 2]", source)
+        callbacks = source.split("    fn OnFolderChanging(", 1)[1].split("    fn OnSelectionChange(", 1)[0]
+        self.assertEqual(callbacks.count("self.dialog.enter()"), 2)
+        self.assertEqual(callbacks.count("self.dialog.visible()"), 1)  # Existing presentation observation only.
+        self.assertIn("self.dialog.folder.navigation.changing()", callbacks)
+        self.assertIn("self.dialog.folder.navigation.changed()", callbacks)
+        for forbidden in ("folder_readback", "installed_action", "GetFolder", "SetFolder", "BM_CLICK", "ObservationTurn"):
+            self.assertNotIn(forbidden, callbacks)
+        for start, end, expected in (
+            ("    fn release_once(", "    pub fn settled(", "3628506c1e44fb34bbcd10fa2f84c7202bdf9287ffff4b64621d4bb170870d90"),
+            ('unsafe extern "system" fn control_window(', 'unsafe extern "system" fn task_callback(',
+             "232583cbb4a600aac4e17d30b47469e3304a5b0d3a7d1d1ea447c275a4804d7f")):
+            block = source[source.index(start):source.index(end, source.index(start))]
+            self.assertEqual(hashlib.sha256(block.encode()).hexdigest(), expected)
+
+    def test_navigation_contracts_bind_the_actual_small_production_state(self):
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui.rs").read_text()
+        dialog = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        module = source.split("mod folder_navigation {\n", 1)[1].split("\n}\n\n// Qualification-only supporting HWND", 1)[0]
+        state = module.split("impl FolderNavigation {", 1)[1].split("    #[cfg(test)]\n    mod tests {", 1)[0]
+        tests = module.split("    mod tests {", 1)[1]
+        self.assertIn('#[cfg(any(test, feature = "windows-installed-observation"))]\nmod folder_navigation {', source)
+        self.assertIn('#[cfg(feature = "windows-installed-observation")]\nuse super::folder_navigation::FolderNavigation;', dialog)
+        self.assertNotIn("struct FolderNavigation", dialog)
+        self.assertIn("navigation: FolderNavigation", dialog)
+        self.assertIn("pub(super) struct FolderNavigation { armed: Cell<bool>, observed: Cell<bool>, accepting: Cell<bool>, invalidated: Cell<bool> }", module)
+        self.assertEqual(state.count("pub(super) fn "), 6)
+        self.assertIn("self.armed.replace(true)", state)
+        self.assertIn("self.accepting.replace(true)", state)
+        self.assertIn("if self.accepting.get() { self.invalidated.set(true); }", state)
+        self.assertIn("if self.armed.get() && !self.invalidated.get() { self.observed.set(true); }", state)
+        for forbidden in ("invalidated.set(false)", "armed.set(false)", "accepting.set(false)"):
+            self.assertNotIn(forbidden, module)
+        for forbidden in ("unsafe", "std::thread", "Instant::", "SetTimer", "GetFolder", "SetFolder", "ComOriginal"):
+            self.assertNotIn(forbidden, state)
+        self.assertIn("use super::{FolderNavigation, UiError}", tests)
+        self.assertEqual(tests.count("let navigation = FolderNavigation::default()"), 4)
+        names = ("initial_callbacks_cannot_arm_a_request_or_accept", "request_and_navigation_hint_are_separate_from_one_accept",
+                 "pre_accept_change_waits_without_spending_or_reissuing", "change_after_accept_entry_is_sticky_through_nested_completion")
+        for name in names:
+            self.assertIn("fn " + name + "()", tests)
+        selected = tuple("ui::folder_navigation::tests::" + name for name in names) + (
+            "ui_observer_diagnostic_data::tests::native_action_sites_are_closed_first_only_and_bounded",)
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS[-5:], selected)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+        self.assertEqual(len(set(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)), 24)
+        self.assertEqual(helper.windows_normal_ui_features("native"), ["desktop-ui"])
+        # Invert only relocation indentation and sibling visibility. This pins
+        # the unchanged original state policy and all four actual-state tests.
+        body = module.split("    use std::cell::Cell;\n", 1)[1].lstrip("\n")
+        body = "".join(line[4:] if line.startswith("    ") else line for line in body.splitlines(keepends=True))
+        body = body.replace("pub(super) ", "") + "\n"
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), "95d75fca49d70d87971ba9db8dcfbe3332a274acc43beca3b390637ff09ee4ca")
+
+    def test_first_site_return_preserves_ui_error_original_owner_and_dispatch_retirement(self):
+        source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell_windows.rs").read_text()
+        observer = (SOURCE / "desktop/src-tauri/src/installed_shell_observation_windows.rs").read_text()
+        self.assertIn("pub struct DialogActionFailure { pub site: DialogActionSite, pub error: UiError }", source)
+        self.assertIn("self.installed_action_body(action, &mut site).map_err(|error| DialogActionFailure { site, error })", source)
+        adapter = shell.split("    pub(crate) fn observe_dialog_action(", 1)[1].split("    pub(crate) fn session_final(", 1)[0]
+        for required in ("original().map_err(binding)?", "actual != id", "!allowed(&call, &owner).map_err(binding)?",
+                         "owner.interrupted()", "original.installed_action(action)"):
+            self.assertIn(required, adapter)
+        for forbidden in ("spawn", "run_on_main_thread", "thread::", "sleep", "lock()", "borrow_mut()"):
+            self.assertNotIn(forbidden, adapter)
+        body = observer.split("    fn native_body(", 1)[1].split("    fn dom(", 1)[0]
+        self.assertIn("Result<Option<bool>, Refusal>", body)
+        hint = "if step == Step::AcceptProject && !dialog.native.folder_navigation_observed { return Ok(Some(false)); }"
+        self.assertIn(hint, body)
+        self.assertLess(body.index(hint), body.index("r.actions_attempted[index] = true; drop(r)"))
+        self.assertLess(body.index("r.actions_attempted[index] = true; drop(r)"), body.index("observe_dialog_action(id, action)"))
+        for site, reason in (("Binding", "NativeActionBinding"), ("FolderInput", "NativeFolderInput"),
+                             ("FolderSet", "NativeFolderSet"), ("FolderRead", "NativeFolderRead"),
+                             ("FolderCompare", "NativeFolderCompare"), ("FolderDifferent", "NativeFolderDifferent"),
+                             ("FolderInvalidated", "NativeFolderInvalidated"), ("State", "NativeActionState")):
+            self.assertIn("DialogActionSite::" + site + " => Refusal::" + reason, body)
+        self.assertNotIn("folder_ready", observer)
+        step = observer[observer.index("    fn native_step("):observer.index("    fn native_body(")]
+        step = step.replace("if let Err(reason) = returned { self.fail(reason); }", "if returned.is_err() { self.fail(Refusal::NativeStep); }")
+        self.assertEqual(hashlib.sha256(step.encode()).hexdigest(), "31e706e4b1b82ab4292743946f6cee8713fc3fbfbaaf4ed9eda2af67c7a63790")
+        modal = observer[observer.index("    pub(super) fn modal_turn("):observer.index("    fn reload_step(")]
+        self.assertEqual(hashlib.sha256(modal.encode()).hexdigest(), "4781dcb43a93eaaab8613de50db79e115686252dc4980f4ff8863b3b0de177bb")
+
+    @classmethod
+    def original_log(cls, role="project-draft", coalesced=True):
+        binding = {"sourceSha": "a" * 40, "sourceTree": "b" * 40, "runId": "123456", "attempt": 1, "jobId": 7654321,
+                   "owner": cls.OWNERS[role], "ref": "refs/heads/verify/desktop-windows-normal-project-ui",
+                   "event": "workflow_dispatch", "dispatchScope": "windows-normal-project-ui", "expectedSha": "a" * 40,
+                   "workflowPath": ".github/workflows/desktop-foundation.yml", "workflowSha": "a" * 40,
+                   "role": role, "requestSha256": "c" * 64}
+        run = {"id": 123456, "run_attempt": 1, "head_sha": "a" * 40, "event": "workflow_dispatch",
+               "head_branch": "verify/desktop-windows-normal-project-ui", "path": ".github/workflows/desktop-foundation.yml",
+               "status": "completed", "conclusion": "failure"}
+        jobs = {"total_count": 2, "jobs": [{"id": 7654320, "name": "unrelated skipped job"},
+            {"id": 7654321, "name": "Windows MSVC headless reader and native facts / no runtime enablement",
+             "run_id": 123456, "run_attempt": 1, "head_sha": "a" * 40, "status": "completed", "conclusion": "failure",
+             "steps": [{"number": 17, "name": "Own one " + role + " application and settle its original ordinary-account resources",
+                        "status": "completed", "conclusion": "failure", "started_at": "2026-09-26T10:00:00Z",
+                        "completed_at": "2026-09-26T10:02:00Z"}]}]}
+        stamp = b"2026-09-26T10:01:40.0000000Z "
+        opening = b"test " + cls.OWNERS[role].encode("ascii") + b" ... "
+        if coalesced: opening += b'MRK_WINDOWS_ORDINARY_OWNER_REFUSED={"stage":"ui-profile-original-binding","unknown":false,"cleanupNotRetried":true}'
+        lines = [b"running 1 test", opening, cls.frame(cls.frame_data(role))[1:-1], b"FAILED",
+                 b"test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 173 filtered out; finished in 100.00s"]
+        raw = b"".join(stamp + line + b"\n" for line in lines)
+        closure = {"schema": "windows-normal-ui-observer-original-log-close-v1",
+                   **{key: binding[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "jobId", "role", "requestSha256")},
+                   "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                   "transferReturned": True, "streamClosed": True, "originalJobCompleted": True}
+        return raw, binding, run, jobs, closure
+
+    @staticmethod
+    def joined(parts, *, closed=True):
+        raw, binding, run, jobs, closure = parts
+        return helper.windows_normal_ui_observer_log_data(raw, binding=binding, run=run, jobs=jobs, closure=closure if closed else None)
+
+    def test_all_three_exact_owner_steps_join_only_diagnostic_scalars(self):
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text()
+        for role in self.OWNERS:
+            for coalesced in (True, False):
+                parts = self.original_log(role, coalesced)
+                with self.subTest(role=role, coalesced=coalesced), patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no I/O")), \
+                        patch.object(helper, "run", side_effect=AssertionError("no process")):
+                    data = self.joined(parts)
+                self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["frameState"], "received")
+                self.assertTrue(data["observerDiagnosticOnly"]); self.assertTrue(data["originalSelectedFailure"])
+                self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
+                self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
+                self.assertIsNone(data["rawOriginalExit"])
+                self.assertEqual(data["senderDelivery"], "unobservable")
+            expected = "Own one " + role + " application and settle its original ordinary-account resources"
+            self.assertEqual(helper.WINDOWS_NORMAL_UI_OBSERVER_STEPS[role], expected)
+            self.assertEqual(workflow.count("      - name: " + expected + "\n"), 1)
+
+    def test_original_closure_and_complete_source_metadata_cannot_be_invented(self):
+        self.assertEqual(self.joined(self.original_log(), closed=False)["joinState"], "unavailable")
+        for part, key, value in ((1, "sourceSha", "d" * 40), (1, "requestSha256", "d" * 64), (1, "jobId", 7654320),
+                                 (1, "role", "normal-smoke"), (1, "attempt", True), (2, "status", "in_progress"),
+                                 (3, "total_count", 3), (4, "streamClosed", False), (4, "bytes", 0), (4, "sha256", "0" * 64)):
+            parts = list(self.original_log()); parts[part][key] = value
+            with self.subTest(part=part, key=key): self.assertEqual(self.joined(parts)["joinState"], "mismatch")
+        for change in ("duplicate-job", "duplicate-step", "wrong-step", "unknown-end", "wrong-harness"):
+            parts = list(self.original_log()); job = parts[3]["jobs"][1]
+            if change == "duplicate-job": parts[3]["jobs"].append(deepcopy(job)); parts[3]["total_count"] += 1
+            elif change == "duplicate-step": job["steps"].append(deepcopy(job["steps"][0]))
+            elif change == "wrong-step": job["steps"][0]["name"] = "unrelated owner"
+            elif change == "unknown-end": job["steps"][0]["completed_at"] = None
+            else:
+                parts[0] = parts[0].replace(self.OWNERS["project-draft"].encode(), b"foreign::owner")
+                parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            with self.subTest(change=change): self.assertEqual(self.joined(parts)["joinState"], "mismatch")
+
+    def test_duplicate_missing_partial_foreign_and_outside_span_frames_never_verify(self):
+        for change, state in (("duplicate", "duplicate"), ("missing", "missing"), ("partial", "partial"),
+                              ("foreign", "received"), ("outside", "received"), ("overbound", "oversized")):
+            parts = list(self.original_log()); lines = parts[0].splitlines(keepends=True); frame = lines[2]
+            if change == "duplicate": lines.insert(3, frame)
+            elif change == "missing": del lines[2]
+            elif change == "partial": lines = lines[:2] + [frame[:-4]]
+            elif change == "foreign": lines[2] = frame.replace(b'"source":"' + b"a" * 40, b'"source":"' + b"d" * 40)
+            elif change == "outside": lines[2] = frame.replace(b"10:01:40", b"10:03:00")
+            else: lines[2] = frame[:-1] + b" " * 4096 + b"\n"
+            parts[0] = b"".join(lines); parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            data = self.joined(parts)
+            with self.subTest(change=change):
+                self.assertEqual(data["frameState"], state); self.assertNotEqual(data["joinState"], "verified")
+
+    def test_projection_rejects_open_shape_boolean_numbers_and_invalid_startup_or_pending(self):
+        for where, key, value in (("frame", "diagnosticOnly", False), ("frame", "path", "private"),
+                ("projection", "records", True), ("projection", "records", 64), ("projection", "bytes", 32769),
+                ("projection", "reason", 7), ("row", "event", 7), ("row", "pending", 1), ("row", "pendingStep", 44),
+                ("row", "flags", 65536), ("row", "refusal", 35), ("row", "coverageIncomplete", 0),
+                ("row", "startup", 1), ("row", "startup", (0x51 << 56) | (1 << 52)),
+                ("row", "event", 3), ("row", "event", 4), ("row", "event", 5)):
+            frame = self.frame_data(); at = frame if where == "frame" else frame["projection"] if where == "projection" else frame["projection"]["last"]
+            at[key] = value
+            with self.subTest(where=where, key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        raw = self.frame()
+        for bad in (raw[:-1], raw.replace(b'"schema":1', b'"schema":1,"schema":1'), raw + b"\n", raw.replace(b"\n", b"\r\n")):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(bad)
+
+    def test_missing_partial_and_first_refusal_projection_stay_historical_data(self):
+        for reason in range(7):
+            frame = self.frame_data(); projection = frame["projection"]; projection["reason"] = reason
+            if reason in (1, 2): projection.update(bytes=0, records=0, last=None)
+            data = helper.windows_normal_ui_observer_frame(self.frame(frame))
+            self.assertEqual(data["projection"]["reason"], reason); self.assertTrue(data["diagnosticOnly"])
+        frame = self.frame_data(); projection = frame["projection"]; row = projection["last"]
+        row.update(event=4, startup=(0x51 << 56) | (22 << 26) | (1 << 44), refusal=2)
+        projection.update(observerRefusal=deepcopy(row), startupRefusal=deepcopy(row))
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["projection"], projection)
+        changed = deepcopy(frame); changed["projection"]["startupRefusal"] = None
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        changed = self.frame_data(); changed["projection"]["last"]["coverageIncomplete"] = True
+        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key in ("observerRefusal", "startupRefusal"):
+            changed = deepcopy(frame); changed["projection"][key]["step"] = 2
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+
+
+    @classmethod
+    def capture_frame_data(cls, *, gate=False):
+        frame = cls.frame_data()
+        frame["projection"] = {"bytes": 0, "records": 0, "reason": 1, "last": None, "observerRefusal": None, "startupRefusal": None}
+        frame["captureFailure"] = {"kind": "returned-error", "operation": "journal-open", "check": "native-return", "index": 16,
+            "error": "Unavailable", "native": {"api": "NtCreateFile", "selector": "none", "kind": "ntstatus",
+                "value": -1073741757, "status": "ntstatus", "code": -1073741757}, "detail": None}
+        if gate:
+            frame["captureFailure"] = {"kind": "not-attempted", "operation": "eligibility", "check": "inventory-fresh",
+                                      "index": None, "error": None, "native": None, "detail": None}
+        return frame
+
+    @classmethod
+    def entry_frame_data(cls, entry=None, *, position=0, role="project-draft"):
+        frame = cls.capture_frame_data(); frame["role"] = role
+        frame["captureFailure"].update(operation="directory-entry", check="expected-child", index=position,
+                                       error="Unsafe", native=None, detail=None)
+        frame["captureFailure"]["entry"] = deepcopy(entry if entry is not None else {
+            "class": "known-cwd-log", "expected": None, "log": "debug-log", "kind": "file", "attributes": 0x22})
+        return frame
+
+    def test_capture_failure_accepts_only_exact_legacy_or_new_envelope(self):
+        legacy = self.frame_data()
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
+        for frame in (self.frame_data(), self.capture_frame_data(), self.capture_frame_data(gate=True)):
+            frame.setdefault("captureFailure", None)
+            raw = self.frame(frame)
+            self.assertLessEqual(len(raw), 4096)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+            for change in ("extra", "missing", "duplicate", "bool-index", "unknown-error", "new-kind", "wrong-operation", "wrong-check"):
+                changed = deepcopy(frame)
+                if change == "extra": changed["rawJournal"] = "private"
+                elif change == "missing": del changed["request"]
+                elif change == "duplicate":
+                    with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(raw.replace(b'"captureFailure":', b'"captureFailure":null,"captureFailure":'))
+                    continue
+                elif changed["captureFailure"] is None: continue
+                elif change == "bool-index": changed["captureFailure"]["index"] = True
+                elif change == "unknown-error": changed["captureFailure"]["error"] = "Unknown"
+                elif change == "new-kind": changed["captureFailure"]["kind"] = "timeout"
+                elif change == "wrong-operation": changed["captureFailure"]["operation"] = "private-path"
+                else: changed["captureFailure"]["check"] = "guessed-native"
+                with self.subTest(change=change), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_observer_frame(self.frame(changed))
+
+    def test_capture_failure_keeps_gate_error_and_observed_empty_distinct(self):
+        gate = self.capture_frame_data(gate=True)
+        for key, value in (("error", "State"), ("native", self.capture_frame_data()["captureFailure"]["native"]),
+                           ("index", 0), ("detail", "input.NameState"), ("operation", "journal-open"), ("check", "read-count")):
+            changed = deepcopy(gate); changed["captureFailure"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for reason in range(7):
+            changed = self.capture_frame_data(); changed["projection"]["reason"] = reason
+            if reason == 1: self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(changed))["projection"]["reason"], 1)
+            else:
+                with self.subTest(reason=reason), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        empty = self.capture_frame_data(); empty["captureFailure"] = None; empty["projection"]["reason"] = 2
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(empty))["projection"]["reason"], 2)
+        for check, detail in (("input", "input.NameExact"), ("admission", "admission.canonical-name")):
+            frame = self.capture_frame_data(); fault = frame["captureFailure"]
+            fault.update(check=check, native=None, error="Unsafe", detail=detail)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["captureFailure"], fault)
+            for bad in (None, "private", "input.NotAClosedCheck", "admission.NotAClosedCheck", "none"):
+                fault["detail"] = bad
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_poststate_capture_uses_closed_family_positions_without_widening_native_data(self):
+        positions = {
+            'output-poststate': None, 'result-original': None, 'configuration-input': None, 'configuration-read': None,
+            'fixture-directory-original': 2, 'fixture-directory-open': 2, 'fixture-directory-metadata': 2,
+            'fixture-directory-binding': 2, 'fixture-directory-metadata-after': 2,
+            'fixture-file-original': 3, 'fixture-file-open': 3, 'fixture-file-metadata': 3, 'fixture-file-streams': 3,
+            'fixture-file-read': 3, 'fixture-file-eof': 3, 'fixture-file-metadata-after': 3,
+            'directory-batch': 3, 'directory-entry': 3, 'directory-roster': 3,
+        }
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_OBSERVER_POSTSTATE_POSITIONS, positions)
+        for operation, maximum in positions.items():
+            for index in (None, False, True, -1, 0, 1, 2, 3, 4, 16, 17):
+                frame = self.capture_frame_data()
+                frame["captureFailure"].update(operation=operation, index=index, check="original-clock",
+                                               error="Unsafe", native=None, detail=None)
+                admitted = index is None if maximum is None else type(index) is int and 0 <= index <= maximum
+                with self.subTest(operation=operation, index=index):
+                    if admitted:
+                        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+                    else:
+                        with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for check in ("original-stamp", "role", "bytes-equal", "end-of-file", "entry-unique", "entry-limit",
+                      "expected-child", "entry-kind", "dot-identity", "parent-identity", "exact-roster"):
+            frame = self.capture_frame_data()
+            frame["captureFailure"].update(operation="directory-entry", index=0, check=check,
+                                           error="Unsafe", native=None, detail=None)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+            frame["captureFailure"]["native"] = self.capture_frame_data()["captureFailure"]["native"]
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_capture_failure_native_pairs_are_scoped_failed_scalars_not_handles(self):
+        pairs = [("QueryDosDeviceW", "none", "count"), ("GetFinalPathNameByHandleW", "none", "count"),
+                 ("NtCreateFile", "none", "ntstatus"), ("NtQueryVolumeInformationFile", "file-fs-device-information", "ntstatus"),
+                 ("NtQueryInformationFile", "file-stream-information", "ntstatus"),
+                 *((api, "none", "bool") for api in ("GetHandleInformation", "GetVolumeInformationByHandleW", "GetKernelObjectSecurity", "ReadFile")),
+                 *(("GetFileInformationByHandleEx", selector, "bool") for selector in ("file-basic-info", "file-standard-info",
+                     "file-attribute-tag-info", "file-id-info", "file-case-sensitive-info", "file-stream-info"))]
+        for api, selector, kind in pairs:
+            frame = self.capture_frame_data(); native = frame["captureFailure"]["native"]
+            native.update(api=api, selector=selector, kind=kind, value=-(2**31) if kind == "ntstatus" else 0,
+                          status="ntstatus" if kind == "ntstatus" else "win32", code=-(2**31) if kind == "ntstatus" else 2**32 - 1)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["captureFailure"]["native"], native)
+            for key, value in (("api", "CloseHandle"), ("selector", "FileStreamInfo"), ("kind", "handle"), ("status", "ambient"),
+                               ("value", True), ("code", False), ("value", 1), ("code", 2**32), ("path", "private")):
+                changed = deepcopy(frame); changed["captureFailure"]["native"][key] = value
+                with self.subTest(api=api, key=key), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key, value in (("check", "native-clock-before"), ("error", "Bounds"), ("error", "State"), ("native", None),
+                           ("detail", "input.ReadReturned"), ("index", 17), ("index", -1), ("operation", "eligibility")):
+            frame = self.capture_frame_data(); frame["captureFailure"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(frame))
+
+    def test_capture_failure_collector_never_upgrades_original_failure_or_historical_prefix(self):
+        for gate in (False, True):
+            parts = list(self.original_log()); frame = self.capture_frame_data(gate=gate)
+            parts[0] = parts[0].replace(self.frame(self.frame_data())[1:-1], self.frame(frame)[1:-1])
+            parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            with patch.object(helper, "run", side_effect=AssertionError("no subprocess/native")), \
+                    patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no I/O")):
+                data = self.joined(parts)
+            self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
+            self.assertEqual(data["projection"]["reason"], 1)
+            for key in ("nativeQualified", "combinedPassed"): self.assertFalse(data[key])
+            for key in ("guiCasesExecuted", "verifiedMethods"): self.assertEqual(data[key], 0)
+            self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
+        self.assertIsNone(self.joined(self.original_log())["captureFailure"])
+
+    def test_capture_failure_source_keeps_original_clocks_native_calls_and_return_control(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic, book, qualifier = ((root / name).read_text() for name in
+            ("ordinary_owner_ui.rs", "observer_diagnostic.rs", "lib.rs", "qualification_result.rs"))
+        def span(text, start, end):
+            at = text.index(start); return text[at:text.index(end, at)]
+        def function(text, start, indent=""):
+            at = text.index(start); return text[at:text.index("\n" + indent + "}\n", at) + len(indent) + 3]
+        def digest(text): return hashlib.sha256(text.encode()).hexdigest()
+        owner = span(ui, "fn run_prerequisite_traced(", "// Inert regressions.")
+        start = owner.index("    if observation.is_err() && observer_role(role) && !capture.claimed {")
+        end = owner.index("    trace.prerequisite_at(PrerequisiteStage::Settlement, PrerequisiteCheck::S01);", start)
+        self.assertEqual(digest(owner[:start] + owner[end:]), "a8290b34c6029a485856312846e8d8c4cc074b51edaa303e3227cb1d40adff9a")
+        self.assertEqual(digest(span(ui, "pub(super) fn run(", "fn run_prerequisite_traced(")), "00a1f1d56edd8ba2ff0dd78aed3550fabaa0dd0fccd6717743d4a42805d7390a")
+        self.assertEqual(digest(span(ui, "struct Clock {", "#[derive(Default)]\nstruct ObserverCapture")), "0864dbfc2e605338ad27a3f252f0ce8d06a25d4faa050c995bee0fbb00caf9f7")
+        self.assertEqual(digest(span(diagnostic, "#[cfg(test)]\npub(crate) struct ObserverDiagnosticClock", "// First-only parent-reader DATA.")), "b5c990c492ebd34d36209e0cd44db8b45276ada9193c88a5c796d78d8a6fb55d")
+        call = span(book, "    fn call(", "    // Inert state transition")
+        call = call.replace("self.observer_inventory_effect(call, false, true)?;", "self.observer_inventory_effect(call)?;")
+        call = call.replace("            // Still execute the original post-gate even after a definite native\n"
+                            "            // failure; that ignored secondary clock must not replace its cause.\n", "")
+        call = call.replace("self.observer_inventory_effect(call, true, original.is_ok())", "self.observer_inventory_effect(call)")
+        self.assertEqual(digest(call), "a4af373abc77b196818487a34c0e4c53389bccdcaaa08036c29a2590fb207265")
+        self.assertEqual(digest(span(book, "    fn finish(", "    fn duplicate_live(")), "95617b503463de91027c595fd5894c70391ed7ee1e5b0fa3de14443966b63b3c")
+        self.assertEqual(digest(function(book, "unsafe fn invoke(")), "af9dc9a0573e25fed8afd55daa868eb6c7c91ce362b7ca1826e9d2a52009f063")
+        self.assertEqual(digest(function(diagnostic, "    fn append_original(", "    ")), "ecb284a62d2fab6b6e2589299168b01790f721e6c02ec1c68f1b41c9d55f472f")
+        self.assertEqual(digest(function(diagnostic, "    fn open(", "    ")), "017d1a15b285dda577e6b71b896d01cb8c720997858d6a0d94ad64a9a0b8c04d")
+        qualifier = qualifier.replace("pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal,\n"
+            "    ObserverCaptureCheck, ObserverCaptureNative, ObserverCaptureOperation, ObserverCaptureTrace};",
+            "pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal};")
+        self.assertEqual(digest(qualifier), "d37c28c1d01371e3b4ea67ef2983dad80dfb20228eb07d79b0c7905ffd1e3115")
+        self.assertEqual(hashlib.sha256((root / "ui_observer_diagnostic_data.rs").read_bytes()).hexdigest(), "ecde59e3428f28fd61f48bfe459492c0c0910a97c8e6e237afae98469e1ba287")
+        journal = span(diagnostic, "impl JournalFile {", "/// Existing native owner retains")
+        self.assertEqual(__import__("re").findall(r"unsafe\s*\{\s*([A-Z]+::[A-Za-z0-9_]+)\s*\(", journal),
+            ["FS::CreateFileW", "F::GetLastError", "FS::GetFileInformationByHandleEx", "F::GetLastError", "FS::ReadFile", "F::GetLastError"])
+        failure = owner[start:end]
+        self.assertLess(failure.index("capture.claimed = true;"), failure.index("read_trace.gate(C::ParentSettled"))
+        self.assertIn("Err(Error::Unknown) => capture.unresolved = true", failure)
+        self.assertIn("if child_final && read_trace.gate(C::InventoryFresh, inventory.never_started())", failure)
+        self.assertIn("inventory.observer_failure_inventory(child_final, read_trace)", failure)
+        self.assertIn("observer_failure_poststate(&mut inventory, &mut files, diagnostic, &output, cached, read_trace)", failure)
+        for forbidden in ("GetTickCount", "Instant::", "GetLastError", "std::thread::", "capture.projection = ObserverProjection::decode"):
+            self.assertNotIn(forbidden, failure)
+
+    def test_capture_failure_finite_roster_shared_inert_cases_and_scoped_provenance_are_explicit(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic, book = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs", "lib.rs"))
+        for name, expected in (("ObserverCaptureOperation", helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS),
+                               ("ObserverCaptureCheck", helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS)):
+            block = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
+            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', block)), expected)
+            self.assertEqual(len(expected), len(set(expected)))
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS), 52)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS), 90)
+        observe = book.split("    fn observer_capture_observe<", 1)[1].split("    #[cfg(test)]", 1)[0]
+        self.assertLess(observe.index("self.prerequisite_returned.set(None)"), observe.index("let original = observe(self)"))
+        self.assertIn("admission_before.is_none()", observe)
+        self.assertIn("trace.native_result(original, native, detail)", observe)
+        self.assertNotIn("self.first_unavailable", observe)
+        for forbidden in ("GetLastError", "GetTickCount", "Instant::", "invoke(", "self.call(", "self.finish(", "self.settle"):
+            self.assertNotIn(forbidden, observe)
+        effect = book.split("    fn observer_inventory_effect(", 1)[1].split("    #[cfg(all(test, feature = \"desktop-ui\"))]", 1)[0]
+        self.assertEqual(effect.count("gate.clock.permitted(gate.order.failure())"), 1)
+        self.assertIn("C::NativeClockAfter", effect); self.assertIn("C::NativeClockBefore", effect)
+        self.assertIn("if matches!(call, Call::Close(_)) { return Ok(()); }", effect)
+        selected = ui.split("    fn prerequisite_helper_decisions_preserve_native_control_flow()", 1)[1].split("\n    #[test]", 1)[0]
+        self.assertEqual(selected.count("observer_capture_failure_contract()?"), 1)
+        self.assertEqual(ui.count("fn observer_capture_failure_contract()"), 1)
+        self.assertIn("ObserverCaptureTrace::reader_contract()?", ui)
+        input_reader = diagnostic.split("fn read_input_result<", 1)[1].split("fn read_scope<", 1)[0]
+        self.assertIn("value.check == PrerequisiteCheck::F04", input_reader)
+        self.assertIn("value.error == Error::Unsafe && value.native.is_none() && value.detail.is_none()", input_reader)
+        self.assertIn("return trace.result(ObserverCaptureCheck::FileCeiling, original)", input_reader)
+        for forbidden in ("GetTickCount", "Instant::", "GetLastError", ".timely(", ".body("):
+            self.assertNotIn(forbidden, input_reader)
+        self.assertIn("for mask in 0..128u8", ui)
+        self.assertIn("trace.first(), Some(first)", ui)
+        self.assertIn("original.is_ok().then_some(C::NativeClockAfter)", ui)
+        self.assertIn("capture.reader.first().is_some() && capture.projection != ObserverProjection::default()", ui)
+        self.assertIn("if !observer_role(role) || capture.unresolved { return None; }", ui)
+        self.assertIn("diagnostic, false, read_trace)?", ui)
+        poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
+        self.assertIn("observer_role(role).then_some(&capture.reader)", poststate)
+        self.assertEqual(poststate.count("capture.claimed = true;"), 1)
+        self.assertNotIn("capture.claimed = false", poststate)
+        self.assertEqual(poststate.count("capture.projection = projection"), 1)
+        self.assertLess(poststate.index("fixture.verified = true"), poststate.index("capture.projection = projection"))
+        # Exact ordered original IO/native/clock sites from reviewed source00938ad4.
+        # DATA wrappers must not add, remove, reorder or replace one of them.
+        calls = __import__("re").findall(
+            r"\b(?:native\.[a-z_]+|clock\.effect_traced|files\[[^\]]+\]\.(?:stamp(?:_traced)?|read(?:_traced)?))\(", poststate)
+        self.assertEqual(len(calls), 58)
+        self.assertEqual(hashlib.sha256("\n".join(calls).encode()).hexdigest(),
+                         "680a402a6e76d88acf0a944447d0ef47a0e832326fc9e2c41fd2d489b23ac44b")
+        predicate = ui.split("fn observer_poststate_predicate(", 1)[1].split("fn observer_native<", 1)[0]
+        self.assertIn("trace.scope(operation, index, || trace.result(check, need(original)))", predicate)
+        self.assertTrue(predicate.rstrip().endswith("original\n}"))
+        for forbidden in ("native.", "clock.", "GetLastError", "GetTickCount", "std::thread", "clone("):
+            self.assertNotIn(forbidden, predicate)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+
+    def test_unexpected_entry_closed_cases_preserve_original_failure_and_legacy(self):
+        cases = []
+        for expected, position in helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS.items():
+            kind = "directory" if expected in ("project", "app", "release") else "file"
+            cases.append((position, {"class": "expected-name-case-alias", "expected": expected, "log": None,
+                                     "kind": kind, "attributes": 0x10 if kind == "directory" else 0x20}))
+        for log in helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS:
+            for kind, attributes in (("file", 0x22), ("directory", 2**32 - 1)):
+                cases.append((0, {"class": "known-cwd-log", "expected": None, "log": log, "kind": kind, "attributes": attributes}))
+        for category, kind, attributes in (("other-regular", "file", 0), ("other-directory", "directory", 0x10),
+                                           ("other", "file", 0x10), ("other", "directory", 0)):
+            cases.append((3, {"class": category, "expected": None, "log": None, "kind": kind, "attributes": attributes}))
+        for role in self.OWNERS:
+            for position, entry in cases:
+                frame = self.entry_frame_data(entry, position=position, role=role); raw = self.frame(frame)
+                with self.subTest(role=role, entry=entry):
+                    self.assertLessEqual(len(raw), 4096)
+                    self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+                    self.assertEqual(frame["captureFailure"]["error"], "Unsafe")
+                    self.assertEqual(frame["projection"]["reason"], 1)
+                    del frame["captureFailure"]["entry"]
+                    self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+        # Historical seven-field failures stay readable without inventing details.
+        for frame in (self.frame_data(), self.capture_frame_data(), self.capture_frame_data(gate=True)):
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+
+    def test_unexpected_entry_refuses_foreign_fields_and_provenance(self):
+        for key, value in (("index", None), ("index", True), ("index", -1), ("index", 4), ("index", 16),
+                           ("operation", "directory-roster"), ("operation", "journal-read"), ("check", "entry-kind"),
+                           ("error", "Bounds"), ("error", "Unavailable"), ("error", "Unknown"),
+                           ("kind", "not-attempted"), ("detail", "input.PathText"),
+                           ("native", self.capture_frame_data()["captureFailure"]["native"]),
+                           ("entry", None), ("entry", {}), ("entry", True), ("path", "private")):
+            frame = self.entry_frame_data(); frame["captureFailure"][key] = value
+            with self.subTest(fault=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for key, value in (("attributes", True), ("attributes", False), ("attributes", -1), ("attributes", 2**32),
+                           ("attributes", "32"), ("attributes", 32.0), ("attributes", 0x10),
+                           ("kind", "pipe"), ("kind", True), ("kind", "directory"),
+                           ("class", "permitted-log"), ("class", "other"), ("expected", "result"),
+                           ("log", None), ("log", "debug.log"), ("log", 1), ("name", "private"), ("content", "private")):
+            frame = self.entry_frame_data(); frame["captureFailure"]["entry"][key] = value
+            with self.subTest(entry=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for entry, position in (
+            ({"class": "expected-name-case-alias", "expected": "result", "log": None, "kind": "file", "attributes": 0}, 1),
+            ({"class": "expected-name-case-alias", "expected": "unlisted", "log": None, "kind": "file", "attributes": 0}, 0),
+            ({"class": "expected-name-case-alias", "expected": "result", "log": "debug-log", "kind": "file", "attributes": 0}, 0),
+            ({"class": "other-regular", "expected": None, "log": None, "kind": "directory", "attributes": 0x10}, 0),
+            ({"class": "other-directory", "expected": None, "log": None, "kind": "file", "attributes": 0}, 0),
+            ({"class": "other", "expected": "project", "log": None, "kind": "file", "attributes": 0x10}, 0),
+        ):
+            with self.subTest(cross_fields=entry), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(self.entry_frame_data(entry, position=position)))
+        raw = self.frame(self.entry_frame_data())
+        for key in (b'"entry":', b'"attributes":', b'"class":'):
+            with self.subTest(duplicate=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'null,' + key, 1))
+
+    def test_unexpected_entry_collector_never_upgrades_failure_or_reads_offender(self):
+        for role in self.OWNERS:
+            parts = list(self.original_log(role)); frame = self.entry_frame_data(role=role)
+            parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
+            parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            with patch.object(helper, "run", side_effect=AssertionError("no process/native")), \
+                    patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no filesystem read")):
+                data = self.joined(parts)
+            self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
+            self.assertTrue(data["originalSelectedFailure"]); self.assertEqual(data["projection"]["reason"], 1)
+            self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
+            self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
+            self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
+
+    def test_unexpected_entry_source_uses_only_same_mismatch_and_closed_copy_data(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs"))
+        poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
+        lookup = "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)"
+        self.assertEqual(poststate.count(lookup), 1)
+        seam = poststate.split("let (_, _, expected, kind) =", 1)[1].split("output_result!(OutputEntryBinding", 1)[0]
+        for required in (lookup + ".map_err(|error| {", "if let Some(trace) = read_trace { trace.unexpected_entry(role, &entry,",
+                         "children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str())",
+                         "error\n                    }))?;"):
+            self.assertIn(required, seam)
+        for forbidden in ("native.", "clock.", "GetLastError", "std::fs", "std::env", "return Ok", "continue;"):
+            self.assertNotIn(forbidden, seam)
+        for name, expected in (("ObserverEntryClass", helper.WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES),
+                               ("ObserverExpectedName", tuple(helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS)),
+                               ("ObserverKnownLog", helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS)):
+            body = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
+            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', body)), expected)
+        classifier = diagnostic.split("impl ObserverCaptureEntry {", 1)[1].split("pub(crate) struct ObserverCaptureFailure", 1)[0]
+        for required in ("kind: entry.kind, attributes: entry.attributes", "if !value.consistent() { return value; }",
+                         "name.eq_ignore_ascii_case(&entry.name)", "ObserverExpectedName::of(role, name)",
+                         "ObserverKnownLog::of(&entry.name)", "Some(name.position()) == position"):
+            self.assertIn(required, classifier)
+        fields = diagnostic.split("pub(crate) struct ObserverCaptureEntry {", 1)[1].split("}\n", 1)[0]
+        for forbidden in ("String", "Vec<", "Path", "file_id", "name:"):
+            self.assertNotIn(forbidden, fields)
+        first = diagnostic.split("pub(crate) fn unexpected_entry<", 1)[1].split("    pub(crate) fn gate(", 1)[0]
+        self.assertIn("if self.first.get().is_none()", first)
+        self.assertIn("check: ObserverCaptureCheck::ExpectedChild", first)
+        self.assertIn("error: Some(Error::Unsafe), native: None, detail: None", first)
+        for body in (classifier, first):
+            for forbidden in ("unsafe", "native.", "std::fs", "std::env", "Instant::", "GetTickCount", "GetLastError", "open_child", "read_next"):
+                self.assertNotIn(forbidden, body)
+        selected = ui.split("fn observer_capture_failure_contract()", 1)[1].split("    #[test]", 1)[0]
+        self.assertEqual(selected.count("ObserverCaptureTrace::unexpected_entry_contract()?"), 1)
+        self.assertIn('attributes: u32::MAX', selected)
+        self.assertIn('"bounded original entry DATA"', selected)
+        self.assertIn("assert_eq!(trace.first(), Some(first))", diagnostic)
+        self.assertIn("assert!(trace.first().unwrap().entry.is_none())", diagnostic)
 
 class WindowsNormalUiGuiTests(unittest.TestCase):
     """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""
@@ -14639,6 +15391,68 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         self.assertIn('UiRole::NormalSmoke => need(Path::new(&self.app.path) == root.join("mobile-release-kit-desktop.exe"))',source)
         self.assertIn('UiRole::Prerequisite => need(self.app.path == self.owner.path)',source)
 
+    def test_observer_scratch_uses_prepared_profile_without_moving_output_cwd(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        source = (root / "ordinary_owner_ui.rs").read_text()
+        def span(start, end):
+            at = source.index(start); return source[at:source.index(end, at)]
+        profile = span("fn normal_ui_scratch_profile_directory<", "fn normal_ui_launch_directories(")
+        routing = span("fn normal_ui_launch_directories(", "impl Launch {")
+        for body in (profile, routing):
+            self.assertIn("if role != UiRole::NormalSmoke && !observer_role(role)", body)
+            self.assertLess(body.index("!observer_role(role)"), body.index("profile.ok_or(Error::Unsafe)?"))
+            for forbidden in ("unsafe", "GetProfilesDirectoryW", "CreateProfile", "CreateProcess", "DeleteProfileW",
+                              "std::env::", "std::fs::", "open_child(", "std::thread::"):
+                self.assertNotIn(forbidden, body)
+        observer = source.split("fn observer_role(", 1)[1].split("\n", 1)[0]
+        self.assertIn("matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss)", observer)
+        self.assertIn("return Ok(None)", profile); self.assertIn("return Ok(())", routing)
+        self.assertIn("profile.binding_permitted_traced(trace)?", profile)
+        self.assertIn("profile.getter_entered && profile.getter_return != 0", profile)
+        self.assertIn("profile.units > 1 && profile.units as usize <= profile.directory.len()", profile)
+        self.assertIn("profile.expected == Path::new(&parent).join(&profile.name)", profile)
+        self.assertIn("Ok(Some(profile.expected.as_path()))", profile)
+        self.assertIn('app == root.join("mobile-release-kit-desktop.exe")', routing)
+        self.assertIn('root.join("target").join("x86_64-pc-windows-msvc").join("debug").join("deps")', routing)
+        self.assertIn('name.strip_prefix("installed_shell_observation-")', routing)
+        self.assertIn('name.strip_suffix(".exe")).is_some_and(|hash| is_hex(hash, 16))', routing)
+        self.assertIn('output == root.join(role.name("output")) && app_bound', routing)
+        self.assertIn("*directory == wide(output_text)", routing)
+        for expression in ("!root_text.eq_ignore_ascii_case(output_text)", "!root_text.eq_ignore_ascii_case(profile_text)",
+                           "!output_text.eq_ignore_ascii_case(profile_text)"):
+            self.assertIn(expression, routing)
+        mutation = routing.index("pairs[temp].1 = profile_text.to_owned();")
+        for check in ("temp.is_none() && value.as_str() == output_text", "tmp.is_none() && value.as_str() == output_text",
+                      "let temp = temp.ok_or(Error::Unsafe)?; let tmp = tmp.ok_or(Error::Unsafe)?;"):
+            self.assertLess(routing.index(check), mutation)
+        self.assertIn("pairs[tmp].1 = profile_text.to_owned();", routing)
+        self.assertEqual(routing.count("*directory = wide("), 1)
+        self.assertIn("if role == UiRole::NormalSmoke { *directory = wide(root_text); }", routing)
+        for forbidden in ("pairs.push", "pairs.retain", "pairs.clear", "MRK_WINDOWS_NORMAL_UI_OUTPUT"):
+            self.assertNotIn(forbidden, routing)
+        launch = span("    fn ui_traced(", "// Every registry output/name/query/close destination")
+        self.assertLess(launch.index("normal_ui_scratch_profile_directory(request.role, profile, trace)?"),
+                        launch.index("Self::new_traced(OwnerVariant::Ordinary"))
+        self.assertLess(launch.index("normal_ui_launch_directories(request.role, &request.app.path, output, root, profile_directory,"),
+                        launch.index("pairs.retain("))
+        self.assertIn("current.logon_flags = T::LOGON_WITH_PROFILE;", launch)
+        selected = source.split("    fn native_smoke_never_credits_posting_or_partial_release_as_finality()", 1)[1].split("\n    #[test]", 1)[0]
+        self.assertIn("for role in [UiRole::NormalSmoke, UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss]", selected)
+        self.assertEqual(selected.count("normal_ui_launch_directory_contract(role)"), 1)
+        cases = span("    fn normal_ui_launch_directory_contract(", "    fn output_inventory_diagnostic_contract()")
+        for case in ("else { initial_directory.clone() }", "assert_eq!(values, expected); assert_eq!(directory, expected_directory)",
+                     "assert_eq!(values, baseline); assert_eq!(directory, initial_directory)", "for role in [UiRole::Prerequisite]",
+                     "other_role_app", "installed_shell_observation-0123456789abcdeF.exe", "profile.as_path()"):
+            self.assertIn(case, cases)
+        # Scratch routing leaves Profile and original owner/retirement untouched.
+        # The diagnostic successor adds only same-mismatch entry DATA in poststate.
+        for start, end, expected in (
+            ("struct ProfilePath {", "fn input(", "c44857c7988b2c5e58a5859e1e82f5109ae4c10cf410fec859797789b6adc6d5"),
+            ("fn output_poststate(", "// Qualification-only, same-thread DATA.", "f5e105defe95bee54912f613b7850cfcc828be9d093293b76dbbbcfda2fa0bc6"),
+            ("fn run_prerequisite_traced(", "// Inert regressions.", "3c470aa11c189c5e15de5245187b6391eeae111b13a4e5223404ed731fc07130"),
+        ):
+            self.assertEqual(hashlib.sha256(span(start, end).encode()).hexdigest(), expected)
+
     def test_gui_owner_finality_and_shared_observer_acl_account_chain(self):
         used=set(); identity=None; security=None
         for index,role in enumerate(helper.WINDOWS_NORMAL_UI_GUI_ROLES,1):
@@ -14681,9 +15495,21 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         with self.assertRaises(helper.CheckFailure): self.accept_case(data)
         source=(SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src/ordinary_owner_ui.rs").read_text()
         fixture=source.split("fn create_fixture_file(",1)[1].split("impl Fixture",1)[0]
-        self.assertIn("let writer = files.len(); files.push(",fixture)
-        self.assertLess(fixture.index("files[writer].close()?"),fixture.index("let index = input(files,"))
+        self.assertLess(fixture.index("let writer = files.len();"),fixture.index("trace.at(InputRole::Output, Some(writer as u8));"))
+        self.assertLess(fixture.index("trace.at(InputRole::Output, Some(writer as u8));"),fixture.index("files.push("))
+        self.assertLess(fixture.index("files[writer].close_traced(trace)?"),fixture.index("let index = input(files,"))
         self.assertNotIn("files.pop(",fixture)
+        create=source.split("impl Fixture {",1)[1].split("// Independent post-exit full output inventory.",1)[0]
+        self.assertIn('(path.join("app").join("build.gradle.kts"), UI_FIXTURE_SOURCE)',create)
+        self.assertIn('&path.join("release").join("mobile-release.json"), UI_FIXTURE_CONFIG',create)
+        post=source.split("fn output_poststate(",1)[1].split("fn ",1)[0]
+        self.assertIn('&project_path.join("release").join("mobile-release.json"), false, FS::FILE_GENERIC_READ',post)
+        result_source=(SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src/qualification_result.rs").read_text()
+        mutation=result_source.split("pub fn mutate_normal_ui_fixture(",1)[1].split("pub fn verify_normal_ui_fixture(",1)[0]
+        self.assertIn('normal_ui_project()?.join("release").join("mobile-release.json")',mutation)
+        for body in (create,post,mutation):
+            self.assertNotIn('.join("app/build.gradle.kts")',body)
+            self.assertNotIn('.join("release/mobile-release.json")',body)
         self.assertIn("original.process_close, original.thread_close, files.len(), files.len(), profile.delete_return",source)
 
     def test_auxiliary_recheck_is_full_original_epoch_not_normal_launch_authority(self):
@@ -14806,6 +15632,116 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
                 self.assertIn("MRK_WINDOWS_UI_"+role.upper().replace("-","_")+"_"+part+"_STEP_OUTCOME",blocks["retain"])
         for phase in (*helper.WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,*helper.WINDOWS_NORMAL_UI_GUI_DATA_PHASES):
             self.assertEqual(job.count("ci_foundation.py "+phase+"'"),1)
+
+
+    def test_windows_modal_observer_turn_uses_original_timer_and_retains_callback_depth(self):
+        # Source contracts only. These assertions do not execute the native
+        # timer, modal loop, COM callback or either inert Rust unit test.
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        shell = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/shell_windows.rs").read_text()
+        self.assertEqual(native.count("W::SetTimer("), 1)
+        self.assertIn("const TIMER: usize = 1;", native)
+        self.assertIn("W::SetTimer(window, TIMER, 25, None)", native)
+        self.assertIn('#[cfg(feature = "windows-installed-observation")]\n    ObservationTurn,', native)
+        control = native.split('unsafe extern "system" fn control_window(', 1)[1].split('unsafe extern "system" fn task_callback(', 1)[0]
+        timer = control.split("if message == W::WM_TIMER && wparam == TIMER {", 1)[1].split("if message == W::WM_NCDESTROY", 1)[0]
+        self.assertIn("let _returned = original.enter();", control)
+        self.assertLess(timer.index("original.visible();"), timer.index("original.close_on_sta();"))
+        self.assertLess(timer.index("original.close_on_sta();"), timer.index("original.enter_observation_turn()"))
+        self.assertIn('#[cfg(feature = "windows-installed-observation")]\n            if let Some(_turn_returned)', timer)
+        self.assertIn("original.event(DialogEvent::ObservationTurn);", timer)
+        for forbidden in ("drop(_returned)", "depth.set(", "run_on_main_thread", "SetTimer", "PostMessage"):
+            self.assertNotIn(forbidden, timer)
+        ready = native.split("fn observation_turn_ready(", 1)[1].split("fn enter_observation_turn(", 1)[0]
+        for required in ("self.depth.get() == 1", "self.created.get()", "self.presented.get()", "self.showing.get()",
+                         "!self.show_returned.get()", "self.response.get().is_none()", "!self.control.stopped.load(Ordering::SeqCst)",
+                         "!self.close_entered.get()", "!self.settled.get()", "!self.unknown.get()"):
+            self.assertIn(required, ready)
+        self.assertIn("!self.observation_turn_ready() || self.observation_entered.replace(true)", native)
+        self.assertIn("self.observation_entered.get() && self.observation_turn_ready()", native)
+        self.assertIn("callbacks_active: self.depth.get() != 0, observation_turn: self.observation_turn_active()", native)
+        self.assertIn("impl Drop for DialogReturn<'_> { fn drop(&mut self) { self.0.depth.set(self.0.depth.get().saturating_sub(1)); } }", native)
+        self.assertIn("impl Drop for ObservationTurnReturn<'_> { fn drop(&mut self) { self.0.observation_entered.set(false); } }", native)
+        action = native.split("pub fn installed_action(", 1)[1].split("struct DialogReturn", 1)[0]
+        self.assertGreaterEqual(action.count("if !self.observation_turn_active() { return Err(UiError::State); }"), 4)
+        self.assertLess(action.index("self.observation_turn_active()"), action.index("self.native_window()?"))
+        event = shell.split("fn native_event(", 1)[1].split("fn show(", 1)[0]
+        self.assertIn("native::DialogEvent::ObservationTurn => return", event)
+        self.assertLess(event.index("native::DialogEvent::ObservationTurn => return"), event.index("call.changed();"))
+        show = shell.split("fn show(", 1)[1].split("pub(crate) async fn run_owned_dialog(", 1)[0]
+        self.assertIn("let id = owner.id;", show)
+        self.assertIn("q.modal_turn(app, id, kind, &events)", show)
+        callback = show.split("Box::new(move |event| {", 1)[1].split("})));", 1)[0]
+        self.assertNotIn("owner.", callback)
+        self.assertIn('feature = "windows-installed-observation"', callback)
+        self.assertIn('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol"', callback)
+        self.assertIn("native_event(&events, event, kind == native::DialogKind::Quit);", callback)
+        self.assertIn("app.try_state::<Arc<super::installed_observation::Observation>>().map(|q| (q.inner().clone(), app.clone()))", shell)
+        self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+        self.assertFalse(any("ui_dialog::tests" in name for name in helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS))
+        for test in ("stop_before_native_construction_is_latched_without_a_foreign_window",
+                     "retired_original_cannot_repost_to_a_reused_window"):
+            self.assertEqual(native.count("fn " + test + "("), 1)
+
+    def test_windows_modal_observer_pending_actions_and_reload_preserve_original_finality(self):
+        observer = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/installed_shell_observation_windows.rs").read_text()
+        shell = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/shell_windows.rs").read_text()
+        native = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/ui_dialog.rs").read_text()
+        assets = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/asset_session.rs").read_text()
+        outer = (SOURCE / helper.WINDOWS_INSTALLED_APP / "src/shell.rs").read_text()
+        self.assertNotIn("run_on_main_thread", observer)  # Neither Native nor Reload may leave a replayable task.
+        tick = observer.split("pub(super) fn tick(", 1)[1].split("fn document_sample(", 1)[0]
+        self.assertIn("r.pending = Some(Pending::Native(step)); return;", tick)
+        self.assertIn("r.pending = Some(Pending::Reload); return;", tick)
+        self.assertNotIn("r.reload_requested = true", tick)
+        nonwaiting = observer.split("fn try_record(", 1)[1].split("fn timely(", 1)[0]
+        self.assertIn("self.record.try_lock()", nonwaiting)
+        self.assertIn("Err(TryLockError::WouldBlock) => None", nonwaiting)
+        self.assertIn("Err(TryLockError::Poisoned(_)) => { self.fail(Refusal::Record); None }", nonwaiting)
+        modal = observer.split("pub(super) fn modal_turn(", 1)[1].split("fn reload_step(", 1)[0]
+        self.assertIn("std::thread::current().id() != self.main || !self.timely()", modal)
+        self.assertIn("let Some(r) = self.try_record() else { return; };", modal)
+        self.assertIn("self.native_step(step, id, kind, call)", modal)
+        self.assertIn("self.reload_step(app, id, kind, call)", modal)
+        self.assertNotIn("self.record()", modal)
+        step = observer.split("fn native_step(", 1)[1].split("fn native_body(", 1)[0]
+        self.assertLess(step.index("self.native_body(step, id, kind, call)"), step.index("r.pending = None"))
+        self.assertLess(step.index("if returned == Ok(None) { return; }"), step.index("r.pending = None"))
+        self.assertLess(step.index("returned != Ok(Some(true)) || !self.timely()"), step.index("r.actions_returned[index] = true"))
+        body = observer.split("fn native_body(", 1)[1].split("fn dom(", 1)[0]
+        for required in ("callback_id != id || callback_kind != kind", "!Arc::ptr_eq(call, &dialog.call)",
+                         "self.try_record() else { return Ok(None); }", "!witness.same(&dialog)",
+                         "!dialog.native.callbacks_active || !dialog.native.observation_turn", "r.actions_attempted[index] || !self.timely()"):
+            self.assertIn(required, body)
+        self.assertLess(body.index("r.actions_attempted[index] = true; drop(r);"), body.index("observe_dialog_action(id, action)"))
+        reload = observer.split("fn reload_step(", 1)[1].split("fn native_step(", 1)[0]
+        for required in ("self.case != Case::DocumentLoss || id != 2 || kind != DialogKind::Project",
+                         "r.pending != Some(Pending::Reload)", "r.reload_requested || r.reload_returned || !r.picker_pending",
+                         "Arc::ptr_eq(&witness.call, call)", "Arc::ptr_eq(&witness.owner.gui, call)", "!witness.owner.interrupted()",
+                         "facts.created && facts.showing", "witness.outstanding().is_ok()", "self.try_record()"):
+            self.assertIn(required, reload)
+        self.assertEqual(observer.count('eval("window.location.reload()")'), 1)
+        self.assertLess(reload.index("r.reload_requested = true; drop(r);"), reload.index('eval("window.location.reload()")'))
+        self.assertLess(reload.index('eval("window.location.reload()")'), reload.index("r.reload_returned = true"))
+        self.assertLess(reload.index("returned.is_err() || !self.timely()"), reload.index("r.pending = None"))
+        for forbidden in ("observed_dialog()", ".lost(", "facts.response =", "call.changed()", "diagnostic_progress()", "report_failure()", "Instant::now() +"):
+            self.assertNotIn(forbidden, modal + reload)
+        stop = native.split("pub fn request_stop(", 1)[1].split("pub struct Dialog {", 1)[0]
+        self.assertLess(stop.index("self.stopped.store(true"), stop.index("W::PostMessageW("))
+        self.assertEqual(stop.count("W::PostMessageW("), 1)
+        close = native.split("fn close_on_sta(", 1)[1].split("fn setup_route(", 1)[0]
+        self.assertIn("file.Close(CANCEL)", close); self.assertIn("C::TDM_CLICK_BUTTON", close)
+        release = native.split("fn release_once(", 1)[1].split("pub fn settled(", 1)[0]
+        self.assertIn("self.depth.get() != 0 || self.showing.get()", release)
+        self.assertLess(release.index("W::KillTimer("), release.index("W::DestroyWindow("))
+        self.assertLess(release.index("W::DestroyWindow("), release.index("self.event(DialogEvent::Settled)"))
+        owned = shell.split("pub(crate) async fn run_owned_dialog(", 1)[1].split("pub(super) mod observation", 1)[0]
+        self.assertIn("owner.interrupted() && control.request_stop().is_err()", owned)
+        self.assertIn("result == Err(Reason::CleanupUnknown) || !call.settled()", owned)
+        self.assertIn("state.slot.as_ref().is_some_and(|slot| !slot.owner.gui.settled())", assets)
+        self.assertIn("quit.join_if_ended() == Some(true) && quit.resources_settled()", assets)
+        exit_path = outer.split("if document.can_exit() {", 1)[1]
+        self.assertLess(exit_path.index("settle_relay(&app).await"), exit_path.index("owned_windows::settle_for_exit(&app, &document).await"))
 
 
 class WindowsNormalUiInertRegressionTests(unittest.TestCase):

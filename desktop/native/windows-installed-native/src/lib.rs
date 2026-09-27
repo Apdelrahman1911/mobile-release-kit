@@ -33,6 +33,8 @@ mod loader;
 pub use loader::SystemImage;
 // Pure closed DATA is also used by the headless Windows startup scalar route.
 pub mod ui_startup_data;
+#[cfg(all(feature = "desktop-ui", any(test, all(feature = "qualification-result", feature = "windows-installed-observation"))))]
+pub mod ui_observer_diagnostic_data;
 mod project;
 pub use project::{ProjectBook, project_path_hint};
 #[cfg(feature = "desktop-ui")]
@@ -45,6 +47,8 @@ mod qualification_result;
 pub use qualification_result::{write_fullwalk_result_once, write_passive_result_once, require_passive_qualification, FullwalkFacts, PassiveFacts};
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub use qualification_result::{UiRole, UiCaseFacts, normal_ui_deadline, require_normal_ui_qualification, write_normal_ui_result_once};
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use qualification_result::ObserverDiagnostic;
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub use qualification_result::{normal_ui_project, mutate_normal_ui_fixture, verify_normal_ui_fixture,
     UI_FIXTURE_CONFIG, UI_FIXTURE_CONFIG_AFTER, UI_FIXTURE_SOURCE, UI_FIXTURE_VERSION, UI_FIXTURE_KEEP};
@@ -412,6 +416,17 @@ impl Complete {
 
 /// Non-cloneable storage book, not runtime authority. Calls are synchronous and
 /// must remain in original retained blocking work; no cancel-by-drop is supported.
+#[cfg(all(test, feature = "desktop-ui"))]
+struct ObserverInventoryGate {
+    clock: Arc<qualification_result::ObserverDiagnosticClock>, order: ui_observer_diagnostic_data::InventoryOrder,
+    refusal: Option<qualification_result::ObserverCaptureCheck>,
+}
+#[cfg(all(test, feature = "desktop-ui"))]
+fn observer_inventory_return(first: &mut Option<qualification_result::ObserverCaptureCheck>,
+    check: qualification_result::ObserverCaptureCheck, original: Result<()>, retain: bool) -> Result<()> {
+    if retain && original.is_err() && first.is_none() { *first = Some(check); }
+    original // DATA only: no clock sample, native entry or Result conversion.
+}
 pub struct NativeBook {
     admission: AdmissionTrace,
     identity: Arc<()>,
@@ -429,6 +444,8 @@ pub struct NativeBook {
     first_unavailable: Option<(Call, Returned)>,
     #[cfg(test)]
     prerequisite_returned: Cell<Option<(Call, Returned)>>,
+    #[cfg(all(test, feature = "desktop-ui"))]
+    observer_inventory_gate: Option<ObserverInventoryGate>,
 }
 // SAFETY: actual Windows file/token handles are process-wide. Only ownership of
 // the serialized book moves; no reference to its UnsafeCell outputs escapes.
@@ -445,7 +462,66 @@ impl NativeBook {
             #[cfg(test)]
             first_unavailable: None,
             #[cfg(test)]
-            prerequisite_returned: Cell::new(None) }
+            prerequisite_returned: Cell::new(None),
+            #[cfg(all(test, feature = "desktop-ui"))]
+            observer_inventory_gate: None }
+    }
+    #[cfg(all(test, feature = "desktop-ui"))]
+    fn bind_observer_inventory(&mut self, clock: Arc<qualification_result::ObserverDiagnosticClock>) -> Result<()> {
+        if !self.never_started() || self.observer_inventory_gate.is_some() { return Err(Error::State); }
+        self.observer_inventory_gate = Some(ObserverInventoryGate { clock, order: Default::default(), refusal: None }); Ok(())
+    }
+    #[cfg(all(test, feature = "desktop-ui"))]
+    fn observer_failure_inventory(&mut self, child_final: bool, trace: &qualification_result::ObserverCaptureTrace) -> Result<()> {
+        use qualification_result::ObserverCaptureCheck as C;
+        if !child_final || !self.never_started() { return trace.result(C::InventoryFresh, Err(Error::State)); }
+        let gate = trace.result(C::InventoryBound, self.observer_inventory_gate.as_mut().ok_or(Error::State))?;
+        // A distinct, already-bound purpose; neither endpoint nor latch changes.
+        if !gate.order.select_failure(child_final, true) { return trace.result(C::InventoryOnce, Err(Error::State)); }
+        let original = if gate.clock.permitted(true) { Ok(()) } else { Err(Error::Unsafe) };
+        if original.is_ok() { self.admission.active.set(true); } // Fresh failure-reader DATA only.
+        trace.result(C::InventoryClock, original)
+    }
+    #[cfg(all(test, feature = "desktop-ui"))]
+    fn observer_inventory_effect(&mut self, call: Call, after: bool, retain: bool) -> Result<()> {
+        use qualification_result::ObserverCaptureCheck as C;
+        // Settlement of already-owned originals remains permitted late.
+        if matches!(call, Call::Close(_)) { return Ok(()); }
+        let Some(gate) = self.observer_inventory_gate.as_mut() else { return Ok(()); };
+        gate.order.attempted();
+        if gate.order.failure() && !match call {
+            Call::Mapping | Call::DriveType | Call::Open(_) | Call::HandleInfo | Call::FinalName
+            | Call::FileType | Call::VolumeName | Call::VolumeDevice | Call::Streams => true,
+            Call::Info(class, length) => [
+                (FS::FileBasicInfo, size_of::<FS::FILE_BASIC_INFO>()),
+                (FS::FileStandardInfo, size_of::<FS::FILE_STANDARD_INFO>()),
+                (FS::FileAttributeTagInfo, size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()),
+                (FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()),
+                (FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()),
+            ].contains(&(class, length)),
+            _ => false,
+        } { return observer_inventory_return(&mut gate.refusal, C::NativePurpose, Err(Error::State), retain); }
+        let original = if gate.clock.permitted(gate.order.failure()) { Ok(()) } else { Err(Error::Unsafe) };
+        observer_inventory_return(&mut gate.refusal, if after { C::NativeClockAfter } else { C::NativeClockBefore }, original, retain)
+    }
+    #[cfg(all(test, feature = "desktop-ui"))]
+    fn observer_capture_observe<T>(&mut self, trace: &qualification_result::ObserverCaptureTrace,
+        observe: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.prerequisite_returned.set(None);
+        if let Some(gate) = self.observer_inventory_gate.as_mut() { gate.refusal = None; }
+        let admission_before = self.admission.first.get();
+        let original = observe(self);
+        let native = if matches!(&original, Err(Error::Unavailable | Error::Unknown)) {
+            self.prerequisite_returned.get().and_then(|(call, returned)| qualification_result::ObserverCaptureNative::returned(call, returned))
+        } else { None };
+        let detail = if matches!(&original, Err(Error::Unsafe)) && admission_before.is_none() {
+            self.admission.first.get().map(|value| qualification_result::PrerequisiteDetail::Admission(value.check))
+        } else { None };
+        let gate = self.observer_inventory_gate.as_ref().and_then(|value| value.refusal);
+        if native.is_none() && detail.is_none() && matches!(&original, Err(Error::Unsafe | Error::State)) {
+            if let Some(check) = gate { return trace.result(check, original); }
+        }
+        trace.native_result(original, native, detail)
     }
     #[cfg(test)]
     fn remember_unavailable(&mut self, call: Call, returned: Returned) {
@@ -479,6 +555,8 @@ impl NativeBook {
         Ok(handle)
     }
     fn reserve(&mut self, kind: Kind, parent: Option<usize>, name: &str, canonical: String) -> Result<Original> {
+        #[cfg(all(test, feature = "desktop-ui"))]
+        if let Some(gate) = self.observer_inventory_gate.as_mut() { gate.order.attempted(); }
         self.clear()?;
         // A selected path gets one original attempt for this book, including
         // definite failures and retired originals. Token probes have no path.
@@ -528,6 +606,10 @@ impl NativeBook {
         if matches!(call, Call::Close(_)) {
             if self.active.is_some() { return self.unknown(); }
         } else { self.clear()?; }
+        #[cfg(all(test, feature = "desktop-ui"))]
+        if !matches!(call, Call::Close(_)) {
+            if let Some(gate) = self.observer_inventory_gate.as_mut() { gate.order.attempted(); }
+        }
         // Select the input extent before publishing storage or entering the OS.
         let token_length = match call {
             Call::Token(class) => token_information_length(class)?,
@@ -559,6 +641,8 @@ impl NativeBook {
                 setup.attributes.Attributes = F::OBJ_DONT_REPARSE;
             }
         }
+        #[cfg(all(test, feature = "desktop-ui"))]
+        self.observer_inventory_effect(call, false, true)?;
         self.active = Some(ManuallyDrop::new(frame));
         self.mark_entered(call)?;
         let frame = self.arena()?;
@@ -570,7 +654,17 @@ impl NativeBook {
         #[cfg(test)]
         self.prerequisite_capture(call, returned);
         frame.phase.set(Phase::Returned);
-        self.finish(call, returned)
+        let original = self.finish(call, returned);
+        // Never divide native return from scalar capture or adoption. Unknown
+        // retains the same active arena/slots and dominates a clock refusal.
+        #[cfg(all(test, feature = "desktop-ui"))]
+        if !matches!(original, Err(Error::Unknown)) {
+            // Still execute the original post-gate even after a definite native
+            // failure; that ignored secondary clock must not replace its cause.
+            let timely = self.observer_inventory_effect(call, true, original.is_ok());
+            return original.and_then(|complete| timely.map(|()| complete));
+        }
+        original
     }
     // Inert state transition shared with narrow contract tests; it performs no
     // native call. The active arena and every output cell already belong to us.
