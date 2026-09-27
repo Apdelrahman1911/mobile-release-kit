@@ -1192,7 +1192,7 @@ WINDOWS_FULLWALK_ZIP_BYTES = 12673227
 WINDOWS_FULLWALK_ZIP_SHA256 = "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15"
 WINDOWS_FULLWALK_PINS = {
     "desktop/tools/prepare_windows_embedded_payload.py": (17398, "79c9933b1bb273226ac4b893cd5a08d5ced752875a090d22385215518056a053"),
-    "desktop/tools/prepare_runtime.py": (12355, "4d9f0e52b7cbe1f9d648a96512cf0c0ca5ab01b5b06738282133b57e1830e4f8"),
+    "desktop/tools/prepare_runtime.py": (13227, "dd554d59850d6b059a2c05de92dcdddc9373b154c53d9536e84d13497137f88d"),
     "desktop/licenses/windows-embedded-runtime.txt": (240822, "6c814672403bec2064b22e54dbd028b055e0cacdc6837557a66cd5c0a04af360"),
     "desktop/cpython-source-inputs/github-ca.pem": (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"),
 }
@@ -1587,6 +1587,14 @@ WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
     "secret-service": "5.2.0",
     "zbus": "5.19.0",
 }
+# Fixed current Windows roles, not an allowlist derived from supplied metadata.
+# The common parsers do not enable any Apple native or signing operation.
+WINDOWS_INSTALLED_APP_DIRECT_ROLES = frozenset({
+    ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
+    ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0"),
+    ("plist", "1.10.1"), ("quick-xml", "0.42.0"), ("pkcs12", "0.1.0"),
+    ("cms", "0.2.3"), ("der", "0.7.10"),
+})
 WINDOWS_INSTALLED_APP_INERT = (
     "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
     "runtime::windows_version::tests::windows_manifest_anchors_schema_and_inventory_are_bound_before_use",
@@ -12631,9 +12639,8 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
         if key not in seen:
             seen.add(key); pending.extend(nodes[key]["dependencies"])
     require(seen == set(nodes), "Windows GUI contains disconnected resolved packages")
-    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]} == {
-        ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"), ("sha2", "0.10.9"), ("tokio", "1.48.0"),
-        ("mrk-windows-installed-native", "0.1.0"), ("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
+    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
+        == WINDOWS_INSTALLED_APP_DIRECT_ROLES | {("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
         "Windows GUI direct app roles differ")
     material = {}
     for name, version in WINDOWS_NORMAL_UI_MATERIAL_PACKAGES.items():
@@ -13044,8 +13051,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
             pending.extend(nodes[current]["dependencies"])
     require(seen == set(nodes), "Windows app has a disconnected active compiler node")
     root_dependencies = {(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
-    require(root_dependencies == {("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
-            ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0")},
+    require(root_dependencies == WINDOWS_INSTALLED_APP_DIRECT_ROLES,
             "Windows app selected direct dependencies differ")
     require({(packages[key]["name"], packages[key]["version"]) for key in nodes[local["mrk-windows-installed-native"]]["dependencies"]}
             == {("windows-sys", "0.61.2")}, "Windows app native dependency differs")
@@ -13131,7 +13137,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
     }
     syn_definitions = {
         "clone-impls": [], "default": ["derive", "parsing", "printing", "clone-impls", "proc-macro"],
-        "derive": [], "full": [], "parsing": [], "printing": ["dep:quote"],
+        "derive": [], "extra-traits": [], "full": [], "parsing": [], "printing": ["dep:quote"],
         "proc-macro": ["proc-macro2/proc-macro", "quote?/proc-macro"],
     }
     contracts = (
@@ -13144,7 +13150,8 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         ("syn", "2.0.119", syn_definitions, (
             ("serde_derive", "1.0.228", "^2.0.81", False,
              ["clone-impls", "derive", "parsing", "printing", "proc-macro"]),
-            ("tokio-macros", "2.6.1", "^2.0", True, ["full"]))),
+            ("tokio-macros", "2.6.1", "^2.0", True, ["full"]),
+            ("der_derive", "0.7.3", "^2", True, ["extra-traits"]))),
         ("serde", "1.0.228", {
             "default": ["std"], "derive": ["serde_derive"],
             "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],
@@ -13189,6 +13196,60 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
                           if ref.startswith(name + "/") or ref.startswith(name + "?/")]
             require(same_compile_json(forwarding, ["serde_core/std"] if name == "serde_core" else []),
                     "Windows fixed normal unit parent forwarding differs: " + name)
+        if name == "serde_core":
+            # The pinned time manifest has weak alloc forwarding. Cargo's
+            # metadata includes its optional edge without selecting time/serde;
+            # that edge is DATA, not a normal compiler-feature grant.
+            time_key, time_package = package("time", "0.3.55")
+            plist_key, plist_package = package("plist", "1.10.1")
+            app_key, app_package = package("mobile-release-kit-desktop", "0.1.0", local=True)
+            library(time_package)
+            library(plist_package)
+            time_mapping, time_selected = feature_data(time_key, time_package)
+            time_definitions = {
+                "alloc": ["serde_core?/alloc"], "default": ["std"],
+                "formatting": ["std", "time-macros?/formatting"],
+                "parsing": ["time-macros?/parsing"], "std": ["alloc"],
+                "serde": ["dep:serde_core", "time-macros?/serde", "deranged/serde"],
+            }
+            require(same_compile_json(time_selected, ["alloc", "default", "formatting", "parsing", "std"])
+                    and all(same_compile_json(time_mapping.get(feature), refs)
+                            for feature, refs in time_definitions.items()),
+                    "Windows fixed normal unit time weak metadata features differ")
+            plist_mapping, plist_selected = feature_data(plist_key, plist_package)
+            plist_feature = "enable_unstable_features_that_may_break_with_minor_version_bumps"
+            require(same_compile_json(plist_selected, [plist_feature])
+                    and same_compile_json(plist_mapping, {
+                        "default": ["serde"], plist_feature: [], "serde": ["dep:serde"],
+                    }), "Windows fixed normal unit plist metadata features differ")
+            # These two sole normal hops bind time to the target app, rather
+            # than a same-named library reached through a host/build parent.
+            for child_name, child_key, parent_key, parent, requirement, defaults, requested in (
+                    ("plist", plist_key, app_key, app_package, "=1.10.1", False, [plist_feature]),
+                    ("time", time_key, plist_key, plist_package, "^0.3.47", True, ["parsing", "formatting"])):
+                incoming = [(owner, edge) for owner, node in nodes.items() for edge in node["deps"]
+                            if edge["pkg"] == child_key]
+                require(len(incoming) == 1 and incoming[0][0] == parent_key
+                        and incoming[0][1]["name"] == child_name
+                        and same_compile_json(incoming[0][1]["dep_kinds"], [{"kind": None, "target": None}]),
+                        "Windows fixed normal unit time upstream role/edge differs: " + child_name)
+                declarations = parent.get("dependencies")
+                require(type(declarations) is list and 0 < len(declarations) <= 512
+                        and all(type(declaration) is dict for declaration in declarations),
+                        "Windows fixed normal unit time upstream declarations differ: " + child_name)
+                matching = [declaration for declaration in declarations if declaration.get("name") == child_name]
+                require(len(matching) == 1 and same_compile_json(matching[0], {
+                    "name": child_name, "source": registry, "req": requirement, "kind": None, "rename": None,
+                    "optional": False, "uses_default_features": defaults, "features": requested,
+                    "target": None, "registry": None,
+                }), "Windows fixed normal unit time upstream declaration differs: " + child_name)
+            require(time_key not in expected_parents and "alloc" in metadata_features,
+                    "Windows fixed normal unit time weak metadata effect differs")
+            expected_parents[time_key] = {
+                "name": name, "source": registry, "req": "^1.0.220", "kind": None, "rename": None,
+                "optional": True, "uses_default_features": False, "features": [],
+                "target": None, "registry": None,
+            }
         seen = set()
         for parent_key, node in nodes.items():
             for edge in node["deps"]:
@@ -14558,12 +14619,21 @@ WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS = {
     "gradle": 2, "version": 1, "keep": 1, "config": 3,
 }
 WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS = ("debug-log", "chrome-debug-log", "msedge-debug-log")
+WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES = (
+    "app-identifier", "fixture-project", "fixture-app", "fixture-release", "ebwebview", "webview2",
+    "app-data", "local", "roaming", "microsoft", "temp", "default", "crashpad", "crash-dumps", "browser-metrics",
+    "cache", "code-cache", "gpu-cache", "dawn-cache", "shader-cache", "session-storage", "local-storage",
+    "desktop", "documents", "downloads", "favorites", "links", "recent",
+    "literal-userprofile", "literal-localappdata", "literal-appdata", "literal-temp", "literal-tmp",
+    "mrk-webview2-shape", "webview2-suffix",
+)
 
 
 def windows_normal_ui_observer_capture_entry(value: object, position: int) -> dict:
     """Closed DATA from the original mismatch, never an allowed child/producer."""
-    closed_object(value, {"class", "expected", "log", "kind", "attributes"},
-                  "Windows observer unexpected-entry fields differ")
+    keys = {"class", "expected", "log", "kind", "attributes"}
+    require(type(value) is dict and set(value) in (keys, keys | {"directoryFamily"}),
+            "Windows observer unexpected-entry fields differ")
     require(integer_between(position, 0, 3)
             and type(value["class"]) is str and value["class"] in WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES
             and type(value["kind"]) is str and value["kind"] in ("file", "directory")
@@ -14584,6 +14654,11 @@ def windows_normal_ui_observer_capture_entry(value: object, position: int) -> di
         else:
             require(expected is log is None and value["kind"] == ("file" if category == "other-regular" else "directory"),
                     "Windows observer unexpected-entry category differs")
+    if "directoryFamily" in value:
+        require(category == "other-directory" and consistent and value["kind"] == "directory"
+                and expected is log is None and type(value["directoryFamily"]) is str
+                and value["directoryFamily"] in WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES,
+                "Windows observer directory family differs")
     return dict(value)
 
 

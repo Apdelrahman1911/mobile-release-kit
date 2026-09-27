@@ -289,17 +289,56 @@ impl ObserverKnownLog {
             .into_iter().find(|(fixed, _)| name.eq_ignore_ascii_case(fixed)).map(|(_, label)| label)
     }
 }
+capture_labels!(ObserverDirectoryFamily {
+    AppIdentifier => "app-identifier",
+    FixtureProject => "fixture-project", FixtureApp => "fixture-app", FixtureRelease => "fixture-release",
+    EbWebView => "ebwebview", WebView2 => "webview2",
+    AppData => "app-data", Local => "local", Roaming => "roaming", Microsoft => "microsoft", Temp => "temp",
+    Default => "default", Crashpad => "crashpad", CrashDumps => "crash-dumps", BrowserMetrics => "browser-metrics",
+    Cache => "cache", CodeCache => "code-cache", GpuCache => "gpu-cache", DawnCache => "dawn-cache", ShaderCache => "shader-cache",
+    SessionStorage => "session-storage", LocalStorage => "local-storage",
+    Desktop => "desktop", Documents => "documents", Downloads => "downloads", Favorites => "favorites", Links => "links", Recent => "recent",
+    LiteralUserProfile => "literal-userprofile", LiteralLocalAppData => "literal-localappdata", LiteralAppData => "literal-appdata",
+    LiteralTemp => "literal-temp", LiteralTmp => "literal-tmp",
+    MrkWebView2Shape => "mrk-webview2-shape", WebView2Suffix => "webview2-suffix",
+});
+impl ObserverDirectoryFamily {
+    // Lexical names only: neither a producing process nor this run's profile.
+    // No original basename, prefix, nonce or executable authority is retained.
+    fn of(name: &str) -> Option<Self> {
+        let fixed = [
+            ("dev.mobile-release-kit.desktop", Self::AppIdentifier),
+            ("project", Self::FixtureProject), ("app", Self::FixtureApp), ("release", Self::FixtureRelease),
+            ("EBWebView", Self::EbWebView), ("WebView2", Self::WebView2),
+            ("AppData", Self::AppData), ("Local", Self::Local), ("Roaming", Self::Roaming), ("Microsoft", Self::Microsoft), ("Temp", Self::Temp),
+            ("Default", Self::Default), ("Crashpad", Self::Crashpad), ("CrashDumps", Self::CrashDumps), ("BrowserMetrics", Self::BrowserMetrics),
+            ("Cache", Self::Cache), ("Code Cache", Self::CodeCache), ("GPUCache", Self::GpuCache), ("DawnCache", Self::DawnCache), ("ShaderCache", Self::ShaderCache),
+            ("Session Storage", Self::SessionStorage), ("Local Storage", Self::LocalStorage),
+            ("Desktop", Self::Desktop), ("Documents", Self::Documents), ("Downloads", Self::Downloads), ("Favorites", Self::Favorites), ("Links", Self::Links), ("Recent", Self::Recent),
+            ("%USERPROFILE%", Self::LiteralUserProfile), ("%LOCALAPPDATA%", Self::LiteralLocalAppData), ("%APPDATA%", Self::LiteralAppData),
+            ("%TEMP%", Self::LiteralTemp), ("%TMP%", Self::LiteralTmp),
+        ];
+        if let Some((_, family)) = fixed.into_iter().find(|(fixed, _)| name.eq_ignore_ascii_case(fixed)) { return Some(family); }
+        if name.strip_prefix("mrk-webview2-").is_some_and(|tail|
+            tail.len() == 32 && tail.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))) {
+            return Some(Self::MrkWebView2Shape);
+        }
+        // rsplit_once is boundary-safe even when the original prefix is UTF-8.
+        name.rsplit_once('.').filter(|(prefix, suffix)| !prefix.is_empty() && suffix.eq_ignore_ascii_case("WebView2"))
+            .map(|_| Self::WebView2Suffix)
+    }
+}
 // Same decoded entry only. No arbitrary name, path, file ID or content survives
 // classification. A known log NAME does not identify its producer or make it safe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ObserverCaptureEntry {
     class: ObserverEntryClass, expected: Option<ObserverExpectedName>, log: Option<ObserverKnownLog>,
-    kind: FileKind, attributes: u32,
+    kind: FileKind, attributes: u32, directory_family: Option<ObserverDirectoryFamily>,
 }
 impl ObserverCaptureEntry {
     fn of<'a>(role: UiRole, entry: &DirectoryEntry, mut expected: impl Iterator<Item = &'a str>) -> Self {
         let mut value = Self { class: ObserverEntryClass::Other, expected: None, log: None,
-            kind: entry.kind, attributes: entry.attributes };
+            kind: entry.kind, attributes: entry.attributes, directory_family: None };
         if !value.consistent() { return value; } // DATA fallback, never a new decoder admission.
         value.expected = expected.find(|name| *name != entry.name.as_str() && name.eq_ignore_ascii_case(&entry.name))
             .and_then(|name| ObserverExpectedName::of(role, name));
@@ -308,10 +347,14 @@ impl ObserverCaptureEntry {
             value.class = ObserverEntryClass::KnownCwdLog; value.log = Some(log);
         } else { value.class = match entry.kind { FileKind::File => ObserverEntryClass::OtherRegular,
             FileKind::Directory => ObserverEntryClass::OtherDirectory }; }
+        if value.class == ObserverEntryClass::OtherDirectory {
+            value.directory_family = ObserverDirectoryFamily::of(&entry.name);
+        }
         value
     }
     fn consistent(self) -> bool { (self.attributes & FS::FILE_ATTRIBUTE_DIRECTORY != 0) == (self.kind == FileKind::Directory) }
     fn valid(self, position: Option<u8>) -> bool {
+        if self.directory_family.is_some() && (self.class != ObserverEntryClass::OtherDirectory || !self.consistent()) { return false; }
         if !self.consistent() { return self.class == ObserverEntryClass::Other && self.expected.is_none() && self.log.is_none(); }
         match self.class {
             ObserverEntryClass::ExpectedNameCaseAlias => self.expected.is_some_and(|name| Some(name.position()) == position) && self.log.is_none(),
@@ -326,8 +369,10 @@ impl ObserverCaptureEntry {
         match self.expected { Some(name) => write!(output, "\"{}\"", name.label())?, None => output.write_all(b"null")? }
         output.write_all(b",\"log\":")?;
         match self.log { Some(log) => write!(output, "\"{}\"", log.label())?, None => output.write_all(b"null")? }
-        write!(output, ",\"kind\":\"{}\",\"attributes\":{}}}",
-            match self.kind { FileKind::File => "file", FileKind::Directory => "directory" }, self.attributes)
+        write!(output, ",\"kind\":\"{}\",\"attributes\":{}",
+            match self.kind { FileKind::File => "file", FileKind::Directory => "directory" }, self.attributes)?;
+        if let Some(family) = self.directory_family { write!(output, ",\"directoryFamily\":\"{}\"", family.label())?; }
+        output.write_all(b"}")
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -454,6 +499,7 @@ fn read_streams(trace: Option<&ObserverCaptureTrace>, raw: &[u8]) -> Result<()> 
 impl ObserverCaptureTrace {
     pub(crate) fn unexpected_entry_contract() -> Result<()> {
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O; use ObserverEntryClass as Class;
+        use ObserverDirectoryFamily as D;
         fn entry(name: &str, kind: FileKind, attributes: u32) -> DirectoryEntry {
             DirectoryEntry { name: name.to_owned(), file_id: [0x37; 16], kind, attributes }
         }
@@ -485,10 +531,11 @@ impl ObserverCaptureTrace {
                 let captured = first.entry.unwrap();
                 assert!(first.valid()); assert_eq!(captured.class, Class::ExpectedNameCaseAlias);
                 assert_eq!(captured.expected, Some(*label)); assert_eq!(captured.log, None);
+                assert_eq!(captured.directory_family, None);
                 assert_eq!((captured.kind, captured.attributes), (alias.kind, alias.attributes));
             }
             // A case alias in a different parent, or an absent optional result,
-            // remains other DATA. Neither becomes an expected-name witness.
+            // remains other DATA. A fixture-family label is not an expected-name witness.
             let absent: Vec<_> = expected.iter().filter(|(_, name)| *name != role.name("result.private.json")).cloned().collect();
             for (position, value, names) in [
                 (1, entry("PROJECT", FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), &expected),
@@ -497,6 +544,7 @@ impl ObserverCaptureTrace {
                 let (original, trace) = observe(role, position, &value, names);
                 assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
                 assert!(first.entry.unwrap().expected.is_none());
+                if value.name == "PROJECT" { assert_eq!(first.entry.unwrap().directory_family, Some(D::FixtureProject)); }
             }
         }
         let role = UiRole::ProjectDraft; let expected = [(0, "project".to_owned())];
@@ -508,6 +556,7 @@ impl ObserverCaptureTrace {
                     let value = entry(&name, kind, attributes); let (original, trace) = observe(role, 0, &value, &expected);
                     assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
                     let captured = first.entry.unwrap(); assert_eq!((captured.class, captured.log), (Class::KnownCwdLog, Some(log)));
+                    assert_eq!(captured.directory_family, None);
                     assert_eq!((captured.kind, captured.attributes), (kind, attributes));
                     let mut raw = Vec::new(); trace.write_json(&mut raw).map_err(|_| Error::State)?;
                     assert!(!String::from_utf8(raw).unwrap().contains(name.as_str()));
@@ -517,6 +566,91 @@ impl ObserverCaptureTrace {
                 }
             }
         }
+        fn family_case(name: &str, expected_family: D) -> Result<()> {
+            let role = UiRole::ProjectDraft;
+            let value = entry(name, FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY);
+            let (original, trace) = observe(role, 0, &value, &[]);
+            assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
+            let captured = first.entry.unwrap();
+            assert_eq!((captured.class, captured.expected, captured.log), (Class::OtherDirectory, None, None));
+            assert_eq!(captured.directory_family, Some(expected_family));
+            assert_eq!((captured.kind, captured.attributes), (value.kind, value.attributes));
+            let mut bytes = [0u8; 4096]; let mut cursor = std::io::Cursor::new(&mut bytes[..]);
+            trace.write_json(&mut cursor).map_err(|_| Error::State)?;
+            let count = cursor.position() as usize; assert!(count < bytes.len());
+            let text = std::str::from_utf8(&bytes[..count]).unwrap();
+            assert!(text.contains(&format!("\"directoryFamily\":\"{}\"", expected_family.label())));
+            assert!(text.contains("\"check\":\"expected-child\",\"index\":0,\"error\":\"Unsafe\""));
+            if matches!(expected_family, D::MrkWebView2Shape | D::WebView2Suffix) {
+                assert!(!text.contains(name));
+                assert!(!text.contains("0123456789abcdef0123456789abcdef"));
+                assert!(!text.contains("private-prefix"));
+            }
+            trace.unexpected_entry(role, &entry("later-private-name", FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), std::iter::empty());
+            let _ = trace.scope(O::JournalOpen, Some(16), || trace.result::<()>(C::HelperReturn, Err(Error::Unavailable)));
+            assert_eq!(trace.first(), Some(first));
+            // A family never grants the old file/alias/log/fallback categories.
+            for invalid in 0..7 {
+                let mut changed = first; let entry = changed.entry.as_mut().unwrap();
+                match invalid {
+                    0 => { entry.class = Class::OtherRegular; entry.kind = FileKind::File; entry.attributes = 0; },
+                    1 => { entry.class = Class::ExpectedNameCaseAlias; entry.expected = Some(ObserverExpectedName::Project); },
+                    2 => { entry.class = Class::KnownCwdLog; entry.log = Some(ObserverKnownLog::Debug); },
+                    3 => { entry.class = Class::Other; entry.kind = FileKind::File; },
+                    4 => entry.attributes = 0,
+                    5 => entry.expected = Some(ObserverExpectedName::Project),
+                    _ => entry.log = Some(ObserverKnownLog::Debug),
+                }
+                assert!(!changed.valid());
+            }
+            Ok(())
+        }
+        let fixed_families = [
+            ("dev.mobile-release-kit.desktop", D::AppIdentifier),
+            ("project", D::FixtureProject), ("app", D::FixtureApp), ("release", D::FixtureRelease),
+            ("EBWebView", D::EbWebView), ("WebView2", D::WebView2),
+            ("AppData", D::AppData), ("Local", D::Local), ("Roaming", D::Roaming), ("Microsoft", D::Microsoft), ("Temp", D::Temp),
+            ("Default", D::Default), ("Crashpad", D::Crashpad), ("CrashDumps", D::CrashDumps), ("BrowserMetrics", D::BrowserMetrics),
+            ("Cache", D::Cache), ("Code Cache", D::CodeCache), ("GPUCache", D::GpuCache), ("DawnCache", D::DawnCache), ("ShaderCache", D::ShaderCache),
+            ("Session Storage", D::SessionStorage), ("Local Storage", D::LocalStorage),
+            ("Desktop", D::Desktop), ("Documents", D::Documents), ("Downloads", D::Downloads), ("Favorites", D::Favorites), ("Links", D::Links), ("Recent", D::Recent),
+            ("%USERPROFILE%", D::LiteralUserProfile), ("%LOCALAPPDATA%", D::LiteralLocalAppData), ("%APPDATA%", D::LiteralAppData),
+            ("%TEMP%", D::LiteralTemp), ("%TMP%", D::LiteralTmp),
+        ];
+        assert_eq!(fixed_families.len(), 33);
+        let mut seen = Vec::new();
+        for (name, family) in fixed_families {
+            assert!(!seen.contains(&family)); seen.push(family);
+            family_case(name, family)?; family_case(&name.to_ascii_uppercase(), family)?;
+        }
+        for (name, family) in [
+            ("mrk-webview2-0123456789abcdef0123456789abcdef", D::MrkWebView2Shape),
+            ("private-prefix.exe.WebView2", D::WebView2Suffix), ("é.wEbViEw2", D::WebView2Suffix),
+            ("日本語.WebView2", D::WebView2Suffix),
+        ] { family_case(name, family)?; if !seen.contains(&family) { seen.push(family); } }
+        assert_eq!(seen.len(), D::ALL.len()); assert_eq!(seen.len(), 35);
+        for name in ["", "é", "日本語", ".WebView2", "private-prefix.WebView2.more", "private-prefix.WebView",
+            "private-prefix.WebView۲", "EBWebView-extra", "project-extra", "%TEMP", "USERPROFILE",
+            "mrk-webview2-0123456789abcdef0123456789abcde", "mrk-webview2-0123456789abcdef0123456789abcdef0",
+            "mrk-webview2-0123456789abcdef0123456789abcdeg", "mrk-webview2-0123456789abcdef0123456789abcdeF",
+            "MRK-webview2-0123456789abcdef0123456789abcdef"] {
+            let (original, trace) = observe(role, 0, &entry(name, FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), &expected);
+            assert_eq!(original, Err(Error::Unsafe)); assert!(trace.first().unwrap().valid());
+            assert_eq!(trace.first().unwrap().entry.unwrap().directory_family, None);
+        }
+        for (kind, attributes) in [(FileKind::File, 0), (FileKind::File, FS::FILE_ATTRIBUTE_DIRECTORY), (FileKind::Directory, 0)] {
+            let (original, trace) = observe(role, 0, &entry("EBWebView", kind, attributes), &expected);
+            assert_eq!(original, Err(Error::Unsafe)); assert!(trace.first().unwrap().valid());
+            assert_eq!(trace.first().unwrap().entry.unwrap().directory_family, None);
+        }
+        for (name, legacy) in [
+            ("private-unlisted-name", "{\"class\":\"other-directory\",\"expected\":null,\"log\":null,\"kind\":\"directory\",\"attributes\":16}"),
+            ("debug.log", "{\"class\":\"known-cwd-log\",\"expected\":null,\"log\":\"debug-log\",\"kind\":\"directory\",\"attributes\":16}"),
+        ] {
+            let captured = ObserverCaptureEntry::of(role, &entry(name, FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), std::iter::empty());
+            let mut raw = Vec::new(); captured.write_json(&mut raw).map_err(|_| Error::State)?;
+            assert_eq!(raw, legacy.as_bytes());
+        }
         for (kind, attributes, class) in [(FileKind::File, 0, Class::OtherRegular),
             (FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY, Class::OtherDirectory),
             (FileKind::File, FS::FILE_ATTRIBUTE_DIRECTORY, Class::Other), (FileKind::Directory, 0, Class::Other)] {
@@ -524,6 +658,7 @@ impl ObserverCaptureTrace {
             assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
             let captured = first.entry.unwrap(); assert_eq!(captured.class, class);
             assert_eq!((captured.expected, captured.log), (None, None));
+            assert_eq!(captured.directory_family, None);
             let mut raw = Vec::new(); trace.write_json(&mut raw).map_err(|_| Error::State)?;
             assert!(!String::from_utf8(raw).unwrap().contains(value.name.as_str()));
             for invalid in 0..8 {
@@ -541,7 +676,7 @@ impl ObserverCaptureTrace {
         let trace = Self::default();
         let _ = trace.scope(O::DirectoryEntry, Some(0), || trace.result::<()>(C::EntryUnique, Err(Error::Unsafe)));
         let first = trace.first();
-        trace.unexpected_entry(role, &entry("debug.log", FileKind::File, 0), std::iter::empty());
+        trace.unexpected_entry(role, &entry("EBWebView", FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), std::iter::empty());
         assert_eq!(trace.first(), first); assert!(trace.first().unwrap().entry.is_none());
         assert_eq!((ObserverEntryClass::ALL.len(), ObserverExpectedName::ALL.len(), ObserverKnownLog::ALL.len()), (5, 9, 3));
         Ok(())

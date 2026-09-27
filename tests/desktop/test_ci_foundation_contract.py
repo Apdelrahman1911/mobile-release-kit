@@ -29,6 +29,18 @@ helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
 
 
+# Synthetic direct parser declarations; the source-parity contract below reads
+# the actual manifest/lock independently rather than trusting this fixture.
+WINDOWS_COMMON_PARSERS = {
+    "plist": {"version": "1.10.1", "rename": None,
+              "features": ["enable_unstable_features_that_may_break_with_minor_version_bumps"]},
+    "quick-xml": {"version": "0.42.0", "rename": "quick_xml", "features": []},
+    "pkcs12": {"version": "0.1.0", "rename": None, "features": []},
+    "cms": {"version": "0.2.3", "rename": None, "features": ["alloc"]},
+    "der": {"version": "0.7.10", "rename": "der_07", "features": ["alloc", "oid"]},
+}
+
+
 NATIVE_CASE_NAMES = (
     "core-capabilities", "core-catalog", "core-zip-catalog", "core-valid-draft",
     "core-invalid-draft", "core-service-error", "core-snapshot", "malformed",
@@ -7991,7 +8003,8 @@ class WindowsReaderGateTests(unittest.TestCase):
         source, root = Path(context["source"]), Path(context["root"])
         registry = "registry+https://github.com/rust-lang/crates.io-index"
         versions = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9",
-                    "tokio": "1.48.0", "windows-sys": "0.61.2", "windows-link": "0.2.1"}
+                    "tokio": "1.48.0", "windows-sys": "0.61.2", "windows-link": "0.2.1",
+                    **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
         packages, locked, ids = [], [], {}
         declared = {"mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
                     "mrk-linux-mount-observation": "desktop/native/linux-mount-observation/Cargo.toml",
@@ -8047,9 +8060,13 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "manifest_path": str(directory / "Cargo.toml"), "features": {"allowed": []},
                 "targets": units})
             locked.append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
-        direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", "mrk-windows-installed-native"]
+        # Keep native last: existing normal/dev edge mutations address that role.
+        direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", *WINDOWS_COMMON_PARSERS,
+                  "mrk-windows-installed-native"]
         packages[0]["dependencies"].extend({"name": name, "source": registry, "req": "=" + versions[name],
-            "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
+            "kind": None, "rename": WINDOWS_COMMON_PARSERS.get(name, {}).get("rename"), "optional": False,
+            "uses_default_features": name not in WINDOWS_COMMON_PARSERS,
+            "features": list(WINDOWS_COMMON_PARSERS.get(name, {}).get("features", [])),
             "target": None, "registry": None} for name in direct if name in versions)
         packages[1]["dependencies"] = [{"name": "windows-sys", "source": registry, "req": "=0.61.2",
             "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
@@ -8062,7 +8079,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                 ["windows-runtime-publisher"] if publication and name == "mobile-release-kit-desktop" else [])
             nodes.append({"id": ids[name], "features": features,
                 "dependencies": [ids[item] for item in dependencies],
-                "deps": [{"name": item.replace("-", "_"), "pkg": ids[item], "dep_kinds":
+                "deps": [{"name": (WINDOWS_COMMON_PARSERS.get(item, {}).get("rename") or item).replace("-", "_"),
+                    "pkg": ids[item], "dep_kinds":
                     [{"kind": kind, "target": targets[item]} for kind in (None, "dev")]
                     if name == "mobile-release-kit-desktop" and item == "mrk-windows-installed-native"
                     else [{"kind": None, "target": None}]}
@@ -8113,11 +8131,22 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "result": [], "std": [], "unstable": [],
             }, ["alloc", "result", "std"]),
             ("tokio-macros", "2.6.1", {}, []),
+            ("der_derive", "0.7.3", {}, []),
             ("syn", "2.0.119", syn_features, sorted(syn_features)),
+            ("time", "0.3.55", {
+                "alloc": ["serde_core?/alloc"], "default": ["std"],
+                "formatting": ["std", "time-macros?/formatting"],
+                "parsing": ["time-macros?/parsing"], "std": ["alloc"],
+                "serde": ["dep:serde_core", "time-macros?/serde", "deranged/serde"],
+            }, ["alloc", "default", "formatting", "parsing", "std"]),
+            ("deranged", "0.5.8", {"default": [], "serde": ["dep:serde_core"]}, ["default"]),
+            ("indexmap", "2.14.2", {
+                "default": ["std"], "std": [], "serde": ["dep:serde_core", "dep:serde"],
+            }, ["default", "std"]),
         )
         for name, version, features, selected in specifications:
             directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
-            kind = ["proc-macro"] if name in {"serde_derive", "tokio-macros"} else ["lib"]
+            kind = ["proc-macro"] if name in {"serde_derive", "tokio-macros", "der_derive"} else ["lib"]
             package = {"id": name + "@" + version, "name": name, "version": version, "source": registry,
                 "manifest_path": str(directory / "Cargo.toml"), "features": features, "dependencies": [],
                 "targets": [{"name": name.replace("-", "_"), "kind": kind, "crate_types": kind,
@@ -8158,12 +8187,14 @@ class WindowsReaderGateTests(unittest.TestCase):
         declaration["features"] = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]
         # The additional paths make the two typenum parents and two host macro
         # consumers reachable without adding an application direct dependency.
-        def edge(parent_name, name, requirement, features=(), defaults=True, optional=False, target=None):
+        def edge(parent_name, name, requirement, features=(), defaults=True, optional=False, target=None, active=True):
             parent, child = packages[parent_name], packages[name]
             parent.setdefault("dependencies", []).append({
                 "name": name, "source": registry, "req": requirement, "kind": None, "rename": None,
                 "optional": optional, "uses_default_features": defaults, "features": list(features),
                 "target": target, "registry": None})
+            if not active:
+                return
             node = nodes[parent["id"]]
             node["dependencies"].append(child["id"])
             node["deps"].append({"name": name.replace("-", "_"), "pkg": child["id"],
@@ -8178,6 +8209,23 @@ class WindowsReaderGateTests(unittest.TestCase):
         edge("serde", "serde_derive", "^1", optional=True)
         edge("serde", "serde_core", "=1.0.228", ("result",), defaults=False)
         edge("serde_json", "serde_core", "^1.0.220", defaults=False)
+        # Observed metadata retains time's weak optional core edge while its
+        # serde activation is absent. Connect the exact target-normal path.
+        plist_feature = "enable_unstable_features_that_may_break_with_minor_version_bumps"
+        packages["plist"]["features"] = {
+            "default": ["serde"], plist_feature: [], "serde": ["dep:serde"],
+        }
+        nodes[packages["plist"]["id"]]["features"] = [plist_feature]
+        edge("plist", "time", "^0.3.47", ("parsing", "formatting"))
+        edge("time", "serde_core", "^1.0.220", defaults=False, optional=True)
+        edge("time", "deranged", "^0.5.8")
+        edge("plist", "indexmap", "^2.14.0")
+        # These genuine optional declarations do not have metadata edges.
+        # A generic optional-parent exception would incorrectly admit them.
+        edge("deranged", "serde_core", "^1.0.220", defaults=False, optional=True, active=False)
+        edge("indexmap", "serde_core", "^1.0.220", defaults=False, optional=True, active=False)
+        edge("indexmap", "serde", "^1.0.220", defaults=False, optional=True, target="cfg(any())", active=False)
+        edge("plist", "serde", "^1.0.2", optional=True, active=False)
         # Inactive cfg(any()) and nonroot dev declarations are not normal
         # consumers. Keep them without fabricating active resolution edges.
         for parent, child, requirement, kind, target, defaults, features in (
@@ -8196,7 +8244,97 @@ class WindowsReaderGateTests(unittest.TestCase):
         edge("serde_derive", "syn", "^2.0.81",
              ("clone-impls", "derive", "parsing", "printing", "proc-macro"), defaults=False)
         edge("tokio-macros", "syn", "^2.0", ("full",))
+        packages["der"]["features"] = {"alloc": ["zeroize?/alloc"], "derive": ["dep:der_derive"],
+                                        "oid": ["dep:const-oid"]}
+        nodes[packages["der"]["id"]]["features"] = ["alloc", "derive", "oid"]
+        edge("der", "der_derive", "^0.7.2", optional=True)
+        edge("der_derive", "syn", "^2", ("extra-traits",))
         return value, lock, context
+
+    def test_windows_current_common_parser_roles_match_source_and_reject_graph_drift(self):
+        manifest = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.toml").read_text(encoding="utf-8"))
+        lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        locked = {(row["name"], row["version"], row.get("source")) for row in lock["package"]}
+        direct = set()
+        for alias, value in manifest["dependencies"].items():
+            declaration = {"version": value} if type(value) is str else value
+            if declaration.get("optional", False):
+                continue
+            self.assertTrue(declaration["version"].startswith("="))
+            name, version = declaration.get("package", alias), declaration["version"][1:]
+            self.assertIn((name, version, registry), locked)
+            direct.add((name, version))
+        native = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
+        self.assertEqual(manifest["target"][native]["dependencies"],
+                         {"mrk-windows-installed-native": {"path": "../native/windows-installed-native"}})
+        self.assertIn(("mrk-windows-installed-native", "0.1.0", None), locked)
+        direct.add(("mrk-windows-installed-native", "0.1.0"))
+        self.assertEqual(len(direct), 11)
+        self.assertEqual(direct, helper.WINDOWS_INSTALLED_APP_DIRECT_ROLES)
+        for name, row in WINDOWS_COMMON_PARSERS.items():
+            expected = {"version": "=" + row["version"], "default-features": False}
+            if row["features"]:
+                expected["features"] = row["features"]
+            if row["rename"] is not None:
+                expected["package"] = name
+            self.assertEqual(manifest["dependencies"][row["rename"] or name], expected)
+        gui = set()
+        for table, name, version in (("dependencies", "rfd", "0.15.4"),
+                                     ("dependencies", "tauri", "2.11.5"),
+                                     ("build-dependencies", "tauri-build", "2.6.3")):
+            self.assertIs(manifest[table][name]["optional"], True)
+            self.assertEqual(manifest[table][name]["version"], "=" + version)
+            self.assertIn((name, version, registry), locked)
+            gui.add((name, version))
+        self.assertEqual(len(direct | gui), 14)
+        self.assertEqual(manifest["build-dependencies"]["sha2"], manifest["dependencies"]["sha2"])
+        # Move a missing direct edge beneath another node so connectivity and
+        # declarations remain valid; the exact root-role gate must reject it.
+        for gui_role in (False, True):
+            if gui_role:
+                value, graph_lock, source, root = WindowsNormalUiGuiTests.graph_fixture()
+                parse = lambda data, data_lock: helper.windows_normal_ui_app_graph(
+                    data, data_lock, source=source, root=root, observer=False)
+                message, extra = "Windows GUI direct app roles differ", "wry"
+            else:
+                value, graph_lock, context = self.graph_data()
+                source, root = Path(context["source"]), Path(context["root"])
+                parse = lambda data, data_lock: helper.windows_installed_app_graph(data, data_lock, source=source, root=root)
+                message, extra = "Windows app selected direct dependencies differ", "windows-sys"
+            parse(value, graph_lock)
+            for name in WINDOWS_COMMON_PARSERS:
+                for mutation in ("missing", "stale"):
+                    data, data_lock = deepcopy(value), deepcopy(graph_lock)
+                    packages = {row["name"]: row for row in data["packages"]}
+                    nodes = {row["id"]: row for row in data["resolve"]["nodes"]}
+                    package, app = packages[name], packages["mobile-release-kit-desktop"]
+                    if mutation == "missing":
+                        node, other = nodes[app["id"]], nodes[packages["sha2"]["id"]]
+                        edge = next(row for row in node["deps"] if row["pkg"] == package["id"])
+                        node["deps"].remove(edge); node["dependencies"].remove(package["id"])
+                        other["deps"].append(edge); other["dependencies"].append(package["id"])
+                        declaration = next(row for row in app["dependencies"] if row["name"] == name)
+                        app["dependencies"].remove(declaration)
+                        packages["sha2"].setdefault("dependencies", []).append(declaration)
+                    else:
+                        old = package["version"]; package["version"] = "0.0.0"
+                        package["manifest_path"] = package["manifest_path"].replace(name + "-" + old, name + "-0.0.0")
+                        for target in package["targets"]:
+                            target["src_path"] = target["src_path"].replace(name + "-" + old, name + "-0.0.0")
+                        next(row for row in data_lock["package"] if row["name"] == name and row["version"] == old)["version"] = "0.0.0"
+                    with self.subTest(gui=gui_role, parser=name, mutation=mutation), self.assertRaisesRegex(helper.CheckFailure, message):
+                        parse(data, data_lock)
+            data = deepcopy(value)
+            packages = {row["name"]: row for row in data["packages"]}
+            nodes = {row["id"]: row for row in data["resolve"]["nodes"]}
+            app, package = packages["mobile-release-kit-desktop"], packages[extra]
+            app["dependencies"].append({"name": extra, "source": registry, "kind": None, "target": None})
+            nodes[app["id"]]["dependencies"].append(package["id"])
+            nodes[app["id"]]["deps"].append({"name": extra.replace("-", "_"), "pkg": package["id"],
+                                            "dep_kinds": [{"kind": None, "target": None}]})
+            with self.subTest(gui=gui_role, mutation="extra"), self.assertRaisesRegex(helper.CheckFailure, message):
+                parse(data, graph_lock)
 
     def test_windows_reader_active_graph_binds_declared_locals_and_locked_resolution(self):
         value, lock, context = self.graph_data()
@@ -8661,7 +8799,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             "tokio": ["bytes", "default", "io-util", "libc", "macros", "mio", "net", "process",
                       "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time",
                       "tokio-macros", "windows-sys"],
-            "syn": ["clone-impls", "default", "derive", "full", "parsing", "printing", "proc-macro"],
+            "syn": ["clone-impls", "default", "derive", "extra-traits", "full", "parsing", "printing", "proc-macro"],
             "serde": ["default", "derive", "serde_derive", "std"],
             "serde_json": ["default", "std"],
             "serde_core": ["result", "std"],
@@ -8716,6 +8854,12 @@ class WindowsReaderGateTests(unittest.TestCase):
                 for index, (name, expected) in enumerate([*wanted.items(), ("serde_core", wanted["serde_core"])]):
                     surplus = graph["nodes"][packages[name]["id"]]["features"]
                     invalid = [surplus]
+                    if name == "serde_core":
+                        # Both its library and custom-build unit must refuse
+                        # rc and alloc+rc, not only the observed alloc surplus.
+                        invalid += [sorted(expected + ["rc"]), sorted(expected + ["alloc", "rc"])]
+                    if name == "syn":
+                        invalid.append([feature for feature in expected if feature != "extra-traits"])
                     if expected:
                         invalid += [expected[:-1], list(reversed(expected)), expected + [expected[0]]]
                     for features in invalid:
@@ -8738,6 +8882,47 @@ class WindowsReaderGateTests(unittest.TestCase):
         with self.assertRaisesRegex(helper.CheckFailure, "selected feature definitions differ"):
             helper.windows_installed_app_unit_features(graph)
 
+    def test_windows_reader_fixed_normal_time_weak_edge_remains_metadata_only(self):
+        """Source-lock-joined observation shape, not a native compiler receipt."""
+        value, _, context = self.graph_data(publication=True)
+        packages = {row["name"]: row for row in value["packages"]}
+        nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+        # The broader fixture deliberately exercises extra serde/json metadata
+        # features. This regression instead uses their observed selected lists.
+        for name, features in (("serde", ["default", "derive", "serde_derive", "std"]),
+                               ("serde_json", ["default", "std"])):
+            nodes[packages[name]["id"]]["features"] = features
+        lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        locked = {(row["name"], row["version"], row.get("source")): row for row in lock["package"]}
+        for name, version in (("plist", "1.10.1"), ("time", "0.3.55"), ("serde_core", "1.0.228"),
+                              ("deranged", "0.5.8"), ("indexmap", "2.14.2")):
+            self.assertEqual(packages[name]["version"], version)
+            self.assertEqual(packages[name]["source"], registry)
+            self.assertRegex(locked[(name, version, registry)]["checksum"], r"^[0-9a-f]{64}$")
+        # Use the actual source lock, not the fixture's fabricated checksums.
+        graph = helper.windows_installed_app_graph(
+            value, lock, source=Path(context["source"]), root=Path(context["root"]), publication=True)
+        selected = helper.windows_installed_app_unit_features(graph, helper=True)
+        core, time = packages["serde_core"], packages["time"]
+        incoming = sorted(graph["packages"][key]["name"] for key, node in graph["nodes"].items()
+                          for edge in node["deps"] if edge["pkg"] == core["id"])
+        self.assertEqual(incoming, ["serde", "serde_json", "time"])
+        self.assertEqual(nodes[core["id"]]["features"], ["alloc", "result", "std"])
+        self.assertEqual(selected[core["id"]], ["result", "std"])
+        self.assertNotIn("serde", nodes[time["id"]]["features"])
+        self.assertEqual(time["features"]["alloc"], ["serde_core?/alloc"])
+        declaration = next(row for row in time["dependencies"] if row["name"] == "serde_core")
+        self.assertIs(declaration["optional"], True)
+        self.assertIs(declaration["uses_default_features"], False)
+        self.assertEqual(declaration["features"], [])
+        for name in ("serde", "serde_json"):
+            self.assertEqual(selected[packages[name]["id"]], nodes[packages[name]["id"]]["features"])
+        for name in ("deranged", "indexmap"):
+            self.assertTrue(any(row["name"] == "serde_core" and row["optional"] is True
+                                for row in packages[name]["dependencies"]))
+            self.assertFalse(any(edge["pkg"] == core["id"] for edge in nodes[packages[name]["id"]]["deps"]))
+
     def test_windows_reader_fixed_normal_unit_declarations_and_metadata_fail_closed(self):
         def reject(label, change):
             value, lock, context = self.graph_data(publication=True)
@@ -8750,22 +8935,26 @@ class WindowsReaderGateTests(unittest.TestCase):
                 helper.windows_installed_app_unit_features(graph, helper=True)
         def declaration(packages, parent, child):
             return next(row for row in packages[parent]["dependencies"] if row["name"] == child)
-        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core"):
+        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core", "der_derive", "time", "plist"):
             reject("version-" + name, lambda g, p, n, name=name: p[name].update(version="0.0.0"))
             reject("source-" + name, lambda g, p, n, name=name: p[name].update(source="git+https://example.invalid/other"))
             reject("missing-" + name, lambda g, p, n, name=name: g["nodes"].pop(p[name]["id"]))
-        def duplicate_unit(graph, packages, nodes):
-            copy = deepcopy(packages["typenum"]); copy["id"] = "duplicate-typenum"
+        def duplicate_unit(graph, packages, nodes, name):
+            copy = deepcopy(packages[name]); copy["id"] = "duplicate-" + name
             graph["packages"][copy["id"]] = copy
-            graph["nodes"][copy["id"]] = {**deepcopy(nodes["typenum"]), "id": copy["id"]}
-        reject("duplicated-unit", duplicate_unit)
+            graph["nodes"][copy["id"]] = {**deepcopy(nodes[name]), "id": copy["id"]}
+        for name in ("typenum", "time", "plist"):
+            reject("duplicated-unit-" + name, lambda g, p, n, name=name: duplicate_unit(g, p, n, name))
         for parent, child in (("crypto-common", "typenum"), ("generic-array", "typenum"),
                               ("mobile-release-kit-desktop", "tokio"), ("serde_derive", "syn"), ("tokio-macros", "syn"),
+                              ("der_derive", "syn"),
                               ("mobile-release-kit-desktop", "serde"), ("mobile-release-kit-desktop", "serde_json"),
-                              ("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
-            for field, value in (("req", "*"), ("rename", "alias"), ("kind", "build"), ("target", "cfg(unix)"),
-                                 ("optional", 0), ("uses_default_features", 1),
-                                 ("features", ()), ("features", ["const-generics"]), ("registry", "other")):
+                              ("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive"),
+                              ("time", "serde_core"), ("plist", "time"), ("mobile-release-kit-desktop", "plist")):
+            for field, value in (("name", "other"), ("source", "git+https://example.invalid/other"),
+                                 ("req", "*"), ("rename", "alias"), ("kind", "build"), ("kind", "dev"), ("target", "cfg(unix)"),
+                                 ("optional", 0), ("optional", 1), ("uses_default_features", 0), ("uses_default_features", 1),
+                                 ("features", ()), ("features", ["const-generics"]), ("registry", "other"), ("extra", None)):
                 reject(parent + "-" + child + "-" + field + "-" + str(value),
                        lambda g, p, n, parent=parent, child=child, field=field, value=value:
                            declaration(p, parent, child).update({field: value}))
@@ -8781,6 +8970,9 @@ class WindowsReaderGateTests(unittest.TestCase):
             reject(parent + "-" + child + "-duplicate-declaration",
                    lambda g, p, n, parent=parent, child=child:
                        p[parent]["dependencies"].append(deepcopy(declaration(p, parent, child))))
+            reject(parent + "-" + child + "-missing-declaration",
+                   lambda g, p, n, parent=parent, child=child:
+                       p[parent]["dependencies"].remove(declaration(p, parent, child)))
         reject("missing-parent-edge", lambda g, p, n: n["generic-array"].update(deps=[]))
         reject("duplicate-parent-edge", lambda g, p, n:
                n["generic-array"]["deps"].append(deepcopy(n["generic-array"]["deps"][0])))
@@ -8793,8 +8985,13 @@ class WindowsReaderGateTests(unittest.TestCase):
         reject("additional-parent", lambda g, p, n:
                n["serde_json"]["deps"].append({"name": "typenum", "pkg": p["typenum"]["id"],
                                               "dep_kinds": [{"kind": None, "target": None}]}))
+        reject("additional-syn-parent", lambda g, p, n:
+               n["cms"]["deps"].append({"name": "syn", "pkg": p["syn"]["id"],
+                                       "dep_kinds": [{"kind": None, "target": None}]}))
         reject("host-became-library", lambda g, p, n:
                p["serde_derive"]["targets"][0].update(kind=["lib"], crate_types=["lib"]))
+        reject("parser-host-became-library", lambda g, p, n:
+               p["der_derive"]["targets"][0].update(kind=["lib"], crate_types=["lib"]))
         reject("target-became-macro", lambda g, p, n:
                p["typenum"]["targets"][0].update(kind=["proc-macro"], crate_types=["proc-macro"]))
         reject("target-source", lambda g, p, n: p["syn"]["targets"][0].update(src_path="/unrelated/lib.rs"))
@@ -8802,7 +8999,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         for ref in ("typenum/const-generics", "typenum?/const-generics"):
             reject("parent-forward-" + ref, lambda g, p, n, ref=ref:
                    p["generic-array"]["features"]["more_lengths"].append(ref))
-        for name, feature in (("tokio", "time"), ("syn", "full"), ("serde", "serde_derive"),
+        for name, feature in (("tokio", "time"), ("syn", "full"), ("syn", "extra-traits"), ("serde", "serde_derive"),
                               ("serde", "std"), ("serde_json", "std"), ("serde_core", "result"), ("serde_core", "std")):
             reject(name + "-selected-definition", lambda g, p, n, name=name, feature=feature:
                    p[name]["features"].update({feature: ["unreviewed"]}))
@@ -8812,7 +9009,9 @@ class WindowsReaderGateTests(unittest.TestCase):
                    n[name]["features"].remove(feature))
         def incoming(packages, nodes, parent, child):
             return next(edge for edge in nodes[parent]["deps"] if edge["pkg"] == packages[child]["id"])
-        for parent, child in (("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
+        for parent, child in (("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive"),
+                              ("der_derive", "syn"), ("time", "serde_core"), ("plist", "time"),
+                              ("mobile-release-kit-desktop", "plist")):
             reject(parent + "-" + child + "-missing-edge", lambda g, p, n, parent=parent, child=child:
                    n[parent]["deps"].remove(incoming(p, n, parent, child)))
             reject(parent + "-" + child + "-duplicate-edge", lambda g, p, n, parent=parent, child=child:
@@ -8823,6 +9022,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                            incoming(p, n, parent, child)["dep_kinds"][0].update({field: value}))
             reject(parent + "-" + child + "-alias", lambda g, p, n, parent=parent, child=child:
                    incoming(p, n, parent, child).update(name="other"))
+            reject(parent + "-" + child + "-duplicate-kind", lambda g, p, n, parent=parent, child=child:
+                   incoming(p, n, parent, child)["dep_kinds"].append(deepcopy(incoming(p, n, parent, child)["dep_kinds"][0])))
         for child in ("serde", "serde_json", "serde_core"):
             reject(child + "-additional-parent", lambda g, p, n, child=child:
                    n["tokio"]["deps"].append({"name": child, "pkg": p[child]["id"],
@@ -8830,6 +9031,81 @@ class WindowsReaderGateTests(unittest.TestCase):
         reject("metadata-feature-type", lambda g, p, n: n["tokio"].update(features=True))
         reject("metadata-feature-duplicate", lambda g, p, n: n["syn"]["features"].append("full"))
         reject("declaration-list-type", lambda g, p, n: p["crypto-common"].update(dependencies=None))
+
+        for name in ("time", "plist"):
+            reject(name + "-became-macro", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(kind=["proc-macro"], crate_types=["proc-macro"]))
+            reject(name + "-crate-type", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(crate_types=["rlib"]))
+            reject(name + "-library-name", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(name="other"))
+            reject(name + "-library-source", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(src_path="/unrelated/lib.rs"))
+            reject(name + "-missing-library", lambda g, p, n, name=name: p[name].update(targets=[]))
+            reject(name + "-duplicate-library", lambda g, p, n, name=name:
+                   p[name]["targets"].append(deepcopy(p[name]["targets"][0])))
+        reject("plist-time-request-order", lambda g, p, n:
+               declaration(p, "plist", "time").update(features=["formatting", "parsing"]))
+
+        def reparent(graph, packages, nodes, parent, child, kind):
+            edge = incoming(packages, nodes, parent, child)
+            declared = declaration(packages, parent, child)
+            nodes[parent]["deps"].remove(edge)
+            nodes[parent]["dependencies"].remove(packages[child]["id"])
+            packages[parent]["dependencies"].remove(declared)
+            edge["dep_kinds"][0]["kind"] = kind
+            declared["kind"] = kind
+            nodes["sha2"]["deps"].append(edge)
+            nodes["sha2"]["dependencies"].append(packages[child]["id"])
+            packages["sha2"].setdefault("dependencies", []).append(declared)
+            # Both tables and the entire graph remain connected. Reject the
+            # changed source role, not an accidental orphan or dangling edge.
+            for node in nodes.values():
+                self.assertEqual(len(node["dependencies"]), len(set(node["dependencies"])))
+                self.assertEqual(set(node["dependencies"]), {item["pkg"] for item in node["deps"]})
+            seen, pending = set(), [graph["appId"]]
+            while pending:
+                key = pending.pop()
+                if key not in seen:
+                    seen.add(key)
+                    pending.extend(graph["nodes"][key]["dependencies"])
+            self.assertEqual(seen, set(graph["nodes"]))
+        for parent, child in (("mobile-release-kit-desktop", "plist"), ("plist", "time")):
+            for kind in (None, "build", "dev"):
+                reject(parent + "-" + child + "-reparent-" + str(kind),
+                       lambda g, p, n, parent=parent, child=child, kind=kind: reparent(g, p, n, parent, child, kind))
+
+        for name in ("deranged", "indexmap"):
+            def extra_optional_parent(graph, packages, nodes, name=name):
+                self.assertIs(declaration(packages, name, "serde_core")["optional"], True)
+                nodes[name]["dependencies"].append(packages["serde_core"]["id"])
+                nodes[name]["deps"].append({"name": "serde_core", "pkg": packages["serde_core"]["id"],
+                                           "dep_kinds": [{"kind": None, "target": None}]})
+            reject(name + "-optional-core-edge-is-not-time", extra_optional_parent)
+        for feature in ("alloc", "default", "formatting", "parsing", "std"):
+            reject("time-missing-selected-" + feature, lambda g, p, n, feature=feature:
+                   n["time"]["features"].remove(feature))
+        reject("time-serde-activation", lambda g, p, n:
+               n["time"].update(features=sorted(n["time"]["features"] + ["serde"])))
+        def extra_time_feature(graph, packages, nodes):
+            packages["time"]["features"]["extra"] = []
+            nodes["time"]["features"] = sorted(nodes["time"]["features"] + ["extra"])
+        reject("time-extra-selected-feature", extra_time_feature)
+        reject("time-strong-alloc-forwarding", lambda g, p, n:
+               p["time"]["features"].update(alloc=["serde_core/alloc"]))
+        for name, features in (("time", ("alloc", "default", "formatting", "parsing", "std", "serde")),
+                               ("plist", ("default", "serde", "enable_unstable_features_that_may_break_with_minor_version_bumps"))):
+            for feature in features:
+                reject(name + "-changed-definition-" + feature, lambda g, p, n, name=name, feature=feature:
+                       p[name]["features"].update({feature: ["unreviewed"]}))
+                reject(name + "-missing-definition-" + feature, lambda g, p, n, name=name, feature=feature:
+                       p[name]["features"].pop(feature))
+        reject("plist-extra-feature-definition", lambda g, p, n: p["plist"]["features"].update(extra=[]))
+        reject("plist-missing-selected-feature", lambda g, p, n: n["plist"].update(features=[]))
+        for feature in ("default", "serde"):
+            reject("plist-activated-" + feature, lambda g, p, n, feature=feature:
+                   n["plist"].update(features=sorted(n["plist"]["features"] + [feature])))
+        reject("core-missing-weak-metadata-alloc", lambda g, p, n: n["serde_core"]["features"].remove("alloc"))
 
     def test_windows_reader_selected_eleven_and_compile_argv_are_closed(self):
         names = (
@@ -14768,6 +15044,19 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
 
     def test_unexpected_entry_closed_cases_preserve_original_failure_and_legacy(self):
         cases = []
+        families = (
+            "app-identifier", "fixture-project", "fixture-app", "fixture-release", "ebwebview", "webview2",
+            "app-data", "local", "roaming", "microsoft", "temp", "default", "crashpad", "crash-dumps", "browser-metrics",
+            "cache", "code-cache", "gpu-cache", "dawn-cache", "shader-cache", "session-storage", "local-storage",
+            "desktop", "documents", "downloads", "favorites", "links", "recent",
+            "literal-userprofile", "literal-localappdata", "literal-appdata", "literal-temp", "literal-tmp",
+            "mrk-webview2-shape", "webview2-suffix",
+        )
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES, families)
+        self.assertEqual(len(families), len(set(families))); self.assertEqual(len(families), 35)
+        for family in families:
+            cases.append((0, {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                              "attributes": 0x10, "directoryFamily": family}))
         for expected, position in helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS.items():
             kind = "directory" if expected in ("project", "app", "release") else "file"
             cases.append((position, {"class": "expected-name-case-alias", "expected": expected, "log": None,
@@ -14786,6 +15075,9 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                     self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
                     self.assertEqual(frame["captureFailure"]["error"], "Unsafe")
                     self.assertEqual(frame["projection"]["reason"], 1)
+                    if "directoryFamily" in entry:
+                        legacy = deepcopy(frame); del legacy["captureFailure"]["entry"]["directoryFamily"]
+                        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
                     del frame["captureFailure"]["entry"]
                     self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
         # Historical seven-field failures stay readable without inventing details.
@@ -14806,7 +15098,8 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                            ("attributes", "32"), ("attributes", 32.0), ("attributes", 0x10),
                            ("kind", "pipe"), ("kind", True), ("kind", "directory"),
                            ("class", "permitted-log"), ("class", "other"), ("expected", "result"),
-                           ("log", None), ("log", "debug.log"), ("log", 1), ("name", "private"), ("content", "private")):
+                           ("log", None), ("log", "debug.log"), ("log", 1), ("name", "private"), ("content", "private"),
+                           ("directoryFamily", "ebwebview"), ("directoryFamily", None)):
             frame = self.entry_frame_data(); frame["captureFailure"]["entry"][key] = value
             with self.subTest(entry=(key, value)), self.assertRaises(helper.CheckFailure):
                 helper.windows_normal_ui_observer_frame(self.frame(frame))
@@ -14824,24 +15117,59 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         for key in (b'"entry":', b'"attributes":', b'"class":'):
             with self.subTest(duplicate=key), self.assertRaises(helper.CheckFailure):
                 helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'null,' + key, 1))
+        family_entry = {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                        "attributes": 0x10, "directoryFamily": "ebwebview"}
+        for key, value in (("directoryFamily", None), ("directoryFamily", True), ("directoryFamily", 1),
+                           ("directoryFamily", []), ("directoryFamily", {}), ("directoryFamily", "EBWebView"),
+                           ("directoryFamily", "private.exe.WebView2"), ("directoryFamily", "unknown"),
+                           ("class", "known-cwd-log"), ("class", "expected-name-case-alias"), ("class", "other-regular"),
+                           ("class", "other"), ("kind", "file"), ("attributes", 0), ("attributes", True),
+                           ("expected", "project"), ("log", "debug-log"), ("name", "EBWebView"), ("sha256", "a" * 64)):
+            frame = self.entry_frame_data(family_entry); frame["captureFailure"]["entry"][key] = value
+            with self.subTest(family=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        # Otherwise valid legacy categories cannot smuggle a family, even when
+        # all of their own cross-fields and the original provenance are valid.
+        for legacy in (
+            {"class": "expected-name-case-alias", "expected": "project", "log": None, "kind": "directory", "attributes": 0x10},
+            {"class": "known-cwd-log", "expected": None, "log": "debug-log", "kind": "directory", "attributes": 0x10},
+            {"class": "other-regular", "expected": None, "log": None, "kind": "file", "attributes": 0},
+            {"class": "other", "expected": None, "log": None, "kind": "file", "attributes": 0x10},
+        ):
+            frame = self.entry_frame_data(legacy)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+            frame["captureFailure"]["entry"]["directoryFamily"] = "ebwebview"
+            with self.subTest(family_category=legacy), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for key, value in (("operation", "directory-roster"), ("check", "entry-kind"), ("index", 4),
+                           ("error", "Unavailable"), ("detail", "input.PathText")):
+            frame = self.entry_frame_data(family_entry); frame["captureFailure"][key] = value
+            with self.subTest(family_provenance=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        raw = self.frame(self.entry_frame_data(family_entry)); key = b'"directoryFamily":'
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'"ebwebview",' + key, 1))
 
     def test_unexpected_entry_collector_never_upgrades_failure_or_reads_offender(self):
         for role in self.OWNERS:
-            parts = list(self.original_log(role)); frame = self.entry_frame_data(role=role)
-            parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
-            parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
-            with patch.object(helper, "run", side_effect=AssertionError("no process/native")), \
-                    patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no filesystem read")):
-                data = self.joined(parts)
-            self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
-            self.assertTrue(data["originalSelectedFailure"]); self.assertEqual(data["projection"]["reason"], 1)
-            self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
-            self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
-            self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
+            for entry in (None, {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                                 "attributes": 0x10, "directoryFamily": "ebwebview"}):
+                parts = list(self.original_log(role)); frame = self.entry_frame_data(entry, role=role)
+                parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
+                parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+                with patch.object(helper, "run", side_effect=AssertionError("no process/native")), \
+                        patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no filesystem read")):
+                    data = self.joined(parts)
+                self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
+                self.assertTrue(data["originalSelectedFailure"]); self.assertEqual(data["projection"]["reason"], 1)
+                self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
+                self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
+                self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
 
     def test_unexpected_entry_source_uses_only_same_mismatch_and_closed_copy_data(self):
         root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
         ui, diagnostic = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs"))
+        self.assertEqual(hashlib.sha256(ui.encode()).hexdigest(), "af22b27be8f53299c62e49764692c813bbb524a4155fdc8320ab6a5e17ac4a4a")
         poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
         lookup = "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)"
         self.assertEqual(poststate.count(lookup), 1)
@@ -14854,14 +15182,21 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
             self.assertNotIn(forbidden, seam)
         for name, expected in (("ObserverEntryClass", helper.WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES),
                                ("ObserverExpectedName", tuple(helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS)),
-                               ("ObserverKnownLog", helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS)):
+                               ("ObserverKnownLog", helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS),
+                               ("ObserverDirectoryFamily", helper.WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES)):
             body = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
-            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', body)), expected)
+            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z0-9-]+)"', body)), expected)
         classifier = diagnostic.split("impl ObserverCaptureEntry {", 1)[1].split("pub(crate) struct ObserverCaptureFailure", 1)[0]
         for required in ("kind: entry.kind, attributes: entry.attributes", "if !value.consistent() { return value; }",
                          "name.eq_ignore_ascii_case(&entry.name)", "ObserverExpectedName::of(role, name)",
-                         "ObserverKnownLog::of(&entry.name)", "Some(name.position()) == position"):
+                         "ObserverKnownLog::of(&entry.name)", "Some(name.position()) == position",
+                         "if value.class == ObserverEntryClass::OtherDirectory", "ObserverDirectoryFamily::of(&entry.name)",
+                         "if let Some(family) = self.directory_family"):
             self.assertIn(required, classifier)
+        family = diagnostic.split("impl ObserverDirectoryFamily {", 1)[1].split("// Same decoded entry only.", 1)[0]
+        for required in ('name.strip_prefix("mrk-webview2-")', 'tail.len() == 32', "name.rsplit_once('.')",
+                         '!prefix.is_empty() && suffix.eq_ignore_ascii_case("WebView2")'):
+            self.assertIn(required, family)
         fields = diagnostic.split("pub(crate) struct ObserverCaptureEntry {", 1)[1].split("}\n", 1)[0]
         for forbidden in ("String", "Vec<", "Path", "file_id", "name:"):
             self.assertNotIn(forbidden, fields)
@@ -14869,7 +15204,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         self.assertIn("if self.first.get().is_none()", first)
         self.assertIn("check: ObserverCaptureCheck::ExpectedChild", first)
         self.assertIn("error: Some(Error::Unsafe), native: None, detail: None", first)
-        for body in (classifier, first):
+        for body in (classifier, first, family):
             for forbidden in ("unsafe", "native.", "std::fs", "std::env", "Instant::", "GetTickCount", "GetLastError", "open_child", "read_next"):
                 self.assertNotIn(forbidden, body)
         selected = ui.split("fn observer_capture_failure_contract()", 1)[1].split("    #[test]", 1)[0]
@@ -14888,7 +15223,8 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
         registry = "registry+https://github.com/rust-lang/crates.io-index"
         direct = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9", "tokio": "1.48.0",
-            "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3"}
+            "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3",
+            **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
         selected = {"mobile-release-kit-desktop": "0.1.0", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
         ids = {name: name + "@" + version for name, version in selected.items()}
         app, native = ids["mobile-release-kit-desktop"], ids["mrk-windows-installed-native"]
@@ -14912,9 +15248,14 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             packages.append({"id": ids[name], "name": name, "version": version, "source": None if local else registry,
                 "manifest_path": str(manifest), "features": declarations, "targets": targets,
                 "dependencies": [{"name": dependency, "source": None if dependency == "mrk-windows-installed-native" else registry,
-                    "kind": None, "target": None} for dependency in dependencies]})
+                    "kind": None, "target": None,
+                    **({"req": "=" + WINDOWS_COMMON_PARSERS[dependency]["version"],
+                        "rename": WINDOWS_COMMON_PARSERS[dependency]["rename"], "optional": False,
+                        "uses_default_features": False, "features": list(WINDOWS_COMMON_PARSERS[dependency]["features"]),
+                        "registry": None} if dependency in WINDOWS_COMMON_PARSERS else {})} for dependency in dependencies]})
             nodes.append({"id": ids[name], "features": active, "dependencies": [ids[dependency] for dependency in dependencies],
-                "deps": [{"name": dependency.replace("-", "_"), "pkg": ids[dependency], "dep_kinds": [{"kind": None, "target": None}]} for dependency in dependencies]})
+                "deps": [{"name": (WINDOWS_COMMON_PARSERS.get(dependency, {}).get("rename") or dependency).replace("-", "_"),
+                          "pkg": ids[dependency], "dep_kinds": [{"kind": None, "target": None}]} for dependency in dependencies]})
         metadata = {"version": 1, "packages": packages, "workspace_root": str(source / helper.WINDOWS_INSTALLED_APP), "workspace_members": [app],
             "workspace_default_members": [app], "target_directory": str(root / "target"), "resolve": {"root": app, "nodes": nodes}}
         return metadata, lock, source, root
