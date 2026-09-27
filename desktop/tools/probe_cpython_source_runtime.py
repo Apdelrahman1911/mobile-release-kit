@@ -23,7 +23,7 @@ import time
 
 PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 SCOPE = "conventional-interpreter-behavior-smoke-v1"
-APPROVED_PREPARED_MANIFEST_SHA256: str | None = '8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66'
+APPROVED_PREPARED_MANIFEST_SHA256: str | None = 'acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba'
 APPROVED_PROTOCOL_SHA256: str | None = '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
 TARGET = "x86_64-unknown-linux-gnu"
 CA = (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f")

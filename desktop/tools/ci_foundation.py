@@ -410,9 +410,9 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
-    "manifestSha256": "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2",
+    "manifestSha256": "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
     "preparedArtifact": {
-        "artifactId": "10909746838",
+        "artifactId": "10919138502",
         "attempt": 1,
         "files": [
             {
@@ -607,18 +607,18 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "outer.json",
-                "sha256": "06f95fd1da957743ad92316aa71aea6181c7baf263057afa561aee583484381c",
+                "sha256": "df4aca0eef4b6aa86d622d20884e4a415d78b87ef81417f39d195687c70293fd",
                 "size": 327
             },
             {
                 "path": "preparation.json",
-                "sha256": "c32da9dd5199c35dfa4e5ae4723b810b4375715e18a57bf6861737b418c46e77",
+                "sha256": "2b935c147cbb35419dc898dd25adf81c13a9262cf586302e6c090afffc0d9b26",
                 "size": 2539
             },
             {
                 "path": "prepared-runtime.tar",
-                "sha256": "08052c50e9935dda7b6517643fd713009f8be3f2177c8934192f2e1186bb026e",
-                "size": 28825600
+                "sha256": "8aef742915909c15d7a7bc548cc5058feaca750abac44bd03514629870e2808b",
+                "size": 28917760
             },
             {
                 "path": "reviews/configuration-review.txt",
@@ -632,8 +632,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             },
             {
                 "path": "source-bindings.json",
-                "sha256": "8ec1cc91434ccd757f8f130687c180b7358ef7eeb97e06b8268d652741357960",
-                "size": 19147
+                "sha256": "fe0a541aa1954e5db6b6800f4e61c831dc452d456f3825c61ba6f09c41b75b92",
+                "size": 23075
             },
             {
                 "path": "source-kit/hosted-evidence.tar",
@@ -652,8 +652,8 @@ CONVENTIONAL_SMOKE_INPUTS: dict | None = {
             }
         ],
         "repository": "Apdelrahman1911/mobile-release-kit",
-        "runId": "36252225056",
-        "sourceSha": "668af1b27be77f4e2ff3a1e303e5e47ed5358bdd"
+        "runId": "36282923412",
+        "sourceSha": "a446e648e298d843824e9598ffb8a5d8e5f38364"
     },
     "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 }

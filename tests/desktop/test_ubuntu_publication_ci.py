@@ -570,12 +570,12 @@ class PublisherCI(unittest.TestCase):
         pin = {"size": 1, "sha256": "b" * 64}
         # Fixed generation literals make this independent of the active expected pins.
         current_manifests = {
-            "P0": "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2",
-            "F1": "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2",
+            "P0": "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
+            "F1": "2e6ca2cac4939019e2ab720eb782ba4ae4e0a61d528e68bbbdc38fa0a53e0e80",
         }
         historical_manifests = {
-            "P0": "556b2ea59b4b3e9abb9d04a3d263e0fd420e8c44b3f71c478b1f71bdd21ec417",
-            "F1": "1270d1d7d9427fff260bb1e79f51c1c3c14145651db87014b0ee9d08d601c112",
+            "P0": "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2",
+            "F1": "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2",
         }
         packages = {label: {**pin, "manifestSha256": current_manifests[label],
                             "version": "0.0.0+mrk.lifecycle." + version}
