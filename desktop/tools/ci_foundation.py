@@ -1587,6 +1587,14 @@ WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
     "secret-service": "5.2.0",
     "zbus": "5.19.0",
 }
+# Fixed current Windows roles, not an allowlist derived from supplied metadata.
+# The common parsers do not enable any Apple native or signing operation.
+WINDOWS_INSTALLED_APP_DIRECT_ROLES = frozenset({
+    ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
+    ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0"),
+    ("plist", "1.10.1"), ("quick-xml", "0.42.0"), ("pkcs12", "0.1.0"),
+    ("cms", "0.2.3"), ("der", "0.7.10"),
+})
 WINDOWS_INSTALLED_APP_INERT = (
     "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
     "runtime::windows_version::tests::windows_manifest_anchors_schema_and_inventory_are_bound_before_use",
@@ -12631,9 +12639,8 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
         if key not in seen:
             seen.add(key); pending.extend(nodes[key]["dependencies"])
     require(seen == set(nodes), "Windows GUI contains disconnected resolved packages")
-    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]} == {
-        ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"), ("sha2", "0.10.9"), ("tokio", "1.48.0"),
-        ("mrk-windows-installed-native", "0.1.0"), ("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
+    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
+        == WINDOWS_INSTALLED_APP_DIRECT_ROLES | {("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
         "Windows GUI direct app roles differ")
     material = {}
     for name, version in WINDOWS_NORMAL_UI_MATERIAL_PACKAGES.items():
@@ -13044,8 +13051,7 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
             pending.extend(nodes[current]["dependencies"])
     require(seen == set(nodes), "Windows app has a disconnected active compiler node")
     root_dependencies = {(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
-    require(root_dependencies == {("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
-            ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0")},
+    require(root_dependencies == WINDOWS_INSTALLED_APP_DIRECT_ROLES,
             "Windows app selected direct dependencies differ")
     require({(packages[key]["name"], packages[key]["version"]) for key in nodes[local["mrk-windows-installed-native"]]["dependencies"]}
             == {("windows-sys", "0.61.2")}, "Windows app native dependency differs")
@@ -13131,7 +13137,7 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
     }
     syn_definitions = {
         "clone-impls": [], "default": ["derive", "parsing", "printing", "clone-impls", "proc-macro"],
-        "derive": [], "full": [], "parsing": [], "printing": ["dep:quote"],
+        "derive": [], "extra-traits": [], "full": [], "parsing": [], "printing": ["dep:quote"],
         "proc-macro": ["proc-macro2/proc-macro", "quote?/proc-macro"],
     }
     contracts = (
@@ -13144,7 +13150,8 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
         ("syn", "2.0.119", syn_definitions, (
             ("serde_derive", "1.0.228", "^2.0.81", False,
              ["clone-impls", "derive", "parsing", "printing", "proc-macro"]),
-            ("tokio-macros", "2.6.1", "^2.0", True, ["full"]))),
+            ("tokio-macros", "2.6.1", "^2.0", True, ["full"]),
+            ("der_derive", "0.7.3", "^2", True, ["extra-traits"]))),
         ("serde", "1.0.228", {
             "default": ["std"], "derive": ["serde_derive"],
             "serde_derive": ["dep:serde_derive"], "std": ["serde_core/std"],

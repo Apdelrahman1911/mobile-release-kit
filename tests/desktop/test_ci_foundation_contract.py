@@ -29,6 +29,18 @@ helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
 
 
+# Synthetic direct parser declarations; the source-parity contract below reads
+# the actual manifest/lock independently rather than trusting this fixture.
+WINDOWS_COMMON_PARSERS = {
+    "plist": {"version": "1.10.1", "rename": None,
+              "features": ["enable_unstable_features_that_may_break_with_minor_version_bumps"]},
+    "quick-xml": {"version": "0.42.0", "rename": "quick_xml", "features": []},
+    "pkcs12": {"version": "0.1.0", "rename": None, "features": []},
+    "cms": {"version": "0.2.3", "rename": None, "features": ["alloc"]},
+    "der": {"version": "0.7.10", "rename": "der_07", "features": ["alloc", "oid"]},
+}
+
+
 NATIVE_CASE_NAMES = (
     "core-capabilities", "core-catalog", "core-zip-catalog", "core-valid-draft",
     "core-invalid-draft", "core-service-error", "core-snapshot", "malformed",
@@ -7991,7 +8003,8 @@ class WindowsReaderGateTests(unittest.TestCase):
         source, root = Path(context["source"]), Path(context["root"])
         registry = "registry+https://github.com/rust-lang/crates.io-index"
         versions = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9",
-                    "tokio": "1.48.0", "windows-sys": "0.61.2", "windows-link": "0.2.1"}
+                    "tokio": "1.48.0", "windows-sys": "0.61.2", "windows-link": "0.2.1",
+                    **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
         packages, locked, ids = [], [], {}
         declared = {"mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
                     "mrk-linux-mount-observation": "desktop/native/linux-mount-observation/Cargo.toml",
@@ -8047,9 +8060,13 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "manifest_path": str(directory / "Cargo.toml"), "features": {"allowed": []},
                 "targets": units})
             locked.append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
-        direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", "mrk-windows-installed-native"]
+        # Keep native last: existing normal/dev edge mutations address that role.
+        direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", *WINDOWS_COMMON_PARSERS,
+                  "mrk-windows-installed-native"]
         packages[0]["dependencies"].extend({"name": name, "source": registry, "req": "=" + versions[name],
-            "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
+            "kind": None, "rename": WINDOWS_COMMON_PARSERS.get(name, {}).get("rename"), "optional": False,
+            "uses_default_features": name not in WINDOWS_COMMON_PARSERS,
+            "features": list(WINDOWS_COMMON_PARSERS.get(name, {}).get("features", [])),
             "target": None, "registry": None} for name in direct if name in versions)
         packages[1]["dependencies"] = [{"name": "windows-sys", "source": registry, "req": "=0.61.2",
             "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
@@ -8062,7 +8079,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                 ["windows-runtime-publisher"] if publication and name == "mobile-release-kit-desktop" else [])
             nodes.append({"id": ids[name], "features": features,
                 "dependencies": [ids[item] for item in dependencies],
-                "deps": [{"name": item.replace("-", "_"), "pkg": ids[item], "dep_kinds":
+                "deps": [{"name": (WINDOWS_COMMON_PARSERS.get(item, {}).get("rename") or item).replace("-", "_"),
+                    "pkg": ids[item], "dep_kinds":
                     [{"kind": kind, "target": targets[item]} for kind in (None, "dev")]
                     if name == "mobile-release-kit-desktop" and item == "mrk-windows-installed-native"
                     else [{"kind": None, "target": None}]}
@@ -8113,11 +8131,12 @@ class WindowsReaderGateTests(unittest.TestCase):
                 "result": [], "std": [], "unstable": [],
             }, ["alloc", "result", "std"]),
             ("tokio-macros", "2.6.1", {}, []),
+            ("der_derive", "0.7.3", {}, []),
             ("syn", "2.0.119", syn_features, sorted(syn_features)),
         )
         for name, version, features, selected in specifications:
             directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
-            kind = ["proc-macro"] if name in {"serde_derive", "tokio-macros"} else ["lib"]
+            kind = ["proc-macro"] if name in {"serde_derive", "tokio-macros", "der_derive"} else ["lib"]
             package = {"id": name + "@" + version, "name": name, "version": version, "source": registry,
                 "manifest_path": str(directory / "Cargo.toml"), "features": features, "dependencies": [],
                 "targets": [{"name": name.replace("-", "_"), "kind": kind, "crate_types": kind,
@@ -8196,7 +8215,97 @@ class WindowsReaderGateTests(unittest.TestCase):
         edge("serde_derive", "syn", "^2.0.81",
              ("clone-impls", "derive", "parsing", "printing", "proc-macro"), defaults=False)
         edge("tokio-macros", "syn", "^2.0", ("full",))
+        packages["der"]["features"] = {"alloc": ["zeroize?/alloc"], "derive": ["dep:der_derive"],
+                                        "oid": ["dep:const-oid"]}
+        nodes[packages["der"]["id"]]["features"] = ["alloc", "derive", "oid"]
+        edge("der", "der_derive", "^0.7.2", optional=True)
+        edge("der_derive", "syn", "^2", ("extra-traits",))
         return value, lock, context
+
+    def test_windows_current_common_parser_roles_match_source_and_reject_graph_drift(self):
+        manifest = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.toml").read_text(encoding="utf-8"))
+        lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        locked = {(row["name"], row["version"], row.get("source")) for row in lock["package"]}
+        direct = set()
+        for alias, value in manifest["dependencies"].items():
+            declaration = {"version": value} if type(value) is str else value
+            if declaration.get("optional", False):
+                continue
+            self.assertTrue(declaration["version"].startswith("="))
+            name, version = declaration.get("package", alias), declaration["version"][1:]
+            self.assertIn((name, version, registry), locked)
+            direct.add((name, version))
+        native = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
+        self.assertEqual(manifest["target"][native]["dependencies"],
+                         {"mrk-windows-installed-native": {"path": "../native/windows-installed-native"}})
+        self.assertIn(("mrk-windows-installed-native", "0.1.0", None), locked)
+        direct.add(("mrk-windows-installed-native", "0.1.0"))
+        self.assertEqual(len(direct), 11)
+        self.assertEqual(direct, helper.WINDOWS_INSTALLED_APP_DIRECT_ROLES)
+        for name, row in WINDOWS_COMMON_PARSERS.items():
+            expected = {"version": "=" + row["version"], "default-features": False}
+            if row["features"]:
+                expected["features"] = row["features"]
+            if row["rename"] is not None:
+                expected["package"] = name
+            self.assertEqual(manifest["dependencies"][row["rename"] or name], expected)
+        gui = set()
+        for table, name, version in (("dependencies", "rfd", "0.15.4"),
+                                     ("dependencies", "tauri", "2.11.5"),
+                                     ("build-dependencies", "tauri-build", "2.6.3")):
+            self.assertIs(manifest[table][name]["optional"], True)
+            self.assertEqual(manifest[table][name]["version"], "=" + version)
+            self.assertIn((name, version, registry), locked)
+            gui.add((name, version))
+        self.assertEqual(len(direct | gui), 14)
+        self.assertEqual(manifest["build-dependencies"]["sha2"], manifest["dependencies"]["sha2"])
+        # Move a missing direct edge beneath another node so connectivity and
+        # declarations remain valid; the exact root-role gate must reject it.
+        for gui_role in (False, True):
+            if gui_role:
+                value, graph_lock, source, root = WindowsNormalUiGuiTests.graph_fixture()
+                parse = lambda data, data_lock: helper.windows_normal_ui_app_graph(
+                    data, data_lock, source=source, root=root, observer=False)
+                message, extra = "Windows GUI direct app roles differ", "wry"
+            else:
+                value, graph_lock, context = self.graph_data()
+                source, root = Path(context["source"]), Path(context["root"])
+                parse = lambda data, data_lock: helper.windows_installed_app_graph(data, data_lock, source=source, root=root)
+                message, extra = "Windows app selected direct dependencies differ", "windows-sys"
+            parse(value, graph_lock)
+            for name in WINDOWS_COMMON_PARSERS:
+                for mutation in ("missing", "stale"):
+                    data, data_lock = deepcopy(value), deepcopy(graph_lock)
+                    packages = {row["name"]: row for row in data["packages"]}
+                    nodes = {row["id"]: row for row in data["resolve"]["nodes"]}
+                    package, app = packages[name], packages["mobile-release-kit-desktop"]
+                    if mutation == "missing":
+                        node, other = nodes[app["id"]], nodes[packages["sha2"]["id"]]
+                        edge = next(row for row in node["deps"] if row["pkg"] == package["id"])
+                        node["deps"].remove(edge); node["dependencies"].remove(package["id"])
+                        other["deps"].append(edge); other["dependencies"].append(package["id"])
+                        declaration = next(row for row in app["dependencies"] if row["name"] == name)
+                        app["dependencies"].remove(declaration)
+                        packages["sha2"].setdefault("dependencies", []).append(declaration)
+                    else:
+                        old = package["version"]; package["version"] = "0.0.0"
+                        package["manifest_path"] = package["manifest_path"].replace(name + "-" + old, name + "-0.0.0")
+                        for target in package["targets"]:
+                            target["src_path"] = target["src_path"].replace(name + "-" + old, name + "-0.0.0")
+                        next(row for row in data_lock["package"] if row["name"] == name and row["version"] == old)["version"] = "0.0.0"
+                    with self.subTest(gui=gui_role, parser=name, mutation=mutation), self.assertRaisesRegex(helper.CheckFailure, message):
+                        parse(data, data_lock)
+            data = deepcopy(value)
+            packages = {row["name"]: row for row in data["packages"]}
+            nodes = {row["id"]: row for row in data["resolve"]["nodes"]}
+            app, package = packages["mobile-release-kit-desktop"], packages[extra]
+            app["dependencies"].append({"name": extra, "source": registry, "kind": None, "target": None})
+            nodes[app["id"]]["dependencies"].append(package["id"])
+            nodes[app["id"]]["deps"].append({"name": extra.replace("-", "_"), "pkg": package["id"],
+                                            "dep_kinds": [{"kind": None, "target": None}]})
+            with self.subTest(gui=gui_role, mutation="extra"), self.assertRaisesRegex(helper.CheckFailure, message):
+                parse(data, graph_lock)
 
     def test_windows_reader_active_graph_binds_declared_locals_and_locked_resolution(self):
         value, lock, context = self.graph_data()
@@ -8661,7 +8770,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             "tokio": ["bytes", "default", "io-util", "libc", "macros", "mio", "net", "process",
                       "rt", "rt-multi-thread", "signal-hook-registry", "socket2", "sync", "time",
                       "tokio-macros", "windows-sys"],
-            "syn": ["clone-impls", "default", "derive", "full", "parsing", "printing", "proc-macro"],
+            "syn": ["clone-impls", "default", "derive", "extra-traits", "full", "parsing", "printing", "proc-macro"],
             "serde": ["default", "derive", "serde_derive", "std"],
             "serde_json": ["default", "std"],
             "serde_core": ["result", "std"],
@@ -8716,6 +8825,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                 for index, (name, expected) in enumerate([*wanted.items(), ("serde_core", wanted["serde_core"])]):
                     surplus = graph["nodes"][packages[name]["id"]]["features"]
                     invalid = [surplus]
+                    if name == "syn":
+                        invalid.append([feature for feature in expected if feature != "extra-traits"])
                     if expected:
                         invalid += [expected[:-1], list(reversed(expected)), expected + [expected[0]]]
                     for features in invalid:
@@ -8750,7 +8861,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                 helper.windows_installed_app_unit_features(graph, helper=True)
         def declaration(packages, parent, child):
             return next(row for row in packages[parent]["dependencies"] if row["name"] == child)
-        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core"):
+        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core", "der_derive"):
             reject("version-" + name, lambda g, p, n, name=name: p[name].update(version="0.0.0"))
             reject("source-" + name, lambda g, p, n, name=name: p[name].update(source="git+https://example.invalid/other"))
             reject("missing-" + name, lambda g, p, n, name=name: g["nodes"].pop(p[name]["id"]))
@@ -8761,6 +8872,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         reject("duplicated-unit", duplicate_unit)
         for parent, child in (("crypto-common", "typenum"), ("generic-array", "typenum"),
                               ("mobile-release-kit-desktop", "tokio"), ("serde_derive", "syn"), ("tokio-macros", "syn"),
+                              ("der_derive", "syn"),
                               ("mobile-release-kit-desktop", "serde"), ("mobile-release-kit-desktop", "serde_json"),
                               ("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
             for field, value in (("req", "*"), ("rename", "alias"), ("kind", "build"), ("target", "cfg(unix)"),
@@ -8793,8 +8905,13 @@ class WindowsReaderGateTests(unittest.TestCase):
         reject("additional-parent", lambda g, p, n:
                n["serde_json"]["deps"].append({"name": "typenum", "pkg": p["typenum"]["id"],
                                               "dep_kinds": [{"kind": None, "target": None}]}))
+        reject("additional-syn-parent", lambda g, p, n:
+               n["cms"]["deps"].append({"name": "syn", "pkg": p["syn"]["id"],
+                                       "dep_kinds": [{"kind": None, "target": None}]}))
         reject("host-became-library", lambda g, p, n:
                p["serde_derive"]["targets"][0].update(kind=["lib"], crate_types=["lib"]))
+        reject("parser-host-became-library", lambda g, p, n:
+               p["der_derive"]["targets"][0].update(kind=["lib"], crate_types=["lib"]))
         reject("target-became-macro", lambda g, p, n:
                p["typenum"]["targets"][0].update(kind=["proc-macro"], crate_types=["proc-macro"]))
         reject("target-source", lambda g, p, n: p["syn"]["targets"][0].update(src_path="/unrelated/lib.rs"))
@@ -8802,7 +8919,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         for ref in ("typenum/const-generics", "typenum?/const-generics"):
             reject("parent-forward-" + ref, lambda g, p, n, ref=ref:
                    p["generic-array"]["features"]["more_lengths"].append(ref))
-        for name, feature in (("tokio", "time"), ("syn", "full"), ("serde", "serde_derive"),
+        for name, feature in (("tokio", "time"), ("syn", "full"), ("syn", "extra-traits"), ("serde", "serde_derive"),
                               ("serde", "std"), ("serde_json", "std"), ("serde_core", "result"), ("serde_core", "std")):
             reject(name + "-selected-definition", lambda g, p, n, name=name, feature=feature:
                    p[name]["features"].update({feature: ["unreviewed"]}))
@@ -8812,7 +8929,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                    n[name]["features"].remove(feature))
         def incoming(packages, nodes, parent, child):
             return next(edge for edge in nodes[parent]["deps"] if edge["pkg"] == packages[child]["id"])
-        for parent, child in (("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
+        for parent, child in (("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive"),
+                              ("der_derive", "syn")):
             reject(parent + "-" + child + "-missing-edge", lambda g, p, n, parent=parent, child=child:
                    n[parent]["deps"].remove(incoming(p, n, parent, child)))
             reject(parent + "-" + child + "-duplicate-edge", lambda g, p, n, parent=parent, child=child:
@@ -14947,7 +15065,8 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
         registry = "registry+https://github.com/rust-lang/crates.io-index"
         direct = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9", "tokio": "1.48.0",
-            "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3"}
+            "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3",
+            **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
         selected = {"mobile-release-kit-desktop": "0.1.0", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
         ids = {name: name + "@" + version for name, version in selected.items()}
         app, native = ids["mobile-release-kit-desktop"], ids["mrk-windows-installed-native"]
@@ -14971,9 +15090,14 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             packages.append({"id": ids[name], "name": name, "version": version, "source": None if local else registry,
                 "manifest_path": str(manifest), "features": declarations, "targets": targets,
                 "dependencies": [{"name": dependency, "source": None if dependency == "mrk-windows-installed-native" else registry,
-                    "kind": None, "target": None} for dependency in dependencies]})
+                    "kind": None, "target": None,
+                    **({"req": "=" + WINDOWS_COMMON_PARSERS[dependency]["version"],
+                        "rename": WINDOWS_COMMON_PARSERS[dependency]["rename"], "optional": False,
+                        "uses_default_features": False, "features": list(WINDOWS_COMMON_PARSERS[dependency]["features"]),
+                        "registry": None} if dependency in WINDOWS_COMMON_PARSERS else {})} for dependency in dependencies]})
             nodes.append({"id": ids[name], "features": active, "dependencies": [ids[dependency] for dependency in dependencies],
-                "deps": [{"name": dependency.replace("-", "_"), "pkg": ids[dependency], "dep_kinds": [{"kind": None, "target": None}]} for dependency in dependencies]})
+                "deps": [{"name": (WINDOWS_COMMON_PARSERS.get(dependency, {}).get("rename") or dependency).replace("-", "_"),
+                          "pkg": ids[dependency], "dep_kinds": [{"kind": None, "target": None}]} for dependency in dependencies]})
         metadata = {"version": 1, "packages": packages, "workspace_root": str(source / helper.WINDOWS_INSTALLED_APP), "workspace_members": [app],
             "workspace_default_members": [app], "target_directory": str(root / "target"), "resolve": {"root": app, "nodes": nodes}}
         return metadata, lock, source, root
