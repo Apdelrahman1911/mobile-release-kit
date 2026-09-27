@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn descriptor_requires_every_exact_typed_key_and_current_kind_presence() {
-        for kind in [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken] {
+        for kind in [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::IosFirebase, Kind::AscP8, Kind::GoogleWif, Kind::ProjectReadToken] {
             let original = Descriptor::new(kind, Some("Personal development".into()), vec![false; commands::field_names(kind).len()], kind.file().is_some()).unwrap();
             let raw = original.encode().unwrap(); let decoded = Descriptor::decode(&raw).unwrap();
             assert!(decoded.kind == kind); assert_eq!(decoded.label.as_deref(), Some("Personal development"));
@@ -383,6 +383,35 @@ mod tests {
         }
         assert!(valid_label(Some("Development 🔐"))); assert!(!valid_label(Some(&"é".repeat(65))));
         assert!(!valid_label(Some("\0"))); assert!(!valid_label(Some("\u{0085}")));
+    }
+
+    #[test]
+    fn asc_descriptor_has_exact_two_presence_cells_and_no_persisted_approval() {
+        for presence in [vec![false, false], vec![true, false], vec![false, true], vec![true, true]] {
+            let descriptor = Descriptor::new(Kind::AscP8, None, presence.clone(), true).unwrap();
+            let encoded = descriptor.encode().unwrap();
+            let decoded = Descriptor::decode(&encoded).unwrap();
+            assert!(decoded.kind == Kind::AscP8 && decoded.has_file());
+            assert_eq!(decoded.presence(), presence);
+            let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(wire, serde_json::json!({"schemaVersion":1,"kind":"asc-p8","label":null,
+                "fieldPresence":presence,"filePresent":true}));
+        }
+        for presence in [vec![], vec![true], vec![true, true, false]] {
+            assert!(Descriptor::new(Kind::AscP8, None, presence, true).is_err());
+        }
+        assert!(Descriptor::new(Kind::AscP8, None, vec![true, true], false).is_err());
+        let good = r#"{"schemaVersion":1,"kind":"asc-p8","label":null,"fieldPresence":[true,false],"filePresent":true}"#;
+        for wrong in [
+            good.replace(r#""fieldPresence":[true,false],"#, ""),
+            good.replace(r#""fieldPresence":[true,false]"#, r#""fieldPresence":[true]"#),
+            good.replace(r#""fieldPresence":[true,false]"#, r#""fieldPresence":[true,false,true]"#),
+            good.replace(r#""fieldPresence":[true,false]"#, r#""fieldPresence":[1,null]"#),
+            good.replace(r#""kind":"asc-p8""#, r#""kind":"asc-p8","ki\u006ed":"asc-p8""#),
+            good.replace(r#""filePresent":true"#, r#""filePresent":true,"filePresent":true"#),
+            good.replace(r#""filePresent":true"#, r#""filePresent":false"#),
+            good.replace(r#""filePresent":true"#, r#""filePresent":true,"approval":{"algorithm":"ec","curve":"p256"}"#),
+        ] { assert!(Descriptor::decode(wrong.as_bytes()).is_err()); }
     }
 
     #[test]

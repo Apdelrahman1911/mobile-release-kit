@@ -67,9 +67,15 @@ CHUNK, FILE_LIMIT, TOTAL_LIMIT = 64 << 10, 512 << 20, 1 << 30
 CONTEXT_FIELDS = {"sourceCommit", "sourceTree", "runId", "runAttempt", "job", "preparation"}
 LICENSE_HASH = "24333f8a63b6825ea9c5514f83c2829b004d1fee"
 LICENSE_NORMALIZED_SHA256 = "aaf80cd0aee7e569ffa8a4be1b61189c0fefccf23068e38dfafe336289b8c723"
-SDK_RECEIPT_CLASSIFICATION = "existing-sdk-receipt-correspondence-v1"
+SDK_RECEIPT_CLASSIFICATION = "provider-preinstalled-sdk-current-use-v1"
 SDK_RECEIPT = "/usr/local/lib/android/sdk/licenses/android-sdk-license"
 SDK_IMAGE_DATA = "/imagegeneration/imagedata.json"
+SDK_PACKAGE_PATHS = {name: {"metadataPath": "/usr/local/lib/android/sdk/" + name.replace(";", "/") + "/package.xml",
+                           "propertiesPath": "/usr/local/lib/android/sdk/" + name.replace(";", "/") + "/source.properties"}
+                     for name in ("platforms;android-35", "build-tools;35.0.0")}
+SDK_PROPERTIES = {"platforms;android-35": {"Pkg.Revision": "2", "AndroidVersion.ApiLevel": "35",
+    "AndroidVersion.ExtensionLevel": "13", "AndroidVersion.IsBaseSdk": "true", "Layoutlib.Api": "15"},
+    "build-tools;35.0.0": {"Pkg.Revision": "35.0.0"}}
 SDK_IMAGE = {"image_name": "ubuntu-24.04", "image_version": "20260920.314.1",
     "os_name": "Ubuntu 24.04.5 LTS",
     "image_url": "https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md",
@@ -215,6 +221,10 @@ def _host_input_limit(name):
         return 4096
     if name == SDK_IMAGE_DATA:
         return 64 << 10
+    if name in {row["metadataPath"] for row in SDK_PACKAGE_PATHS.values()}:
+        return 32 << 10
+    if name in {row["propertiesPath"] for row in SDK_PACKAGE_PATHS.values()}:
+        return 16 << 10
     if name in (*NETWORK_ROLES, RESOLVER_CANONICAL):
         return CONFIGURATION_LIMIT
     return FILE_LIMIT  # Existing tool/provider/font limits are unchanged.
@@ -339,7 +349,7 @@ def android_host_inputs(native, bindings, *, bind_path, deadline):
         host["bindings"][key] = selected
     _provider_host_inputs(policy(), host, bind_path, deadline)
     # Only this existing-owner path produces the private SDK correspondence.
-    # Its unavailable authority is not promoted by copying a caller's proof.
+    # A caller cannot supply current-use correspondence or historical authority.
     host["graph"]["androidGenerated"] = {"sdkLicense": _sdk_receipt_state(policy(), host, deadline)}
     _point(deadline)
     return host
@@ -492,10 +502,11 @@ def _sdk_receipt_rule(value):
     expected = {"path": SDK_RECEIPT, "classification": SDK_RECEIPT_CLASSIFICATION,
         "imagePath": SDK_IMAGE_DATA, "sourceRecipe": SDK_SOURCE_RECIPE,
         "licenseDefinition": {"id": "android-sdk-license", "normalizedSha1": LICENSE_HASH,
-                              "normalizedSha256": LICENSE_NORMALIZED_SHA256}}
+                              "normalizedSha256": LICENSE_NORMALIZED_SHA256},
+        "packages": [{"id": name, **paths} for name, paths in SDK_PACKAGE_PATHS.items()]}
     D.need(D.same(rule, expected), "Android SDK receipt source-correspondence rule differs")
-    D.need({SDK_RECEIPT, SDK_IMAGE_DATA} <= set(_input_rules(value)["files"]),
-           "Android fixed receipt/image original roster is incomplete")
+    D.need({SDK_RECEIPT, SDK_IMAGE_DATA, *(path for paths in SDK_PACKAGE_PATHS.values() for path in paths.values())}
+           <= set(_input_rules(value)["files"]), "Android fixed preinstalled SDK original roster is incomplete")
     return rule
 
 
@@ -529,8 +540,133 @@ def _sdk_receipt_ids(raw):
     return {"selectedId": LICENSE_HASH, "definitionSha256": LICENSE_NORMALIZED_SHA256, "idCount": len(lines)}
 
 
+def _sdk_source_properties(name, raw):
+    """The same selected package requirements used for official archive DATA."""
+    D.need(name in SDK_PROPERTIES and type(raw) is bytes and 0 < len(raw) <= 16 << 10
+           and raw.isascii() and all(c in (9, 10, 13) or 32 <= c < 127 for c in raw),
+           "Android source.properties bound/encoding differs")
+    properties = {}
+    for line in raw.decode("ascii").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        D.need(separator == "=" and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", key)
+               and key not in properties and len(value) <= 4096 and len(properties) < 128,
+               "Android source.properties field differs")
+        properties[key] = value
+    wanted = SDK_PROPERTIES[name]
+    D.need(all(properties.get(key) == value for key, value in wanted.items())
+           and properties.get("Pkg.Path", name) == name,
+           "Android official package/source.properties disagree")
+    return {"package": name, "selectedProperties": dict(wanted)}
+
+
+def _sdk_license_definition(text):
+    normalized = sdk_license_value(text).encode("utf-8")
+    D.need(len(normalized) == 16960 and _sha(normalized) == LICENSE_NORMALIZED_SHA256
+           and hashlib.sha1(normalized).hexdigest() == LICENSE_HASH, "Android pinned SDK licence definition differs")
+    return {"id": "android-sdk-license", "normalizedSha1": LICENSE_HASH,
+            "normalizedSha256": LICENSE_NORMALIZED_SHA256}
+
+
+def _sdk_local_package(name, raw):
+    """Bounded local-package DATA, not proof of installation or licence consent.
+
+    Check the actual selected type/revision/licence, not an unbound XML prefix or
+    a substring/hash search. Unused namespace declarations carry no authority.
+    No external entity, DTD, arbitrary local package or unsupported dependency is
+    consumed. Both selected official definitions have exactly these four fields.
+    """
+    D.need(name in SDK_PACKAGE_PATHS and type(raw) is bytes and 0 < len(raw) <= 32 << 10,
+           "Android preinstalled SDK package XML bound differs")
+    try:
+        text = raw.decode("utf-8")
+        D.need("\x00" not in text and "<!DOCTYPE" not in text.upper() and "<!ENTITY" not in text.upper(),
+               "Android preinstalled SDK package declarations differ")
+        parser = ET.iterparse(io.BytesIO(raw), events=("start-ns", "start", "end"))
+        namespaces, scopes, pending, stack = {}, {}, [], [{}]
+        declarations, count, depth = 0, 0, 0
+        for event, item in parser:
+            if event == "start-ns":
+                prefix, uri = item
+                declarations += 1
+                D.need(declarations <= 64 and len(prefix) <= 64 and len(uri) <= 256
+                       and (prefix not in namespaces or namespaces[prefix] == uri),
+                       "Android preinstalled SDK namespace changed")
+                namespaces[prefix] = uri
+                pending.append((prefix, uri))
+            elif event == "start":
+                count, depth = count + 1, depth + 1
+                D.need(count <= 64 and depth <= 8, "Android preinstalled SDK XML shape bound")
+                scope = {**stack[-1], **dict(pending)}
+                pending.clear()
+                scopes[item] = scope
+                stack.append(scope)
+            else:
+                depth -= 1
+                stack.pop()
+        root = parser.root
+    except (UnicodeError, ET.ParseError):
+        raise D.Refused("Android preinstalled SDK package XML differs") from None
+
+    def children(element, required):
+        D.need(not (element.text or "").strip(), "Android preinstalled SDK structural text differs")
+        result = {}
+        for child in element:
+            D.need(child.tag in required and child.tag not in result and not (child.tail or "").strip(),
+                   "Android preinstalled SDK duplicate/unexpected package field")
+            result[child.tag] = child
+        D.need(set(result) == set(required), "Android preinstalled SDK package fields are incomplete")
+        return result
+
+    def scalar(element, wanted):
+        D.need(not element.attrib and not len(element) and (element.text or "").strip() == wanted,
+               "Android preinstalled SDK package value differs")
+
+    D.need(root.tag == "{" + COMMON_NAMESPACE + "}repository" and not root.attrib,
+           "Android preinstalled SDK package root differs")
+    nodes = children(root, {"license", "localPackage"})
+    license_node, package = nodes["license"], nodes["localPackage"]
+    D.need(set(license_node.attrib) <= {"id", "type"} and license_node.get("id") == "android-sdk-license"
+           and license_node.get("type", "text") == "text" and not len(license_node),
+           "Android preinstalled SDK licence reference differs")
+    licence = _sdk_license_definition(license_node.text)
+    D.need(set(package.attrib) <= {"path", "obsolete"} and package.get("path") == name
+           and package.get("obsolete", "false") == "false", "Android preinstalled SDK package selection differs")
+    fields = children(package, {"type-details", "revision", "display-name", "uses-license"})
+    types, revision, reference = fields["type-details"], fields["revision"], fields["uses-license"]
+    type_key = "{http://www.w3.org/2001/XMLSchema-instance}type"
+    D.need(set(types.attrib) == {type_key} and types.attrib[type_key].count(":") == 1,
+           "Android preinstalled SDK package type differs")
+    prefix, kind = types.attrib[type_key].split(":")
+    platform = name == "platforms;android-35"
+    D.need((scopes[types].get(prefix), kind) == ((SDK_NAMESPACE, "platformDetailsType") if platform
+           else (GENERIC_NAMESPACE, "genericDetailsType")), "Android preinstalled SDK type namespace differs")
+    details = children(types, {"api-level", "extension-level", "base-extension", "layoutlib"} if platform else set())
+    if platform:
+        for key, value in (("api-level", "35"), ("extension-level", "13"), ("base-extension", "true")):
+            scalar(details[key], value)
+        layout = details["layoutlib"]
+        D.need(layout.attrib == {"api": "15"} and not len(layout) and not (layout.text or "").strip(),
+               "Android preinstalled SDK layoutlib differs")
+    D.need(not revision.attrib and not (revision.text or "").strip(), "Android preinstalled SDK revision differs")
+    parts = {}
+    for part in revision:
+        D.need(part.tag in {"major", "minor", "micro", "preview"} and part.tag not in parts
+               and not (part.tail or "").strip(), "Android preinstalled SDK revision field differs")
+        value = "2" if platform and part.tag == "major" else "35" if part.tag == "major" else "0"
+        scalar(part, value)
+        parts[part.tag] = value
+    D.need("major" in parts, "Android preinstalled SDK revision is incomplete")
+    scalar(fields["display-name"], "Android SDK Platform 35" if platform else "Android SDK Build-Tools 35")
+    D.need(reference.attrib == {"ref": "android-sdk-license"} and not len(reference)
+           and not (reference.text or "").strip(), "Android preinstalled SDK selected licence differs")
+    return {"package": name, "revision": {"major": 2 if platform else 35, "minor": 0, "micro": 0, "preview": 0},
+            "type": kind, "licenseDefinition": licence}
+
+
 def _sdk_receipt_state(value, host, deadline):
-    """Observe protected current originals; never create prior legal authority.
+    """Join six protected current originals; never create prior legal authority.
 
     H's file-ancestry refusal is not repaired by this producer. A caller cannot
     supply a positive origin boolean; immutable source and local identity are
@@ -539,15 +675,27 @@ def _sdk_receipt_state(value, host, deadline):
     _point(deadline)
     rule = _sdk_receipt_rule(value)
     files = host["bindings"]["files"]
-    D.need({SDK_RECEIPT, SDK_IMAGE_DATA} <= set(files), "Android receipt/image originals are absent")
+    selected_paths = {SDK_RECEIPT, SDK_IMAGE_DATA,
+                      *(path for paths in SDK_PACKAGE_PATHS.values() for path in paths.values())}
+    D.need(selected_paths <= set(files), "Android preinstalled SDK originals are absent")
     proof = {"classification": SDK_RECEIPT_CLASSIFICATION, "sourceRecipe": deepcopy(rule["sourceRecipe"]),
-             "receiptAuthority": "unavailable", "producerExecutionProven": False, "newConsent": False}
+             "currentUse": "selected-preinstalled-sdk-no-install-v1",
+             "producerExecutionProven": False, "newConsent": False, "packages": {}}
     for role, selected, limit, parse in (("receipt", SDK_RECEIPT, 4096, _sdk_receipt_ids),
                                        ("image", SDK_IMAGE_DATA, 64 << 10, _sdk_image_identity)):
         with _stock_host_original(files[selected], selected, limit, deadline) as (raw, original):
             summary = parse(raw)
         proof[role] = {**original, "correspondence": summary}
-    for selected in (SDK_RECEIPT, SDK_IMAGE_DATA):
+    for name, paths in SDK_PACKAGE_PATHS.items():
+        package = {}
+        for role, key, parse in (("metadata", "metadataPath", _sdk_local_package),
+                                 ("properties", "propertiesPath", _sdk_source_properties)):
+            selected = paths[key]
+            with _stock_host_original(files[selected], selected, _host_input_limit(selected), deadline) as (raw, original):
+                summary = parse(name, raw)
+            package[role] = {**original, "correspondence": summary}
+        proof["packages"][name] = package
+    for selected in sorted(selected_paths):
         _point(deadline)
         _protected_binding(files[selected], selected)
     _point(deadline)
@@ -569,16 +717,16 @@ def _sdk_staged_receipt(root, owner, row, identity, receipt, deadline):
 
 
 def _sdk_receipt_authority(value, host, deadline):
+    """Current-use correspondence only, never a historical/legal approval."""
     proof = _sdk_receipt_state(value, host, deadline)
     supplied = host["graph"].get("androidGenerated")
     D.need(type(supplied) is dict and set(supplied) == {"sdkLicense"}
            and D.same(supplied["sdkLicense"], proof), "Android original SDK correspondence changed")
-    # Deliberately no external true/false switch. The available source/image/
-    # normalized-hash observations cannot establish historical hosted origin
-    # or legal permission. A separately reviewed authenticated prior receipt
-    # route (or explicit owner-authorized licence route) is still required.
-    raise D.Refused("Android SDK receipt authority is unavailable; authenticated prior receipt provenance "
-                    "or an explicit owner-authorized licence route is required")
+    # The selected image/source, receipt and both package/property originals
+    # correspond now. No installer history or legal entitlement is inferred.
+    # An unprotected source is still rejected by the same original reader;
+    # copying it or supplying a caller-made positive flag cannot admit it.
+    return proof
 
 
 def _configuration_lines(role, raw, deadline):
@@ -1687,9 +1835,7 @@ def sdk_license_value(value):
 
 
 def existing_license(raw, text):
-    normalized = sdk_license_value(text).encode("utf-8")
-    D.need(len(normalized) == 16960 and _sha(normalized) == LICENSE_NORMALIZED_SHA256
-           and hashlib.sha1(normalized).hexdigest() == LICENSE_HASH, "Android pinned SDK licence definition differs")
+    _sdk_license_definition(text)
     _sdk_receipt_ids(raw)
     return raw  # Preserve the existing bytes. Never synthesize an acceptance marker.
 
@@ -1702,19 +1848,8 @@ def sdk_packages(xml, source_properties):
     licenses = [r for r in root if r.tag == "license" and r.get("id") == "android-sdk-license"]
     D.need(len(licenses) == 1 and licenses[0].text is not None, "Android selected SDK licence is missing/ambiguous")
     result = {}
-    for name, wanted in (("platforms;android-35", {"Pkg.Revision": "2", "AndroidVersion.ApiLevel": "35",
-            "AndroidVersion.ExtensionLevel": "13", "AndroidVersion.IsBaseSdk": "true", "Layoutlib.Api": "15"}),
-            ("build-tools;35.0.0", {"Pkg.Revision": "35.0.0"})):
-        props = {}
-        raw = source_properties[name]
-        D.need(type(raw) is bytes and len(raw) <= 16384, "Android source.properties bound")
-        for line in raw.decode("ascii").splitlines():
-            if not line or line.startswith("#"):
-                continue
-            key, sep, val = line.partition("=")
-            D.need(sep == "=" and key not in props, "Android source.properties field differs")
-            props[key] = val
-        D.need(all(props.get(k) == v for k, v in wanted.items()), "Android official package/source.properties disagree")
+    for name in SDK_PROPERTIES:
+        _sdk_source_properties(name, source_properties[name])
         packages = [r for r in root if r.tag == "remotePackage" and r.get("path") == name]
         D.need(len(packages) == 1, "Android fixed SDK package missing/ambiguous")
         package = packages[0]

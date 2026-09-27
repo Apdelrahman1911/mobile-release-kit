@@ -191,6 +191,12 @@ pub(crate) struct Lifetime {
 impl Lifetime {
     pub(crate) fn settled(&self) -> bool { self.complete && !self.fatal && self.contained && self.command_dispatched == Some(false)
         && self.commands == 0 && self.profile_calls == 0 && self.input_closed && self.handlers_restored && self.resources_closed }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn retained_failure(&self) -> bool {
+        // DATA from the original decoded frame; not native close permission.
+        self.fatal && !self.settled() && self.contained && self.command_dispatched == Some(false)
+            && self.commands == 0 && self.profile_calls == 0 && self.input_closed && self.handlers_restored
+    }
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

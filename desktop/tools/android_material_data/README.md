@@ -57,12 +57,23 @@ TrimStringAdapter/License classes establish the licence normalization; the
 pre-existing receipt must contain24333f8a63b6825ea9c5514f83c2829b004d1fee. The
 adapter preserves actual pre-existing receipt bytes; it never accepts terms.
 
+The current-use join requires six protected originals: the selected image report,
+that existing receipt, and both selected packages' local `package.xml` and
+`source.properties`. Exact image/source, API/revision/type and normalized licence
+correspondence is recomputed by the material owner with the original bounds,
+deadline, close and POST checks. Its `provider-preinstalled-sdk-current-use-v1`
+classification does **not** establish who installed the SDK, who accepted terms,
+or licence entitlement. `producerExecutionProven` and `newConsent` remain false.
+Caller-provided approval fields, stale proofs, writable originals or a copied
+receipt cannot satisfy this join. All four generated material roles and the
+private0400 receipt staging remain required.
+
 ## Remaining target fact gate
 
 `hostPolicy` is deliberately null. The existing host-material route still must
 establish the complete target supplier/version/helper/font/configuration/alias
-closure, Java CA producer/input provenance, resolver/configuration boundaries,
-and the origin of the fixed hosted-image SDK receipt. Jansi/fileevents selected
+closure, Java CA input/consumer correspondence, resolver/configuration boundaries,
+and the six-original current-use SDK join. Jansi/fileevents selected
 origins, ncurses fallback and same-VM native member/helper settlement still need
 their applicable source/native evidence. Portable supplier facts
 must not be confused with same-VM generated observations. No unreviewed host
@@ -72,3 +83,18 @@ The helper refuses before acquisition/creation while this policy is absent.
 The Rust default remains an absent Android profile; both output executables
 consume the same explicit, bounded OS input only after admitted preparation.
 Ordinary Android qualification flags remain false.
+
+The metadata-only workflow now reads just the six SDK originals, five network
+configuration roles and the exact resolver target when applicable. It skips the
+unrelated GTK/JDK/glibc installation and DATA-mode preparation. It uses the same
+protected file reader, an8MiB charged read ceiling and the existing45s deadline;
+unknown resolver aliases refuse before target traversal. Failure diagnostics
+retain only the fixed role, traversal index, original type/owner/mode/link count
+and failed invariant, never a later filesystem rewalk or arbitrary error text.
+The public result contains no raw configuration or licence bodies. Nonstandard
+host/search/database values are counted and redacted, explicitly not a complete
+configuration proof. Collection/runtime/producer/native/consent flags remain
+false; a DATA observation cannot open host policy or publication pins itself.
+The historical ancestry failure remains historical until a new actual observation
+identifies the current failed check. No permission repair or licence action is
+part of this route.

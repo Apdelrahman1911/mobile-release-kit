@@ -3,7 +3,7 @@
 import type { ApiError } from './types.ts';
 import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
 
-export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile'] as const;
+export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8'] as const;
 export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token'] as const;
 export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown',
   'vault-uninitialized', 'vault-key-missing', 'vault-keyring-locked', 'vault-keyring-denied', 'vault-keyring-unavailable', 'vault-provider-unsupported', 'vault-corrupt', 'vault-interrupted', 'vault-durability-unknown'] as const;
@@ -16,6 +16,7 @@ export const SESSION_FIELDS = {
   'ios-firebase': [],
   'apple-p12': ['password'],
   'apple-profile': [],
+  'asc-p8': ['keyId', 'issuerId'],
   'google-wif': ['provider', 'serviceAccount'],
   'project-read-token': ['token'],
 } as const;
@@ -25,6 +26,7 @@ const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'ios-firebase': [['file', 'IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64']],
   'apple-p12': [['file', 'APPLE_DISTRIBUTION_P12_BASE64'], ['password', 'APPLE_DISTRIBUTION_P12_PASSWORD']],
   'apple-profile': [['file', 'APPLE_PROVISIONING_PROFILE_BASE64']],
+  'asc-p8': [['file', 'ASC_PRIVATE_KEY_P8_BASE64'], ['keyId', 'ASC_KEY_ID'], ['issuerId', 'ASC_ISSUER_ID']],
   'google-wif': [['provider', 'GOOGLE_WIF_PROVIDER'], ['serviceAccount', 'GOOGLE_SERVICE_ACCOUNT']],
   'project-read-token': [['token', 'PROJECT_READ_TOKEN']],
 };
@@ -242,7 +244,7 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
       const labelled = keys(value, ['contextRevision', 'source', 'fields', 'label']) && assetLabelFits(value.label);
       if (!keys(value, ['contextRevision', 'source', 'fields']) && !labelled) return false;
       if (source.type === 'selection') return keys(source, ['type', 'selectionToken']) && token(source.selectionToken) &&
-        (fields(value.fields, []) || fields(value.fields, SESSION_FIELDS['android-keystore']) || fields(value.fields, SESSION_FIELDS['apple-p12']));
+        (fields(value.fields, []) || fields(value.fields, SESSION_FIELDS['android-keystore']) || fields(value.fields, SESSION_FIELDS['apple-p12']) || fields(value.fields, SESSION_FIELDS['asc-p8']));
       return keys(source, ['type', 'kind', 'replacement']) && source.type === 'scalar' && one(source.kind, ['google-wif', 'project-read-token']) &&
         (source.replacement === null || recordRef(source.replacement)) && fields(value.fields, SESSION_FIELDS[source.kind as 'google-wif' | 'project-read-token']);
     }
@@ -279,7 +281,7 @@ export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   unqualified: 'Native session import has not completed its required qualification. You can read the guides, but this build cannot collect private inputs.',
   'unsupported-platform': 'Session import needs its separately admitted native profile: Linux x86_64 or Apple-silicon macOS. Apple P12/profile collection is macOS-only. Windows and browser previews cannot collect these inputs; format support does not enable a native profile.',
   'unsupported-filesystem': 'The native profile requires its admitted local filesystem: ext-family on Linux or APFS on macOS. Network, overlay and FUSE sources are refused. Your original file was not changed.',
-  'unsupported-format': 'Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist and, on admitted macOS, P12 and DER CMS profile envelopes. P12 passwords and Apple authenticity are not tested by format assessment. P8 and binary plist are not enabled.',
+  'unsupported-format': 'Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, unencrypted P8 PKCS#8 envelopes and, on admitted macOS, P12 and DER CMS profile envelopes. P8 assessment checks envelope/EC-P256 identifiers only, not mathematical key validity or account access. Passwords and Apple authenticity are not tested. Binary plist is not enabled.',
   'invalid-request': 'The submitted input does not fit the supported interface. Review the field guide; no repair or retry was performed.',
   busy: 'The original session operation still owns its slot. Wait for its status or request Cancel; do not start a replacement operation.',
   'source-refused': 'The original file could not be safely captured. It must be a supported private regular file outside registered projects, without symbolic-link traversal. The app will not change its permissions or contents.',

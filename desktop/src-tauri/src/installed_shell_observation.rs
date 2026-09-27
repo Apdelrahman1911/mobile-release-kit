@@ -13,11 +13,17 @@ use crate::{asset_session::{InstalledEvidenceWitness, InstalledLifecycleStopWitn
     edit_protocol::{self as edit, ConfigEditStatus, EditProjection}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), GitHub(github::Case), SettledFailure }
+enum Case { Positive, Outstanding, ProjectPaths, WorkflowApply, Session(SessionCase), MetadataSave, VersionSave, Commands(commands::Case), Recovery(recovery::Case), GitHub(github::Case), GitHubPreflight(preflight::Case), GitHubRelease(release::Case), SettledFailure }
 #[path = "installed_tools_observation.rs"]
 pub(crate) mod commands;
+#[path = "installed_project_recovery_observation.rs"]
+pub(crate) mod recovery;
 #[path = "installed_shell_github_observation.rs"]
 pub(crate) mod github;
+#[path = "installed_shell_preflight_observation.rs"]
+pub(crate) mod preflight;
+#[path = "installed_shell_release_observation.rs"]
+pub(crate) mod release;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionCase { Inputs, Refusals, Loss, Deadline, IosFirebase }
 impl SessionCase {
@@ -28,7 +34,10 @@ impl SessionCase {
 impl Case {
     fn session(self) -> Option<SessionCase> { match self { Self::Session(case) => Some(case), _ => None } }
     fn commands(self) -> Option<commands::Case> { match self { Self::Commands(case) => Some(case), _ => None } }
+    fn recovery(self) -> Option<recovery::Case> { match self { Self::Recovery(case) => Some(case), _ => None } }
     fn github(self) -> Option<github::Case> { match self { Self::GitHub(case) => Some(case), _ => None } }
+    fn preflight(self) -> Option<preflight::Case> { match self { Self::GitHubPreflight(case) => Some(case), _ => None } }
+    fn release(self) -> Option<release::Case> { match self { Self::GitHubRelease(case) => Some(case), _ => None } }
 }
 // A moved, private, one-use observation registration, never an enable grant.
 pub(crate) struct SessionRegistration { original: std::sync::Weak<Observation>, case: SessionCase }
@@ -56,7 +65,7 @@ enum Step {
     LifecycleReleases, ReadLifecycleReleases, LifecycleRecovery, ReadLifecycleRecovery, LifecycleControls,
     ChangeEvidenceStage, ReadEvidenceStage, ChooseEvidenceReplacement, EvidenceReplacementReady,
     RequestEvidenceStop, EvidenceStopped, ReadEvidenceStale, StaleArtifacts, ReadStaleArtifacts, StaleRecovery, ReadStaleRecovery,
-    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step), GitHubReadOnly(github::Step),
+    CandidateSettings, ReadCandidateDraft, PrepareNoop, ReadNoopReview, Close, Quit, Exit, Paths(PathStep), Workflow(WorkflowStep), Session(SessionStep), MetadataSave(MetadataStep), VersionSave(VersionStep), Commands(commands::Step), Recovery(recovery::Step), GitHubReadOnly(github::Step), GitHubPreflight(preflight::Step), GitHubRelease(release::Step),
 }
 impl Step {
     fn failure_line(self) -> &'static [u8] {
@@ -165,7 +174,10 @@ impl Step {
             Self::MetadataSave(step) => step.failure_line(),
             Self::VersionSave(step) => step.failure_line(),
             Self::Commands(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+            Self::Recovery(_) => b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProjectRecovery\n",
             Self::GitHubReadOnly(step) => step.failure_line(),
+            Self::GitHubPreflight(step) => step.failure_line(),
+            Self::GitHubRelease(step) => step.failure_line(),
         }
     }
 }
@@ -1394,7 +1406,10 @@ fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
         Case::MetadataSave => "shell-metadata-save-failure.labels",
         Case::VersionSave => "shell-version-save-failure.labels",
         Case::Commands(case) => case.failure_leaf(),
+        Case::Recovery(case) => case.failure_leaf(),
         Case::GitHub(case) => case.failure_leaf(),
+        Case::GitHubPreflight(case) => case.failure_leaf(),
+        Case::GitHubRelease(case) => case.failure_leaf(),
         Case::SettledFailure => "shell-settled-failure-failure.labels",
     };
     let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
@@ -4459,7 +4474,7 @@ fn saved_read_context(r: &Record) -> bool {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, start: Instant, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: FailureLatch,
-    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>, github: Option<Arc<github::Control>>,
+    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>, commands: Option<Arc<commands::Control>>, recovery: Option<Arc<recovery::Control>>, github: Option<Arc<github::Control>>, preflight: Option<Arc<preflight::Control>>, release: Option<Arc<release::Control>>,
 }
 impl Observation {
     fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
@@ -4469,7 +4484,8 @@ impl Observation {
                 Case::WorkflowApply => path.with_file_name("workflow-project"),
                 Case::Session(case) => path.with_file_name(case.name()).join("project"),
                 Case::Commands(case) => path.with_file_name(case.name()).join("project"),
-                Case::GitHub(_) => path.with_file_name("github-project"),
+                Case::Recovery(case) => path.with_file_name(case.name()).join("project"),
+                Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_) => path.with_file_name("github-project"),
                 Case::MetadataSave => path.with_file_name("metadata-project"),
                 Case::VersionSave => path.with_file_name("version-project"), _ => path });
         let paths = Paths::new((case == Case::ProjectPaths).then_some(project_path.as_deref()).flatten());
@@ -4477,7 +4493,7 @@ impl Observation {
         Self { case, main: std::thread::current().id(), start, end,
             failed: FailureLatch::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
-            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), github: case.github().map(github::Control::new), record: Mutex::new(Record {
+            failure_reported: AtomicBool::new(false), failure_sink, commands: case.commands().map(commands::Control::new), recovery: case.recovery().map(recovery::Control::new), github: case.github().map(github::Control::new), preflight: case.preflight().map(preflight::Control::new), release: case.release().map(release::Control::new), record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 bootstrap: BootstrapProgress::NotSampled, evidence_diagnostic: None, snapshot_diagnostic: None,
@@ -4641,22 +4657,49 @@ impl Observation {
     }
     pub(super) fn build_bridge(&self, resources: PathBuf) -> Result<crate::bridge::DesktopBridge, BridgeError> {
         if self.failed.load(Ordering::SeqCst) || !route() { return Err(BridgeError::invalid()); }
-        match &self.github {
-            Some(control) => crate::bridge::DesktopBridge::for_installed_github_observation(resources, control.profile()),
-            None => Ok(crate::bridge::DesktopBridge::new(resources)),
+        match (&self.github, &self.preflight, &self.release) {
+            (Some(control), None, None) => crate::bridge::DesktopBridge::for_installed_github_observation(resources, control.profile()),
+            (None, Some(_), None) => crate::bridge::DesktopBridge::for_installed_github_preflight_observation(resources,
+                crate::runtime::GitHubPreflightObservationProfile::Synthetic),
+            (None, None, Some(control)) => crate::bridge::DesktopBridge::for_installed_github_release_observation(resources, control.profile()),
+            (None, None, None) => Ok(crate::bridge::DesktopBridge::new(resources)),
+            _ => Err(BridgeError::invalid()),
         }
     }
     pub(super) fn github_result(&self, command: github::Command, result: &Result<crate::github_connection_protocol::Status, BridgeError>) {
         if let Some(control) = &self.github { control.result(command, result); }
+        if let Some(control) = &self.preflight { control.read_result(command, result); }
+        if let Some(control) = &self.release { control.read_result(command, result); }
     }
     pub(super) fn github_status(&self, status: &crate::github_connection_protocol::Status) {
         if let Some(control) = &self.github { control.status(status); }
+        if let Some(control) = &self.preflight { control.read_status(status); }
+        if let Some(control) = &self.release { control.read_status(status); }
+    }
+    pub(super) fn preflight_result(&self, command: &str, result: &Result<crate::github_preflight_protocol::Status, BridgeError>) {
+        if let Some(control) = &self.preflight { control.result(command, result); }
+    }
+    pub(super) fn preflight_status(&self, status: &crate::github_preflight_protocol::Status) {
+        if let Some(control) = &self.preflight { control.status(status); }
+    }
+    pub(super) fn release_result(&self, command: &str, result: &Result<crate::github_release_protocol::Status, BridgeError>) {
+        if let Some(control) = &self.release { control.result(command, result); }
+    }
+    pub(super) fn release_status(&self, status: &crate::github_release_protocol::Status) {
+        if let Some(control) = &self.release { control.status(status); }
     }
     pub(super) async fn github_relay(&self, app: &tauri::AppHandle) {
         if let Some(control) = &self.github { control.relay(app).await; }
+        if let Some(control) = &self.preflight { control.relay(app).await; }
+        if let Some(control) = &self.release { control.relay(app).await; }
     }
     pub(super) async fn github_exit(&self, app: &tauri::AppHandle) -> bool {
-        match &self.github { Some(control) => control.settle_for_exit(app).await, None => true }
+        match (&self.github, &self.preflight, &self.release) {
+            (Some(control), None, None) => control.settle_for_exit(app).await,
+            (None, Some(control), None) => control.settle_for_exit(app).await,
+            (None, None, Some(control)) => control.settle_for_exit(app).await,
+            (None, None, None) => true, _ => false,
+        }
     }
     pub(super) fn attach(self: &Arc<Self>, supervisor: &Supervisor) -> Result<(), BridgeError> {
         if std::thread::current().id() != self.main { self.fail(); return Err(BridgeError::invalid()); }
@@ -4664,6 +4707,8 @@ impl Observation {
         // before the real window/bootstrap. Positive leaves all hooks unarmed.
         if self.case == Case::Outstanding { supervisor.arm_initial_app_info_shutdown()?; }
         if let Some(control) = &self.github { control.attach(self, supervisor)?; }
+        if let Some(control) = &self.preflight { control.attach(self, supervisor)?; }
+        if let Some(control) = &self.release { control.attach(self, supervisor)?; }
         let mut record = self.record_at(Boundary::Bootstrap).ok_or_else(BridgeError::cleanup_unknown)?;
         if record.attached { self.fail(); return Err(BridgeError::invalid()); }
         record.attached = true;
@@ -4678,7 +4723,14 @@ impl Observation {
         document.register_installed_session(SessionRegistration { original: Arc::downgrade(self), case })
     }
     pub(super) fn attach_commands(self: &Arc<Self>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
-        if let Some(commands) = &self.commands { commands.attach(self, document)?; } Ok(())
+        if let Some(commands) = &self.commands { commands.attach(self, document)?; }
+        if let Some(recovery) = &self.recovery { recovery.attach(self, document)?; } Ok(())
+    }
+    pub(super) fn recovery_request(&self, command: recovery::Command, value: &Value) {
+        if let Some(recovery) = &self.recovery { recovery.request(command, value); }
+    }
+    pub(super) fn recovery_result(&self, command: recovery::Command, result: &Result<crate::project_recovery_protocol::Status, BridgeError>) {
+        if let Some(recovery) = &self.recovery { recovery.returned(command, result); }
     }
     pub(super) fn commands_request(&self, command: commands::Command, value: &Value) {
         if let Some(commands) = &self.commands { commands.request(command, value); }
@@ -4727,8 +4779,12 @@ impl Observation {
         r.info = true; r.methods = methods.len();
     }
     fn github_guidance_scope(&self, r: &Record) -> github::GuidanceReloadScope {
-        github::guidance_reload_scope(r.step, r.pending, self.github.is_some()
-            && !self.failed.load(Ordering::SeqCst) && Instant::now() < self.end)
+        let live = !self.failed.load(Ordering::SeqCst) && Instant::now() < self.end;
+        if self.release.is_some() {
+            release::guidance_reload_scope(r.step, r.pending, live)
+        } else if self.preflight.is_some() {
+            preflight::guidance_reload_scope(r.step, r.pending, live)
+        } else { github::guidance_reload_scope(r.step, r.pending, self.github.is_some() && live) }
     }
     pub(super) fn unexpected(&self) { self.fail(); }
     pub(super) fn catalog(&self, result: &Result<Value, BridgeError>) {
@@ -4764,7 +4820,7 @@ impl Observation {
             Ok(Some(project)) if r.step == Step::Selected && r.cancelled && r.project.is_none() && r.pickers[1].responded && r.pickers[1].returned
                 && self.project_path().is_some_and(|path| Path::new(&project.path) == path)
                 && project.name == (match self.case { Case::ProjectPaths => "path-project", Case::WorkflowApply => "workflow-project",
-                    Case::Session(_) | Case::Commands(_) => "project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
+                    Case::Session(_) | Case::Commands(_) | Case::Recovery(_) => "project", Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_) => "github-project", Case::MetadataSave => "metadata-project",
                     Case::VersionSave => "version-project", _ => "positive-project" })
                 && crate::protocol::valid_id(&project.id) => r.project = Some(project.clone()),
             _ => self.fail(),
@@ -4783,6 +4839,7 @@ impl Observation {
     }
     pub(super) fn snapshot(&self, project_id: &str, result: &Result<Value, BridgeError>) {
         if let Some(commands) = &self.commands { commands.snapshot(project_id, result); return; }
+        if let Some(recovery) = &self.recovery { recovery.snapshot(project_id, result); return; }
         if self.case.session().is_some() { self.session_snapshot_result(project_id,result); return; }
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
         let saved = r.snapshot_requests == 2;
@@ -6407,13 +6464,13 @@ impl Observation {
             }
             if r.step == Step::Bootstrap && self.case != Case::Outstanding {
                 if !r.info || !r.catalog { r.bootstrap = BootstrapProgress::AppInfoCatalog; return; }
-                r.step = if self.case.session().is_some() || self.commands.is_some() || self.github.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
+                r.step = if self.case.session().is_some() || self.commands.is_some() || self.recovery.is_some() || self.github.is_some() || self.preflight.is_some() || self.release.is_some() { Step::Dashboard } else { Step::Environment }; r.bootstrap = BootstrapProgress::Advanced;
             }
             if r.step == Step::Bootstrap { r.bootstrap = BootstrapProgress::HeldAppInfo; }
             // Wait for already-requested native replies without spending DOM
             // evaluations on work that has not returned. No new task/deadline.
             let native_pending = match r.step {
-                Step::GitHubReadOnly(github::Step::EnterRepository) => !r.github_guidance.complete(),
+                Step::GitHubReadOnly(github::Step::EnterRepository) | Step::GitHubPreflight(preflight::Step::EnterRepository) | Step::GitHubRelease(release::Step::EnterRepository) => !r.github_guidance.complete(),
                 Step::VersionSave(VersionStep::ReadOpen(index)) => !r.version.sessions.get(usize::from(index))
                     .is_some_and(|s|s.open_returned && s.projection.phase == edit::Phase::Editing),
                 Step::VersionSave(VersionStep::ReadReview(index)) => !r.version.sessions.get(usize::from(index))
@@ -6584,8 +6641,20 @@ impl Observation {
             let Some(commands) = &self.commands else { self.fail(); return; };
             if !commands.tick(app, step) { return; }
         }
+        if let Step::Recovery(step) = step {
+            let Some(control) = &self.recovery else { self.fail(); return; };
+            if !control.tick(app, step) { return; }
+        }
         if let Step::GitHubReadOnly(step) = step {
             let Some(control) = &self.github else { self.fail(); return; };
+            if !control.tick(app, step) { return; }
+        }
+        if let Step::GitHubPreflight(step) = step {
+            let Some(control) = &self.preflight else { self.fail(); return; };
+            if !control.tick(app, step) { return; }
+        }
+        if let Step::GitHubRelease(step) = step {
+            let Some(control) = &self.release else { self.fail(); return; };
             if !control.tick(app, step) { return; }
         }
         {
@@ -6614,7 +6683,13 @@ impl Observation {
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4] || r.metadata.requests != [0;4]) { self.fail(); return; }
                     if self.commands.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
                         || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.recovery.as_ref().is_some_and(|c| !c.complete() || r.requests != [0;4] || !r.sessions.is_empty()
+                        || r.workflow.requests != [0;4]) { self.fail(); return; }
                     if self.github.as_ref().is_some_and(|c| !r.github_guidance.complete() || !c.ready_to_close() || r.requests != [0;4]
+                        || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.preflight.as_ref().is_some_and(|c| !r.github_guidance.complete() || !c.ready_to_close() || r.requests != [0;4]
+                        || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
+                    if self.release.as_ref().is_some_and(|c| !r.github_guidance.complete() || !c.ready_to_close() || r.requests != [0;4]
                         || !r.sessions.is_empty() || r.workflow.requests != [0;4]) { self.fail(); return; }
                     r.step = Step::Quit; Pending::Close
                 },
@@ -6634,7 +6709,7 @@ impl Observation {
                         } else { self.fail(); }
                         return;
                     }
-                    if step == Step::GitHubReadOnly(github::Step::ReloadGuidance) && !r.github_guidance.reserve() { self.fail(); return; }
+                    if matches!(step, Step::GitHubReadOnly(github::Step::ReloadGuidance) | Step::GitHubPreflight(preflight::Step::ReloadGuidance) | Step::GitHubRelease(release::Step::ReloadGuidance)) && !r.github_guidance.reserve() { self.fail(); return; }
                     r.evaluations += 1; Pending::Dom(step)
                 },
             });
@@ -6695,8 +6770,17 @@ impl Observation {
         if let Step::Commands(step) = step {
             if let Some(commands) = &self.commands { commands.dom(step, &value); } else { self.fail(); } return;
         }
+        if let Step::Recovery(step) = step {
+            if let Some(control) = &self.recovery { control.dom(step, &value); } else { self.fail(); } return;
+        }
         if let Step::GitHubReadOnly(step) = step {
             if let Some(control) = &self.github { control.dom(step, &value); } else { self.fail(); } return;
+        }
+        if let Step::GitHubPreflight(step) = step {
+            if let Some(control) = &self.preflight { control.dom(step, &value); } else { self.fail(); } return;
+        }
+        if let Step::GitHubRelease(step) = step {
+            if let Some(control) = &self.release { control.dom(step, &value); } else { self.fail(); } return;
         }
         if let Step::Session(session) = step { self.session_dom(session,&value); return; }
         if let Step::Paths(path) = step { self.path_dom(path,&value); return; }
@@ -6734,6 +6818,9 @@ impl Observation {
             },
             Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)
                 && value["chooseEnabled"].as_bool() == Some(true),
+            Step::ReadSnapshot if self.recovery.is_some() => object.len() == 4 && r.selected && r.snapshot
+                && value["configuration"] == "Not configured" && value["name"] == "project"
+                && value["sourceFiles"].as_str().is_some_and(|text| text.ends_with(" recognized files")),
             Step::ReadSnapshot if self.case.session().is_some() || self.commands.is_some() => object.len() == 4 && r.selected && r.snapshot
                 && value["configuration"].as_str() == Some("Format-valid only") && value["name"].as_str() == Some("project")
                 && value["sourceFiles"].as_str().is_some_and(|text| text.ends_with(" recognized files")),
@@ -6743,7 +6830,7 @@ impl Observation {
                     else if self.case == Case::MetadataSave { "3 recognized files" }
                     else if self.case == Case::VersionSave { "1 recognized files" } else { "2 recognized files" })
                 && value["name"].as_str() == Some(match self.case { Case::ProjectPaths => "path-project",
-                    Case::WorkflowApply => "workflow-project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
+                    Case::WorkflowApply => "workflow-project", Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_) => "github-project", Case::MetadataSave => "metadata-project",
                     Case::VersionSave => "version-project", _ => "positive-project" }),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
             Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 5 && r.adopted && r.capability && source() && draft(false, true)
@@ -6850,7 +6937,10 @@ impl Observation {
             Step::ChooseSelect => Step::SetProject,
             Step::ReadSnapshot => { r.snapshot_visible = true;
                 if self.github.is_some() { Step::GitHubReadOnly(github::Step::Navigate) }
+                else if self.preflight.is_some() { Step::GitHubPreflight(preflight::Step::Navigate) }
+                else if self.release.is_some() { Step::GitHubRelease(release::Step::Navigate) }
                 else if self.commands.is_some() { Step::Commands(commands::Step::Navigate) }
+                else if self.recovery.is_some() { Step::Recovery(recovery::Step::Navigate) }
                 else if self.case.session().is_some() { Step::Session(SessionStep::Navigate) }
                 else if self.case == Case::MetadataSave { Step::MetadataSave(MetadataStep::Navigate) }
                 else if self.case == Case::VersionSave { Step::VersionSave(VersionStep::Open(0)) } else { Step::Settings } },
@@ -7087,7 +7177,7 @@ impl Observation {
             r.session.quit_cancel_id=Some(id); r.session.quit_cancel.created=true; return;
         }
         if !quit || id == 0 || self.case == Case::Positive && id != 7 || self.case == Case::ProjectPaths && id != 14
-            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) && id != 3
+            || matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_)) && id != 3
             || !r.close_prevented || r.step != Step::Quit || r.native_id.is_some() { self.fail(); return; }
         r.native_id = Some(id);
     }
@@ -7222,8 +7312,8 @@ impl Observation {
         let originals_final = if self.case == Case::Outstanding { true } else {
             let Some(r) = self.record_at(Boundary::Exit) else { return; };
             if self.case == Case::ProjectPaths { r.paths.complete() && r.project_witness.as_ref().is_some_and(|project| document.installed_observation_paths_final(project)) }
-            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_)) { r.project_witness.is_some()
-                && self.commands.as_ref().is_none_or(|c| c.complete()) && self.github.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
+            else if matches!(self.case,Case::WorkflowApply | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_)) { r.project_witness.is_some()
+                && self.commands.as_ref().is_none_or(|c| c.complete()) && self.github.as_ref().is_none_or(|c| c.complete()) && self.preflight.as_ref().is_none_or(|c| c.complete()) && self.release.as_ref().is_none_or(|c| c.complete()) && document.installed_observation_final() }
             else if let Some(case) = self.case.session() { self.session_behavior_complete(&r)
                 && r.project_witness.as_ref().is_some_and(|project| document.installed_session_final(project,case == SessionCase::Loss)) }
             else { r.lifecycle.complete() && r.project_witness.as_ref().is_some_and(|project| r.lifecycle.stop_original.as_ref().is_some_and(|original| document.installed_observation_lifecycle_final(project, original))) }
@@ -7258,7 +7348,7 @@ impl Observation {
             r.session.queries = Some(queries); r.session.r1_final = retired; retired
         } else { self.case.session().is_none() };
         let retired = match (self.case, held) {
-            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::GitHub(_), None) => true,
+            (Case::Positive | Case::ProjectPaths | Case::WorkflowApply | Case::Session(_) | Case::MetadataSave | Case::VersionSave | Case::Commands(_) | Case::Recovery(_) | Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_), None) => true,
             (Case::Outstanding, Some(mut held)) => {
                 // Borrow/join the same original after the NORMAL event loop
                 // exits. No additional task, shutdown call, or replacement
@@ -7304,7 +7394,9 @@ impl Observation {
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
                 && self.session_behavior_complete(&r) && r.originals_final && r.session.r1_final
-                || (self.commands.as_ref().is_some_and(|c| c.complete()) || self.github.as_ref().is_some_and(|c| c.complete() && r.github_guidance.complete())) && r.info && r.catalog && !r.environment
+                || (self.commands.as_ref().is_some_and(|c| c.complete()) || self.recovery.as_ref().is_some_and(|c| c.complete()) || self.github.as_ref().is_some_and(|c| c.complete() && r.github_guidance.complete())
+                    || self.preflight.as_ref().is_some_and(|c| c.complete() && r.github_guidance.complete())
+                    || self.release.as_ref().is_some_and(|c| c.complete() && r.github_guidance.complete())) && r.info && r.catalog && !r.environment
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.snapshot_requests == 1 && r.project_witness.is_some()
                 && r.requests == [0;4] && r.sessions.is_empty() && !r.open_pending && r.prepare_pending.is_none()
@@ -8133,7 +8225,8 @@ impl Observation {
         let Some((index,SA::Choose(file,expected,_)))=self.session_action(r.step) else { self.fail(); return; };
         let name=match kind { crate::credential_format::FileKind::AndroidKeystore=>"android-keystore", crate::credential_format::FileKind::AndroidFirebase=>"android-firebase",
             crate::credential_format::FileKind::IosFirebase=>"ios-firebase",
-            crate::credential_format::FileKind::AppleP12 | crate::credential_format::FileKind::AppleProfile => { self.fail(); return; } };
+            crate::credential_format::FileKind::AppleP12 | crate::credential_format::FileKind::AppleProfile
+            | crate::credential_format::FileKind::AscP8 => { self.fail(); return; } };
         if name!=expected || id<=2 || r.session.files.len()>=9 || r.session.files.iter().any(|f| f.id==id || f.index==index) { self.fail(); return; }
         r.session.files.push(SessionFile {id,index,kind:expected,select:!file.is_empty(),picker:Picker {created:true,..Picker::default()},parent_navigation_reserved:false});
     }
@@ -8905,12 +8998,15 @@ fn workflow_script(step: WorkflowStep) -> Option<String> {
 
 fn script(step: Step, case: Case) -> Option<String> {
     if let Step::Commands(step) = step { return commands::script(step, case.commands()?); }
+    if let Step::Recovery(step) = step { return recovery::script(step, case.recovery()?); }
     if let Step::GitHubReadOnly(step) = step { return github::script(step); }
+    if let Step::GitHubPreflight(step) = step { return preflight::script(step, case.preflight()?); }
+    if let Step::GitHubRelease(step) = step { return release::script(step, case.release()?); }
     if let Step::Paths(path) = step { return path_script(path); }
     if let Step::Workflow(workflow) = step { return workflow_script(workflow); }
     if let Step::MetadataSave(metadata) = step { return metadata_script(metadata); }
     if let Step::VersionSave(version) = step { return version_script(version); }
-    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) => "project", Case::GitHub(_) => "github-project", Case::MetadataSave => "metadata-project",
+    let project_name = match case { Case::WorkflowApply => "workflow-project", Case::Session(_) | Case::Commands(_) | Case::Recovery(_) => "project", Case::GitHub(_) | Case::GitHubPreflight(_) | Case::GitHubRelease(_) => "github-project", Case::MetadataSave => "metadata-project",
         Case::VersionSave => "version-project", _ => "positive-project" };
     let body = match step {
         Step::Environment | Step::GuidanceEnvironment => r#"
@@ -9569,7 +9665,10 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(value) if value == OsStr::new("metadata-save") => Some(Case::MetadataSave),
         Some(value) if value == OsStr::new("version-save") => Some(Case::VersionSave),
         Some(value) if cfg!(target_os = "linux") && value == OsStr::new("settled-failure") => Some(Case::SettledFailure),
-        Some(value) => commands::Case::parse(value).map(Case::Commands).or_else(|| github::Case::parse(value).map(Case::GitHub)),
+        Some(value) => commands::Case::parse(value).map(Case::Commands).or_else(|| recovery::Case::parse(value).map(Case::Recovery))
+            .or_else(|| github::Case::parse(value).map(Case::GitHub))
+            .or_else(|| preflight::Case::parse(value).map(Case::GitHubPreflight))
+            .or_else(|| release::Case::parse(value).map(Case::GitHubRelease)),
         _ => None,
     };
     let Some(case) = case.filter(|_| args.next().is_none() && route()) else {
@@ -9641,7 +9740,10 @@ pub(crate) fn main() -> std::process::ExitCode {
         assert_version_open_race_contract();
     }
     if case.commands().is_some() { commands::assert_contracts(); }
+    if case.recovery().is_some() { recovery::assert_contracts(); }
     if case.github().is_some() { github::assert_contracts(); }
+    if case.preflight().is_some() { preflight::assert_contracts(); }
+    if case.release().is_some() { release::assert_contracts(); }
     // Routing DATA is not native admission. The ordinary builder constructs
     // DesktopBridge::new / RuntimeConfig::packaged and owes every real check.
     let returned = super::run_builder(super::builder().manage(q.clone()));
@@ -9664,16 +9766,34 @@ pub(crate) fn main() -> std::process::ExitCode {
         Case::MetadataSave => b"MRK_INSTALLED_SHELL_OBSERVATION=metadata-save-verified\n",
         Case::VersionSave => b"MRK_INSTALLED_SHELL_OBSERVATION=version-save-verified\n",
         Case::Commands(case) => case.verified_line(),
+        Case::Recovery(case) => match case.verified_line() { Some(line) => line, None => return std::process::ExitCode::FAILURE },
         Case::GitHub(case) => case.verified_line(),
+        Case::GitHubPreflight(case) => case.verified_line(),
+        Case::GitHubRelease(case) => case.verified_line(),
         // A missing deliberate rejection must never become a positive receipt.
         Case::SettledFailure => return std::process::ExitCode::FAILURE,
     };
     let mut stdout = std::io::stdout().lock();
     if stdout.write_all(b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n")
         .and_then(|_| {
+            if let Some(control) = &q.release {
+                let report = control.report().ok_or_else(|| std::io::Error::other("GitHub release receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_GITHUB_RELEASE=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
+            if let Some(control) = &q.preflight {
+                let report = control.report().ok_or_else(|| std::io::Error::other("GitHub preflight receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_GITHUB_PREFLIGHT=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
             if let Some(control) = &q.github {
                 let report = control.report().ok_or_else(|| std::io::Error::other("GitHub receipt unavailable"))?;
                 stdout.write_all(b"MRK_INSTALLED_SHELL_GITHUB_READONLY=")?;
+                stdout.write_all(&report)?; return stdout.write_all(b"\n");
+            }
+            if let Some(recovery) = &q.recovery {
+                let report = recovery.report().ok_or_else(|| std::io::Error::other("Recovery receipt unavailable"))?;
+                stdout.write_all(b"MRK_INSTALLED_SHELL_PROJECT_RECOVERY=")?;
                 stdout.write_all(&report)?; return stdout.write_all(b"\n");
             }
             if let Some(commands) = &q.commands {

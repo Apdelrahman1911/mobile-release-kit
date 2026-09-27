@@ -265,8 +265,9 @@ test('preparation targets require the exact current core row, active hint and ac
     assert.equal(h.controller.preparationCurrent(active, active), true);
     assert.equal(h.controller.preparationTarget(source, { ...input }), null);
     assert.equal(h.controller.preparationTarget(source, source.result.requirements[1]), null); // other stage, even an actual row
-    const unsupported = h.controller.preparationTarget(source, source.result.requirements[2]);
-    assert.ok(unsupported); assert.equal(sessionPreparationKind(unsupported.guideId), null);
+    const asc = h.controller.preparationTarget(source, source.result.requirements[2]);
+    assert.ok(asc); assert.equal(sessionPreparationKind(asc.guideId), 'asc-p8');
+    assert.equal(sessionPreparationKind('unknown-credential'), null);
     for (const changed of [{ guideId: 'android-firebase' }, { requirement: { ...input } }, { scope: { ...target.scope, purpose: 'signing' } }]) {
       const unrelated = { ...target, ...changed };
       assert.equal(h.controller.preparationCurrent(unrelated, unrelated), false);
@@ -309,6 +310,26 @@ for (const kindId of ['apple-p12', 'apple-profile']) test(`a current ${kindId} r
     assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === kindId).fields.map((field) => field.id), kindId === 'apple-p12' ? ['file', 'password'] : ['file']);
     assert.equal(h.controller.preparationCurrent(target, target), true); assert.equal(h.state, source); assert.equal(h.calls.length, calls);
     h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.teamId', value: 'Z9' });
+    assert.equal(h.controller.preparationCurrent(target, target), false);
+  } finally { h.controller.dispose(); }
+});
+
+for (const stage of ['candidate', 'external-testing', 'production']) test(`ASC ${stage} requirements hand off to iOS/full preparation without collecting or assessing material`, async () => {
+  const h = harness();
+  try {
+    h.controller.setStage(stage);
+    await read(h, valid([guidedRow('asc-p8', stage)]));
+    const source = h.state, calls = h.calls.length;
+    const target = h.controller.preparationTarget(source, source.result.requirements[0]);
+    assert.ok(target); assert.equal(sessionPreparationKind(target.guideId), 'asc-p8');
+    assert.deepEqual(target.scope, { platform: 'ios', stage, purpose: 'full' });
+    assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === 'asc-p8').fields.map((field) => field.id), ['file', 'keyId', 'issuerId']);
+    assert.equal(h.controller.preparationCurrent(target, target), true);
+    assert.equal(h.state, source); assert.equal(h.calls.length, calls);
+    // The static core guide and its requiredness stay unchanged; a handoff
+    // is not native availability, file collection, assessment or assignment.
+    assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === 'asc-p8'), guide.kinds.find((kind) => kind.id === 'asc-p8'));
+    h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.bundleId', value: 'org.changed' });
     assert.equal(h.controller.preparationCurrent(target, target), false);
   } finally { h.controller.dispose(); }
 });

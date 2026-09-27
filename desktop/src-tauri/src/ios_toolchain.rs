@@ -4,6 +4,12 @@ pub(crate) const APPLICATIONS: &str = "/Applications";
 pub(crate) const STANDARD_APP: &str = "Xcode.app";
 pub(crate) const SDK_COMPONENTS: [&str; 5] = ["Platforms", "iPhoneOS.platform", "Developer", "SDKs", "iPhoneOS.sdk"];
 
+/// The exact alias is only selection data. Concrete originals still require
+/// root ownership and independent native custody; an alias lends no authority.
+pub(crate) fn selection_alias_owner(owner: u32, account: u32) -> bool {
+    account != 0 && (owner == 0 || owner == account)
+}
+
 /// Accept only one direct sibling target. The original native link and named
 /// sibling are independently retained/rechecked; this parser grants no IO.
 pub(crate) fn sibling_target(value: &str) -> Option<&str> {
@@ -21,6 +27,11 @@ mod tests {
     use super::*;
     #[test]
     fn fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup() {
+        assert!(selection_alias_owner(0, 501));
+        assert!(selection_alias_owner(501, 501));
+        assert!(!selection_alias_owner(502, 501));
+        assert!(!selection_alias_owner(0, 0));
+        assert!(!selection_alias_owner(501, 0));
         assert_eq!(sibling_target("Xcode_26.0.app"), Some("Xcode_26.0.app"));
         assert_eq!(sibling_target("/Applications/Xcode-beta.app"), Some("Xcode-beta.app"));
         for bad in ["Xcode.app", "/Applications/Xcode.app", "../Xcode_26.app", "./Xcode_26.app",

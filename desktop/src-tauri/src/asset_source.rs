@@ -161,7 +161,7 @@ pub(crate) struct InstalledSourceFacts {
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
     match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => 32 * 1024 * 1024,
-        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile => 4 * 1024 * 1024 }
+        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => 4 * 1024 * 1024 }
 }
 fn private_file(mode: u32) -> bool { mode & 0o077 == 0 }
 fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<usize, Reason> {
@@ -471,6 +471,7 @@ mod linux {
             FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore"),
             FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
             FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
+            FileKind::AscP8 => suffix.eq_ignore_ascii_case(b"p8"),
             FileKind::AppleP12 | FileKind::AppleProfile => return Err(Reason::UnsupportedPlatform),
         };
         if !matches || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
@@ -803,6 +804,11 @@ mod linux {
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/google-services.json")).is_err());
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/GoogleService-Info.plist.p12")).is_err());
             assert_eq!(material_limit(FileKind::IosFirebase), 4 * 1024 * 1024);
+            assert_eq!(material_limit(FileKind::AscP8), 4 * 1024 * 1024);
+            assert!(suffix(FileKind::AscP8, Path::new("/fictional/AuthKey.P8")).is_ok());
+            for bad in ["/fictional/p8", "/fictional/key.pem", "/fictional/key.p8.p12"] {
+                assert!(suffix(FileKind::AscP8, Path::new(bad)).is_err());
+            }
             assert_eq!(suffix(FileKind::AppleP12, Path::new("/fictional/certificate.p12")), Err(Reason::UnsupportedPlatform));
             assert_eq!(suffix(FileKind::AppleProfile, Path::new("/fictional/app.mobileprovision")), Err(Reason::UnsupportedPlatform));
         }

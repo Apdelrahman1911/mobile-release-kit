@@ -1104,26 +1104,70 @@ mod tests {
 
     #[test]
     fn encrypted_save_publishes_descriptor_only_and_requires_separate_assessment_and_bind() {
-        let (mut state, _) = model(Operation::Commit, true);
-        state.context = Some(context_data());
-        let row = descriptor_data(3, 1); let key = row.key();
-        let slot = state.slot.as_mut().unwrap();
-        slot.phase = Phase::Mutating; slot.selection = Some(token('b')); slot.assessment_context_revision = Some(1);
-        slot.review_end = Some(Instant::now() + REVIEW);
-        slot.preview = Some(Preview { token: token('c'), action: Action::Save, bind_token: Some(token('d')), record: None,
-            subject: PreviewSubject::new(Kind::GoogleWif, SubjectChange::New, None) });
-        let session = state.vault.as_mut().unwrap(); session.state = State::Mutating;
-        // Only the shared memory transition is under test. No native effect,
-        // original join or authenticated filesystem receipt is manufactured.
-        publish_saved_revision(session, slot, id(3), Some(row), 7);
-        assert!(slot.phase == Phase::Idle && slot.settlement == Settlement::Known && slot.discard);
-        assert!(slot.preview.is_none() && slot.selection.is_none() && slot.assessment.is_none());
-        assert!(slot.assessment_context_revision.is_none() && slot.review_end.is_none());
-        assert!(slot.result_record.as_ref() == Some(&key));
-        assert!(state.assignments.is_empty() && !record_assessed(&state, &key));
-        let rows = summaries(&state); assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].storage, rows[0].availability, rows[0].payload_state), ("encrypted", "unassigned", "not-checked"));
-        assert!(!usable(&state, state.slot.as_ref().unwrap(), &key, Kind::GoogleWif));
+        for kind in [Kind::GoogleWif, Kind::AscP8] {
+            let (mut state, _) = model(Operation::Commit, true);
+            let mut context = context_data();
+            if kind == Kind::AscP8 {
+                let context = Arc::get_mut(&mut context).unwrap(); context.platform = Platform::Ios; context.purpose = Purpose::Full;
+            }
+            state.context = Some(context);
+            let mut row = descriptor_data(3, 1);
+            row.authenticated.descriptor = format::Descriptor::new(kind, None, vec![false, false], kind.file().is_some()).unwrap();
+            let key = row.key(); let slot = state.slot.as_mut().unwrap();
+            slot.kind = Some(kind);
+            slot.phase = Phase::Mutating; slot.selection = Some(token('b')); slot.assessment_context_revision = Some(1);
+            slot.review_end = Some(Instant::now() + REVIEW);
+            slot.preview = Some(Preview { token: token('c'), action: Action::Save, bind_token: Some(token('d')), record: None,
+                subject: PreviewSubject::new(kind, SubjectChange::New, None) });
+            let session = state.vault.as_mut().unwrap(); session.state = State::Mutating;
+            // Only the shared memory transition is under test. No native effect,
+            // original join or authenticated filesystem receipt is manufactured.
+            publish_saved_revision(session, slot, id(3), Some(row), 7);
+            assert!(slot.phase == Phase::Idle && slot.settlement == Settlement::Known && slot.discard);
+            assert!(slot.preview.is_none() && slot.selection.is_none() && slot.assessment.is_none());
+            assert!(slot.assessment_context_revision.is_none() && slot.review_end.is_none());
+            assert!(slot.result_record.as_ref() == Some(&key));
+            assert!(state.assignments.is_empty() && !record_assessed(&state, &key));
+            let rows = summaries(&state); assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].storage, rows[0].availability, rows[0].payload_state), ("encrypted", "unassigned", "not-checked"));
+            assert!(!usable(&state, state.slot.as_ref().unwrap(), &key, kind));
+        }
+    }
+
+    #[test]
+    fn asc_descriptor_and_reference_never_substitute_for_the_actual_loaded_revision() {
+        let (mut state, _) = model(Operation::Prepare, true);
+        let mut row = descriptor_data(3, 1);
+        row.authenticated.descriptor = format::Descriptor::new(Kind::AscP8, None, vec![false, false], true).unwrap();
+        let reference = row.reference(identity()); let record = row.key();
+        let key = state.vault.as_ref().unwrap().key.as_ref().unwrap();
+        assert!(match_descriptor(&row, reference, key).is_ok());
+        for wrong in [
+            StoredRef { identity: format::Identity::new(id(7), id(8)).unwrap(), ..reference },
+            StoredRef { record: id(4), ..reference },
+            StoredRef { revision: format::Revision::new(id(201), 2).unwrap(), ..reference },
+            StoredRef { revision: format::Revision::new(id(202), 1).unwrap(), ..reference },
+            StoredRef { original: store::ReadWitness::lifecycle_data(id(4), reference.revision), ..reference },
+        ] { assert_eq!(match_descriptor(&row, wrong, key), Err(Reason::SourceChanged)); }
+        state.vault.as_mut().unwrap().rows.push(row);
+        assert!(has_record(&state, &record, Kind::AscP8));
+        assert!(!has_record(&state, &record, Kind::GoogleWif));
+        let stale = RecordKey { revision: 2, ..record.clone() };
+        assert!(!has_record(&state, &stale, Kind::AscP8) && !reference.matches(&stale));
+        state.slot.as_mut().unwrap().vault.reference = Some(reference);
+        assert!(!usable(&state, state.slot.as_ref().unwrap(), &record, Kind::AscP8));
+        // A cached scalar payload is genuinely source-usable, but the wrong
+        // kind. ASC companions alone also cannot replace its missing file.
+        for kind in [Kind::GoogleWif, Kind::AscP8] {
+            let slot = state.slot.as_mut().unwrap();
+            slot.vault.loaded = Some(Arc::new(Payload { kind, material: None, fields: None }));
+            assert_eq!(slot.vault.loaded.as_ref().unwrap().usable_source(), kind == Kind::GoogleWif);
+            assert!(!usable(&state, state.slot.as_ref().unwrap(), &record, Kind::AscP8));
+        }
+        revoke(&mut state, &record);
+        assert!(pending(&state, &record));
+        assert!(!usable(&state, state.slot.as_ref().unwrap(), &record, Kind::AscP8));
+        assert!(state.assignments.is_empty());
     }
 
     #[test]

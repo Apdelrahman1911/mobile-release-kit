@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { metadataCacheBytes, metadataLineEndings, metadataNoOp, metadataTextDirty, metadataTextSavedFresh } from '../metadataText.ts';
-import type { MetadataActionId, MetadataPreparedFile, MetadataTextEditProjection, PreparedMetadataTextView } from '../metadataText.ts';
+import type { MetadataActionId, MetadataPreparedFile, MetadataRetainedDraftChange, MetadataTextEditProjection, PreparedMetadataTextView } from '../metadataText.ts';
 import { currentMetadataApplyBinding } from '../metadataTextEditController.ts';
-import type { MetadataApplyBinding, MetadataDiscardBinding, MetadataTextEditController, MetadataTextState } from '../metadataTextEditController.ts';
+import type { MetadataApplyBinding, MetadataDiscardBinding, MetadataRetainedDraftReview, MetadataTextEditController, MetadataTextState } from '../metadataTextEditController.ts';
 import { normalMetadataTextResult } from '../metadataTextProtocol.ts';
 import type { ProjectSession } from '../drafts.ts';
 import type { HelpContent } from '../types.ts';
@@ -131,12 +131,48 @@ function DiscardConfirmation({ label, blocked, onCancel, onConfirm }: { label: s
     <p>Only this in-memory public-text bundle is affected. Configuration, other locale drafts and files on disk are unchanged. No native review is closed and no text is saved by discard.</p>
     {blocked && <p className="review-caution" role="alert">{blocked}</p>}<div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep draft</button><button type="button" className="button danger" disabled={blocked !== null} onClick={onConfirm}>{label}</button></div></div></dialog>;
 }
+function RetainedDraftText({ change, side }: { change: MetadataRetainedDraftChange; side: 'before' | 'after' }) {
+  const text = side === 'before' ? change.before : change.after;
+  const label = side === 'before' ? 'Current observed comparison' : 'Retained unsaved replacement';
+  return <section className="metadata-raw"><h4>{label}</h4>{text === null ? <p>Observed absent. Using this draft does not create a file.</p> : <>
+    <p>{new TextEncoder().encode(text).byteLength.toLocaleString()} UTF-8 bytes · {metadataLineEndings(text)} · {text.endsWith('\n') || text.endsWith('\r') ? 'Final line ending present' : 'No final line ending'}</p>
+    <pre tabIndex={0} aria-label={`${label} for ${change.path}`}><code>{text}</code></pre>
+  </>}</section>;
+}
+function RetainedDraftConfirmation({ review, blocked, onCancel, onConfirm }: {
+  review: MetadataRetainedDraftReview; blocked: string | null; onCancel: () => void; onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null); const mounted = useRef(false); const titleId = useId();
+  const [reviewed, setReviewed] = useState(false);
+  useEffect(() => {
+    mounted.current = true; const element = dialog.current; element?.showModal();
+    return () => { mounted.current = false; if (element?.open) element.close(); };
+  }, []);
+  return <dialog ref={dialog} className="confirm-dialog metadata-confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}><div className="dialog-content">
+    <h2 id={titleId}>Review retained draft for current settings</h2>
+    <p><strong>{review.projectName}</strong> · project <code>{review.target.projectId}</code> · {review.target.platform} / {review.target.locale} · <code>{review.target.metadataRoot}</code></p>
+    <p>Reuse {review.changes.length} edited public-text {review.changes.length === 1 ? 'field' : 'fields'} from configuration baseline {review.source.configBaselineGeneration} in the selected current baseline {review.target.configBaselineGeneration}. Every edited field still matches its original path and exact text or absence. Newly observed, untouched fields stay as they are.</p>
+    {review.changes.map((change) => <section className="metadata-file-review" key={change.id}><h3><code>{change.path}</code></h3>
+      <div className="metadata-raw-grid"><RetainedDraftText change={change} side="before" /><RetainedDraftText change={change} side="after" /></div>
+    </section>)}
+    <p>Complete text is shown without trimming, newline conversion or BOM removal. Byte and line-ending descriptions are local previews, not a native save plan. The original retained bundle and both comparison baselines are kept.</p>
+    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed every shown destination and the complete before/after text.</label>
+    <p>Use as unsaved draft only. Nothing is read, saved, validated, copied to the clipboard or sent to a Store. Validate text and separately review and confirm Save afterward. Closing the app still loses in-memory drafts.</p>
+    {blocked && <p className="review-caution" role="alert">{blocked}</p>}
+    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep both drafts</button>
+      <button type="button" className="button primary" disabled={blocked !== null || !reviewed} onClick={() => {
+        if (mounted.current && dialog.current?.isConnected && dialog.current.open && reviewed && blocked === null) onConfirm();
+      }}>Use as unsaved draft</button></div>
+  </div></dialog>;
+}
 export function MetadataTextEditor({ state, controller, session, onShowProject, onHelp }: {
   state: MetadataTextState; controller: MetadataTextEditController; session: ProjectSession | null;
   onShowProject: (projectId: string, key?: string) => void; onHelp: (help: HelpContent) => void;
 }) {
   const id = useId(); const entry = controller.selectedEntry();
   const [discard, setDiscard] = useState<{ binding: MetadataDiscardBinding; action: 'reset' | 'latest' | 'forget'; label: string } | null>(null);
+  const [retainedReview, setRetainedReview] = useState<MetadataRetainedDraftReview | null>(null);
+  const [retainedNotice, setRetainedNotice] = useState<string | null>(null);
   const retained = Object.values(state.entries);
   const oldContexts = retained.filter((item) => item.context.projectId === state.projectId && !state.choices.some((choice) => choice.key === item.context.key));
   const loadReason = controller.loadReason(); const validateReason = controller.validateReason(); const reviewReason = controller.startReason();
@@ -155,6 +191,7 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
       </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load public text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
       <p id={`${id}-load-reason`} className="save-note">{loadReason ?? 'Read only this locale’s required public text. Refresh shows a separate observation; it never replaces your draft or its original comparison copy.'}</p>
       {!state.help && <p className="review-caution">The packaged text-field guide is unavailable. No fallback limits, validation, observation or save result has been invented.</p>}
+      {retainedNotice && <p className="save-note" role="status">{retainedNotice}</p>}
       {state.cacheError && <ErrorNotice error={state.cacheError} title="Text cache full; existing drafts kept" />}
       {entry?.loadError && <ErrorNotice error={entry.loadError} title="Text could not be loaded; earlier draft kept" />}
       {entry?.editError && <ErrorNotice error={entry.editError} title="The previous text draft was kept" />}
@@ -190,11 +227,26 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
     </section>
     <MetadataTextSave state={state} controller={controller} detailed onShowProject={onShowProject} onHelp={onHelp} />
     {retained.length > 0 && <details className="card metadata-retained"><summary>Retained locale text · {retained.length} / 32 bundles · {(metadataCacheBytes(state.entries) / 1024 / 1024).toFixed(2)} / 8 MiB</summary>
-      <p>Refresh, project switches and locale removal never evict these drafts or move their text. Old contexts must be reconciled explicitly. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>
-      <ul>{retained.map((item) => <li key={item.context.key}><div><strong>{item.projectName} · {item.context.platform} / {item.context.locale}</strong><code>{item.context.metadataRoot} · configuration baseline {item.context.configBaselineGeneration}</code><Badge tone={metadataTextDirty(item) ? 'warning' : 'neutral'}>{metadataTextDirty(item) ? 'Unsaved text' : 'Retained in memory'}</Badge></div>
-        <button type="button" className="button small secondary" onClick={() => onShowProject(item.context.projectId, item.context.key)}>View original context</button><button type="button" className="text-button" disabled={controller.discardReason(item.context.key) !== null} onClick={() => askDiscard(item.context.key, 'forget', 'Forget this retained text bundle')}>Forget bundle…</button></li>)}</ul>
+      <p>Refresh, project switches and locale removal never evict these drafts or move their text. To reuse an earlier draft, first select and load its same project, metadata root, platform and locale under the current saved configuration above. Then review its retained changes below; conflicting fields are never merged or forced.</p>
+      <p>Using a retained draft is not a save or transaction recovery. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>
+      <ul>{retained.map((item, index) => {
+        const earlierDraft = item.context.projectId === state.projectId && item.context.configBaselineGeneration < (session?.baselineGeneration ?? 0) && metadataTextDirty(item);
+        const reason = earlierDraft ? controller.retainedDraftReason(item.context.key) : null;
+        return <li key={item.context.key}><div><strong>{item.projectName} · {item.context.platform} / {item.context.locale}</strong><code>{item.context.metadataRoot} · configuration baseline {item.context.configBaselineGeneration}</code><Badge tone={metadataTextDirty(item) ? 'warning' : 'neutral'}>{metadataTextDirty(item) ? 'Unsaved text' : 'Retained in memory'}</Badge></div>
+          <button type="button" className="button small secondary" onClick={() => onShowProject(item.context.projectId, item.context.key)}>View original context</button>
+          {earlierDraft && <div><button type="button" className="button small secondary" disabled={reason !== null} aria-describedby={`${id}-retained-${index}`} onClick={() => {
+            const review = controller.reviewRetainedDraft(item.context.key); if (review) { setRetainedNotice(null); setRetainedReview(review); }
+          }}>Review retained draft for current settings</button><p id={`${id}-retained-${index}`} className="save-note">{reason ?? 'Review matching edited fields before using them as an unsaved draft. The original bundle is kept.'}</p></div>}
+          <button type="button" className="text-button" disabled={controller.discardReason(item.context.key) !== null} onClick={() => askDiscard(item.context.key, 'forget', 'Forget this retained text bundle')}>Forget bundle…</button></li>;
+      })}</ul>
       <ActionHelp state={state} id="discard" onHelp={onHelp} />
     </details>}
+    {retainedReview && <RetainedDraftConfirmation key={JSON.stringify(retainedReview.binding)} review={retainedReview} blocked={controller.retainedDraftReviewReason(retainedReview)}
+      onCancel={() => setRetainedReview(null)} onConfirm={() => {
+        const accepted = controller.adoptRetainedDraft(retainedReview); setRetainedReview(null);
+        setRetainedNotice(accepted ? 'Retained changes are now an unsaved draft in the selected current locale. The original bundle is kept. Validate text, then separately review and confirm Save.' :
+          'The retained draft could not be reused. Both bundles were kept; inspect the current context and any cache limit before reviewing again.');
+      }} />}
     {discard && <DiscardConfirmation label={discard.label} blocked={controller.discardReason(discard.binding.key) ?? (JSON.stringify(controller.discardBinding(discard.binding.key)) !== JSON.stringify(discard.binding) ? 'The draft changed while confirmation was open. Cancel and inspect its current contents.' : null)}
       onCancel={() => setDiscard(null)} onConfirm={() => { controller.discard(discard.binding, discard.action); setDiscard(null); }} />}
   </>;

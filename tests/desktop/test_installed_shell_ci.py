@@ -1124,7 +1124,7 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                      and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets))
         names = ast.literal_eval(paths)
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(len(names), 82)
+        self.assertEqual(len(names), 104)
         self.assertTrue({"desktop/tools/android_material_preparation.py", "desktop/tools/ci_foundation.py",
             "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
             "desktop/src-tauri/src/android_toolchain.rs", *("desktop/tools/android_material_data/" + name
@@ -1151,6 +1151,10 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                          "desktop/tools/observe_hosted_python.py"} <= set(names))
         self.assertTrue({"desktop/src-tauri/tests/fixtures/github_tls/" + name for name in (
             "api-expired.pem", "api-valid.pem", "other-root-ca.pem", "root-ca.pem", "server-key.pem", "wrong-san.pem")} <= set(names))
+        self.assertTrue({"desktop/src-tauri/src/github_preflight_native_observation.rs",
+                         "desktop/src-tauri/src/installed_shell_preflight_observation.rs",
+                         "desktop/src-tauri/tests/fixtures/github_preflight_peer.py",
+                         "templates/workflows/mobile-preflight.yml"} <= set(names))
 
     def test_observer_module_roster_matches_production_supported_platforms(self):
         # The actual-main observer has its own crate root. Library compilation
@@ -1982,7 +1986,8 @@ def android_receipt_data(lifecycle, case):
         "toolsClosed": True, "namespaceClosed": True, "stopObserved": "cancelled" if cancelled else "none"}
     fixture = {"sourceControlsAccounted": True, "savedVersionChanged": refused, "gradleBoundary": "" if refused else "active\n",
                "generatedScopesNotExported": ["project/.mobile-release", "project/app/build", "project/build"]}
-    return {"schema": "installed-android-build-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+    return {"schema": "installed-android-build-v2", "case": case, "qualificationOnly": True, "builder": "normal",
+        "normalSelection": {"selectedBeforeObservation": True, "observerGranted": False},
         "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
         "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
         "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
@@ -3953,11 +3958,11 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertLess(source.index("    assert_shell_fixture_path_contract();"), source.index("let returned = super::run_builder("))
         # Source correspondence and pure assertion placement are not GTK/native evidence.
 
-    def test_both_lifecycle_workflow_entry_pins_follow_actual_source(self):
+    def test_all_lifecycle_workflow_entry_pins_follow_actual_source(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         pins = re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow)
-        self.assertEqual(pins, [hashlib.sha256(lifecycle).hexdigest()] * 2)
+        self.assertEqual(pins, [hashlib.sha256(lifecycle).hexdigest()] * 5)
 
     def test_normal_capability_error_literals_match_the_existing_joined_classifier(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -4055,9 +4060,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
         entry = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
-        self.assertEqual(workflow.count("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:"), 3)
+        self.assertEqual(workflow.count("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:"), 5)
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(entry).hexdigest()] * 3)
+                         [hashlib.sha256(entry).hexdigest()] * 5)
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         github_source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
@@ -4227,7 +4232,8 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         accepted.add("/lib64/ld-linux-x86-64.so.2")
         self.assertTrue(set(public_paths).isdisjoint(accepted))
         role = supervisor.split("    fn role(path: &str) -> Option<MapRole> {", 1)[1].split("    #[derive(Clone, Copy)]", 1)[0]
-        self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "81b3ae0552e8a79cdb3d5e8353d83299e88b7093e951cbb69e74878c35838240")
+        # The added preflight role contract preserves the ordinary role lookup.
+        self.assertEqual(hashlib.sha256(role.encode()).hexdigest(), "c491d5c14740ae1d5171061d340ae2b65bd129f0cbdc979f421c4804cef7dba9")
         parser = supervisor.split("    fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {", 1)[1].split(
             '    #[cfg(all(debug_assertions, any(all(feature = "desktop-shell", feature = "custom-protocol"),\n'
             '        all(not(feature = "desktop-shell"), not(feature = "custom-protocol")))))]', 1)[0]
@@ -4235,8 +4241,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
                    "historical_executable_file_refusal(executable_file_refusal(path), historical, major, minor, inode), path, historical.is_some()), "
                    "path, historical, major, minor, inode))?")
         self.assertEqual(parser.count(refusal), 1)
+        # Only preflight Pending/pre-GO refusal permits four mandatory maps plus observed TLS.
         self.assertEqual(hashlib.sha256(parser.replace(refusal, "need(!executable).map_err(|_| MapRefusal::ExecutableFile)?").encode()).hexdigest(),
-                         "40b22fc8658a78932040bc83788073f3ba9dd47517c28072623d59998e1e23b9")
+                         "5b2e408d3067974bad01b39f82e31ce08df3f1d65fe32ccab38d5409bc85f8f8")
         lookup = supervisor.split("    fn executable_file_refusal(path: &str) -> MapRefusal {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn(".position(|(candidate, _)| path == *candidate)", lookup)
         for forbidden in ("fs::", "original_bytes", "/proc/", "read_link", "canonicalize", "trim", "format!", "to_owned", ".await", "Instant::now"):
@@ -4434,17 +4441,22 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertIn("let start = Instant::now(); let end = start + Duration::from_secs(45);", source)
         self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
         commands = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        recovery = (SOURCE / "desktop/src-tauri/src/installed_project_recovery_observation.rs").read_text()
         self.assertTrue('#[path = "installed_tools_observation.rs"]\npub(crate) mod commands;' in source,
                         "The parent must bind the reviewed Tools/Offline module")
         sink = source.split("fn failure_sink(case: Case)", 1)[1].split("\n}\n", 1)[0]
         parent_leaves = sink.split("    let leaf = match case {\n", 1)[1].split("\n    };", 1)[0]
         command_leaves = commands.split("    pub(super) fn failure_leaf(self) -> &'static str { match self {\n", 1)[1].split("\n    } }", 1)[0]
+        recovery_leaves = recovery.split("    pub(super) fn failure_leaf(self) -> &'static str { match self {\n", 1)[1].split("\n    } }", 1)[0]
         self.assertEqual(parent_leaves.count("Case::Commands(case) => case.failure_leaf(),"), 1)
+        self.assertEqual(parent_leaves.count("Case::Recovery(case) => case.failure_leaf(),"), 1)
         actual_leaves = re.findall(r'=> "([^"\n]*)"',
-            parent_leaves.replace("Case::Commands(case) => case.failure_leaf(),", command_leaves))
+            parent_leaves.replace("Case::Commands(case) => case.failure_leaf(),", command_leaves)
+                         .replace("Case::Recovery(case) => case.failure_leaf(),", recovery_leaves))
         # Match-arm declaration order is not lifecycle execution order.
         # Require every allowed leaf exactly once, independent of source placement.
-        self.assertCountEqual(actual_leaves, ["shell-" + case + "-failure.labels" for case in lifecycle.SHELL_CASES[1:]])
+        self.assertCountEqual(actual_leaves, ["shell-" + case + "-failure.labels"
+                                             for case in (*lifecycle.SHELL_CASES[1:], *lifecycle.SHELL_RECOVERY_ALL_CASES)])
         self.assertNotIn("shell-normal-failure.labels", source)
         self.assertNotIn("shell-normal-failure.labels", commands)
         self.assertEqual({name for name in lifecycle.public_files({"shell": {}}) if name.endswith("failure.labels")},
@@ -5244,14 +5256,14 @@ class InstalledGitHubReadOnlyRouteContracts(unittest.TestCase):
                 S.installed_shell_candidate(Path("/inert"), "a" * 40, lifecycle=lifecycle,
                                             github=selection, local_transport=transport)
             reading.assert_not_called()
-        # A GitHub environment alone cannot change the default Android-required
-        # candidate contract; only the checked fixed caller passes github=True.
+        # An omitted GitHub discriminator is a caller/route conflict, not
+        # permission to inspect unrelated Android material before refusing.
         with patch.dict(S.os.environ, {"GITHUB_REF": S.SHELL_GITHUB_REF}, clear=True), \
              patch.object(S.D, "read") as reading:
-            lifecycle.shell_android_materials.side_effect = S.D.Refused("missing-android-material")
-            with self.assertRaisesRegex(S.D.Refused, "missing-android-material"):
+            with self.assertRaisesRegex(S.D.Refused, "GitHub shell candidate requires"):
                 S.installed_shell_candidate(Path("/inert"), "a" * 40, lifecycle=lifecycle)
             reading.assert_not_called()
+            lifecycle.shell_android_materials.assert_not_called()
 
     def test_both_fixed_shell_refs_use_only_compile_and_observe_in_the_same_job(self):
         common = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
@@ -5280,8 +5292,8 @@ class InstalledGitHubReadOnlyRouteContracts(unittest.TestCase):
         self.assertEqual(argv[argv.index("--features") + 1], "desktop-shell,custom-protocol")
         self.assertIn("--no-default-features", argv)
         body = source.split("def verify_installed_shell():", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn('github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF)', body)
-        self.assertIn("tools_inputs = None if github else shell_tools_inputs_for_observation()", body)
+        self.assertIn('github = os.environ["GITHUB_REF"] in (SHELL_GITHUB_REF, SHELL_GITHUB_BOUNDARY_REF, SHELL_GITHUB_PREFLIGHT_REF)', body)
+        self.assertIn("tools_inputs = None if github or recovery else shell_tools_inputs_for_observation()", body)
         self.assertEqual(body.count('check.command("root-shell-connection"'), 1)
         self.assertEqual(body.count("lifecycle.verify_service_result("), 1)
         self.assertLess(body.index("lifecycle.verify_service_result("), body.index("shell_github_observation("))

@@ -344,6 +344,23 @@ pub(super) mod observation {
             returned.map_err(|_| ObservationError::NativeAction(diagnostic))
         })
     }
+    pub(crate) fn prepare_project_field(id: u32, kind: PanelKind, navigate: bool,
+        returned: &mut Option<native::ProjectFieldPreparation>) -> Result<bool, ObservationError> {
+        *returned = None;
+        if !native::main_thread() { return Err(ObservationError::WrongThread); }
+        PANEL.with(|book| {
+            let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
+            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(ObservationError::OriginalBinding)?;
+            let (call, owner) = original(entry)?;
+            if entry.open_release.is_some() || !allowed(&call, &owner)? || owner.interrupted() {
+                return Err(ObservationError::Ineligible);
+            }
+            // Same original Panel and native ProjectPathBinding input. No
+            // Record/GuiFacts lock spans the initial-root read or navigation.
+            entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
+                .installed_project_field(kind, navigate, returned).map_err(|_| ObservationError::NativeObservation)
+        })
+    }
 }
 
 // Retained by the original coordinating task, independent of GuiCall's first
@@ -372,7 +389,7 @@ fn response_kind(response: PanelResponse) -> NativeResponse {
 }
 fn uncertain(call: &Arc<GuiCall>) -> NativeResult { call.failed(Reason::CleanupUnknown); Err(()) }
 
-fn construct(call: &Arc<GuiCall>, choice: PanelKind,
+fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std::path::Path>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
     observer: Option<&super::installed_observation::Observation>,
@@ -428,7 +445,10 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind,
         }
         // Keep the original PANEL borrow, but no Record/GuiFacts guard, across
         // this SAME start. There is no per-getter observer callback in AppKit.
-        let returned = panel.start(choice);
+        let returned = match initial_folder {
+            Some(root) => panel.start_project_field(choice, root),
+            None => panel.start(choice),
+        };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
         if arm.is_some() { *identity_return = panel.take_installed_identity_start_return().map(|data| (owner.id, data)); }
@@ -542,11 +562,19 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
 pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
     initial_folder: Option<PathBuf>) -> DialogOutcome {
     let call = owner.gui.clone();
-    let kind = match (choice, initial_folder) {
+    let kind = match (choice, initial_folder.as_deref()) {
         (DialogChoice::Project, None) => PanelKind::Project,
         (DialogChoice::File(crate::credential_format::FileKind::AppleP12
-            | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase), None) => PanelKind::File,
+            | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase
+            | crate::credential_format::FileKind::AscP8), None) => PanelKind::File,
         (DialogChoice::Quit, None) => PanelKind::Quit,
+        (DialogChoice::ProjectPath(field), Some(root)) if crate::asset_source::path_hint(root).is_ok() => match field {
+            crate::asset_commands::ProjectPathField::VersionSource => PanelKind::VersionSource,
+            crate::asset_commands::ProjectPathField::IosProject => PanelKind::IosProject,
+            crate::asset_commands::ProjectPathField::IosWorkspace => PanelKind::IosWorkspace,
+            crate::asset_commands::ProjectPathField::MetadataRoot => PanelKind::MetadataRoot,
+        },
+        (DialogChoice::ProjectPath(_), _) => { call.not_created(Reason::SourceRefused); return Err(Reason::SourceRefused); }
         _ => { call.not_created(Reason::UnsupportedPlatform); return Err(Reason::UnsupportedPlatform); }
     };
     if native::main_thread() { call.not_created(Reason::Unqualified); return Err(Reason::Unqualified); }
@@ -569,7 +597,7 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
         let mut identity_return = None;
-        let result = construct(&creating, kind,
+        let result = construct(&creating, kind, initial_folder.as_deref(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
             starting_observer.as_deref(),

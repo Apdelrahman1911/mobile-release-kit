@@ -37,6 +37,18 @@ macro_rules! installed_command_result {
         if let Some(q) = &$state.observation { q.commands_result(installed_observation::commands::Command::$kind, $value); }
     };
 }
+macro_rules! installed_recovery_request {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.recovery_request(installed_observation::recovery::Command::$kind, $value); }
+    };
+}
+macro_rules! installed_recovery_result {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.recovery_result(installed_observation::recovery::Command::$kind, $value); }
+    };
+}
 // The fixed installed Mac observer sees the same real command body/result.
 // These taps do not synthesize a request or admit an ordinary shipping build.
 macro_rules! installed_ios_request {
@@ -282,7 +294,9 @@ async fn prepare_project_recovery(webview: Webview, request: tauri::ipc::Request
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     let args = crate::project_recovery_protocol::prepare(&value)?;
+    installed_recovery_request!(state, Prepare, &value);
     let result = state.document.prepare_project_recovery(args);
+    installed_recovery_result!(state, Prepare, &result);
     result
 }
 #[tauri::command]
@@ -291,7 +305,9 @@ async fn start_project_recovery(webview: Webview, request: tauri::ipc::Request<'
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     let args = crate::project_recovery_protocol::start(&value)?;
+    installed_recovery_request!(state, Start, &value);
     let result = state.document.start_project_recovery(args);
+    installed_recovery_result!(state, Start, &result);
     result
 }
 #[tauri::command]
@@ -300,7 +316,10 @@ async fn project_recovery_status(webview: Webview, request: tauri::ipc::Request<
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     crate::project_recovery_protocol::status_request(&value)?;
-    state.document.project_recovery_status()
+    installed_recovery_request!(state, Status, &value);
+    let result = state.document.project_recovery_status();
+    installed_recovery_result!(state, Status, &result);
+    result
 }
 #[tauri::command]
 async fn cancel_project_recovery(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
@@ -308,7 +327,9 @@ async fn cancel_project_recovery(webview: Webview, request: tauri::ipc::Request<
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     let args = crate::project_recovery_protocol::cancel(&value)?;
+    installed_recovery_request!(state, Cancel, &value);
     let result = state.document.cancel_project_recovery(args);
+    installed_recovery_result!(state, Cancel, &result);
     result
 }
 #[tauri::command]
@@ -897,49 +918,70 @@ async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Req
 async fn github_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_status", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_status", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_status", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_prepare", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_prepare", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_prepare", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_dispatch(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_dispatch", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_dispatch", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_dispatch", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_track(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_track", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_track", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_track", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_reconcile", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_reconcile", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_reconcile", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_pending", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_pending", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_pending", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_cancel", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_cancel", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_cancel", &result); }
+    result
 }
 
 
@@ -947,49 +989,84 @@ async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<
 async fn github_release_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_status", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_status", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_status", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_prepare", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_prepare", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_prepare", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_dispatch(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_dispatch", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_dispatch", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_dispatch", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_track(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_track", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_track", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_track", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_reconcile", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_reconcile", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_reconcile", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_pending", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_pending", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_pending", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_cancel", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_cancel", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_cancel", &result); }
+    result
 }
 
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
@@ -1198,13 +1275,17 @@ async fn choose_project_path(webview: Webview, app: tauri::AppHandle, request: t
     let result: Result<Option<asset_commands::ProjectPathResult>, AssetError> = async {
         asset_window(&webview)?;
         let args = asset_commands::choose_project_path(asset_body(&request)?)?;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64",
+                feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if let Some(q) = &state.observation { q.path_request(&args); }
         let owner = state.document.choose_project_path(app, args)?;
         state.document.project_path_result(owner).await
     }.await;
     let result = result.map_err(|error| asset_commands::project_path_error(error.reason));
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64",
+            feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.path_result(&result); }
     result
 }
@@ -1315,11 +1396,17 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
             let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
             let status = document.github_preflight_status();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.preflight_status(&status); }
             if github_preflight_revision != Some(status.revision) {
                 github_preflight_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_preflight_protocol::EVENT, &status);
             }
             let status = document.github_release_status();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.release_status(&status); }
             if github_release_revision != Some(status.revision) {
                 github_release_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_release_protocol::EVENT, &status);
@@ -1597,6 +1684,7 @@ mod owned_gtk {
             DialogChoice::File(kind) => {
                 let title = match kind { FileKind::AndroidKeystore => "Choose an Android JKS keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON",
                     FileKind::IosFirebase => "Choose iOS Firebase XML plist",
+                    FileKind::AscP8 => "Choose an original App Store Connect P8",
                     FileKind::AppleP12 | FileKind::AppleProfile => { not_created(&call, Reason::UnsupportedPlatform); return; } };
                 Object::File(gtk::FileChooserDialog::with_buttons(Some(title), Some(&parent), gtk::FileChooserAction::Open,
                     &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)]))
@@ -1666,6 +1754,10 @@ mod owned_gtk {
                             FileKind::IosFirebase => {
                                 filter.set_name(Some("iOS Firebase XML plist (.plist)"));
                                 for pattern in ["*.plist", "*.PLIST"] { filter.add_pattern(pattern); }
+                            }
+                            FileKind::AscP8 => {
+                                filter.set_name(Some("App Store Connect private key (.p8)"));
+                                for pattern in ["*.p8", "*.P8"] { filter.add_pattern(pattern); }
                             }
                             // Refused before object construction above. Keep the
                             // closed match fail-safe if this path ever changes.
@@ -2546,7 +2638,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; }
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

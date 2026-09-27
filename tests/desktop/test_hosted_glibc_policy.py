@@ -116,10 +116,12 @@ class HostedGlibcPolicyContracts(unittest.TestCase):
             if case is not None:
                 env["MRK_INSTALLED_SHELL_CASE"] = case
             self.assertEqual(S.context(env)["GITHUB_JOB"], job)
+            wrong_case = "compile" if case == "observe" else "observe"
+            self.assertNotIn((ref, job, wrong_case), S.ROUTES)
             for change in ({"GITHUB_JOB": "native"}, {"GITHUB_REF": "refs/heads/main"},
-                           {"MRK_INSTALLED_SHELL_CASE": "observe"}, {"GITHUB_WORKFLOW_SHA": "b" * 40},
+                           {"MRK_INSTALLED_SHELL_CASE": wrong_case}, {"GITHUB_WORKFLOW_SHA": "b" * 40},
                            {"RUNNER_ENVIRONMENT": "self-hosted"}, {"GITHUB_RUN_ATTEMPT": "0"}):
-                with self.subTest(change=change), self.assertRaises(S.Refused):
+                with self.subTest(route=(ref, job, case), change=change), self.assertRaises(S.Refused):
                     S.context({**env, **change})
             if case == "host-metadata-only":
                 with self.assertRaises(S.Refused):

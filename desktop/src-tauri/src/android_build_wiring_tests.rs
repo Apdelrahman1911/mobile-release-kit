@@ -16,7 +16,8 @@ fn empty_state() -> DocumentState {
         first_origin: None }
 }
 fn section<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
-    text.split_once(start).unwrap().1.split_once(end).unwrap().0
+    let body = text.split_once(start).unwrap_or_else(|| panic!("missing source section: {start}")).1;
+    body.split_once(end).unwrap_or_else(|| panic!("missing end {end:?} for source section: {start}")).0
 }
 const DOCUMENT: &str = include_str!("asset_session.rs");
 const SHELL: &str = include_str!("shell.rs");
@@ -101,15 +102,21 @@ fn android_admission_and_reciprocal_exclusion_use_the_real_document_gate() {
         "self.inner.bridge.diagnostics.busy()", "self.inner.bridge.preflight.disabled()", "self.inner.bridge.preflight.stopping()", "self.inner.bridge.preflight.busy()"] {
         assert!(gate.contains(required), "missing Android gate: {required}");
     }
-    for name in ["fn preflight_gate(", "fn environment_gate(", "fn gate(", "fn github_gate("] {
+    for name in ["fn preflight_gate(", "fn environment_gate(", "fn common_gate(", "fn github_gate("] {
         let body = section(DOCUMENT, name, "\n    }");
         for check in ["android_build.disabled()", "android_build.stopping()", "android_build.busy()"] { assert!(body.contains(check), "{name}: {check}"); }
+    }
+    let private_gate = section(DOCUMENT, "fn gate(", "\n    }");
+    let common = private_gate.find("self.common_gate(state, session)?").expect("private gate must delegate to common lifecycle gate");
+    for qualification in ["self.live_session_owner_reason()", "ordinary_asset_platform_gate()?", "self.native_qualified()", "session_writable(state)"] {
+        let qualified = private_gate.find(qualification).unwrap_or_else(|| panic!("missing private qualification: {qualification}"));
+        assert!(common < qualified, "common lifecycle gate must precede {qualification}");
     }
     for name in ["pub(crate) fn passive_query(", "pub(crate) fn configuration_edit_admit<T>(", "fn registered_edit_admit<T>(",
         "pub(crate) fn compatibility_picker_begin(", "pub(crate) fn compatibility_picker_publish(", "pub(crate) fn not_quitting("] {
         assert!(section(DOCUMENT, name, "\n    }").contains("android_build.ensure_idle()?"), "{name}");
     }
-    assert!(section(DOCUMENT, "fn evidence_gate(", "\n    }").contains("self.gate(state, false)"));
+    assert!(section(DOCUMENT, "fn evidence_gate(", "\n    }").contains("self.common_gate(state, false)"));
     let passive = section(DOCUMENT, "pub(crate) fn passive_query(", "\n    }");
     assert!(passive.find("android_build.ensure_idle()?").unwrap() < passive.find("supervisor.start_passive(").unwrap());
     assert!(!passive.contains("drop(state)") && !passive.contains(".await"));
@@ -121,9 +128,12 @@ fn android_retirement_never_hides_status_stop_or_lends_offline_fixture_authority
         let body = section(DOCUMENT, name, "\n    }");
         assert!(body.find("android_build.context_changed()").unwrap() < body.find("android_build.ensure_idle()?").unwrap());
     }
-    for name in ["pub(crate) fn context(", "pub(crate) fn choose_project("] {
+    for (name, gate) in [("pub(crate) fn context(", "self.gate(&state, true)?"),
+        ("pub(crate) fn choose_project(", "self.common_gate(&state, false)?")] {
         let body = section(DOCUMENT, name, "\n    }");
-        assert!(body.find("android_build.context_changed()").unwrap() < body.find("self.gate(").unwrap());
+        let invalidated = body.find("android_build.context_changed()").unwrap_or_else(|| panic!("{name}: missing Android context invalidation"));
+        let gated = body.find(gate).unwrap_or_else(|| panic!("{name}: missing expected gate {gate}"));
+        assert!(invalidated < gated, "{name}: Android context invalidation must precede {gate}");
     }
     assert!(section(DOCUMENT, "pub(crate) fn lock_session(", "\n    }").contains("android_build.context_changed()"));
     for name in ["fn exhaust(", "fn loss_locked(", "pub(crate) fn android_build_relay_lost("] {
@@ -142,7 +152,7 @@ fn android_retirement_never_hides_status_stop_or_lends_offline_fixture_authority
         "state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending", "preflight.ensure_idle()?",
         "android_build.ensure_idle()?", "diagnostics.ensure_idle()?"] { assert!(config.contains(required)); }
     let bridge = include_str!("bridge.rs");
-    assert!(bridge.contains("AndroidBuildOwner::new(runtime, crate::android_toolchain::AndroidToolchainProfile::compiled())"));
+    assert!(bridge.contains("AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled())"));
     for name in ["pub fn open_config_edit(", "pub(crate) fn register_picked_project("] {
         assert!(section(bridge, name, "\n    }").contains("self.android_build.ensure_idle()?"));
     }
@@ -171,7 +181,7 @@ fn android_relay_loss_and_both_quit_backends_keep_originals_in_finality() {
     assert!(section(SHELL, "impl Drop for AndroidBuildRelayGuard", "\nfn start_relay(").contains("self.document.android_build_relay_lost()"));
     for required in ["android_build_revision != Some(status.status_revision)", "crate::android_build_protocol::EVENT", "document.android_build_relay_lost()",
         "android_build.changed()", "android_build_guard.closed = true"] { assert!(relay.contains(required)); }
-    let settled = section(SHELL, "async fn settle_relay(", "\n#[cfg(target_os = \"linux\")]");
+    let settled = section(SHELL, "async fn settle_relay(", "\n}\n");
     assert!(settled.find("book.handle.as_mut()").unwrap() < settled.find("let joined = handle.await").unwrap());
     assert!(settled.find("let joined = handle.await").unwrap() < settled.find("book.handle.take()").unwrap());
     for name in ["fn gui_response(", "pub(crate) fn compatibility_quit_result("] {
@@ -184,7 +194,7 @@ fn android_relay_loss_and_both_quit_backends_keep_originals_in_finality() {
         assert!(joined.contains(original), "{original}");
     }
     assert!(section(quit, "while !(", ") {").contains("android_build.can_exit()"));
-    let compatibility = section(SHELL, "#[cfg(not(target_os = \"linux\"))]\nfn request_shutdown(", "\n#[derive");
+    let compatibility = section(SHELL, "#[cfg(not(any(target_os = \"linux\", target_os = \"macos\", target_os = \"windows\")))]\nfn request_shutdown(", "\n#[derive");
     assert!(section(compatibility, "tokio::join!(", ");").contains("bridge.android_build.shutdown()"));
     assert!(compatibility.contains("android_build.is_ok()") && compatibility.matches("bridge.android_build.can_exit()").count() == 2);
     assert!(!quit.contains("try_join!") && !compatibility.contains("try_join!") && !relay.contains(".abort("));

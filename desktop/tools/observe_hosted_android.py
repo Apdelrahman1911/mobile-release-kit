@@ -23,6 +23,8 @@ SCHEMA = "mrk-hosted-android-prerequisite-data-v1"
 OUTPUT_NAME = "android-host-materials.json"
 OUTPUT_LIMIT = 1 << 20
 READ_LIMIT = 192 << 20
+SDK_NETWORK_READ_LIMIT = 8 << 20
+SDK_NETWORK_SUBSET = "sdk-current-use-and-network-v1"
 # Separate conservative ceiling of the existing G observer: two512MiB nft
 # streaming reads, three32MiB package reads, and all small fixed/proc inputs.
 # These are existing limits, not permission to acquire a binary or open a tool.
@@ -52,7 +54,8 @@ PACKAGES = ("coreutils", "sed", "findutils", "libacl1", "libasound2t64", "libgif
 SOURCE_FILES = ("observe_hosted_android.py", "observe_hosted_python.py",
                 "ci_ubuntu_publication.py", "ci_foundation.py", "conventional_runtime_data.py",
                 "ubuntu_publication_lifecycle.py", "hosted_glibc_policy.py",
-                "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json")
+                "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json",
+                "android_material_preparation.py")
 TRUST_INPUTS = (("/etc/ssl/certs/ca-certificates.crt", 4 << 20, "pem"),
                 ("/etc/ssl/certs/java/cacerts", 8 << 20, "jks"),
                 ("/etc/ca-certificates.conf", 256 << 10, "config"))
@@ -72,7 +75,8 @@ def need(ok, reason):
 
 
 def local(name):
-    need(name in {"ci_ubuntu_publication", "observe_hosted_python", "stock_trust_correspondence"}, "module-role")
+    need(name in {"ci_ubuntu_publication", "observe_hosted_python", "stock_trust_correspondence",
+                  "android_material_preparation"}, "module-role")
     spec = importlib.util.spec_from_file_location("_host_android_" + name, TOOLS / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -126,6 +130,16 @@ def diagnostic_reason(error):
         "Native OS ancestry changed while reading": "file-ancestry-changed",
         "Native OS link changed while reading": "file-link-changed",
         "Native OS input binding changed": "file-binding-changed",
+        "Native fixed Android DATA alias differs": "fixed-resolver-alias",
+        "Android fixed image/source recipe correspondence differs": "sdk-image-selection",
+        "Android existing SDK licence receipt shape differs": "sdk-receipt-format",
+        "Android existing receipt does not contain the selected bounded SDK licence": "sdk-receipt-selection",
+        "Android preinstalled SDK package selection differs": "sdk-package-selection",
+        "Android preinstalled SDK package XML differs": "sdk-package-xml",
+        "Android preinstalled SDK namespace changed": "sdk-package-namespace",
+        "Android preinstalled SDK type namespace differs": "sdk-package-namespace",
+        "Android pinned SDK licence definition differs": "sdk-licence-definition",
+        "Android official package/source.properties disagree": "sdk-package-properties",
     }
     value = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
     if isinstance(error, ValueError):
@@ -136,13 +150,34 @@ def diagnostic_reason(error):
     return reason(error)
 
 
+def public_host_failure(error, role):
+    """Only fixed reader metadata, never the exception or an arbitrary pathname."""
+    value = getattr(error, "host_file_failure", None)
+    fields = {"role", "componentIndex", "kind", "uid", "gid", "mode", "links", "failedInvariants"}
+    invariants = {"component-stat", "directory", "root-owner", "protected-mode", "regular-file",
+                  "fixed-resolver-alias", "fixed-resolver-target", "single-link", "original-ancestry",
+                  "link-bound", "original-link", "original-file"}
+    if not (type(value) is dict and set(value) == fields and type(value["role"]) is str and value["role"] == role
+            and type(value["componentIndex"]) is int and 0 <= value["componentIndex"] <= 256
+            and type(value["kind"]) is str and value["kind"] in {"unobserved", "directory", "file", "link", "other"}
+            and type(value["failedInvariants"]) is list and 1 <= len(value["failedInvariants"]) <= 4
+            and all(type(item) is str and item in invariants for item in value["failedInvariants"])):
+        return None
+    for name, bound in (("uid", 1 << 32), ("gid", 1 << 32), ("mode", 0o10000), ("links", 1 << 32)):
+        item = value[name]
+        if not (item is None if value["kind"] == "unobserved" else type(item) is int and 0 <= item < bound):
+            return None
+    return value
+
+
 class Reader:
     """Accounting for this finite observation only; not a new command owner."""
 
-    def __init__(self, publisher, deadline):
+    def __init__(self, publisher, deadline, *, fixed_android_data=False):
         self.s = publisher
         self.deadline = deadline
-        self.remaining = READ_LIMIT
+        self.fixed_android_data = fixed_android_data
+        self.remaining = SDK_NETWORK_READ_LIMIT if fixed_android_data else READ_LIMIT
         self.phase = "observation"
 
     def point(self):
@@ -185,7 +220,8 @@ class Reader:
         return result
 
     def _record(self, name, bound):
-        row = self.s.protected_host_file(Path(name), bound)
+        row = (self.s.protected_host_file(Path(name), bound, fixed_android_data=True)
+               if self.fixed_android_data else self.s.protected_host_file(Path(name), bound))
         item = Path(row["path"]).lstat()
         need(item.st_uid == item.st_gid == 0, "original-owner-changed")
         need(list(self.s.D.state(item)) == row["identity"], "original-binding-changed")
@@ -460,6 +496,108 @@ def github_materials(publisher, reader):
     return value
 
 
+def public_network_summary(material, role, raw, deadline):
+    """Reuse material semantics; never export arbitrary host/search/database names.
+
+    The complete normalized digest is a DATA commitment, not policy approval.
+    Unknown values remain counted/redacted and cannot silently become a complete
+    public configuration. No raw configuration, comment or resolver query leaves
+    this reader.
+    """
+    value = material._network_configuration_data(role, raw, deadline)
+    result = {"configurationSha256": hashlib.sha256(material.D.canonical(value)).hexdigest(),
+              "allConfiguredValuesExported": True}
+    if role == "/etc/hosts":
+        known_names = {"localhost", "ip6-localhost", "ip6-loopback", "ip6-allnodes", "ip6-allrouters", "broadcasthost"}
+        known_addresses = {"127.0.0.1", "::1", "ff02::1", "ff02::2"}
+        public = [row for row in value["records"] if row["address"] in known_addresses and set(row["names"]) <= known_names]
+        omitted = len(value["records"]) - len(public)
+        result.update(configuration={"records": public}, redactedRecordCount=omitted, allConfiguredValuesExported=omitted == 0)
+    elif role == "/etc/resolv.conf":
+        servers = [name for name in value["nameservers"] if name in {"127.0.0.1", "127.0.0.53", "::1"}]
+        search = [name for name in value["search"] if name == "."]
+        result.update(configuration={"nameservers": servers, "search": search, "options": value["options"]},
+                      redactedNameserverCount=len(value["nameservers"]) - len(servers),
+                      redactedSearchCount=len(value["search"]) - len(search),
+                      allConfiguredValuesExported=servers == value["nameservers"] and search == value["search"])
+    elif role == "/etc/nsswitch.conf":
+        names = {"passwd", "group", "shadow", "gshadow", "hosts", "networks", "protocols", "services", "ethers",
+                 "rpc", "netgroup", "automount", "aliases", "initgroups", "sudoers"}
+        sources = {"files", "systemd", "dns", "nis", "db", "compat"}
+        public = {name: rows for name, rows in value["databases"].items() if name in names and set(rows) <= sources}
+        omitted = len(value["databases"]) - len(public)
+        result.update(configuration={"databases": public}, redactedDatabaseCount=omitted, allConfiguredValuesExported=omitted == 0)
+    else:
+        need(role in {"/etc/host.conf", "/etc/gai.conf"}, "network-public-role")
+        result["configuration"] = value  # Only existing fixed booleans.
+    return result
+
+
+def collect_sdk_network(publisher, run, deadline):
+    """A fixed small diagnostic DATA subset; never host/material admission."""
+    material = local("android_material_preparation")
+    reader = Reader(publisher, deadline, fixed_android_data=True)
+    observations = {}
+    record = {"schema": SCHEMA, "subset": SDK_NETWORK_SUBSET, "run": run,
+              "runtimeAdmission": False, "nativeQualification": False, "newConsent": False,
+              "collectionComplete": False, "producerOriginProven": False, "observations": observations,
+              "stopped": None, "readBounds": {"android": SDK_NETWORK_READ_LIMIT, "github": 0,
+                                               "combined": SDK_NETWORK_READ_LIMIT},
+              "remainingWork": ["review-current-protected-sdk-six-original-correspondence",
+                                "review-complete-target-network-configuration",
+                                "review-static-policy-before-any-admission"]}
+    tasks = [(material.SDK_IMAGE_DATA, 64 << 10, image_identity),
+             (material.SDK_RECEIPT, 4096, material._sdk_receipt_ids)]
+    for name, paths in material.SDK_PACKAGE_PATHS.items():
+        tasks.extend(((paths["metadataPath"], 32 << 10, lambda raw, n=name: material._sdk_local_package(n, raw)),
+                      (paths["propertiesPath"], 16 << 10, lambda raw, n=name: material._sdk_source_properties(n, raw))))
+    for name in material.NETWORK_ROLES:
+        tasks.append((name, material.CONFIGURATION_LIMIT,
+                      lambda raw, n=name: public_network_summary(material, n, raw, deadline)))
+    tasks.append((material.RESOLVER_CANONICAL, material.CONFIGURATION_LIMIT,
+                  lambda raw: public_network_summary(material, "/etc/resolv.conf", raw, deadline)))
+    need(len(tasks) == 12 and {name for name, _, _ in tasks} == set(publisher.ANDROID_PUBLIC_DATA_ROLES),
+         "fixed-sdk-network-roster")
+    observations.update({name: {"status": "not-observed"} for name, _, _ in tasks})
+    for name, limit, parse in tasks:
+        reader.phase = "observation"
+        try:
+            reader.point()
+            if name == material.RESOLVER_CANONICAL:
+                resolver = observations["/etc/resolv.conf"]
+                if resolver["status"] != "observed":
+                    observations[name] = {"status": "not-observed", "reason": "selected-resolver-unavailable"}
+                    continue
+                if resolver["file"]["path"] == "/etc/resolv.conf":
+                    observations[name] = {"status": "not-required", "reason": "selected-resolver-is-regular"}
+                    continue
+                need(resolver["file"]["path"] == name, "fixed-resolver-target")
+            row = reader.file(name, limit, parse)
+            reader.point()
+            if name == material.RESOLVER_CANONICAL:
+                need(all(publisher.D.same(row["file"][key], resolver["file"][key])
+                         for key in ("path", "identity", "size", "sha256", "uid", "gid", "mode"))
+                     and publisher.D.same(row["data"], resolver["data"]), "fixed-resolver-original-changed")
+            prospective = {**record, "observations": {**observations, name: row}}
+            if len(publisher.D.canonical(prospective)) > OUTPUT_LIMIT - 4096:
+                raise Stopped("output-budget")
+            observations[name] = row
+        except Stopped as error:
+            record["stopped"] = error.args[0]
+            observations[name] = {"status": "unavailable", "reason": error.args[0],
+                                  "phase": reader.phase, "refusal": error.args[0]}
+            break
+        except (OSError, ValueError, UnicodeError, KeyError, RecursionError) as error:
+            row = {"status": "unavailable", "reason": reason(error), "phase": reader.phase,
+                   "refusal": diagnostic_reason(error)}
+            detail = public_host_failure(error, name)
+            if detail is not None:
+                row["failedCheck"] = detail
+            observations[name] = row
+    record["androidChargedReadBytes"] = SDK_NETWORK_READ_LIMIT - reader.remaining
+    return record
+
+
 def collect(publisher, run, deadline):
     reader = Reader(publisher, deadline)
     observations = {}
@@ -578,7 +716,7 @@ def main():
         original = publisher.directory_identity(root)
         source = [{**publisher.D.file_record(TOOLS / name, 2 << 20), "path": "desktop/tools/" + name}
                   for name in SOURCE_FILES]
-        record = collect(publisher, run, started + SECONDS)
+        record = collect_sdk_network(publisher, run, started + SECONDS)
         after = [{**publisher.D.file_record(TOOLS / name, 2 << 20), "path": "desktop/tools/" + name}
                  for name in SOURCE_FILES]
         need(publisher.D.same(source, after), "collector-source-changed")

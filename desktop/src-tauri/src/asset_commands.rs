@@ -27,13 +27,15 @@ impl Kind {
     }
     pub(crate) fn enabled(self) -> bool {
         matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
+            || (cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "macos", target_arch = "aarch64"))) && self == Self::AscP8)
             || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && matches!(self, Self::AppleP12 | Self::AppleProfile))
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
         match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase),
             Self::IosFirebase => Some(FileKind::IosFirebase), Self::AppleP12 => Some(FileKind::AppleP12),
-            Self::AppleProfile => Some(FileKind::AppleProfile), _ => None }
+            Self::AppleProfile => Some(FileKind::AppleProfile), Self::AscP8 => Some(FileKind::AscP8), _ => None }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -306,7 +308,7 @@ pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile => &[],
         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
-        _ => &[],
+        Kind::AscP8 => &["keyId", "issuerId"],
     }
 }
 pub(crate) fn validate_fields(kind: Kind, value: &Value) -> Result<(), AssetError> {
@@ -624,7 +626,7 @@ mod tests {
         }
         assert!(validate_fields(chosen.kind, &json!({"storePassword":null,"keyAlias":null,"keyPassword":null})).is_err());
         assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"ios-firebase","replacement":null},"fields":{}})).is_err());
-        assert!(!Kind::AscP8.enabled() && Kind::AscP8.file().is_none());
+        assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
         for kind in [Kind::AppleP12, Kind::AppleProfile] {
             assert_eq!(kind.enabled(), cfg!(all(target_os = "macos", target_arch = "aarch64")));
             assert!(kind.file().is_some());
@@ -653,7 +655,44 @@ mod tests {
             assert!(validate_fields(Kind::AppleP12, &input).is_err());
         }
         assert!(validate_fields(Kind::AppleProfile, &json!({"password":null})).is_err());
-        assert!(!Kind::AscP8.enabled());
+        assert_eq!(Kind::AscP8.enabled(), cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64"))));
+    }
+    #[test]
+    fn asc_uses_the_original_file_selection_and_exact_write_only_identifiers() {
+        assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
+        assert_eq!(field_names(Kind::AscP8), &["keyId", "issuerId"]);
+        let choice = json!({"contextRevision":1,"kind":"asc-p8","replacement":null});
+        assert!(choose(&choice).is_ok());
+        // Core owns identifier syntax and requiredness. Native admission must
+        // preserve every byte, including malformed spelling, NUL and Unicode.
+        for input in [json!({"keyId":null,"issuerId":null}),
+            json!({"keyId":"A1B2C3C4D5","issuerId":"12345678-1234-1234-1234-123456789abc"}),
+            json!({"keyId":" \0 KEY-CANARY ","issuerId":"é-\0-ISSUER-CANARY"}),
+            json!({"keyId":"","issuerId":" ".repeat(4096)})] {
+            let fields = own_fields(Kind::AscP8, &input);
+            if Kind::AscP8.enabled() {
+                let fields = fields.ok().unwrap();
+                assert_eq!(fields.into_value(), input);
+                assert_eq!(fields.borrow_value("keyId"), input["keyId"].as_str());
+                assert_eq!(fields.borrow_value("issuerId"), input["issuerId"].as_str());
+                assert!(fields.borrow_value("file").is_none());
+            } else { assert!(fields.is_err()); }
+        }
+        for input in [json!({}), json!({"keyId":null}), json!({"keyId":false,"issuerId":null}),
+            json!({"keyId":"x".repeat(4097),"issuerId":null}),
+            json!({"keyId":null,"issuerId":"é".repeat(2049)}),
+            json!({"keyId":null,"issuerId":null,"password":null})] {
+            assert!(validate_fields(Kind::AscP8, &input).is_err());
+        }
+        for extra in ["path", "filename", "bytes", "base64", "observation", "algorithm", "curve"] {
+            let mut input = choice.clone(); input[extra] = json!("PRIVATE-CANARY");
+            assert!(choose(&input).is_err());
+            let mut companion = json!({"keyId":null,"issuerId":null}); companion[extra] = json!("PRIVATE-CANARY");
+            assert!(validate_fields(Kind::AscP8, &companion).is_err());
+        }
+        assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"asc-p8","replacement":null},
+            "fields":{"keyId":null,"issuerId":null}})).is_err());
     }
     #[test]
     fn consumer_field_borrow_uses_original_backing_without_normalization_or_unknown_names() {

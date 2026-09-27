@@ -4,7 +4,7 @@
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
 use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
-    os::fd::{AsRawFd, BorrowedFd}, path::PathBuf, ptr::NonNull, rc::Rc};
+    os::{fd::{AsRawFd, BorrowedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, ptr::NonNull, rc::Rc};
 
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn mrk_publish(from: c_int, source: *const c_char, to: c_int, destination: *const c_char) -> c_int;
     fn mrk_panel_reserve() -> *mut c_void;
     fn mrk_panel_start(panel: *mut c_void, kind: c_int) -> c_int;
+    fn mrk_panel_start_project_field(panel: *mut c_void, kind: c_int, initial: *const u8, bytes: usize) -> c_int;
     fn mrk_panel_poll(panel: *mut c_void, result: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
     fn mrk_panel_close(panel: *mut c_void) -> c_int;
     fn mrk_panel_release(panel: *mut c_void) -> c_int;
@@ -104,7 +105,24 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind { Project, Quit, File }
+pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot }
+impl PanelKind {
+    fn code(self) -> c_int { match self {
+        Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
+        Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7,
+    } }
+    fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
+}
+fn project_field_initial(kind: PanelKind, initial: &Path) -> io::Result<&[u8]> {
+    let bytes = initial.as_os_str().as_bytes();
+    if !kind.project_field() || bytes.is_empty() || bytes.len() > 4096 || bytes[0] != b'/'
+        || bytes.contains(&0) || initial.to_str().is_none()
+        || bytes != b"/" && bytes[1..].split(|byte| *byte == b'/').any(|part|
+            part.is_empty() || part == b"." || part == b".." || part.len() > 255) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(bytes)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelResponse { Accept, Decline, Other }
 fn panel_response(code: c_int) -> io::Result<PanelResponse> {
@@ -145,12 +163,27 @@ impl Panel {
         if self.unknown || !main_thread() { Err(io::ErrorKind::Other.into()) } else { Ok(()) }
     }
     pub fn start(&mut self, kind: PanelKind) -> io::Result<()> {
+        if kind.project_field() { return Err(io::ErrorKind::InvalidInput.into()); }
+        self.start_inner(kind, None)
+    }
+    /// Only the original native project-field binding supplies this root.
+    /// It is an initial location, not selection containment or write authority.
+    pub fn start_project_field(&mut self, kind: PanelKind, initial: &Path) -> io::Result<()> {
+        let bytes = project_field_initial(kind, initial)?;
+        self.start_inner(kind, Some(bytes))
+    }
+    fn start_inner(&mut self, kind: PanelKind, initial: Option<&[u8]>) -> io::Result<()> {
         #[cfg(feature = "installed-observation")]
         { self.observation_start = None; }
         self.usable()?;
         // SAFETY: retained opaque original, main-thread-only type. EPERM means
         // the native function observed no available parent before construction.
-        let status = unsafe { mrk_panel_start(self.original.as_ptr(), match kind { PanelKind::Project => 1, PanelKind::Quit => 2, PanelKind::File => 3 }) };
+        let status = unsafe { match initial {
+            // SAFETY: the complete borrowed UTF-8 slice was checked above and
+            // remains live through this synchronous native start/temporary close.
+            Some(bytes) => mrk_panel_start_project_field(self.original.as_ptr(), kind.code(), bytes.as_ptr(), bytes.len()),
+            None => mrk_panel_start(self.original.as_ptr(), kind.code()),
+        } };
         #[cfg(feature = "installed-observation")]
         if self.observation_identity_armed {
             // This C call ACTUALLY returned. Copy saved scalars now, before the
@@ -217,7 +250,7 @@ impl Panel {
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
     OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
-    OriginalWindowState, OriginalWindowReturn, installed_original_window,
+    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -317,12 +350,63 @@ mod observation {
         pub dismissed: bool,
         pub closed: bool,
     }
+    /// Saved scalar DATA from a returned original P2 preparation, not a new
+    /// native observation, action grant, selection, or finality receipt.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ProjectFieldPreparation { pub result: &'static str, pub facts: Option<u32> }
+    impl ProjectFieldPreparation {
+        pub fn succeeded(self, kind: PanelKind, navigate: bool) -> bool {
+            kind.project_field() && self.result == "ok" && self.facts == Some(511 | 4096
+                | if navigate { 512 | 1024 | if kind == PanelKind::VersionSource { 2048 } else { 0 } } else { 0 })
+        }
+    }
+    fn project_field_preparation(status: c_int, flags: u32) -> ProjectFieldPreparation {
+        let result = match status { 0 => "ok", 1 => "permission-denied", 5 => "io", 22 => "invalid-input",
+            35 => "would-block", 37 => "already", _ => "invalid-return" };
+        let valid = flags & !8191 == 0 && (flags == 0 || flags & 257 == 257)
+            && (flags & 512 == 0 || flags & 511 == 511) && (flags & 1024 == 0 || flags & 512 != 0)
+            && (flags & 2048 == 0 || flags & 1024 != 0) && (status != 35 || flags == 0);
+        ProjectFieldPreparation { result, facts: valid.then_some(flags) }
+    }
+    fn project_field_data_check() -> bool {
+        // Pure spelling/ABI DATA in the existing observer entry. No Panel,
+        // AppKit call, filesystem operation or additional test runner exists.
+        for kind in [PanelKind::VersionSource, PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot] {
+            if project_field_initial(kind, Path::new("/Users/owner/project")).ok() != Some(b"/Users/owner/project".as_slice()) {
+                return false;
+            }
+            for invalid in ["", "relative", "//Users", "/Users/../project", "/Users/./project", "/Users/project/", "/Users/a\0b"] {
+                if project_field_initial(kind, Path::new(invalid)).is_ok() { return false; }
+            }
+            for navigate in [false, true] {
+                let mask = 511 | 4096 | if navigate { 512 | 1024 | if kind == PanelKind::VersionSource { 2048 } else { 0 } } else { 0 };
+                if !project_field_preparation(0, mask).succeeded(kind, navigate) { return false; }
+                for bit in 0..13 {
+                    if project_field_preparation(0, mask ^ (1 << bit)).succeeded(kind, navigate) { return false; }
+                }
+                for status in [1, 5, 22, 35, 37, -1] {
+                    if project_field_preparation(status, mask).succeeded(kind, navigate) { return false; }
+                }
+            }
+        }
+        for kind in [PanelKind::Project, PanelKind::File, PanelKind::Quit] {
+            if project_field_initial(kind, Path::new("/Users/owner/project")).is_ok()
+                || project_field_preparation(0, 511 | 4096).succeeded(kind, false) { return false; }
+        }
+        for flags in [8192, 1, 256, 512, 257 | 1024, 257 | 2048, 4096, u32::MAX] {
+            if project_field_preparation(5, flags).facts.is_some() { return false; }
+        }
+        project_field_preparation(35, 0) == (ProjectFieldPreparation { result: "would-block", facts: Some(0) })
+            && project_field_preparation(35, 257).facts.is_none()
+            && project_field_initial(PanelKind::VersionSource, Path::new(&format!("/{}", "a".repeat(4096)))).is_err()
+    }
     unsafe extern "C" {
         fn mrk_observation_original_window(original: usize, flags: *mut u32) -> c_int;
         fn mrk_panel_observe(panel: *mut c_void, kind: *mut c_int, flags: *mut u32,
             response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
             diagnostic: *mut u32) -> c_int;
+        fn mrk_panel_observe_project_field(panel: *mut c_void, navigate: c_int, facts: *mut u32) -> c_int;
         fn mrk_observation_ax_trusted() -> c_int;
         fn mrk_panel_observe_arm_open_identity(panel: *mut c_void, target: *const u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_identity_data(panel: *mut c_void, data: *mut IdentityWire);
@@ -382,9 +466,9 @@ mod observation {
         binding: IdentityProofWire,
     }
     const IDENTITY_CLASSES: [Option<&str>; 5] = [None, Some("nil"), Some("match"), Some("different"), Some("type-invalid")];
-    const IDENTITY_SITES: [Option<&str>; 12] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
+    const IDENTITY_SITES: [Option<&str>; 13] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
         Some("parent-get"), Some("complete"), Some("prompt-set"), Some("prompt-get"),
-        Some("initial-directory-url"), Some("initial-directory-set"), Some("file-name-set"), Some("file-name-get")];
+        Some("initial-directory-url"), Some("initial-directory-set"), Some("file-name-set"), Some("file-name-get"), Some("initial-temporary-close")];
     const PANEL_ID_CLASSES: [Option<&str>; 10] = [None, Some("nil"), Some("type-invalid"), Some("empty"),
         Some("byte-limit"), Some("nul"), Some("encoding-invalid"), Some("valid"), Some("match"), Some("different")];
     const PROOF_SITES: [&str; 14] = ["objects", "attachment", "directory", "parent-identifier", "panel-identifier",
@@ -466,6 +550,7 @@ mod observation {
             (7, 13) => base_flags == 111 && parent.is_some() && matches!(prompt, Some("nil" | "different" | "type-invalid")),
             (8, 2 | 14) => base_flags == 111 && parent.is_some() && prompt == Some("match"),
             (9, 14) => base_flags == 239 && parent.is_some() && prompt == Some("match"),
+            (12, 15) => !c.file_panel && matches!(base_flags, 111 | 239 | 495) && parent.is_some() && prompt == Some("match"),
             (5, 0) => base_flags == 511 && c.complete(),
             _ => false,
         };
@@ -537,6 +622,15 @@ mod observation {
             if !identity_configuration(partial).is_some_and(|c| !c.complete()
                 && c.initial_directory_setter_entered == (site == 9) && !c.initial_directory_setter_returned)
                 || identity_configuration(IdentityWire { flags: flags | 256, ..partial }).is_some() { return false; }
+        }
+        // P2 initial-location temporary retirement may fail before/after the
+        // setter returned. Preserve the actual partial chronology, not success.
+        for flags in [111, 239, 495] {
+            let partial = IdentityWire { flags, site: 12, error: 15, parent: 2, prompt: 2, ..IdentityWire::default() };
+            if !identity_configuration(partial).is_some_and(|c| !c.complete() && !c.file_panel
+                && c.error == Some("cleanup-unknown") && c.initial_directory_setter_returned == (flags == 495))
+                || identity_configuration(IdentityWire { flags: flags | 16, ..partial }).is_some()
+                || identity_configuration(IdentityWire { flags: flags | 512, ..partial }).is_some() { return false; }
         }
         // Exact entered/returned distinction for the actual File-only setter
         // and getter. Neither a partial nor a wrong kind may become complete.
@@ -1113,12 +1207,31 @@ mod observation {
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
         action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
+            && project_field_data_check()
             && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
             .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
     }
     impl Panel {
+        pub fn installed_project_field(&mut self, kind: PanelKind, navigate: bool,
+            returned: &mut Option<ProjectFieldPreparation>) -> io::Result<bool> {
+            *returned = None;
+            self.usable()?;
+            if !kind.project_field() { return Err(io::ErrorKind::InvalidInput.into()); }
+            let mut facts = 0;
+            // SAFETY: retained main-thread original, fixed scalar argument and
+            // writable cell; every conversion is owned/retired by that call.
+            let status = unsafe { mrk_panel_observe_project_field(self.original.as_ptr(), i32::from(navigate), &mut facts) };
+            let data = project_field_preparation(status, facts); *returned = Some(data);
+            match result(status) {
+                Ok(()) if data.succeeded(kind, navigate) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock && data.facts == Some(0) => Ok(false),
+                Err(error) if matches!(error.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied) => Err(error),
+                Err(error) => { self.unknown = true; Err(error) },
+                Ok(()) => { self.unknown = true; Err(io::ErrorKind::InvalidData.into()) },
+            }
+        }
         pub fn installed_arm_open_identity(&mut self, path: &Path) -> io::Result<()> {
             self.usable()?;
             if self.observation_identity_armed { return Err(io::ErrorKind::Other.into()); }
@@ -1178,6 +1291,7 @@ mod observation {
             if let Err(error) = result(status) { self.unknown = true; return Err(error); }
             let parsed = (|| {
                 let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit, 3 => PanelKind::File,
+                    4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 if !observation_flags_valid(flags) { return Err(io::ErrorKind::InvalidData.into()); }
                 let parent_present = flags & 0x1000 != 0; let panel_present = flags & 0x2000 != 0;
@@ -1261,17 +1375,22 @@ mod tests {
         }
         let directory = record(2, 0x1_0000_0001, b"dir");
         let file = record(1, 0x2_0000_0002, b"file");
+        let link = record(5, 0xf_0000_0003, b"linked.p12");
         assert_eq!(file.len(), 52); // Legal4-byte final short-fit, not mandatory8.
-        let mut block = [directory.clone(), file.clone()].concat();
+        let mut block = [directory.clone(), file.clone(), link.clone()].concat();
         let mut expected = Vec::new();
         for (inode, kind, name) in [(0x1_0000_0001u64, 4u8, b"dir".as_slice()),
-                                    (0x2_0000_0002u64, 8u8, b"file".as_slice())] {
+                                    (0x2_0000_0002u64, 8u8, b"file".as_slice()),
+                                    (0xf_0000_0003u64, 10u8, b"linked.p12".as_slice())] {
             expected.extend_from_slice(&inode.to_ne_bytes()); expected.push(kind);
             expected.extend_from_slice(&(name.len() as u16).to_ne_bytes()); expected.extend_from_slice(name);
         }
-        assert_eq!(decode(&block, 2, 65536), (0, expected.len(), expected.clone()));
+        assert_eq!(decode(&block, 3, 65536), (0, expected.len(), expected.clone()));
+        // Exhaustion in the final link record cannot publish the good prefix.
+        let (code, used, _) = decode(&block, 3, expected.len() - 1);
+        assert_ne!(code, 0); assert_eq!(used, 0);
         block.resize(65536, 0); // Native API returns count, not filled byte length.
-        assert_eq!(decode(&block, 2, 65536), (0, expected.len(), expected));
+        assert_eq!(decode(&block, 3, 65536), (0, expected.len(), expected));
         assert_eq!(decode(&block, 0, 65536), (0, 0, Vec::new()));
         // Extra legal alignment padding after the name remains outside attr_length.
         let mut padded = file.clone(); padded.resize(56, 0); padded[..4].copy_from_slice(&56u32.to_ne_bytes());
@@ -1289,7 +1408,9 @@ mod tests {
             (16, &1u32.to_ne_bytes()), (20, &1u32.to_ne_bytes()),
             (24, &(-1i32).to_ne_bytes()), (24, &4i32.to_ne_bytes()), (24, &i32::MAX.to_ne_bytes()),
             (28, &1u32.to_ne_bytes()), (28, &257u32.to_ne_bytes()), (28, &256u32.to_ne_bytes()),
-            (32, &5u32.to_ne_bytes()), (36, &0u64.to_ne_bytes()),
+            (32, &0u32.to_ne_bytes()), (32, &3u32.to_ne_bytes()), (32, &4u32.to_ne_bytes()),
+            (32, &6u32.to_ne_bytes()), (32, &7u32.to_ne_bytes()), (32, &8u32.to_ne_bytes()),
+            (32, &u32::MAX.to_ne_bytes()), (36, &0u64.to_ne_bytes()),
             (44, b"/"), (45, b"\0"), (47, b"x"),
         ];
         for &(offset, replacement) in mutations {
@@ -1297,7 +1418,7 @@ mod tests {
             invalid[offset..offset + replacement.len()].copy_from_slice(replacement);
             // One good prefix cannot turn a malformed second record into a
             // partial successful inventory (used must remain zero).
-            let batch = [file.clone(), invalid].concat();
+            let batch = [link.clone(), invalid].concat();
             let (code, used, _) = decode(&batch, 2, 65536);
             assert_ne!(code, 0, "offset={offset}"); assert_eq!(used, 0);
         }
@@ -1309,6 +1430,11 @@ mod tests {
         for (kind, code, expected) in [
             (1, 1, PanelResponse::Accept), (1, 0, PanelResponse::Decline),
             (3, 1, PanelResponse::Accept), (3, 0, PanelResponse::Decline),
+            (4, 1, PanelResponse::Accept), (4, 0, PanelResponse::Decline),
+            (5, 1, PanelResponse::Accept), (5, 0, PanelResponse::Decline),
+            (6, 1, PanelResponse::Accept), (6, 0, PanelResponse::Decline),
+            (7, 1, PanelResponse::Accept), (7, 0, PanelResponse::Decline),
+            (4, -1000, PanelResponse::Other), (7, 1001, PanelResponse::Other),
             (3, -1000, PanelResponse::Other), (3, 1001, PanelResponse::Other),
             (2, 1001, PanelResponse::Accept), (2, 1000, PanelResponse::Decline),
             (1, -1000, PanelResponse::Other), (1, -1001, PanelResponse::Other),

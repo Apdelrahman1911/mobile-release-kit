@@ -57,12 +57,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
-      - name: Select fixed frontend compiler
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24.20.0'
-          package-manager-cache: false
-      - name: Reserve fresh work and record exact source and actual tool bindings
+      - name: Reserve fresh private work before every candidate and toolchain query
         id: work
         shell: bash
         env:
@@ -71,123 +66,10 @@ jobs:
           set -euo pipefail
           umask 077
           [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-aqua.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
-          "$MRK_PYTHON" -I -S -B - "$root/source-binding.json" <<'PY'
-          import json, os, subprocess, sys
-          tools = {}
-          for name, command in (
-              ("rustc", ["rustc", "--version", "--verbose"]),
-              ("cargo", ["cargo", "--version", "--verbose"]),
-              ("cltSdkPath", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"]),
-              ("cltSdkVersion", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
-              ("cltSdkBuild", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"]),
-              ("cltCompiler", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "--version"]),
-              ("node", ["node", "--version"]),
-              ("python", [sys.executable, "-I", "-S", "-B", "--version"]),
-          ):
-              result = subprocess.run(command, cwd="desktop" if name in ("rustc", "cargo") else None,
-                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
-              if not result.stdout or len(result.stdout) > 4096: raise ValueError("tool version output refused")
-              tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
-          value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
-                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
-                    "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
-                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
-                    "reusedSupplierOnly": True,
-                   "scope": "nine-fixed-current-ios-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
-                   "caseNames": ["ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality", "ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel", "ios-recovery-empty"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
-                   "actualAquaSaveGate": "not-yet-executed", "shippingBinaryQualified": False, "distributionQualified": False}
-          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          if len(data) > 65536: raise ValueError("source/tool binding size refused")
-          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              while data:
-                  n = os.write(fd, data)
-                  if not n: raise RuntimeError("write refused")
-                  data = data[n:]
-              os.fsync(fd)
-          finally: os.close(fd)
-          PY
-      - name: Diagnose the real full-Xcode layout before compilation, separately from CLT
-        timeout-minutes: 2
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$MRK_PYTHON" -I -S -B - <<'PY_XCODE'
-          import json, os, pathlib, re, stat, subprocess
-          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
-          value = {"schemaVersion": 1, "scope": "full-xcode-layout-diagnostic-not-native-custody",
-                   "source": os.environ["GITHUB_SHA"], "compilerDeveloperDir": os.environ["DEVELOPER_DIR"],
-                   "layout": [], "tools": {}, "passed": False}
-          def observe(path, kind):
-              s = path.lstat()
-              value["layout"].append({"path": str(path), "mode": s.st_mode, "uid": s.st_uid,
-                                      "gid": s.st_gid, "device": s.st_dev, "inode": s.st_ino})
-              # A symlink's permission bits are not its target's access mode.
-              # Match the original native one-sibling alias policy; the real
-              # target and every descendant must still be protected objects.
-              alias = stat.S_ISLNK(s.st_mode)
-              if s.st_uid != 0 or (not alias and s.st_mode & 0o022) or not kind(s.st_mode):
-                  raise ValueError("full-xcode-protected-layout")
-              if alias and (s.st_nlink != 1 or not 1 <= s.st_size <= 1024):
-                  raise ValueError("full-xcode-alias-shape")
-          try:
-              app = pathlib.Path("/Applications/Xcode.app")
-              observe(pathlib.Path("/"), stat.S_ISDIR)
-              observe(app.parent, stat.S_ISDIR)
-              if app.is_symlink():
-                  observe(app, stat.S_ISLNK)
-                  target = os.readlink(app)
-                  sibling = target.removeprefix("/Applications/")
-                  if sibling == "Xcode.app" or not re.fullmatch(r"Xcode[A-Za-z0-9._+-]*\.app", sibling) or len(sibling) > 255:
-                      raise ValueError("full-xcode-single-sibling-alias")
-                  value["selectedAlias"] = target
-                  app = app.parent / sibling
-              observe(app, stat.S_ISDIR)
-              developer = app
-              for part in ("Contents", "Developer"):
-                  developer /= part
-                  observe(developer, stat.S_ISDIR)
-              tool = developer
-              for part in ("usr", "bin"):
-                  tool /= part
-                  observe(tool, stat.S_ISDIR)
-              tool /= "xcodebuild"
-              observe(tool, stat.S_ISREG)
-              if not tool.lstat().st_mode & 0o111: raise ValueError("full-xcode-executable")
-              sdk = developer
-              for part in ("Platforms", "iPhoneOS.platform", "Developer", "SDKs", "iPhoneOS.sdk"):
-                  sdk /= part
-                  observe(sdk, stat.S_ISDIR)
-              home = root / "xcode-diagnostic-home"
-              home.mkdir(mode=0o700)
-              environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
-                             "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "DEVELOPER_DIR": str(developer)}
-              for name, arguments in (("fullXcodeVersion", ["-version"]),
-                                      ("fullIPhoneOSVersion", ["-version", "-sdk", "iphoneos", "SDKVersion"])):
-                  command = [str(tool), *arguments]
-                  result = subprocess.run(command, env=environment, cwd=root, stdin=subprocess.DEVNULL,
-                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15, check=False)
-                  if len(result.stdout) > 4096: raise ValueError("full-xcode-version-output-bound")
-                  value["tools"][name] = {"command": command, "returncode": result.returncode,
-                                          "output": result.stdout.decode("utf-8", "strict").strip()}
-                  if result.returncode or not result.stdout: raise ValueError("full-xcode-version-refused")
-              value["passed"] = True
-          except (OSError, ValueError, subprocess.SubprocessError) as error:
-              value["failure"] = type(error).__name__
-              raise
-          finally:
-              data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-              if len(data) > 16384: raise ValueError("full-xcode-diagnostic-bound")
-              fd = os.open(root / "xcode-layout.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-              with os.fdopen(fd, "wb") as stream:
-                  stream.write(data)
-                  stream.flush()
-                  os.fsync(stream.fileno())
-          PY_XCODE
       - name: Bind the complete reviewed first-party checkout before compilation
         shell: bash
         run: |
@@ -232,6 +114,85 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           PY_SOURCE
+      - name: Prepare only the fixed disposable Xcode ancestor before any worker
+        timeout-minutes: 2
+        # Empty environment before even this noninteractive shell starts. The
+        # second env -i carries only provider-owned, fixed-route inputs into
+        # the nonroot DATA Python; no loader/shell/tool override survives.
+        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          # Match the real-UID CF default before Python/native imports; never
+          # inherit an ambient encoding or consult the runner's preferences.
+          printf -v mrk_cf_encoding '0x%X:0:0' "$UID"
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME='${{ steps.work.outputs.root }}' LANG=C LC_ALL=C TZ=UTC \
+            __CF_USER_TEXT_ENCODING="$mrk_cf_encoding" \
+            RUNNER_ENVIRONMENT='${{ runner.environment }}' \
+            RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
+            RUNNER_TEMP='${{ runner.temp }}' \
+            GITHUB_REPOSITORY='${{ github.repository }}' \
+            GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
+            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' \
+            GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \
+            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \
+            GITHUB_JOB='${{ github.job }}' GITHUB_WORKSPACE='${{ github.workspace }}' \
+            MRK_EXPECTED_SHA='${{ github.sha }}' \
+            MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \
+            MRK_MACOS_WORK='${{ steps.work.outputs.root }}' \
+            '${{ steps.python.outputs.python-path }}' -I -S -B \
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_xcode_host_preparation.py
+          # Only this original helper's exit0 after every final close admits
+          # later steps. Its immutable JSON is explicitly provisional, not a
+          # substitute for workflow status. Never restore0775 before VM disposal.
+      - name: Select fixed frontend compiler
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Record exact source and actual tool bindings only after host preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-binding.json" <<'PY'
+          import json, os, subprocess, sys
+          tools = {}
+          for name, command in (
+              ("rustc", ["rustc", "--version", "--verbose"]),
+              ("cargo", ["cargo", "--version", "--verbose"]),
+              ("cltSdkPath", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"]),
+              ("cltSdkVersion", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
+              ("cltSdkBuild", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"]),
+              ("cltCompiler", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "--version"]),
+              ("node", ["node", "--version"]),
+              ("python", [sys.executable, "-I", "-S", "-B", "--version"]),
+          ):
+              result = subprocess.run(command, cwd="desktop" if name in ("rustc", "cargo") else None,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
+              if not result.stdout or len(result.stdout) > 4096: raise ValueError("tool version output refused")
+              tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
+          value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
+                    "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
+                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
+                    "reusedSupplierOnly": True,
+                   "scope": "one-project-fields-and-nine-current-ios-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
+                   "scopes": ["project-fields", "ios-current-synthetic"],
+                   "caseNames": ["project-fields", "ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality", "ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel", "ios-recovery-empty"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
+                   "actualAquaSaveGate": "not-yet-executed", "shippingBinaryQualified": False, "distributionQualified": False}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 65536: raise ValueError("source/tool binding size refused")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              while data:
+                  n = os.write(fd, data)
+                  if not n: raise RuntimeError("write refused")
+                  data = data[n:]
+              os.fsync(fd)
+          finally: os.close(fd)
+          PY
       - name: Check current owner pins before native preparation
         timeout-minutes: 1
         shell: bash
@@ -249,13 +210,15 @@ jobs:
               module.IOSAquaDataTests("test_normal_macos_selection_is_original_bound_without_observer_grants"),
               module.CurrentIOSAquaDataTests("test_current_reports_are_closed_bounded_and_do_not_claim_successful_signing"),
               module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted"),
+              module.ProjectFieldsAquaDataTests("test_complete_project_fields_report_is_bounded_and_fail_closed"),
+              module.ProjectFieldsAquaDataTests("test_original_fixture_restoration_has_only_two_ctime_exceptions"),
           ])
           result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
-          if (result.testsRun != 4 or not result.wasSuccessful()
+          if (result.testsRun != 6 or not result.wasSuccessful()
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS
-      - name: Compile headless Mac library and run six exact DATA regressions first
+      - name: Compile headless Mac libraries and run eleven exact DATA regressions first
         timeout-minutes: 10
         shell: bash
         run: |
@@ -265,7 +228,9 @@ jobs:
           # Cargo must see desktop/rust-toolchain.toml, not the host default.
           cd desktop/src-tauri
           set +e
+          # The same locked graph builds both existing native DATA regressions.
           cargo test --locked --no-default-features --jobs 2 --target aarch64-apple-darwin \
+            --package mobile-release-kit-desktop --package mrk-macos-installed-native \
             --lib --no-run --message-format=json \
             > "$MRK_MACOS_WORK/headless-build.jsonl" 2> "$MRK_MACOS_WORK/headless-build.stderr"
           status=$?
@@ -282,13 +247,26 @@ jobs:
               "asset_source::macos::tests::entered_native_checks_remain_uncertain_after_descriptor_book_retirement",
               "asset_source::macos::tests::protected_objects_are_recognized_even_from_another_firmlink_parent_role",
               "asset_source::macos::tests::complete_alias_rosters_are_bounded_before_any_native_acquisition",
+              "asset_source::macos::tests::project_fields_are_strict_descendant_data_not_credential_capture",
+              "asset_source::macos::tests::project_spellings_are_bounded_without_canonicalization",
+              "asset_source::macos::tests::only_local_ownership_aware_apfs_is_admitted",
               "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
           )
-          receipt = {"schemaVersion": 1, "scope": "six-exact-macos-headless-data-regressions",
+          native_names = (
+              "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
+              "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
+          )
+          libraries = (
+              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 9, "headless"),
+              ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",
+               ["default"], native_names, 2, "headless-native"),
+          )
+          receipt = {"schemaVersion": 1, "scope": "nine-main-and-two-native-macos-headless-data-regressions",
                      "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                      "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
-                     "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "names": names,
-                     "originalReturned": False, "artifactOriginalUnchanged": False, "passed": False,
+                     "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "names": names + native_names, "targets": [],
+                     "originalReturned": False, "artifactOriginalUnchanged": False, "artifactOriginalClosed": False,
+                     "passed": False,
                      "shippingBinaryQualified": False, "distributionQualified": False}
           def sig(s):
               return (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
@@ -312,7 +290,7 @@ jobs:
                   stream.write(data)
                   stream.flush()
                   os.fsync(stream.fileno())
-          binary_fd = None
+          originals = []
           stage = "original-compiler"
           try:
               if read_bound(work / "headless-build.status", 4) != b"0\n":
@@ -323,86 +301,123 @@ jobs:
               if [r.get("success") for r in rows if r.get("reason") == "build-finished"] != [True]:
                   raise ValueError("headless-original-compiler-finish")
               targets = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("executable") is not None]
-              if len(targets) != 1: raise ValueError("headless-one-original-artifact")
-              target = targets[0]
-              if (target.get("target", {}).get("name") != "mobile_release_desktop"
-                      or target["target"].get("kind") != ["lib"]
-                      or target["target"].get("src_path") != str(checkout / "desktop/src-tauri/src/lib.rs")
-                      or target.get("profile", {}).get("test") is not True or target.get("features") != []):
-                  raise ValueError("headless-fixed-feature-off-library")
-              binary = pathlib.Path(target["executable"])
-              expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/deps"
-              if binary.parent != expected or not re.fullmatch(r"mobile_release_desktop-[0-9a-f]+", binary.name):
-                  raise ValueError("headless-original-artifact-path")
-              binary_fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-              before = os.fstat(binary_fd)
-              regular(before, 1024 * 1024 * 1024)
-              if not before.st_mode & 0o111: raise ValueError("headless-original-not-executable")
-              digest, remaining = hashlib.sha256(), before.st_size
-              while remaining:
-                  block = os.read(binary_fd, min(remaining, 1024 * 1024))
-                  if not block: raise ValueError("headless-original-artifact-short")
-                  digest.update(block)
-                  remaining -= len(block)
-              if os.read(binary_fd, 1): raise ValueError("headless-original-artifact-grew")
-              def original_unchanged():
-                  if sig(before) != sig(os.fstat(binary_fd)) or sig(before) != sig(binary.lstat()):
-                      raise ValueError("headless-original-artifact-changed")
-              original_unchanged()
-              receipt.update(compilerJsonSha256=hashlib.sha256(raw).hexdigest(),
-                             artifact={"path": str(binary), "sha256": digest.hexdigest(), "identity": sig(before)})
+              if len(targets) != 2: raise ValueError("headless-two-original-artifacts")
+              receipt["compilerJsonSha256"] = hashlib.sha256(raw).hexdigest()
+              admitted = []
+              # Admit both fixed compiler targets before invoking either one.
+              # The native empty default feature is not installed-observation.
+              for role, directory, package, library, features, test_names, count, prefix in libraries:
+                  matches = [r for r in targets if r.get("target", {}).get("name") == library]
+                  if len(matches) != 1: raise ValueError("headless-one-original-per-library")
+                  target = matches[0]
+                  package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"
+                  if (target.get("package_id") != package_id
+                          or target.get("manifest_path") != str(checkout / directory / "Cargo.toml")
+                          or target["target"].get("kind") != ["lib"]
+                          or target["target"].get("crate_types") != ["lib"]
+                          or target["target"].get("src_path") != str(checkout / directory / "src/lib.rs")
+                          or target.get("profile", {}).get("test") is not True or target.get("features") != features):
+                      raise ValueError("headless-fixed-non-observer-library")
+                  binary = pathlib.Path(target["executable"])
+                  expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "aarch64-apple-darwin/debug/deps"
+                  if binary.parent != expected or not re.fullmatch(re.escape(library) + r"-[0-9a-f]+", binary.name):
+                      raise ValueError("headless-original-artifact-path")
+                  record = {"role": role, "packageId": package_id, "features": features, "names": test_names,
+                            "originalReturned": False, "artifactOriginalUnchanged": False,
+                            "artifactOriginalClosed": False, "testsPassed": False}
+                  receipt["targets"].append(record)
+                  admitted.append((binary, test_names, count, prefix, record))
               stage = "owner-admission"
               spec = importlib.util.spec_from_file_location("_mrk_macos_headless_owner", checkout / "desktop/tools/macos_aqua_qualification.py")
               qualification = importlib.util.module_from_spec(spec)
               sys.modules[spec.name] = qualification
               spec.loader.exec_module(qualification)
               owner = qualification.load_owner(checkout)
-              home, tmp = work / "headless-home", work / "headless-tmp"
-              home.mkdir(mode=0o700)
-              tmp.mkdir(mode=0o700)
-              original_unchanged()
-              stage = "original-test-invocation"
-              result = owner.run_owned(
-                  [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *names],
-                  environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(tmp),
-                           "LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
-                  cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024,
-              )
-              if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
-                      or type(result.stdout) is not bytes or type(result.stderr) is not bytes
-                      or len(result.stdout) + len(result.stderr) > 64 * 1024):
-                  raise ValueError("headless-original-return-contract")
-              receipt.update(originalReturned=True, returncode=result.returncode,
-                             stdoutSha256=hashlib.sha256(result.stdout).hexdigest(),
-                             stderrSha256=hashlib.sha256(result.stderr).hexdigest())
-              # Preserve the original return before testing its status/content.
-              publish("headless-tests.stdout", result.stdout)
-              publish("headless-tests.stderr", result.stderr)
-              publish("headless-tests.status", (str(result.returncode) + "\n").encode("ascii"))
-              original_unchanged()
-              receipt["artifactOriginalUnchanged"] = True
-              stage = "empty-test-directory-retirement"
-              home.rmdir()
-              tmp.rmdir()
-              stage = "exact-six-test-result"
-              if result.returncode != 0 or result.stderr: raise ValueError("headless-tests-returned-failure")
-              lines = [line for line in result.stdout.decode("utf-8", "strict").splitlines() if line]
-              expected_rows = {"test " + name + " ... ok" for name in names}
-              if (len(names) != 6 or len(expected_rows) != 6 or len(lines) != 8 or lines[0] != "running 6 tests"
-                      or len(set(lines[1:7])) != 6 or set(lines[1:7]) != expected_rows):
-                  raise ValueError("headless-exact-six-results-required")
-              summary = re.fullmatch(r"test result: ok\. 6 passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
-              if summary is None: raise ValueError("headless-six-test-summary")
-              receipt.update(passed=True, tests=6, failed=0, ignored=0, measured=0, filtered=int(summary[1]))
+              for binary, test_names, count, prefix, record in admitted:
+                  stage = prefix + "-original-artifact"
+                  binary_fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+                  original = {"fd": binary_fd, "record": record}
+                  originals.append(original)  # Custody precedes every fallible observation.
+                  before = os.fstat(binary_fd)
+                  regular(before, 1024 * 1024 * 1024)
+                  if not before.st_mode & 0o111: raise ValueError("headless-original-not-executable")
+                  def original_digest():
+                      if sig(before) != sig(os.fstat(binary_fd)) or sig(before) != sig(binary.lstat()):
+                          raise ValueError("headless-original-artifact-changed")
+                      digest, offset = hashlib.sha256(), 0
+                      while offset < before.st_size:
+                          block = os.pread(binary_fd, min(before.st_size - offset, 1024 * 1024), offset)
+                          if not block: raise ValueError("headless-original-artifact-short")
+                          digest.update(block)
+                          offset += len(block)
+                      if os.pread(binary_fd, 1, before.st_size): raise ValueError("headless-original-artifact-grew")
+                      if sig(before) != sig(os.fstat(binary_fd)) or sig(before) != sig(binary.lstat()):
+                          raise ValueError("headless-original-artifact-changed")
+                      return digest.hexdigest()
+                  digest = original_digest()
+                  record["artifact"] = {"path": str(binary), "sha256": digest, "identity": sig(before)}
+                  home, tmp = work / (prefix + "-home"), work / (prefix + "-tmp")
+                  home.mkdir(mode=0o700)
+                  tmp.mkdir(mode=0o700)
+                  if original_digest() != digest: raise ValueError("headless-original-artifact-hash")
+                  stage = prefix + "-original-test-invocation"
+                  result = owner.run_owned(
+                      [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names],
+                      environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(tmp),
+                               "LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
+                      cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024,
+                  )
+                  if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
+                          or type(result.stdout) is not bytes or type(result.stderr) is not bytes
+                          or len(result.stdout) + len(result.stderr) > 64 * 1024):
+                      raise ValueError("headless-original-return-contract")
+                  record.update(originalReturned=True, returncode=result.returncode,
+                                stdoutSha256=hashlib.sha256(result.stdout).hexdigest(),
+                                stderrSha256=hashlib.sha256(result.stderr).hexdigest())
+                  # Preserve each original return before testing its status/content.
+                  publish(prefix + "-tests.stdout", result.stdout)
+                  publish(prefix + "-tests.stderr", result.stderr)
+                  publish(prefix + "-tests.status", (str(result.returncode) + "\n").encode("ascii"))
+                  if original_digest() != digest: raise ValueError("headless-original-artifact-hash")
+                  record["artifactOriginalUnchanged"] = True
+                  stage = prefix + "-empty-test-directory-retirement"
+                  home.rmdir()
+                  tmp.rmdir()
+                  stage = prefix + "-exact-test-result"
+                  if result.returncode != 0 or result.stderr: raise ValueError("headless-tests-returned-failure")
+                  lines = [line for line in result.stdout.decode("utf-8", "strict").splitlines() if line]
+                  expected_rows = {"test " + name + " ... ok" for name in test_names}
+                  heading = f"running {count} " + ("test" if count == 1 else "tests")
+                  if (len(test_names) != count or len(expected_rows) != count or len(lines) != count + 2
+                          or lines[0] != heading or len(set(lines[1:-1])) != count or set(lines[1:-1]) != expected_rows):
+                      raise ValueError("headless-exact-named-results-required")
+                  summary = re.fullmatch(rf"test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+                  if summary is None: raise ValueError("headless-exact-test-summary")
+                  record.update(testsPassed=True, tests=count, failed=0, ignored=0, measured=0, filtered=int(summary[1]))
           except BaseException as error:
               receipt["failure"] = {"stage": stage, "type": type(error).__name__}
               raise
           finally:
-              if binary_fd is not None: os.close(binary_fd)
+              close_errors = []
+              for original in originals:
+                  descriptor, original["fd"] = original["fd"], None
+                  try:
+                      os.close(descriptor)  # Exactly one close attempt; unknown is not retried.
+                      original["record"]["artifactOriginalClosed"] = True
+                  except BaseException as error:
+                      close_errors.append({"role": original["record"]["role"], "type": type(error).__name__})
+              if close_errors: receipt["closeErrors"] = close_errors
+              for key in ("originalReturned", "artifactOriginalUnchanged", "artifactOriginalClosed"):
+                  receipt[key] = len(receipt["targets"]) == 2 and all(row[key] for row in receipt["targets"])
+              receipt["passed"] = ("failure" not in receipt and not close_errors
+                  and receipt["originalReturned"] and receipt["artifactOriginalUnchanged"] and receipt["artifactOriginalClosed"]
+                  and all(row["testsPassed"] for row in receipt["targets"]))
+              if receipt["passed"]: receipt.update(tests=7, failed=0, ignored=0, measured=0)
               # No exception-path directory cleanup or fabricated finality.
               data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() + b"\n"
               if len(data) > 16384: raise ValueError("headless-receipt-bound")
               publish("headless-tests.receipt.json", data)
+              if close_errors and "failure" not in receipt: raise ValueError("headless-original-close-unconfirmed")
           PY_HEADLESS
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         timeout-minutes: 2
@@ -614,7 +629,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
-      - name: Standard Installer only is privileged; never execute the app or Python as root
+      - name: Application installation uses only standard privileged Installer; app and Python stay nonroot
         timeout-minutes: 5
         shell: bash
         run: |
@@ -662,7 +677,28 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
-          printf '%s\n' 'Instrumented engineering installation only; all nine current-iOS Aqua cases must separately pass, prerequisite first.'
+          printf '%s\n' 'Instrumented engineering installation only; the project-field journey and all nine current-iOS cases must separately pass.'
+      - name: One project-field Aqua journey through the reviewed original invocation owner
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          git -c core.fsmonitor=false diff --exit-code HEAD -- src/mobile_release desktop/tools/macos_aqua_qualification.py
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_aqua_qualification.py --scope project-fields \
+            > "$MRK_MACOS_WORK/aqua-project-fields-results.jsonl" 2> "$MRK_MACOS_WORK/aqua-project-fields-failure.jsonl"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-project-fields.status"
+          [[ $status == 0 ]]
+          # The original helper returns zero only after original calls/readbacks,
+          # fixture closes and complete-record publication. Otherwise no later
+          # native case starts; the separate fixture namespace remains evidence.
       - name: Nine serial current-iOS Aqua cases through the reviewed original invocation owner
         timeout-minutes: 50
         shell: bash
@@ -776,7 +812,6 @@ jobs:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
-            ${{ steps.work.outputs.root }}/xcode-layout.json
             ${{ steps.work.outputs.root }}/package-format-input.json
             ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
             ${{ steps.work.outputs.root }}/package-format-prepare.json
@@ -785,6 +820,8 @@ jobs:
             ${{ steps.work.outputs.root }}/package-format-audit.json
             ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
             ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/xcode-host-preparation-intent.json
+            ${{ steps.work.outputs.root }}/xcode-host-preparation-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
             ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl
             ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt
@@ -792,6 +829,9 @@ jobs:
             ${{ steps.work.outputs.root }}/headless-tests.stdout
             ${{ steps.work.outputs.root }}/headless-tests.stderr
             ${{ steps.work.outputs.root }}/headless-tests.status
+            ${{ steps.work.outputs.root }}/headless-native-tests.stdout
+            ${{ steps.work.outputs.root }}/headless-native-tests.stderr
+            ${{ steps.work.outputs.root }}/headless-native-tests.status
             ${{ steps.work.outputs.root }}/headless-tests.receipt.json
             ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl
             ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt
@@ -814,6 +854,9 @@ jobs:
             ${{ steps.work.outputs.root }}/package-tar.status
             ${{ steps.work.outputs.root }}/package-xar.status
             ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/aqua-project-fields-results.jsonl
+            ${{ steps.work.outputs.root }}/aqua-project-fields-failure.jsonl
+            ${{ steps.work.outputs.root }}/aqua-project-fields.status
             ${{ steps.work.outputs.root }}/aqua-results.jsonl
             ${{ steps.work.outputs.root }}/aqua-failure.jsonl
             ${{ steps.work.outputs.root }}/aqua.status

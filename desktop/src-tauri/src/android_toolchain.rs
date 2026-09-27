@@ -35,7 +35,8 @@ pub(crate) struct AndroidToolchainProfile {
 }
 
 impl AndroidToolchainProfile {
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    // The ordinary owner and its observer compare the SAME compile DATA.
+    // Equality grants no tool/runtime custody and never supplies missing DATA.
     pub(crate) fn installed_candidate_matches_compiled(&self) -> bool { Self::compiled().as_ref() == Some(self) }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn installed_candidate_root(&self) -> &std::path::Path { &self.root }
@@ -415,6 +416,32 @@ mod pure_tests {
         assert!(make(Some("inert-data-only"), Some(&manifest), Some(&raw), Some(&manifest)).is_none());
         let mut changed = raw; changed.push(b' ');
         assert!(make(Some("inert-data-only"), Some(&manifest), Some(&changed), Some(&anchor)).is_none());
+    }
+    #[test]
+    fn ordinary_compiled_comparison_rejects_absent_or_changed_profile_data() {
+        let actual = AndroidToolchainProfile::compiled();
+        let profile = match actual {
+            Some(profile) => {
+                assert!(profile.installed_candidate_matches_compiled());
+                profile
+            },
+            None => {
+                let raw = serde_json::to_vec(&manifest_data()).unwrap();
+                let inert = profile(&raw);
+                assert!(!inert.installed_candidate_matches_compiled());
+                inert // Negative DATA only; never supplied to an owner/Book.
+            },
+        };
+        let mut changed = profile.clone(); changed.instance.push_str("-different");
+        assert!(!changed.installed_candidate_matches_compiled());
+        let mut changed = profile.clone(); changed.root.push("different");
+        assert!(!changed.installed_candidate_matches_compiled());
+        let mut changed = profile.clone();
+        let first = if changed.manifest_sha256.starts_with('a') { "b" } else { "a" };
+        changed.manifest_sha256.replace_range(0..1, first);
+        assert!(!changed.installed_candidate_matches_compiled());
+        let mut changed = profile; changed.os.id.push_str("-different");
+        assert!(!changed.installed_candidate_matches_compiled());
     }
     #[test]
     fn manifest_requires_fixed_roles_contract_helpers_and_compiled_os_files() {

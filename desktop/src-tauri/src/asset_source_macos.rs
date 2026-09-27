@@ -1,5 +1,6 @@
 //! Original read-only Darwin source custody for project selection and private
-//! session assets. Never a runtime, snapshot/Save, signing or P2 capability.
+//! session assets and project-relative field selection. Never a runtime,
+//! snapshot/Save, signing or continuing write capability.
 //! The SAME SourceBook lives outside its blocking worker until every original
 //! acquisition/native call/one-use close and that worker's actual join settle.
 #![forbid(unsafe_code)]
@@ -374,6 +375,7 @@ pub(crate) fn suffix(kind: FileKind, path: &Path) -> Result<(), Reason> {
         FileKind::AppleP12 => suffix.eq_ignore_ascii_case(b"p12") || suffix.eq_ignore_ascii_case(b"pfx"),
         FileKind::AppleProfile => suffix.eq_ignore_ascii_case(b"mobileprovision"),
         FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
+        FileKind::AscP8 => suffix.eq_ignore_ascii_case(b"p8"),
         FileKind::AndroidKeystore | FileKind::AndroidFirebase => return Err(Reason::UnsupportedPlatform),
     };
     if !supported || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
@@ -470,13 +472,100 @@ pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc
     book.finish(result, stop)
 }
 
-// This slice adds no descendant-path (P2) capability.
-pub(crate) fn probe_project_path(_: &mut SourceBook, _: &RegisteredRoot, _: PathBuf, _: ProjectPathField,
-    _: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> { Err(Reason::UnsupportedPlatform) }
+struct ProjectPathSpelling<'a> { components: Vec<&'a [u8]>, root_depth: usize, relative_path: String }
+fn project_path_spelling<'a>(root: &Path, path: &'a Path, field: ProjectPathField) -> Result<ProjectPathSpelling<'a>, Reason> {
+    // Match the existing field policy without normalizing a native selection.
+    // The real root is subsequently checked and held by this same SourceBook.
+    let root_parts = parts(root)?;
+    let components = parts(path)?;
+    if components.len() <= root_parts.len() || !components.starts_with(&root_parts) { return Err(Reason::SourceRefused); }
+    let start = root.as_os_str().as_bytes().len() + usize::from(!root_parts.is_empty());
+    let relative = std::str::from_utf8(&path.as_os_str().as_bytes()[start..]).map_err(|_| Reason::SourceRefused)?;
+    if !crate::release_version_protocol::relative_display_path(relative)
+        || !field.accepts_basename(relative.rsplit('/').next().ok_or(Reason::SourceRefused)?) { return Err(Reason::SourceRefused); }
+    let relative_path = crate::asset_commands::copy_text(relative).map_err(|error| error.reason)?;
+    Ok(ProjectPathSpelling { components, root_depth: root_parts.len(), relative_path })
+}
+fn project_path_file_leaf(file: FileIdentity, parent: DirectoryIdentity) -> bool {
+    file.common.mode & u32::from(SFlag::S_IFMT.bits()) == u32::from(SFlag::S_IFREG.bits())
+        && file.nlink == 1 && file.common.dev == parent.dev
+}
+pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, path: PathBuf, field: ProjectPathField,
+    stop: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> {
+    let root_identity = root.identity.posix()?;
+    let spelling = project_path_spelling(&root.path, &path, field)?;
+    let file = !field.directory();
+    let capacity = roster_limit([spelling.components.len() - usize::from(file)], 0)?;
+    book.begin(capacity, usize::from(file), 0)?;
+    let result = (|| {
+        book.root(stop)?;
+        let (chain, _) = book.chain(&spelling.components[..spelling.root_depth], false, stop)?;
+        let mut parent = *chain.last().ok_or(Reason::SourceRefused)?;
+        if book.directory(parent)? != root_identity { return Err(Reason::SourceChanged); }
+        let (leaf, parents) = spelling.components[spelling.root_depth..].split_last().ok_or(Reason::SourceRefused)?;
+        for name in parents { parent = book.child(parent, name, false, stop)?; }
+        if field.directory() {
+            book.child(parent, leaf, false, stop)?;
+        } else {
+            let name = copy_bytes(leaf)?;
+            let parent_identity = book.directory(parent)?;
+            checkpoint(stop)?;
+            // Version-file selection is metadata DATA only. Do not open or
+            // read the leaf, or relax the private credential capture policy.
+            let metadata = stat::fstatat(book.fd(parent)?, OsStr::from_bytes(leaf), AtFlags::AT_SYMLINK_NOFOLLOW)
+                .map_err(|_| Reason::SourceRefused)?;
+            checkpoint(stop)?;
+            let identity = file_identity(&metadata)?;
+            if !project_path_file_leaf(identity, parent_identity) { return Err(Reason::SourceRefused); }
+            if book.probes.len() >= book.probes.capacity() { return Err(Reason::Capacity); }
+            book.probes.push(LeafProbe { parent, name, identity });
+        }
+        Ok(ProjectPathProbe { relative_path: spelling.relative_path })
+    })();
+    // Final original-root/leaf rechecks and consuming closes are unchanged.
+    book.finish(result, stop)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_fields_are_strict_descendant_data_not_credential_capture() {
+        let root = Path::new("/inert/project");
+        for (path, field, relative) in [
+            ("/inert/project/inputs/VERSION", ProjectPathField::VersionSource, "inputs/VERSION"),
+            ("/inert/project/ios/App.xcodeproj", ProjectPathField::IosProject, "ios/App.xcodeproj"),
+            ("/inert/project/ios/App.xcworkspace", ProjectPathField::IosWorkspace, "ios/App.xcworkspace"),
+            ("/inert/project/metadata", ProjectPathField::MetadataRoot, "metadata"),
+        ] {
+            let selected = project_path_spelling(root, Path::new(path), field).unwrap();
+            assert_eq!(selected.root_depth, 2); assert_eq!(selected.relative_path, relative);
+        }
+        let parent = DirectoryIdentity { dev: 1, ino: 2, mode: 0o40755, uid: 501, gid: 20 };
+        let registered = RegisteredRoot { path: root.to_path_buf(), identity: ProjectIdentity::Posix(parent) };
+        for (path, field) in [
+            ("/inert/project2/VERSION", ProjectPathField::VersionSource),
+            ("/inert/project", ProjectPathField::MetadataRoot),
+            ("/inert/project/../VERSION", ProjectPathField::VersionSource),
+            ("/inert/project//VERSION", ProjectPathField::VersionSource),
+            ("/inert/project/secrets/VERSION", ProjectPathField::VersionSource),
+            ("/inert/project/App.XCODEPROJ", ProjectPathField::IosProject),
+            ("/inert/project/App.xcodeproj", ProjectPathField::IosWorkspace),
+        ] {
+            let mut book = SourceBook::new();
+            assert!(matches!(probe_project_path(&mut book, &registered, PathBuf::from(path), field, &mut || true), Err(Reason::SourceRefused)));
+            assert!(book.not_started() && !book.settled()); // No native entry.
+        }
+        let file = FileIdentity { common: DirectoryIdentity { ino: 3, mode: 0o100644, ..parent },
+            nlink: 1, size: 0, mtime: (1, 2), ctime: (3, 4) };
+        assert!(project_path_file_leaf(file, parent)); assert!(!private_file(file.common.mode));
+        assert!(project_path_file_leaf(FileIdentity { size: u64::MAX, ..file }, parent));
+        for nlink in [0, 2] { assert!(!project_path_file_leaf(FileIdentity { nlink, ..file }, parent)); }
+        assert!(!project_path_file_leaf(FileIdentity { common: DirectoryIdentity { dev: 2, ..file.common }, ..file }, parent));
+        for mode in [0o40755, 0o120777, 0o10600, 0o20600] {
+            assert!(!project_path_file_leaf(FileIdentity { common: DirectoryIdentity { mode, ..file.common }, ..file }, parent));
+        }
+    }
     #[test]
     fn project_spellings_are_bounded_without_canonicalization() {
         assert!(parts(Path::new("/Users/owner/project")).is_ok());
@@ -506,12 +595,14 @@ mod tests {
     #[test]
     fn private_asset_suffixes_never_enable_android_or_bare_profile_plists() {
         for (kind, path) in [(FileKind::AppleP12, "/inert/cert.P12"), (FileKind::AppleP12, "/inert/cert.pfx"),
-            (FileKind::AppleProfile, "/inert/app.mobileprovision"), (FileKind::IosFirebase, "/inert/google.PLIST")] {
+            (FileKind::AppleProfile, "/inert/app.mobileprovision"), (FileKind::IosFirebase, "/inert/google.PLIST"),
+            (FileKind::AscP8, "/inert/AuthKey.P8")] {
             assert!(suffix(kind, Path::new(path)).is_ok());
         }
         for (kind, path) in [(FileKind::AppleP12, "/inert/p12"), (FileKind::AppleP12, "/inert/cert.pem"),
             (FileKind::AppleProfile, "/inert/profile.plist"), (FileKind::AppleProfile, "/inert/app.mobileprovision.p12"),
-            (FileKind::AndroidKeystore, "/inert/key.jks"), (FileKind::AndroidFirebase, "/inert/config.json")] {
+            (FileKind::AndroidKeystore, "/inert/key.jks"), (FileKind::AndroidFirebase, "/inert/config.json"),
+            (FileKind::AscP8, "/inert/p8"), (FileKind::AscP8, "/inert/key.pem"), (FileKind::AscP8, "/inert/key.p8.p12")] {
             assert!(suffix(kind, Path::new(path)).is_err());
         }
     }

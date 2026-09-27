@@ -478,6 +478,102 @@ mod tests {
         }
     }
 
+    fn asc_file() -> Vec<u8> {
+        use der_07::{asn1::ObjectIdentifier, Any, Encode, Tag};
+        // Deliberately not an EC scalar. Authentication/envelope recognition
+        // must never be presented as mathematical key or account validation.
+        let mut identifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1").to_der().unwrap();
+        identifier.extend_from_slice(&ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7").to_der().unwrap());
+        let mut fields = 0u8.to_der().unwrap();
+        fields.extend_from_slice(&Any::new(Tag::Sequence, identifier).unwrap().to_der().unwrap());
+        fields.extend_from_slice(&Any::new(Tag::OctetString, b"PRIVATE_P8_PAYLOAD_CANARY".to_vec()).unwrap().to_der().unwrap());
+        Any::new(Tag::Sequence, fields).unwrap().to_der().unwrap()
+    }
+
+    #[test]
+    fn asc_authenticated_round_trip_retains_original_bytes_and_requires_fresh_observation() {
+        use crate::credential_format::{inspect, FileKind};
+        let key = key(); let der = asc_file();
+        let pem = der_07::pem::encode_string("PRIVATE KEY", der_07::pem::LineEnding::CRLF, &der).unwrap().into_bytes();
+        // Raw companion spelling is preserved. Core semantics, not this codec,
+        // decide that whitespace/NUL/non-identifier values are unusable.
+        let values = serde_json::json!({"keyId":" RAW_ASC_KEY_CANARY\0é ", "issuerId":"MixedCase-ASC-ISSUER-CANARY\n"});
+        let fields = commands::own_fields(commands::Kind::AscP8, &values).ok().unwrap();
+        let descriptor = Descriptor::new(commands::Kind::AscP8, None, vec![true, true], true).unwrap();
+        for (encoding, file) in [("der", der), ("pem", pem)] {
+            let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, Some(&file), ALLOWANCE, &mut Fixed::at(20)).unwrap();
+            let original_revision = sealed.revision();
+            let listed = key.open_descriptor(&sealed.bytes[..216 + sealed.prefix.descriptor_length + 16], ALLOWANCE).unwrap();
+            assert!(listed.descriptor.kind == commands::Kind::AscP8 && listed.revision == original_revision);
+            assert_eq!(listed.descriptor.presence(), &[true, true]);
+            let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+            assert!(opened.record == id(3) && opened.revision == original_revision);
+            let stored = opened.file.as_ref().unwrap();
+            assert_eq!(stored.bytes(), file);
+            let observed = inspect(FileKind::AscP8, stored.bytes(), &mut || false).ok().unwrap();
+            assert_eq!(serde_json::to_value(observed).unwrap(), serde_json::json!({
+                "status":"observed","byteCount":file.len(),"format":"pkcs8","encoding":encoding,"algorithm":"ec","curve":"p256"}));
+            assert!(inspect(FileKind::AscP8, stored.bytes(), &mut || true).is_err());
+            assert_eq!(opened.fields.into_value(), values);
+
+            let replacement = key.seal_record_with(id(3), Some(original_revision), &descriptor, &fields, Some(&file), ALLOWANCE, &mut Fixed::at(40)).unwrap();
+            let opened = key.open_record(replacement.bytes, ALLOWANCE).unwrap();
+            assert_eq!(opened.revision.counter, 2);
+            assert!(opened.revision != original_revision && opened.revision.random != original_revision.random);
+            assert_eq!(opened.file.as_ref().unwrap().bytes(), file);
+        }
+        let missing = serde_json::json!({"keyId":null,"issuerId":null});
+        let fields = commands::own_fields(commands::Kind::AscP8, &missing).ok().unwrap();
+        let descriptor = Descriptor::new(commands::Kind::AscP8, None, vec![false, false], true).unwrap();
+        let malformed = b"not-a-private-key-envelope";
+        let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, Some(malformed), ALLOWANCE, &mut Fixed::at(20)).unwrap();
+        let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+        assert_eq!(opened.fields.into_value(), missing);
+        let observation = inspect(FileKind::AscP8, opened.file.as_ref().unwrap().bytes(), &mut || false).ok().unwrap();
+        assert_ne!(serde_json::to_value(observation).unwrap()["status"], "observed",
+            "authenticated storage never persists parser approval");
+    }
+
+    #[test]
+    fn asc_payload_refuses_wrong_kind_presence_duplicate_companions_and_over_cap_before_entropy() {
+        let key = key(); let kind = commands::Kind::AscP8; let file = asc_file();
+        let descriptor = Descriptor::new(kind, None, vec![true, true], true).unwrap();
+        let values = serde_json::json!({"keyId":"A1B2C3D4E5","issuerId":"00112233-4455-6677-8899-AABBCCDDEEFF"});
+        let fields = commands::own_fields(kind, &values).ok().unwrap();
+        for invalid in [
+            br#"{"keyId":"a"}"#.as_slice(), br#"{"keyId":"a","issuerId":"b","keyId":"a"}"#,
+            br#"{"keyId":"a","issuerId":"b","key\u0049d":"a"}"#,
+            br#"{"keyId":"a","issuerId":"b","extra":null}"#, br#"{"keyId":"a","issuerId":[]}"#,
+            br#"{"keyId":null,"issuerId":"b"}"#, br#"{"keyId":"a","issuerId":"b"} {}"#,
+        ] { assert!(decode_payload(&descriptor, &payload(invalid, &file)).is_err()); }
+        for oversized in ["x".repeat(4097), "é".repeat(2049)] {
+            let raw = serde_json::to_vec(&serde_json::json!({"keyId":oversized,"issuerId":"b"})).unwrap();
+            assert!(decode_payload(&descriptor, &payload(&raw, &file)).is_err());
+        }
+        let nullable = Descriptor::new(kind, None, vec![false, true], true).unwrap();
+        assert!(decode_payload(&nullable, &payload(br#"{"keyId":null,"issuerId":"b"}"#, &file)).is_ok());
+        let wrong_kind = super::tests::fields();
+        for (descriptor, fields, source) in [
+            (&descriptor, &wrong_kind, Some(file.as_slice())),
+            (&nullable, &fields, Some(file.as_slice())),
+            (&descriptor, &fields, None),
+        ] {
+            let mut random = Fixed::at(20);
+            assert!(key.seal_record_with(id(3), None, descriptor, fields, source, ALLOWANCE, &mut random).is_err());
+            assert_eq!(random.call, 20);
+        }
+        let limit = asset_source::material_limit(crate::credential_format::FileKind::AscP8);
+        assert_eq!(limit, 4 * 1024 * 1024);
+        let over = vec![b'x'; limit + 1];
+        let mut random = Fixed::at(20);
+        assert!(key.seal_record_with(id(3), None, &descriptor, &fields, Some(&over), ALLOWANCE, &mut random).is_err());
+        assert_eq!(random.call, 20);
+        assert!(decode_payload(&descriptor, &payload(&serde_json::to_vec(&values).unwrap(), &over)).is_err());
+        let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, Some(&over[..limit]), ALLOWANCE, &mut random).unwrap();
+        let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+        assert_eq!(opened.file.as_ref().unwrap().bytes(), &over[..limit]);
+    }
+
     #[test]
     fn random_refusal_collision_and_capacity_never_return_an_output() {
         for failed in 21..=22 {

@@ -21,6 +21,8 @@ use super::owned_macos::observation::{observed_panel, observe_panel_action, prep
 pub(crate) mod ios;
 #[path = "installed_shell_observation_macos_session.rs"]
 pub(crate) mod session;
+#[path = "installed_shell_observation_macos_project_fields.rs"]
+pub(crate) mod project_fields;
 pub(crate) use session::Command as SessionCommand;
 
 // Closed public categories only. The first winner is published before failure;
@@ -62,6 +64,8 @@ const FAILURE_REASONS: &[&str] = &[
     "ios-original-witness", "ios-request-contract", "ios-status-contract", "ios-version-contract",
     "ios-finality-contract", "ios-fixture-contract", "ios-dom-contract",
     "session-request-contract", "session-result-contract", "session-original-contract", "session-dom-contract",
+    "project-fields-request-contract", "project-fields-result-contract", "project-fields-original-contract",
+    "project-fields-fixture-contract", "project-fields-dom-contract",
 ];
 const _: () = assert!(FAILURE_REASONS.len() < u8::MAX as usize);
 fn latch_failure(first: &AtomicU8, failed: &AtomicBool, reason: &'static str) -> bool {
@@ -160,20 +164,31 @@ const CONFIG: &[u8] = br#"{
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case) }
+enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields }
 impl Case {
     fn name(self) -> &'static str { match self {
         Self::FirstSave => "first-save", Self::NoopStale => "noop-stale",
         Self::PickerLoss => "picker-loss", Self::SaveLoss => "save-loss",
         Self::Ios(case) => case.name(),
+        Self::ProjectFields => project_fields::NAME,
     }}
     fn selected_id(self) -> u32 { if self == Self::FirstSave { 2 } else { 1 } }
-    fn quit_id(self) -> u32 { if self.inputs() { 12 } else if self == Self::FirstSave { 4 } else { 2 } }
+    fn quit_id(self) -> u32 { if self.inputs() || self == Self::ProjectFields { 12 } else if self == Self::FirstSave { 4 } else { 2 } }
     fn inputs(self) -> bool { matches!(self, Self::Ios(case) if case.inputs()) }
     fn file_index(self, id: u32) -> Option<u8> { match self { Self::Ios(case) => session::file_index(case,id), _ => None } }
     fn input_id(self, i: u8) -> Option<u32> { match self { Self::Ios(case) => session::choose_id(case,i), _ => None } }
+    fn field_index(self, id: u32) -> Option<u8> { (self == Self::ProjectFields).then(|| project_fields::index(id)).flatten() }
+    fn accepted_id(self, id: u32) -> bool {
+        self != Self::PickerLoss && (id == self.selected_id() || self.file_index(id).is_some_and(|i| i != 6)
+            || self.field_index(id).is_some_and(project_fields::accepts))
+    }
+    fn kind_name(self, id: u32) -> &'static str {
+        self.field_index(id).and_then(project_fields::kind_name).unwrap_or(if self.file_index(id).is_some() { "file" } else { "project" })
+    }
     fn open_id(self, step: Step) -> Option<u32> { match step {
-        Step::OpenProject => Some(self.selected_id()), Step::Session(session::Step::Native(i)) if i != 6 => self.input_id(i), _ => None,
+        Step::OpenProject => Some(self.selected_id()), Step::Session(session::Step::Native(i)) if i != 6 => self.input_id(i),
+        Step::ProjectFields(project_fields::Step::Native(i)) if self == Self::ProjectFields && project_fields::accepts(i) => project_fields::id(i),
+        _ => None,
     } }
     fn panel_index(self, step: Step) -> Option<usize> { match step {
         Step::CancelProject | Step::PickerPending => Some(0),
@@ -182,7 +197,7 @@ impl Case {
     } }
     fn methods(self) -> usize { METHODS.len() }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) => 0 } }
+    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields => 0 } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -195,7 +210,7 @@ enum Step {
     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
     PickerPending, Reload, Lost,
-    Ios(ios::Step), Session(session::Step),
+    Ios(ios::Step), Session(session::Step), ProjectFields(project_fields::Step),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -248,7 +263,9 @@ fn retire_returned_native(pending: &mut Option<Pending>, current: Step, returned
 }
 fn open_step_entry(pending: Option<Pending>, current: Step, id: u32) -> bool {
     (matches!(id, 1 | 2) && current == Step::OpenProject
-        || matches!(current, Step::Session(session::Step::Native(i)) if i < 6) && (2..=10).contains(&id))
+        || matches!(current, Step::Session(session::Step::Native(i)) if i < 6) && (2..=10).contains(&id)
+        || matches!(current, Step::ProjectFields(project_fields::Step::Native(i))
+            if project_fields::accepts(i) && project_fields::id(i) == Some(id)))
         && pending == Some(Pending::Accessibility(id))
 }
 fn retire_returned_open(pending: &mut Option<Pending>, current: Step, id: u32) -> bool {
@@ -304,7 +321,7 @@ struct OpenFlight {
 }
 #[derive(Clone, Copy)]
 struct OpenInputSample {
-    id: u32, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
+    id: u32, step: Step, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
     entered: Option<bool>, native_entered: Option<bool>, returned: bool, joined: bool, retired: bool,
     expired: bool, timely: Option<bool>, custody_known: Option<bool>,
     attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
@@ -312,8 +329,12 @@ struct OpenInputSample {
     diagnostic: Option<mrk_macos_installed_native::OpenDiagnostic>, report: Option<mrk_macos_installed_native::OpenReport>,
 }
 impl OpenInputSample {
-    fn preparing(id: u32) -> Self {
-        Self { id, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
+    fn preparing(id: u32, step: Step) -> Self {
+        // Project/File retain the existing action-schema label. The new P2
+        // rows carry their exact closed purpose/ordinal rather than borrowing
+        // that historical Project action label.
+        let step = if matches!(step, Step::ProjectFields(_)) { step } else { Step::OpenProject };
+        Self { id, step, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
             entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
             expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
             triggered: None, worker_registered: false, worker_joined: false, rechecks_settled: None, diagnostic: None, report: None }
@@ -358,7 +379,7 @@ impl OpenInputSample {
             && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-preconfigured-original-press-v5","step":"OpenProject","id":self.id,
+        json!({"mechanism":"accessibility-preconfigured-original-press-v5","step":format!("{:?}",self.step),"id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
             "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
             "receiptJoined":self.joined,"workerRegistered":self.worker_registered,"workerJoined":self.worker_joined,
@@ -382,7 +403,7 @@ impl IdentitySample {
     fn succeeded(self, id: u32) -> bool { self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched) }
     fn value(self) -> Value {
         let c = self.configuration;
-        let mut value = json!({"mechanism":"preconfigured-original-sheet-v2","case":self.case.name(),"id":self.id,"kind":if c.file_panel { "file" } else { "project" },
+        let mut value = json!({"mechanism":"preconfigured-original-sheet-v2","case":self.case.name(),"id":self.id,"kind":self.case.kind_name(self.id),
             "start":{"returned":true,"result":self.start_result},
             "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
                 "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,
@@ -404,11 +425,11 @@ struct CompletionSample {
 }
 impl CompletionSample {
     fn succeeded(self, id: u32) -> bool {
-        self.case != Case::PickerLoss && (self.id == self.case.selected_id() || self.case.file_index(self.id).is_some_and(|i| i != 6)) && self.id == id
+        self.case.accepted_id(self.id) && self.id == id
             && self.timely && self.returned.succeeded()
     }
     fn value(self) -> Value {
-        json!({"mechanism":"original-ok-singleton-selection-v1","case":self.case.name(),"id":self.id,"kind":if self.case.file_index(self.id).is_some() { "file" } else { "project" },
+        json!({"mechanism":"original-ok-singleton-selection-v1","case":self.case.name(),"id":self.id,"kind":self.case.kind_name(self.id),
             "pollReturned":true,"pollResult":self.returned.poll_result,"timely":self.timely,
             "facts":self.returned.facts.map(|f| json!({"callbackEntered":f.callback_entered,
                 "urlsReadEntered":f.urls_read_entered,"urlsReadReturned":f.urls_read_returned,
@@ -418,7 +439,7 @@ impl CompletionSample {
 }
 fn publish_completion(slot: &mut Option<CompletionSample>, case: Case, id: u32,
     returned: mrk_macos_installed_native::CompletionReturn, timely: bool) -> Result<(), &'static str> {
-    if case == Case::PickerLoss || (id != case.selected_id() && !case.file_index(id).is_some_and(|i| i != 6)) || slot.is_some() { return Err("native-completion-custody"); }
+    if !case.accepted_id(id) || slot.is_some() { return Err("native-completion-custody"); }
     *slot = Some(CompletionSample { case, id, timely, returned });
     Ok(()) // Actual returned DATA even on error/expiry; never cleanup authority.
 }
@@ -467,7 +488,9 @@ impl PanelSample {
         let native = &panel.native;
         Self { step, id: panel.id,
             kind: match native.kind { mrk_macos_installed_native::PanelKind::Project => "project",
-                mrk_macos_installed_native::PanelKind::Quit => "quit", mrk_macos_installed_native::PanelKind::File => "file" },
+                mrk_macos_installed_native::PanelKind::Quit => "quit", mrk_macos_installed_native::PanelKind::File => "file",
+                mrk_macos_installed_native::PanelKind::VersionSource => "version-source", mrk_macos_installed_native::PanelKind::IosProject => "ios-project",
+                mrk_macos_installed_native::PanelKind::IosWorkspace => "ios-workspace", mrk_macos_installed_native::PanelKind::MetadataRoot => "metadata-root" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
             panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible }
@@ -572,7 +595,7 @@ fn directory_rosters(path: &Path, uid: u32, mode: u32, entries: &[&str], alterna
 struct Fixture {
     root: PathBuf, uid: u32, root_identity: [u64; 6], app_identity: Option<[u64; 6]>,
     untouched: Option<[FileFact; 3]>, ignore: FileFact, config: Option<FileFact>, release: Option<[u64; 6]>,
-    ios: Option<ios::Fixture>,
+    ios: Option<ios::Fixture>, project_fields: Option<project_fields::Fixture>,
     written: bool, mutated: bool,
 }
 impl Fixture {
@@ -587,7 +610,14 @@ impl Fixture {
             let root_identity = directory(&root, uid, 0o700, &fixture.root_entries())?;
             return Ok(Self { root, uid, root_identity, app_identity: fixture.source_identity(), untouched: None,
                 ignore: fixture.ignore(), config: fixture.config(), release: fixture.release_identity(),
-                ios: Some(fixture), written: false, mutated: false });
+                ios: Some(fixture), project_fields: None, written: false, mutated: false });
+        }
+        if case == Case::ProjectFields {
+            let fixture = project_fields::Fixture::capture(&root, uid)?;
+            return Ok(Self { root, uid, root_identity: fixture.dir(".").ok_or(())?,
+                app_identity: fixture.dir("app"), untouched: None, ignore: fixture.file(".gitignore").ok_or(())?,
+                config: fixture.file("release/mobile-release.json"), release: fixture.dir("release"),
+                ios: None, project_fields: Some(fixture), written: false, mutated: false });
         }
         let saved = case == Case::NoopStale;
         let root_identity = directory(&root, uid, 0o700, if saved {
@@ -600,9 +630,10 @@ impl Fixture {
         let (config, release) = if saved { (Some(file_fact(&root.join("release/mobile-release.json"), CONFIG, uid)?),
             Some(directory(&root.join("release"), uid, 0o755, &["mobile-release.json"])?)) } else { (None, None) };
         Ok(Self { root, uid, root_identity, app_identity: Some(app_identity), untouched: Some(untouched), ignore, config, release,
-            ios: None, written: false, mutated: false })
+            ios: None, project_fields: None, written: false, mutated: false })
     }
     fn verify(&self, saved: bool) -> Result<(), ()> {
+        if let Some(fixture) = &self.project_fields { return fixture.verify(&self.root, self.uid); }
         if let Some(ios) = &self.ios {
             if directory(&self.root, self.uid, 0o700, &ios.root_entries())?[..5] != self.root_identity[..5] { return Err(()); }
             return ios.verify(&self.root, self.uid);
@@ -704,14 +735,16 @@ struct Record {
     quit_cancelled: bool, close_count: u8, reload_requested: bool, reload_returned: bool, reload_navigation: bool,
     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
     failure_close_requested: bool, failure_quit_attempted: bool,
-    ios_record: Option<ios::Record>, session_record: Option<session::Record>,
+    ios_record: Option<ios::Record>, session_record: Option<session::Record>, project_field_record: Option<project_fields::Record>,
     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
+    field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
     fixture: Fixture,
 }
 impl Record {
     fn action_returned(&self, step: Step) -> Result<bool, &'static str> {
         match step {
             Step::Session(session::Step::Native(i)) => self.file_actions.get(usize::from(i)).copied().ok_or("native-step"),
+            Step::ProjectFields(project_fields::Step::Native(i)) => self.field_actions.get(usize::from(i)).copied().ok_or("native-step"),
             _ => same_panel_action_returned(step, &self.native_actions_returned),
         }
     }
@@ -724,7 +757,8 @@ impl Record {
     fn retain_open(&mut self, id: u32) -> bool {
         let (Some(sample), Some(identity), Some(completion), Some(progress)) =
             (self.open_sample(), self.identity_binding, self.completion_selection, self.open_progress.as_ref()) else { return false; };
-        if self.panel_history.len() >= 7 || self.panel_history.iter().any(|p| p.sample.id == id)
+        if self.panel_history.len() >= if self.project_field_record.is_some() { 9 } else { 7 }
+            || self.panel_history.iter().any(|p| p.sample.id == id)
             || self.pending.is_some() || self.prepared_open.is_some() || !sample.succeeded() || sample.id != id
             || !identity.succeeded(id) || !completion.succeeded(id) || progress.snapshot().state != "retired" { return false; }
         self.panel_history.push(OpenHistory { sample, identity, completion, progress: progress.clone() });
@@ -742,13 +776,19 @@ struct FailureSnapshot {
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>, completion_selection: Option<CompletionSample>,
     project_selection: Option<ProjectSelectionSample>,
+    field_preparation: Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation)>,
 }
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
             original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
-            project_selection: r.project_selection, completion_selection: r.completion_selection }
+            project_selection: r.project_selection, completion_selection: r.completion_selection,
+            field_preparation: match r.step {
+                Step::ProjectFields(project_fields::Step::Native(i) | project_fields::Step::Chosen(i)) =>
+                    r.project_field_record.as_ref().and_then(|record| record.preparation_sample(i)).map(|data| (i,data)),
+                _ => None,
+            } }
     }
     fn at_expiry(mut self, progress: OpenProgress) -> Self {
         // Non-accessibility fields are the original pre-arm sample, NOT fresh
@@ -775,7 +815,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     let pending = r.pending.map(|pending| {
         let (kind, step) = match pending {
             Pending::Dom(original) => ("dom", Some(original.step)), Pending::Native(step) => ("native", Some(step)),
-            Pending::Accessibility(_) => ("accessibility", Some(Step::OpenProject)),
+            Pending::Accessibility(_) => ("accessibility", Some(r.accessibility.map_or(Step::OpenProject, |s| s.step))),
             Pending::Close(step) => ("close", Some(step)), Pending::Reload => ("reload", None),
             Pending::FailureClose => ("failure-close", None),
         };
@@ -798,6 +838,10 @@ fn failure_context(r: &FailureSnapshot) -> Value {
         "accessibilityBinding":r.identity_binding.map(IdentitySample::value)});
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
+    if let Some((i,data)) = r.field_preparation {
+        value["projectFieldPreparation"] = json!({"operationId":project_fields::id(i),"kind":project_fields::kind_name(i),
+            "returned":true,"result":data.result,"facts":data.facts});
+    }
     value
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -865,8 +909,8 @@ pub(super) struct Observation {
     // Only the original relay owns this lock; main never acquires it. Unknown
     // retains the exact receiver/token/owners here past the finite wait.
     open_custody: Mutex<Option<OpenFlight>>,
-    case: Case, main: ThreadId, end: Instant, project_path: PathBuf, input_paths: Vec<PathBuf>, base: Value,
-    ios: Option<Arc<ios::Control>>,
+    case: Case, main: ThreadId, end: Instant, project_path: PathBuf, input_paths: Vec<PathBuf>, field_paths: Vec<PathBuf>, base: Value,
+    ios: Option<Arc<ios::Control>>, project_fields: Option<Arc<project_fields::Control>>,
     failed: AtomicBool, failure_reason: AtomicU8, diagnostic: DiagnosticWriter, record: Mutex<Record>,
 }
 impl Observation {
@@ -874,8 +918,10 @@ impl Observation {
         let base = crate::protocol::strict_json(if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
         let end = Instant::now() + Duration::from_secs(if matches!(case, Case::Ios(c) if c != ios::Case::SigningInputs) { 315 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
+        let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let project_path = fixture.root.clone();
         let input_paths = if let Case::Ios(c) = case { session::targets(&project_path, c).ok_or(())? } else { Vec::new() };
+        let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 original_window: None,
@@ -898,11 +944,14 @@ impl Observation {
                 failure_close_requested: false, failure_quit_attempted: false,
                 ios_record: matches!(case, Case::Ios(c) if c != ios::Case::SigningInputs).then(ios::Record::default),
                 session_record: ios.as_ref().filter(|c| c.case.inputs()).map(|c| session::Record::new(c.case)),
-                panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7], fixture,
+                project_field_record: (case == Case::ProjectFields).then(project_fields::Record::new),
+                panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7],
+                field_attached: [false;project_fields::COUNT], field_actions: [false;project_fields::COUNT], fixture,
             });
         let diagnostic = DiagnosticWriter::new()?; // All fallible setup precedes spawn/registration.
         Ok(Self { open_custody: Mutex::new(None), case, main: std::thread::current().id(), end,
-            project_path, input_paths, base, ios, failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
+            project_path, input_paths, field_paths, base, ios, project_fields,
+            failed: AtomicBool::new(false), failure_reason: AtomicU8::new(0), diagnostic, record })
     }
     fn fail(&self) { self.fail_with("observer-invariant"); }
     fn fail_with(&self, reason: &'static str) { latch_failure(&self.failure_reason, &self.failed, reason); }
@@ -919,6 +968,10 @@ impl Observation {
         match kind {
             mrk_macos_installed_native::PanelKind::Project => self.case != Case::PickerLoss && id == self.case.selected_id(),
             mrk_macos_installed_native::PanelKind::File => self.case.file_index(id).is_some_and(|i| i != 6),
+            mrk_macos_installed_native::PanelKind::VersionSource
+                | mrk_macos_installed_native::PanelKind::IosProject | mrk_macos_installed_native::PanelKind::IosWorkspace
+                | mrk_macos_installed_native::PanelKind::MetadataRoot => self.case.field_index(id).is_some_and(|i|
+                    project_fields::accepts(i) && project_fields::kind(i) == Some(kind)),
             mrk_macos_installed_native::PanelKind::Quit => false,
         }
     }
@@ -927,6 +980,9 @@ impl Observation {
         match kind {
             mrk_macos_installed_native::PanelKind::Project => Some(self.project_path.as_path()),
             mrk_macos_installed_native::PanelKind::File => self.input_paths.get(usize::from(self.case.file_index(id)?)).map(PathBuf::as_path),
+            mrk_macos_installed_native::PanelKind::VersionSource
+                | mrk_macos_installed_native::PanelKind::IosProject | mrk_macos_installed_native::PanelKind::IosWorkspace
+                | mrk_macos_installed_native::PanelKind::MetadataRoot => self.field_paths.get(usize::from(self.case.field_index(id)?)).map(PathBuf::as_path),
             mrk_macos_installed_native::PanelKind::Quit => None,
         }
     }
@@ -950,7 +1006,10 @@ impl Observation {
     pub(super) fn identity_start_returned(&self, id: u32, returned: mrk_macos_installed_native::IdentityStartReturn) {
         let Some(mut r) = self.record() else { return; };
         let Some(configuration) = returned.configuration else { self.fail_with("native-default-binding"); return; };
-        let kind = if configuration.file_panel { mrk_macos_installed_native::PanelKind::File } else { mrk_macos_installed_native::PanelKind::Project };
+        let kind = if let Some(i) = self.case.field_index(id) {
+            if configuration.file_panel { self.fail_with("native-default-binding"); return; }
+            let Some(kind) = project_fields::kind(i) else { self.fail_with("native-default-binding"); return; }; kind
+        } else if configuration.file_panel { mrk_macos_installed_native::PanelKind::File } else { mrk_macos_installed_native::PanelKind::Project };
         if !self.open_identity_scope(id, kind) || r.identity_binding.is_some() {
             self.fail_with("native-default-custody"); return;
         }
@@ -967,7 +1026,10 @@ impl Observation {
         // This reason is latched only after the original action body returns.
         // Let its matching Record publication precede the one-shot report;
         // unrelated failures still report truthful unknown/nonreturned DATA.
-        if matches!(reason, "adapter-native-action" | "native-default-binding") && r.pending == Some(Pending::Native(r.step))
+        if (matches!(reason, "adapter-native-action" | "native-default-binding")
+                || matches!(r.step, Step::ProjectFields(project_fields::Step::Native(_)))
+                    && matches!(reason, "adapter-native-observation" | "project-fields-original-contract"))
+            && r.pending == Some(Pending::Native(r.step))
             && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {
             return;
         }
@@ -1043,7 +1105,8 @@ impl Observation {
         let valid = info.runtime.state == "available" && info.runtime.mode == "bundled" && info.runtime.reason.is_none()
             && info.app_name == "Mobile Release Kit" && info.app_version == env!("CARGO_PKG_VERSION")
             && info.project_selection.available && info.project_selection.reason.is_none()
-            && !info.project_path_selection.available
+            && info.project_path_selection.available == (self.case == Case::ProjectFields
+                || crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED)
             && (METHODS.len()..=64).contains(&methods.len()) && (1..=64).contains(&actions.len())
             && methods.iter().filter(available).count() == self.case.methods()
             && METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1)
@@ -1096,7 +1159,7 @@ impl Observation {
     }
     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
-        let saved = self.case == Case::NoopStale || r.snapshot_requests == 2;
+        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields) || r.snapshot_requests == 2;
         let failure = match result {
             Ok(value) => if let Case::Ios(case) = self.case { ios::snapshot_failure(value, &self.project_path, case, &self.base) }
                 else { snapshot_value_failure(value, &self.project_path, saved, &self.base) },
@@ -1141,6 +1204,7 @@ impl Observation {
         if !r.validation_requested || r.validation || !result.as_ref().is_ok_and(format_valid) { self.fail(); return; } r.validation = true;
     }
     pub(super) fn preview_request(&self, base: &Value, draft: &Value) {
+        if self.case == Case::ProjectFields { self.project_fields_preview_request(base, draft); return; }
         let Some(mut r) = self.record() else { return; };
         let expected = if self.case == Case::NoopStale { &self.base } else { &Value::Null };
         if !r.validation || r.preview_requested || !matches!(r.step, Step::Preview | Step::Previewed) || base != expected || draft != &self.base {
@@ -1148,6 +1212,7 @@ impl Observation {
         } r.preview_requested = true;
     }
     pub(super) fn preview_result(&self, result: &Result<Value, BridgeError>) {
+        if self.case == Case::ProjectFields { self.project_fields_preview_result(result); return; }
         let Some(mut r) = self.record() else { return; };
         let Some(v) = result.as_ref().ok().filter(|v| format_valid(&v["validation"]) && assurance(v,"schema-policy")
             && v["comparison"]["state"] == "complete" && v["comparison"]["unreviewedCount"] == 0
@@ -1419,7 +1484,9 @@ impl Observation {
                         self.fail_with("native-completion-selection"); return;
                     }
                     r.project_witness = Some(witness); r.project_settled = true;
-                    if self.case.inputs() && !r.retain_open(self.case.selected_id()) { self.fail_with("session-original-contract"); return; }
+                    if (self.case.inputs() || self.case == Case::ProjectFields) && !r.retain_open(self.case.selected_id()) {
+                        self.fail_with(if self.case == Case::ProjectFields { "project-fields-original-contract" } else { "session-original-contract" }); return;
+                    }
                     r.step = Step::Snapshot; return;
                 },
                 Step::PickerPending => {
@@ -1485,6 +1552,37 @@ impl Observation {
                     // ReleaseHold only releases its original DATA channel; no
                     // DOM call or replacement worker is allowed for Running.
                     if next == ios::Step::Running { return; }
+                },
+                Step::ProjectFields(step) => {
+                    let Some(snapshot) = state.document.installed_macos_session_snapshot() else { return; };
+                    let Some(record) = r.project_field_record.as_mut() else { self.fail_with("project-fields-original-contract"); return; };
+                    if !record.observe(&snapshot) { self.fail_with("project-fields-original-contract"); return; }
+                    if let project_fields::Step::Chosen(i) = step {
+                        if !record.ready_for_native(i, &snapshot) { return; }
+                        let Some(target) = self.field_paths.get(usize::from(i)) else { self.fail_with("project-fields-original-contract"); return; };
+                        if !record.native_finished(i, &state.document, target) { self.fail_with("project-fields-original-contract"); return; }
+                        if project_fields::accepts(i) {
+                            if !r.retain_open(project_fields::id(i).unwrap_or(0)) { self.fail_with("project-fields-original-contract"); return; }
+                        } else if r.open_sample().is_some() || r.identity_binding.is_some() || r.completion_selection.is_some() {
+                            self.fail_with("project-fields-original-contract"); return;
+                        }
+                        // Only original source/GUI/child/coordinator settlement
+                        // above permits restoration of our fixed fixture.
+                        let root = r.fixture.root.clone(); let uid = r.fixture.uid;
+                        if r.fixture.project_fields.as_mut().is_none_or(|fixture|
+                            fixture.restore(i, &root, uid, self.end, &self.failed).is_err()) {
+                            self.fail_with("project-fields-fixture-contract"); return;
+                        }
+                        if self.timely() { r.step = Step::ProjectFields(project_fields::Step::Read(i)); }
+                        return;
+                    }
+                    if step == project_fields::Step::Done {
+                        if snapshot.originals != 11 || !snapshot.originals_settled || !snapshot.empty
+                            || r.fixture.project_fields.as_ref().is_none_or(|fixture| !fixture.restored())
+                            || r.fixture.verify(true).is_err() { self.fail_with("project-fields-fixture-contract"); return; }
+                        if self.timely() { r.file_readback = true; r.step = Step::Close; }
+                        return;
+                    }
                 },
                 Step::Session(step) => {
                     let Some(snapshot) = state.document.installed_macos_session_snapshot() else { return; };
@@ -1555,7 +1653,8 @@ impl Observation {
             }
             if window.close().is_err() { self.fail(); } return;
         }
-        if matches!(step,Step::CancelProject|Step::OpenProject|Step::QuitCancel|Step::Quit|Step::PickerPending|Step::Session(session::Step::Native(_))) {
+        if matches!(step,Step::CancelProject|Step::OpenProject|Step::QuitCancel|Step::Quit|Step::PickerPending
+            |Step::Session(session::Step::Native(_))|Step::ProjectFields(project_fields::Step::Native(_))) {
             {
                 let Some(mut r) = self.record() else { return; };
                 // The entry check preceded this lock. A late tick must not
@@ -1940,6 +2039,9 @@ impl Observation {
                 Step::Session(session::Step::Native(i)) if i != 6 => {
                     r.file_actions[usize::from(i)] = true; r.step = Step::Session(session::Step::Chosen(i));
                 },
+                Step::ProjectFields(project_fields::Step::Native(i)) if project_fields::accepts(i) => {
+                    r.field_actions[usize::from(i)] = true; r.step = Step::ProjectFields(project_fields::Step::Chosen(i));
+                },
                 _ => { self.fail_with("native-step"); return true; },
             }
         }
@@ -1972,13 +2074,20 @@ impl Observation {
             }
         }
         let mut action_diagnostic = None;
-        let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None;
-        let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample, &mut binding_return);
+        let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None; let mut field_preparation = None;
+        let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample,
+            &mut binding_return, &mut field_preparation);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
         if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail_with("native-pending-custody"); return; }
         if let Some(native) = r.native_dispatch.as_mut().filter(|native| native.step == step) { native.returned = true; }
+        if let Some((i, returned)) = field_preparation {
+            if step != Step::ProjectFields(project_fields::Step::Native(i))
+                || !r.project_field_record.as_mut().is_some_and(|record| record.preparation(i, returned)) {
+                self.fail_with("project-fields-original-contract");
+            }
+        }
         if result == Err("adapter-native-action") && first_failure_reason(&self.failure_reason) == Some("adapter-native-action") {
             r.native_action = action_diagnostic; // This same first error's returned DATA only.
         }
@@ -2014,6 +2123,13 @@ impl Observation {
             Ok(false) => {},
             Err(_) => {},
             Ok(true) => {
+                if let Step::ProjectFields(project_fields::Step::Native(i)) = step {
+                    if !matches!(i,4|5) || r.field_actions[usize::from(i)]
+                        || !r.project_field_record.as_ref().is_some_and(|record| record.prepared(i)) {
+                        self.fail_with("native-duplicate-action"); return;
+                    }
+                    r.field_actions[usize::from(i)] = true; r.step = Step::ProjectFields(project_fields::Step::Chosen(i)); return;
+                }
                 if let Step::Session(session::Step::Native(6)) = step {
                     if !self.case.file_index(11).is_some_and(|i| i == 6) || r.file_actions[6] { self.fail_with("native-duplicate-action"); return; }
                     r.file_actions[6] = true; r.step = Step::Session(session::Step::Chosen(6)); return;
@@ -2031,7 +2147,8 @@ impl Observation {
     }
     fn native_step_body(&self, step: Step, timely: bool,
         action_diagnostic: &mut Option<NativeActionSample>, prepared_open: &mut Option<PreparedOpenInput>,
-        open_sample: &mut Option<OpenInputSample>, binding_return: &mut Option<mrk_macos_installed_native::IdentityBindingReturn>) -> Result<bool, &'static str> {
+        open_sample: &mut Option<OpenInputSample>, binding_return: &mut Option<mrk_macos_installed_native::IdentityBindingReturn>,
+        field_preparation: &mut Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation)>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
         // retire in the caller, permitting ordinary failure shutdown to check.
@@ -2041,6 +2158,8 @@ impl Observation {
             Step::CancelProject | Step::PickerPending => (1,PanelKind::Project),
             Step::OpenProject => (self.case.selected_id(),PanelKind::Project),
             Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File),
+            Step::ProjectFields(project_fields::Step::Native(i)) if self.case == Case::ProjectFields =>
+                (project_fields::id(i).ok_or("native-step")?,project_fields::kind(i).ok_or("native-step")?),
             Step::QuitCancel => (3,PanelKind::Quit), Step::Quit => (self.case.quit_id(),PanelKind::Quit), _ => return Err("native-step"),
         };
         let open = self.case.open_id(step) == Some(id);
@@ -2054,17 +2173,35 @@ impl Observation {
             if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
             r.last_panel = Some(PanelSample::from_original(step, &panel));
             let attached = if let Some(i) = self.case.file_index(id) { r.file_attached[usize::from(i)] }
+                else if let Some(i) = self.case.field_index(id) { r.field_attached[usize::from(i)] }
                 else { r.panel_attached[self.case.panel_index(step).ok_or("native-step")?] };
             if !panel_readiness(&panel, id, kind, attached, r.action_returned(step)?,
-                open && r.identity_binding.is_some_and(|s| s.configured(id)))? {
+                self.case.field_index(id).is_some() || open && r.identity_binding.is_some_and(|s| s.configured(id)))? {
                 // Only this known never-attached/no-history phase may wait.
                 // No action, progress fact, or renewed endpoint is produced.
                 return Ok(false);
             }
             if let Some(i) = self.case.file_index(id) { r.file_attached[usize::from(i)] = true; }
+            else if let Some(i) = self.case.field_index(id) { r.field_attached[usize::from(i)] = true; }
             else { r.panel_attached[self.case.panel_index(step).ok_or("native-step")?] = true; }
         }
         if step == Step::PickerPending { return Ok(true); } // Observation only; never dismiss-as-Cancel.
+        if let Some(i) = self.case.field_index(id) {
+            let prepared = {
+                let r = self.record().ok_or("observer-record-unavailable")?;
+                r.project_field_record.as_ref().is_some_and(|record| record.prepared(i))
+            };
+            if !prepared {
+                if !self.timely() { return Err("observer-deadline"); }
+                let mut returned = None;
+                let result = super::owned_macos::observation::prepare_project_field(id, kind, project_fields::accepts(i), &mut returned);
+                *field_preparation = returned.map(|value| (i,value));
+                result.map_err(|error| error.reason())?;
+                // Publish actual initial-root/options DATA only after this
+                // body returns. The next original opportunity can act.
+                return Ok(false);
+            }
+        }
         if open && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {
             return Ok(false); // Before any Open action; original deadline remains unchanged.
         }
@@ -2076,7 +2213,7 @@ impl Observation {
                     return Err("native-default-binding");
                 }
             }
-            let mut sample = OpenInputSample::preparing(id);
+            let mut sample = OpenInputSample::preparing(id, step);
             let target = self.open_identity_target(id, kind).ok_or("native-default-binding")?;
             let prepared = prepare_open_input(id, target, binding_return).map_err(|error| {
                 sample.diagnostic = error.binding_diagnostic(); error.reason()
@@ -2088,6 +2225,8 @@ impl Observation {
         let action = match step {
             Step::CancelProject => PanelAction::ProjectCancel,
             Step::Session(session::Step::Native(6)) => PanelAction::FileCancel,
+            Step::ProjectFields(project_fields::Step::Native(4)) => PanelAction::FileCancel,
+            Step::ProjectFields(project_fields::Step::Native(5)) => PanelAction::ProjectCancel,
             Step::QuitCancel => PanelAction::QuitCancel, Step::Quit => PanelAction::QuitConfirm, _ => return Err("native-step"),
         };
         if !self.timely() { return Err("observer-deadline"); }
@@ -2210,6 +2349,15 @@ impl Observation {
             }
             return;
         }
+        if let Step::ProjectFields(step) = step {
+            let Some(record) = r.project_field_record.as_ref() else { self.fail_with("project-fields-dom-contract"); return; };
+            let mut observed = record.clone();
+            match observed.dom(step, &v) {
+                Ok(next) if self.timely() => { r.project_field_record = Some(observed); r.step = Step::ProjectFields(next); },
+                Ok(_) => {}, Err(()) => self.fail_with("project-fields-dom-contract"),
+            }
+            return;
+        }
         let review_round = match step { Step::Review(i) => Some(i), Step::KeptReview => Some(0), Step::RetainedReview => Some(1), _ => None };
         if let Some(i) = review_round {
             if !r.sessions.get(i).is_some_and(|s| s.live_review() && s.review.as_ref() == v.get("review"))
@@ -2225,7 +2373,7 @@ impl Observation {
             Step::ReadCancelled => r.cancel_settled && v["unselected"] == true && v["chooseEnabled"] == true,
             Step::Snapshot => r.project_settled && r.snapshots == 1 && v["name"] == self.case.name()
                 && v["configuration"] == (if self.case == Case::Ios(ios::Case::RecoveryEmpty) { "Not configured" }
-                    else if matches!(self.case, Case::NoopStale | Case::Ios(_)) { "Format-valid only" } else { "Not configured" }),
+                    else if matches!(self.case, Case::NoopStale | Case::Ios(_) | Case::ProjectFields) { "Format-valid only" } else { "Not configured" }),
             Step::Suggestion => r.suggestion.as_ref() == v.get("provenance"),
             Step::Draft => v["source"] == "version.properties" && v["saveAvailable"] == true
                 && v["dirty"].as_bool() == Some(self.case != Case::NoopStale),
@@ -2269,6 +2417,7 @@ impl Observation {
             Step::ChooseCancel => { r.project_calls += 1; Step::CancelProject }, Step::ReadCancelled => Step::ChooseProject,
             Step::ChooseProject => { r.project_calls += 1; if self.case == Case::PickerLoss { Step::PickerPending } else { Step::OpenProject } },
             Step::Snapshot => if self.case.inputs() { Step::Session(session::Step::Navigate) }
+                else if self.case == Case::ProjectFields { Step::ProjectFields(project_fields::Step::Navigate(0)) }
                 else if matches!(self.case, Case::Ios(_)) { Step::Ios(ios::Step::Navigate) } else { Step::Settings },
             Step::Settings => if self.case == Case::NoopStale { Step::Draft } else { Step::Suggest },
             Step::Suggest => Step::Suggestion, Step::Suggestion => Step::Adopt, Step::Adopt => Step::Draft,
@@ -2307,12 +2456,14 @@ impl Observation {
     }
     pub(super) fn actual_exit(&self, ready: bool, document: &DocumentBinding, edits: &EditOwner) {
         if let Ok(status) = edits.status() { self.edit_status(&status,edits); } else { self.fail_with("exit-edit-status"); }
-        let session = self.case.inputs().then(|| document.installed_macos_session_snapshot()).flatten();
+        let session = (self.case.inputs() || self.case == Case::ProjectFields).then(|| document.installed_macos_session_snapshot()).flatten();
         let Some(mut r) = self.record() else { return; };
         let finality = document.installed_macos_final(self.case.quit_id(),r.project_witness.as_ref(),r.picker_witness.as_ref(),self.case.loses_document());
         if !ready || !finality || !r.relay_joined || r.actual_exit || r.step != Step::Exit || r.pending.is_some()
             || !r.native_actions_returned[3] || !r.sessions.iter().all(|s| s.finality.is_some())
-            || self.case.inputs() && !r.session_record.as_mut().is_some_and(|record| session.as_ref().is_some_and(|s| record.final_originals(s))) {
+            || self.case.inputs() && !r.session_record.as_mut().is_some_and(|record| session.as_ref().is_some_and(|s| record.final_originals(s)))
+            || self.case == Case::ProjectFields && !r.project_field_record.as_mut().is_some_and(|record|
+                session.as_ref().is_some_and(|s| record.final_originals(s))) {
             self.fail_with("exit-finality-contract"); return;
         }
         r.originals_final = true; r.actual_exit = true;
@@ -2348,6 +2499,17 @@ impl Observation {
                 && r.native_actions_returned == [false,false,false,true] && r.loss_settled && r.close_count == 1,
             Case::SaveLoss => r.project_settled && r.review_witness.is_some() && r.loss_settled && r.close_count == 1
                 && r.native_actions_returned == [false,true,false,true] && r.sessions[0].apply_requested == false,
+            Case::ProjectFields => r.project_settled && r.snapshots == 1 && r.close_count == 1
+                && r.native_actions_returned == [false,true,false,true] && r.field_attached == [true;project_fields::COUNT]
+                && r.field_actions == [true;project_fields::COUNT] && r.file_attached == [false;7] && r.file_actions == [false;7]
+                && r.session_record.is_none() && r.ios_record.is_none()
+                && r.project_field_record.as_ref().is_some_and(|record| record.report(
+                    self.project_fields.as_ref().and_then(|c| c.registered()),
+                    r.fixture.project_fields.as_ref().is_some_and(|f| f.restored())).is_some())
+                && r.panel_history.len() == 9 && r.panel_history.iter().zip([1,2,3,4,5,8,9,10,11]).all(|(p,id)|
+                    p.sample.id == id && p.sample.succeeded() && p.progress.snapshot().state == "retired"
+                        && p.identity.succeeded(id) && p.completion.succeeded(id))
+                && r.open_sample().is_none() && r.identity_binding.is_none() && r.completion_selection.is_none(),
             Case::Ios(case) => r.project_settled && r.snapshots == 1 && r.close_count == 1
                 && r.native_actions_returned == [false,true,false,true]
                 && (if case == ios::Case::SigningInputs { r.ios_record.is_none() }
@@ -2361,7 +2523,7 @@ impl Observation {
                     && r.file_actions.iter().enumerate().all(|(i,b)| *b == (i < session::count(case)))
                     && r.open_sample().is_none() && r.identity_binding.is_none() && r.completion_selection.is_none()),
         };
-        if !common || !specific || r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale)).is_err() { return None; }
+        if !common || !specific || r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields)).is_err() { return None; }
         let sessions: Vec<_> = r.sessions.iter().map(|s| {
             let f = s.finality.as_ref()?; let p = s.projection.prepared.as_ref()?;
             Some(json!({"draftRevision":p.draft_revision,"baselineGeneration":p.baseline_generation,
@@ -2392,6 +2554,19 @@ impl Observation {
             if case.inputs() {
                 report["signingInputs"] = r.session_record.as_ref()?.report(normal_registered)?;
             }
+        }
+        if self.case == Case::ProjectFields {
+            report["projectFields"] = r.project_field_record.as_ref()?.report(
+                self.project_fields.as_ref().and_then(|c| c.registered()),
+                r.fixture.project_fields.as_ref().is_some_and(|f| f.restored()))?;
+            report["projectFields"]["panelAttachments"] = json!(r.field_attached);
+            report["projectFields"]["controlReturns"] = json!(r.field_actions);
+            report["projectFields"]["acceptedOpenHistories"] = json!(r.panel_history.iter().map(|p|
+                json!({"operationId":p.sample.id,"kind":self.case.kind_name(p.sample.id),
+                    "originalInputSucceeded":p.sample.reconciled(p.progress.snapshot()).succeeded(),
+                    "originalBarrierRetired":p.progress.snapshot().state == "retired",
+                    "originalBindingMatched":p.identity.succeeded(p.sample.id),
+                    "originalCompletionMatched":p.completion.succeeded(p.sample.id)})).collect::<Vec<_>>());
         }
         self.timely().then_some(report)
     }
@@ -2761,6 +2936,7 @@ fn project_path_mismatch_data_checks() -> bool {
 // replay. Every returned read is from actual DOM/controller rendering.
 fn script(case: Case, step: Step) -> Option<String> {
     if let Step::Session(step) = step { return session::script(step); }
+    if let Step::ProjectFields(step) = step { return project_fields::script(step); }
     let body = match step {
         Step::Ios(step) => { let Case::Ios(case) = case else { return None; }; ios::script(case, step)? },
         Step::Environment|Step::RequirementsPage => "return nav('Environment');",
@@ -2911,9 +3087,12 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     let expected = Path::new(crate::macos_install_paths::APP).join("Contents/MacOS/mobile-release-kit-desktop");
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
-    let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}"));
+    let suffix = if case == Case::ProjectFields { "-project-fields" } else { "" };
+    let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
     if let Case::Ios(case) = case {
         directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None).ok()?;
+    } else if case == Case::ProjectFields {
+        directory(&root,uid,0o700,&[project_fields::NAME,"state"]).ok()?;
     } else { directory(&root,uid,0o700,&["first-save","noop-stale","picker-loss","save-loss","state"]).ok()?; }
     Some((root,uid))
 }
@@ -2930,7 +3109,7 @@ fn native_recheck_data_check() -> bool {
     let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
         press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
         prompt: [Some(true); 2], button };
-    let full = OpenInputSample { id: 2, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
+    let full = OpenInputSample { id: 2, step: Step::OpenProject, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
         timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
         worker_registered: true, worker_joined: true, rechecks_settled: Some(true),
@@ -2980,7 +3159,7 @@ fn native_recheck_data_check() -> bool {
         entered: true, returned: true, joined: true, retired: true, expired: true });
     if unknown.succeeded() || !unknown.joined || !unknown.retired || unknown.custody_known != Some(false)
         || unknown.timely != Some(false) || unknown.report != full.report { return false; }
-    let mut baseline = OpenInputSample::preparing(2); baseline.prepared = true; baseline.requested(); baseline.worker_registered = true;
+    let mut baseline = OpenInputSample::preparing(2, Step::OpenProject); baseline.prepared = true; baseline.requested(); baseline.worker_registered = true;
     let progress = OpenProgress { state: "unknown", requested: true, dispatched: true, entered: true,
         returned: true, joined: false, retired: false, expired: true };
     let sample = baseline.reconciled(progress);
@@ -3101,12 +3280,12 @@ fn observer_data_checks() -> bool {
     // Compiled profile DATA only: this inert path is never resolved or opened.
     // The real builder must still establish every installed/native original.
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));
-    if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available()
+    if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available() != crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED
         || profile.evidence_selection_profile_available() { return false; }
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
-        || !session::data_checks() { return false; }
+        || !session::data_checks() || !project_fields::data_checks() { return false; }
     for ios_case in ios::Case::ALL {
         let case = Case::Ios(ios_case);
         if case.panel_index(Step::Quit) != Some(1) || case.quit_id() != if ios_case.inputs() { 12 } else { 2 } { return false; }
@@ -3128,7 +3307,17 @@ fn observer_data_checks() -> bool {
                 || open_step_entry(Some(Pending::Accessibility(id)), step, id) != (i != 6) { return false; }
         }
     }
-    let mut prepared = OpenInputSample::preparing(2);
+    let p2 = Case::ProjectFields;
+    if p2.quit_id() != 12 || p2.rounds() != 0 || p2.inputs() || p2.field_index(1).is_some() || p2.field_index(12).is_some() { return false; }
+    for i in 0..project_fields::COUNT as u8 {
+        let Some(id) = project_fields::id(i) else { return false; }; let step = Step::ProjectFields(project_fields::Step::Native(i));
+        if p2.field_index(id) != Some(i) || p2.file_index(id).is_some() || p2.panel_index(step).is_some()
+            || (p2.open_id(step) == Some(id)) != project_fields::accepts(i)
+            || p2.accepted_id(id) != project_fields::accepts(i)
+            || open_step_entry(Some(Pending::Accessibility(id)), step, id) != project_fields::accepts(i)
+            || open_step_entry(Some(Pending::Accessibility(id + 1)), step, id + 1) { return false; }
+    }
+    let mut prepared = OpenInputSample::preparing(2, Step::OpenProject);
     prepared.prepared = true;
     if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
     prepared.requested();
@@ -3322,6 +3511,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     let case = match args.next().as_deref() {
         Some(v) if v == OsStr::new("first-save") => Case::FirstSave, Some(v) if v == OsStr::new("noop-stale") => Case::NoopStale,
         Some(v) if v == OsStr::new("picker-loss") => Case::PickerLoss, Some(v) if v == OsStr::new("save-loss") => Case::SaveLoss,
+        Some(v) if v == OsStr::new(project_fields::NAME) => Case::ProjectFields,
         Some(v) if ios::Case::parse(v).is_some() => Case::Ios(ios::Case::parse(v).expect("exact iOS selector")),
         _ => { super::diagnostic(b"MRK_MACOS_AQUA=route-refused\n"); return std::process::ExitCode::FAILURE; },
     };

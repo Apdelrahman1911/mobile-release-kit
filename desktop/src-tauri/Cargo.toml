@@ -68,7 +68,9 @@ quick_xml = { package = "quick-xml", version = "=0.42.0", default-features = fal
 # signing, trust-store or Store capability is enabled by these parsers.
 pkcs12 = { version = "=0.1.0", default-features = false }
 cms = { version = "=0.2.3", default-features = false, features = ["alloc"] }
-der_07 = { package = "der", version = "=0.7.10", default-features = false, features = ["alloc", "oid"] }
+der_07 = { package = "der", version = "=0.7.10", default-features = false, features = ["alloc", "oid", "pem"] }
+# Shared private PEM scratch and the existing Linux vault; no version/lock change.
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 sha2 = "=0.10.9"
 getrandom = "=0.3.4"
 tokio = { version = "=1.48.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
@@ -109,7 +111,6 @@ zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 ordered-stream = "=0.2.0"
 # Private durable-vault primitive only; no RNG defaults or provider activation.
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
-zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 # chacha20poly1305/zeroize does not forward this internal-state Drop feature.
 poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 

@@ -1,7 +1,7 @@
 import type { ApiError, JsonObject } from './types.ts';
 
 // Native session DTOs, not a renderer file API or a second credential policy.
-export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile';
+export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8';
 export type AssetScalarKind = 'google-wif' | 'project-read-token';
 export type AssetKind = AssetFileKind | AssetScalarKind;
 export type AssetPlatform = 'android' | 'ios' | 'project';
@@ -29,11 +29,12 @@ export type AssetIntent = AssetRecordIntent | { type: 'vault'; change: 'open' | 
 export interface AssetChooseRequest { contextRevision: number; kind: AssetFileKind; replacement: AssetRecordRef | null }
 export interface KeystoreFields { storePassword: string | null; keyAlias: string | null; keyPassword: string | null }
 export interface P12Fields { password: string | null }
+export interface AscP8Fields { keyId: string | null; issuerId: string | null }
 export interface WifFields { provider: string | null; serviceAccount: string | null }
 export interface TokenFields { token: string | null }
-export type AssetFields = KeystoreFields | P12Fields | WifFields | TokenFields | Record<string, never>;
+export type AssetFields = KeystoreFields | P12Fields | AscP8Fields | WifFields | TokenFields | Record<string, never>;
 export type CredentialPrepareRequest =
-  | { contextRevision: number; source: { type: 'selection'; selectionToken: string }; fields: KeystoreFields | P12Fields | Record<string, never>; label?: string | null }
+  | { contextRevision: number; source: { type: 'selection'; selectionToken: string }; fields: KeystoreFields | P12Fields | AscP8Fields | Record<string, never>; label?: string | null }
   | { contextRevision: number; source: { type: 'record'; recordId: string; expectedRevision: number } }
   | { contextRevision: number; source: { type: 'scalar'; kind: 'google-wif'; replacement: AssetRecordRef | null }; fields: WifFields; label?: string | null }
   | { contextRevision: number; source: { type: 'scalar'; kind: 'project-read-token'; replacement: AssetRecordRef | null }; fields: TokenFields; label?: string | null };
@@ -43,7 +44,7 @@ export type AssetReason = 'none' | 'closed' | 'unqualified' | 'unsupported-platf
 export type AssetPhase = 'idle' | 'admitting' | 'picking' | 'capturing' | 'selected' | 'assessing' | 'preview' | 'mutating' | 'stopping' | 'unknown';
 export type AssetOperationName = 'choose-file' | 'choose-project' | 'choose-project-path' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock';
 export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
-export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'provider' | 'serviceAccount' | 'token';
+export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token';
 export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
 export type CredentialCheckScope = 'value-admission' | 'identifier-format' | 'file-nonempty' | 'suffix-consistency' | 'container-parse' | 'jks-header' | 'pfx-envelope' | 'cms-signed-data-envelope' | 'pkcs8-envelope' | 'json-document' | 'plist-document' | 'ec-p256-identifiers' | 'firebase-shape' | 'application-identity';
 export interface CredentialAssessment {

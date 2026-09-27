@@ -59,26 +59,60 @@ def inert_font_consumers():
     return roster, report, font
 
 
+SDK_TEST_LICENSE = "Inert selected SDK license definition; not terms or consent."
+
+
+def inert_sdk_license(text):
+    M.D.need(text == SDK_TEST_LICENSE, "inert selected licence definition differs")
+    return {"id": "android-sdk-license", "normalizedSha1": M.LICENSE_HASH,
+            "normalizedSha256": M.LICENSE_NORMALIZED_SHA256}
+
+
+def inert_sdk_package(name):
+    platform = name == "platforms;android-35"
+    details = ('<type-details xsi:type="sdk:platformDetailsType"><api-level>35</api-level>'
+               '<extension-level>13</extension-level><base-extension>true</base-extension>'
+               '<layoutlib api="15"/></type-details>' if platform else
+               '<type-details xsi:type="generic:genericDetailsType"/>')
+    return (f'<common:repository xmlns:common="{M.COMMON_NAMESPACE}" xmlns:sdk="{M.SDK_NAMESPACE}" '
+            f'xmlns:generic="{M.GENERIC_NAMESPACE}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            f'<license id="android-sdk-license" type="text">{SDK_TEST_LICENSE}</license>'
+            f'<localPackage path="{name}" obsolete="false">{details}'
+            f'<revision><major>{2 if platform else 35}</major><minor>0</minor><micro>0</micro></revision>'
+            f'<display-name>Android SDK {"Platform 35" if platform else "Build-Tools 35"}</display-name>'
+            '<uses-license ref="android-sdk-license"/></localPackage></common:repository>').encode("ascii")
+
+
 def inert_sdk_receipt():
     """Synthetic closed-reader DATA only; never a real hosted/licence receipt."""
     rule = {"path": M.SDK_RECEIPT, "classification": M.SDK_RECEIPT_CLASSIFICATION,
         "imagePath": M.SDK_IMAGE_DATA, "sourceRecipe": deepcopy(M.SDK_SOURCE_RECIPE),
         "licenseDefinition": {"id": "android-sdk-license", "normalizedSha1": M.LICENSE_HASH,
-                              "normalizedSha256": M.LICENSE_NORMALIZED_SHA256}}
-    value = {"hostPolicy": {"inputs": {"files": sorted([M.SDK_RECEIPT, M.SDK_IMAGE_DATA]),
+                              "normalizedSha256": M.LICENSE_NORMALIZED_SHA256},
+        "packages": [{"id": name, **paths} for name, paths in M.SDK_PACKAGE_PATHS.items()]}
+    paths = [M.SDK_RECEIPT, M.SDK_IMAGE_DATA,
+             *(path for paths in M.SDK_PACKAGE_PATHS.values() for path in paths.values())]
+    value = {"hostPolicy": {"inputs": {"files": sorted(paths),
                                     "directories": {}, "absences": []}, "generated": {"sdkLicense": rule}}}
     bodies = {M.SDK_RECEIPT: b"\n" + M.LICENSE_HASH.encode("ascii"), M.SDK_IMAGE_DATA: M.D.canonical([
         {"group": "Operating System", "detail": "Ubuntu\n24.04.5\nLTS"},
         {"group": "Runner Image", "detail": "\n".join(prefix + M.SDK_IMAGE[key] for prefix, key in (
             ("Image: ", "image_name"), ("Version: ", "image_version"),
-            ("Included Software: ", "image_url"), ("Image Release: ", "image_release")))}])}
+               ("Included Software: ", "image_url"), ("Image Release: ", "image_release")))}])}
+    for name, paths in M.SDK_PACKAGE_PATHS.items():
+        bodies[paths["metadataPath"]] = inert_sdk_package(name)
+        bodies[paths["propertiesPath"]] = "".join(f"{key}={value}\n" for key, value in M.SDK_PROPERTIES[name].items()).encode()
     host = {"graph": {}, "bindings": {"files": {name: {"fixture": name} for name in bodies}}}
     @contextmanager
     def reader(binding, selected, limit, deadline):
         assert binding == host["bindings"]["files"][selected] and len(bodies[selected]) <= limit
         raw = bodies[selected]
-        yield raw, {"binding": deepcopy(binding), "identity": ["inert-original"],
-                    "file": {"path": selected, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o644}}
+        # Exercise the real closed XML/property parsers without checking licence
+        # text into the repository. Only the separate definition comparator is
+        # a labelled fixture; this is not current-host or legal evidence.
+        with patch.object(M, "_sdk_license_definition", side_effect=inert_sdk_license):
+            yield raw, {"binding": deepcopy(binding), "identity": ["inert-original"],
+                        "file": {"path": selected, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "mode": 0o644}}
     return value, host, bodies, reader
 
 
@@ -438,6 +472,8 @@ class AndroidMaterialDataTests(unittest.TestCase):
 
     def test_small_host_roles_limit_first_binding_and_existing_binding_before_hash(self):
         limits = {M.SDK_RECEIPT: 4096, M.SDK_IMAGE_DATA: 64 << 10, "/inert/tool": M.FILE_LIMIT,
+                  **{paths["metadataPath"]: 32 << 10 for paths in M.SDK_PACKAGE_PATHS.values()},
+                  **{paths["propertiesPath"]: 16 << 10 for paths in M.SDK_PACKAGE_PATHS.values()},
                   **{name: M.CONFIGURATION_LIMIT for name in (*M.NETWORK_ROLES, M.RESOLVER_CANONICAL)}}
         value = {"hostPolicy": {"inputs": {"files": sorted(limits), "directories": {}, "absences": []}}}
         bind = Mock(side_effect=lambda path, **options: {"size": 1})
@@ -469,14 +505,21 @@ class AndroidMaterialDataTests(unittest.TestCase):
         deadline = time.monotonic() + 30
         with patch.object(M, "_stock_host_original", side_effect=reader), patch.object(M, "_protected_binding"):
             proof = M._sdk_receipt_state(value, host, deadline)
-            self.assertEqual(proof["receiptAuthority"], "unavailable")
+            self.assertNotIn("receiptAuthority", proof)
+            self.assertEqual(proof["classification"], "provider-preinstalled-sdk-current-use-v1")
+            self.assertEqual(proof["currentUse"], "selected-preinstalled-sdk-no-install-v1")
             self.assertIs(proof["producerExecutionProven"], False)
             self.assertIs(proof["newConsent"], False)
             self.assertEqual(proof["sourceRecipe"], M.SDK_SOURCE_RECIPE)
             self.assertEqual(M._sdk_receipt_bytes(host, proof, deadline), bodies[M.SDK_RECEIPT])
+            self.assertEqual(set(proof["packages"]), set(M.SDK_PACKAGE_PATHS))
+            for name, paths in M.SDK_PACKAGE_PATHS.items():
+                for role, key in (("metadata", "metadataPath"), ("properties", "propertiesPath")):
+                    self.assertEqual(proof["packages"][name][role]["file"]["sha256"],
+                                     hashlib.sha256(bodies[paths[key]]).hexdigest())
+                    self.assertEqual(proof["packages"][name][role]["correspondence"]["package"], name)
             host["graph"]["androidGenerated"] = {"sdkLicense": proof}
-            with self.assertRaisesRegex(M.D.Refused, "authenticated prior receipt provenance"):
-                M._sdk_receipt_authority(value, host, deadline)
+            self.assertEqual(M._sdk_receipt_authority(value, host, deadline), proof)
             for change in ({"receiptAuthority": "approved"}, {"preExistingHostedImageReceipt": True}, {"newConsent": True}):
                 host["graph"]["androidGenerated"]["sdkLicense"] = {**proof, **change}
                 with self.assertRaisesRegex(M.D.Refused, "correspondence changed"):
@@ -485,6 +528,74 @@ class AndroidMaterialDataTests(unittest.TestCase):
         with patch.object(M, "policy", return_value=value), self.assertRaises(M.D.Refused):
             M.android_host_inputs({"androidGenerated": {"sdkLicense": proof}}, {"files": {}}, bind_path=bind, deadline=deadline)
         bind.assert_not_called()
+
+    def test_sdk_current_use_requires_every_original_and_rejects_changed_package_proofs(self):
+        value, host, bodies, reader = inert_sdk_receipt()
+        deadline = time.monotonic() + 30
+        for missing in bodies:
+            partial = deepcopy(host)
+            del partial["bindings"]["files"][missing]
+            with self.subTest(missing=missing), patch.object(M, "_stock_host_original") as original, \
+                 patch.object(M.D, "write") as write, self.assertRaisesRegex(M.D.Refused, "originals are absent"):
+                M._sdk_receipt_state(value, partial, deadline)
+            original.assert_not_called()
+            write.assert_not_called()
+        with patch.object(M, "_stock_host_original", side_effect=reader), patch.object(M, "_protected_binding") as post:
+            proof = M._sdk_receipt_state(value, host, deadline)
+            self.assertEqual({call.args[1] for call in post.call_args_list}, set(bodies))
+            host["graph"]["androidGenerated"] = {"sdkLicense": deepcopy(proof)}
+            name = "platforms;android-35"
+            host["graph"]["androidGenerated"]["sdkLicense"]["packages"][name]["metadata"]["file"]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(M.D.Refused, "correspondence changed"):
+                M._sdk_receipt_authority(value, host, deadline)
+            host["graph"]["androidGenerated"] = {"sdkLicense": proof}
+            bodies[M.SDK_PACKAGE_PATHS[name]["propertiesPath"]] = bodies[M.SDK_PACKAGE_PATHS[name]["propertiesPath"]].replace(
+                b"AndroidVersion.ApiLevel=35", b"AndroidVersion.ApiLevel=34")
+            with self.assertRaisesRegex(M.D.Refused, "source.properties disagree"):
+                M._sdk_receipt_authority(value, host, deadline)
+
+    def test_sdk_local_package_parser_binds_namespace_revision_and_licence_without_installation(self):
+        name = "platforms;android-35"
+        raw = inert_sdk_package(name)
+        with patch.object(M, "_sdk_license_definition", side_effect=inert_sdk_license) as definition:
+            observed = M._sdk_local_package(name, raw)
+            self.assertEqual(observed["revision"], {"major": 2, "minor": 0, "micro": 0, "preview": 0})
+            definition.assert_called_once_with(SDK_TEST_LICENSE)
+            self.assertEqual(M._sdk_local_package(name, raw.replace(b"xmlns:sdk=", b"xmlns:renamed=")
+                                                .replace(b'sdk:platformDetailsType', b'renamed:platformDetailsType')), observed)
+            build = M._sdk_local_package("build-tools;35.0.0", inert_sdk_package("build-tools;35.0.0"))
+            self.assertEqual(build["revision"]["major"], 35)
+            changes = [raw.replace(b"platforms;android-35", b"platforms;android-34"),
+                       b'<?xml version="1.0" encoding="UTF-16"?>' + raw,
+                       raw.replace(b'<major>2</major>', b'<major>2</major><major>2</major>'),
+                       raw.replace(b'<major>2</major>', b'<major>3</major>'),
+                       raw.replace(b'<micro>0</micro>', b'<preview>1</preview>'),
+                       raw.replace(b'<api-level>35</api-level>', b'<api-level>34</api-level>'),
+                       raw.replace(b'layoutlib api="15"', b'layoutlib api="16"'),
+                       raw.replace(b'sdk:platformDetailsType', b'generic:platformDetailsType'),
+                       raw.replace(b'<type-details ', b'<type-details xmlns:sdk="urn:unselected" '),
+                       raw.replace(f' xmlns:sdk="{M.SDK_NAMESPACE}"'.encode(), b'').replace(
+                           b'<license ', f'<license xmlns:sdk="{M.SDK_NAMESPACE}" '.encode()),
+                       raw.replace(b'obsolete="false"', b'obsolete="true"'),
+                       raw.replace(b'<uses-license ref="android-sdk-license"/>', b'<uses-license ref="unselected"/>'),
+                       raw.replace(b'</localPackage>', b'<dependencies/></localPackage>'),
+                       raw.replace(b'</common:repository>', b'<localPackage path="platforms;android-35"/></common:repository>'),
+                       raw.replace(SDK_TEST_LICENSE.encode(), b'Other inert definition')]
+            for changed in changes:
+                with self.subTest(changed=changed[:30]), self.assertRaises(M.D.Refused):
+                    M._sdk_local_package(name, changed)
+        for changed in (b"<!DOCTYPE test>" + raw, b"<!ENTITY local 'value'>" + raw,
+                        raw.replace(b"<license ", b"\x00<license "), b"x" * ((32 << 10) + 1)):
+            with self.subTest(declaration=changed[:24]), patch.object(M.ET, "iterparse") as parser, self.assertRaises(M.D.Refused):
+                M._sdk_local_package(name, changed)
+            parser.assert_not_called()
+        # Real definition checks still reject fixture or substituted terms.
+        with self.assertRaisesRegex(M.D.Refused, "pinned SDK licence definition"):
+            M._sdk_license_definition(SDK_TEST_LICENSE)
+        for changed in (b"Pkg.Revision=2\nPkg.Revision=2\n", b"Pkg.Revision=2\nPkg.Path=unselected\n",
+                        b"Pkg.Revision=35.0.1\n", b"Pkg.Revision=35.0.0\n" + b"x" * (16 << 10)):
+            with self.subTest(properties=changed[:40]), self.assertRaises(M.D.Refused):
+                M._sdk_source_properties("build-tools;35.0.0", changed)
 
     def test_sdk_original_protection_close_image_and_deadline_fail_closed(self):
         value, host, bodies, reader = inert_sdk_receipt()

@@ -178,16 +178,6 @@ impl Control {
     #[track_caller]
     fn fail(&self) { self.failed.store(true, Ordering::SeqCst); if let Ok(q) = self.original() { q.fail(); } }
     pub(crate) fn unavailable_witness(&self) { self.fail(); }
-    pub(crate) fn permits_android(&self) -> bool {
-        self.case.android() && self.admitted.load(Ordering::SeqCst) == self.case.required_mask()
-            && !self.failed.load(Ordering::SeqCst)
-            && self.original().is_ok_and(|q| !q.failed.load(Ordering::SeqCst)
-                && q.case == ShellCase::Commands(self.case)
-                && q.commands.as_ref().is_some_and(|c| std::ptr::eq(c.as_ref(), self)))
-            // Eligibility is called with the original owner registry held. Never
-            // reacquire the observer record here: its tick borrows that owner.
-            && self.android_document.get().and_then(Weak::upgrade).is_some()
-    }
     // Called by the original owner with actual state while its resource guard
     // is held. This is pending DATA; it cannot claim worker entry or finality.
     pub(crate) fn prepare_hold(&self, facts: OriginalFacts) -> bool {
@@ -505,6 +495,7 @@ struct Record {
     initial: bool, ready: bool, start: bool, consent: bool, cancel: bool, reciprocal: bool,
     held_observed: bool, terminal_visible: bool, final_snapshot: Option<Snapshot>,
     android_fixture: Option<AndroidFixture>, android_final_snapshot: Option<AndroidSnapshot>,
+    android_selected_before_observation: bool,
     android_version_requested: bool, android_version_observed: bool, android_busy_observed: bool,
     android_requests: [u8;3], android_replies: [u8;3],
 }
@@ -1039,6 +1030,11 @@ fn android_script(step: Step) -> Option<String> {
 }
 impl Control {
     fn attach_android(self: &Arc<Self>, q: &Arc<Observation>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
+        // Observe already-selected normal routing before any fixture or Book.
+        // The owner rechecks under Registry at registration; this history can
+        // neither enable routing nor authorize work after shutdown/loss.
+        let selected_before_observation = document.installed_android_normal_selected();
+        if !selected_before_observation { return Err(BridgeError::invalid()); }
         let (document_identity, owner_identity) = document.installed_android_identities();
         {
             let shell = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
@@ -1050,6 +1046,7 @@ impl Control {
             // Bind once before fallible fixture acquisition; a failed attachment
             // cannot be retried for a different original document.
             self.android_document.set(document_identity.clone()).map_err(|_|BridgeError::invalid())?;
+            r.android_selected_before_observation = selected_before_observation;
             let fixture=AndroidFixture::capture(q.project_path().ok_or_else(BridgeError::invalid)?,self.case).map_err(|_|BridgeError::invalid())?;
             r.content=Some(AndroidFixture::content());
             r.saved=Some(crate::protocol::strict_json(ANDROID_CONFIG).map_err(|_|BridgeError::invalid())?);
@@ -1270,26 +1267,29 @@ impl Control {
     }
     fn android_complete(&self) -> bool {
         let Some(r)=self.record() else { return false; };
-        self.permits_android_without_record() && r.requests==[0;5] && r.replies==[0;5]
+        self.android_registration_valid() && r.android_selected_before_observation && r.requests==[0;5] && r.replies==[0;5]
             && r.android_requests==[1,1,u8::from(self.case==Case::AndroidCancel)] && r.android_replies==r.android_requests
             && r.android_version_requested && r.android_version_observed && r.initial && r.ready && r.start && r.consent
             && r.cancel==(self.case==Case::AndroidCancel) && r.android_busy_observed==r.cancel && !r.reciprocal && !r.held_observed
             && r.terminal_visible && r.android_fixture.is_none() && r.fixture.is_none() && r.fixture_report.is_some()
-            // Final receipt checks the recorded binding after document teardown;
-            // live qualification above still requires upgrading the same Weak.
+            // Final receipt checks historical selection/binding after teardown.
+            // Only the ordinary owner, never these facts, checks live eligibility.
             && self.android_document.get().is_some()
             && self.claimed.load(Ordering::SeqCst)==Domain::Android.bit()
             && r.android_final_snapshot.as_ref().is_some_and(|s|self.android_terminal_valid(&r,s))
     }
-    fn permits_android_without_record(&self) -> bool {
-        self.case.android() && self.admitted.load(Ordering::SeqCst)==4 && !self.failed.load(Ordering::SeqCst)
+    fn android_registration_valid(&self) -> bool {
+        self.case.android() && self.admitted.load(Ordering::SeqCst)==self.case.required_mask() && !self.failed.load(Ordering::SeqCst)
             && self.original().is_ok_and(|q|!q.failed.load(Ordering::SeqCst) && q.case==ShellCase::Commands(self.case)
                 && q.commands.as_ref().is_some_and(|c|std::ptr::eq(c.as_ref(),self)))
     }
     fn android_report(&self) -> Option<Vec<u8>> {
         if !self.android_complete() { return None; }
+        // normalSelection is recorded routing history, not the normal-activation
+        // qualification credit which remains false in the product/native limits.
         let r=self.record()?;let original=r.android_final_snapshot.as_ref()?;
-        serde_json::to_vec(&json!({"schema":"installed-android-build-v1","case":self.case.name(),"qualificationOnly":true,"builder":"normal",
+        serde_json::to_vec(&json!({"schema":"installed-android-build-v2","case":self.case.name(),"qualificationOnly":true,"builder":"normal",
+            "normalSelection":{"selectedBeforeObservation":r.android_selected_before_observation,"observerGranted":false},
             "projectPicker":true,"savedObservation":true,"savedVersionObservation":r.android_version_observed,
             "requests":{"androidPrepare":r.android_requests[0],"androidStart":r.android_requests[1],"androidCancel":r.android_requests[2]},
             "ui":{"start":r.start,"consent":r.consent,"terminal":r.terminal_visible,"cancel":r.cancel},"busyObserved":r.android_busy_observed,
@@ -1356,7 +1356,7 @@ fn assert_android_contracts() {
 
     for case in [Case::AndroidBuild,Case::AndroidFailure,Case::AndroidCancel,Case::AndroidRefusals] {
         let control=Control::new(case);
-        assert!(!control.permits_android());
+        assert!(!control.android_registration_valid());
         let token=AndroidAdmission { control:control.clone(),document:Arc::downgrade(&original),owner:Arc::downgrade(&original) };
         assert!(token.document_matches(&original));assert!(!token.document_matches(&foreign));
         assert!(token.consume(&foreign).is_err());assert_eq!(control.admitted.load(Ordering::SeqCst),0);
@@ -1365,8 +1365,11 @@ fn assert_android_contracts() {
         drop(stale);assert!(token.consume(&original).is_err());assert_eq!(control.admitted.load(Ordering::SeqCst),0);
         // No live Observation or actual compiled profile may be synthesized by tests.
         let owner=crate::android_build_owner::AndroidBuildOwner::new(crate::runtime::RuntimeConfig::packaged(PathBuf::from("/unopened-android-runtime")),None);
+        owner.bind_original_document(&original);
+        assert!(!owner.normal_selected(&original));
         let token=AndroidAdmission { control:control.clone(),document:Arc::downgrade(&original),owner:owner.installed_android_identity() };
-        assert!(owner.admit_installed_observation(token).is_err());assert!(owner.can_exit());
+        assert!(owner.admit_installed_observation(&original,token).is_err());assert!(owner.can_exit());
+        assert!(!owner.normal_selected(&original));
         assert!(owner.installed_observation_snapshot().is_none());assert!(!control.complete());
         assert_eq!(control.admitted.load(Ordering::SeqCst),0);
     }

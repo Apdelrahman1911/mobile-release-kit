@@ -15,7 +15,8 @@ pub(crate) const GITHUB_CA_LIMIT: u64 = 512 * 1024;
 // inventory hash is not native socket/TLS, runtime-custody or host qualification.
 pub(crate) const GITHUB_TLS_PROFILE_QUALIFIED: bool = false;
 // A prior read-only/TLS profile does not qualify a durable intent + dispatch
-// handshake. Enable only after this exact installed source/profile is observed.
+// handshake. Normal installed selection has its own exact binding below; this
+// false flag never supplies native or service evidence for that candidate.
 pub(crate) const GITHUB_PREFLIGHT_NATIVE_QUALIFIED: bool = false;
 // Release dispatch needs its own original-journal/native qualification.
 pub(crate) const GITHUB_RELEASE_NATIVE_QUALIFIED: bool = false;
@@ -46,6 +47,9 @@ pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, 
 
 #[derive(Clone)]
 pub struct RuntimeConfig { bundle_root: PathBuf,
+    // Clones share one Android owner claim. Neither a second constructor nor
+    // an observer can reset it after an unavailable or dead first original.
+    android_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     passive_installed: PassiveInstalledSelection,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -54,6 +58,14 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
         target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_observation: Option<GitHubReadOnlyObservationProfile>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_preflight_observation: Option<GitHubPreflightObservationProfile>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_release_observation: Option<GitHubReleaseObservationProfile>,
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
     windows_passive: windows_version::Selection,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -150,6 +162,9 @@ pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = true;
 // Ordinary fixed Mac selection. This does not replace installed-runtime,
 // original-document, four-kind input or native custody qualification.
 pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = true;
+// Project registration and signing-file selection do not qualify the separate
+// project-relative field picker. Actual AppKit/APFS acceptance remains owed.
+pub(crate) const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = false;
 fn session_inputs_qualified() -> bool {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) { INSTALLED_IOS_SESSION_INPUTS_QUALIFIED }
     else { INSTALLED_SESSION_INPUTS_QUALIFIED }
@@ -239,7 +254,7 @@ pub(crate) struct PassiveInstalledProfile { _private: () }
 impl PassiveInstalledProfile {
     // Current payload V 36282923412/1. Any later profile requires separate source review.
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
-    const MANIFEST: &'static str = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
+    pub(crate) const MANIFEST: &'static str = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
     const PROTOCOL: &'static str = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5";
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
@@ -341,17 +356,118 @@ impl GitHubReadOnlyInstalledProfile {
 // Separate sealed action domain. It borrows the original Supervisor's common
 // installed-custody implementation, never a read-only book or edit capability.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-pub(crate) struct GitHubPreflightInstalledProfile { _private: () }
+pub(crate) struct GitHubPreflightInstalledProfile {
+    _private: (),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<GitHubPreflightObservationProfile>,
+}
+// Closed native-observation DATA, not an ordinary activation or a published
+// toolkit claim. The selected helper/core/CA remain under the action domain's
+// own original installed ledger. Read-only fixture selection is not this grant.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubPreflightObservationProfile { Synthetic }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubPreflightObservationProfile {
+    pub(crate) const TOOLING_SHA: &'static str = "304abf6b802cde7dac236a2217488f67b33a3ce4";
+    pub(crate) const CALLER_SHA256: &'static str = "71bd9034967f4a2212a7f4475074ded0f1211d1f52d532a26a9e2f890df98b0d";
+    pub(crate) const MANIFEST: &'static str = "90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    pub(crate) const VERSION: &'static str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>,
+        tooling: Option<&str>, caller: Option<&str>) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+            && tooling == Some(Self::TOOLING_SHA) && caller == Some(Self::CALLER_SHA256)
+    }
+    fn bindings_match(self) -> bool {
+        Self::binding_values_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR,
+            crate::github_preflight_protocol::TOOLING_SHA, crate::github_preflight_protocol::CALLER_SHA256)
+    }
+    pub(crate) fn assert_contracts() {
+        // Pure selector DATA only: no file import, executable, native ledger or
+        // live API is opened by these assertions. Ordinary selects only V.
+        assert!(!GITHUB_PREFLIGHT_NATIVE_QUALIFIED);
+        assert!(Self::Synthetic.bindings_match());
+        for (target, manifest, protocol, tooling, caller) in [
+            ("aarch64-apple-darwin", MANIFEST_ANCHOR, PROTOCOL_ANCHOR, Some(Self::TOOLING_SHA), Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, Some(Self::MANIFEST), PROTOCOL_ANCHOR, Some(Self::TOOLING_SHA), Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, None, Some(Self::TOOLING_SHA), Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, None, Some(Self::CALLER_SHA256)),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, Some(Self::TOOLING_SHA), None),
+            (COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR, Some(Self::CALLER_SHA256), Some(Self::TOOLING_SHA)),
+        ] { assert!(!Self::binding_values_match(target, manifest, protocol, tooling, caller)); }
+        let mut runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-github-preflight-contract"));
+        assert!(runtime.github_preflight_profile_available());
+        assert_eq!(runtime.github_preflight_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        let release_expected = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_release_protocol::publisher_bound();
+        let assert_normal_release = |runtime: &RuntimeConfig| {
+            assert_eq!(runtime.github_release_profile_available(), release_expected);
+            if let Ok(profile) = runtime.github_release_installed_profile() {
+                let selected = profile.selection().unwrap();
+                let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
+                    .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+                assert_eq!(selected.bootstrap, root.join("github_release_bootstrap.py"));
+                assert_eq!(selected.python, root.join("python/bin/python3"));
+                assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            }
+        };
+        assert_normal_release(&runtime);
+        runtime.select_github_readonly_observation(GitHubReadOnlyObservationProfile::DialSyntheticCa).unwrap();
+        assert_normal_release(&runtime);
+        // A read-only fixture cannot replace the ordinary action profile.
+        assert_eq!(runtime.github_preflight_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        runtime.select_github_preflight_observation(Self::Synthetic).unwrap();
+        assert!(runtime.select_github_preflight_observation(Self::Synthetic).is_err());
+        let action = runtime.github_preflight_installed_profile().unwrap();
+        assert_eq!(action.manifest_anchor().unwrap(), Self::MANIFEST);
+        let selected = action.selection().unwrap();
+        assert_eq!(selected.cwd, PathBuf::from(Self::VERSION));
+        assert_eq!(selected.bootstrap, selected.cwd.join("github_preflight_bootstrap.py"));
+        assert_eq!(selected.python, selected.cwd.join("python/bin/python3"));
+        assert_eq!(selected.core, selected.cwd.join("core.zip"));
+        assert_eq!(runtime.github_readonly_installed_profile().unwrap().manifest_anchor().unwrap(), Self::MANIFEST);
+        let ordinary = RuntimeConfig::packaged(PathBuf::from("/unopened-github-preflight-contract"));
+        assert!(ordinary.github_preflight_profile_available());
+        assert_eq!(ordinary.github_preflight_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        assert_eq!(ordinary.github_readonly_installed_profile().unwrap().manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+        // Neither read-only nor G Synthetic selection can lend R its publisher
+        // binding or replace R's normal V payload with the observation payload.
+        assert_normal_release(&runtime);
+        assert_normal_release(&ordinary);
+    }
+}
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl GitHubPreflightInstalledProfile {
+    // Pure selection DATA. Only the factory can mint this action profile, and
+    // production obtains its publisher binding from this family, never passive
+    // availability, a renderer value or the independent observation override.
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>, publisher_bound: bool) -> bool {
+        publisher_bound && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
-        GITHUB_PREFLIGHT_NATIVE_QUALIFIED && crate::github_preflight_protocol::publisher_bound()
-            && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+        Self::binding_values_match(target, manifest, protocol, crate::github_preflight_protocol::publisher_bound())
+    }
+    pub(crate) fn manifest_anchor(&self) -> Result<&'static str, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.observation {
+            if !profile.bindings_match() { return Err(unavailable()); }
+            return Ok(GitHubPreflightObservationProfile::MANIFEST);
+        }
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        Ok(PassiveInstalledProfile::MANIFEST)
     }
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
-        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let manifest = self.manifest_anchor()?;
         let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
-            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            .join(PassiveInstalledProfile::TARGET).join(manifest);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_preflight_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
@@ -361,17 +477,111 @@ impl GitHubPreflightInstalledProfile {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-pub(crate) struct GitHubReleaseInstalledProfile { _private: () }
+pub(crate) struct GitHubReleaseInstalledProfile {
+    _private: (),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<GitHubReleaseObservationProfile>,
+}
+// Private R observation source-candidate binding, NOT delivered production
+// tooling. Connect's/G's profile cannot select this release domain.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubReleaseObservationProfile { Synthetic }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl GitHubReleaseObservationProfile {
+    pub(crate) const TOOLING_SHA: &'static str = "4c89f77c7a1e3f0b538a99ab12069b245484205d";
+    pub(crate) const CANDIDATE_SHA256: &'static str = "693119d27471d9894c250cc4326547258afba446fc40620a1923b334563a8837";
+    pub(crate) const EXTERNAL_SHA256: &'static str = "82dc6d39910a4363b9432fbbda96f51f1a6c4ac543670a40bee8fb6a0c813397";
+    pub(crate) const PRODUCTION_SHA256: &'static str = "b16776c8de7862eaba316d330a05cacb2c36f338f22880897dcdca8f53157188";
+    pub(crate) const MANIFEST: &'static str = "90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    pub(crate) const VERSION: &'static str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb";
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>,
+        tooling: Option<&str>, callers: [Option<&str>;3]) -> bool {
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+            && tooling == Some(Self::TOOLING_SHA)
+            && callers == [Some(Self::CANDIDATE_SHA256), Some(Self::EXTERNAL_SHA256), Some(Self::PRODUCTION_SHA256)]
+    }
+    fn bindings_match(self) -> bool {
+        Self::binding_values_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR,
+            crate::github_release_protocol::TOOLING_SHA, [
+                crate::github_release_protocol::CANDIDATE_SHA256,
+                crate::github_release_protocol::EXTERNAL_SHA256,
+                crate::github_release_protocol::PRODUCTION_SHA256])
+    }
+    pub(crate) fn assert_contracts() {
+        assert!(!GITHUB_RELEASE_NATIVE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED);
+        assert!(Self::Synthetic.bindings_match());
+        let callers=[Some(Self::CANDIDATE_SHA256),Some(Self::EXTERNAL_SHA256),Some(Self::PRODUCTION_SHA256)];
+        for (target,manifest,protocol,tooling) in [
+            ("aarch64-apple-darwin",MANIFEST_ANCHOR,PROTOCOL_ANCHOR,Some(Self::TOOLING_SHA)),
+            (COMPILED_TARGET,Some(Self::MANIFEST),PROTOCOL_ANCHOR,Some(Self::TOOLING_SHA)),
+            (COMPILED_TARGET,MANIFEST_ANCHOR,None,Some(Self::TOOLING_SHA)),
+            (COMPILED_TARGET,MANIFEST_ANCHOR,PROTOCOL_ANCHOR,None),
+            (COMPILED_TARGET,MANIFEST_ANCHOR,PROTOCOL_ANCHOR,Some(GitHubPreflightObservationProfile::TOOLING_SHA)),
+        ] { assert!(!Self::binding_values_match(target,manifest,protocol,tooling,callers)); }
+        for index in 0..3 {
+            for wrong in [None,Some(GitHubPreflightObservationProfile::CALLER_SHA256),callers[(index+1)%3]] {
+                let mut changed=callers;changed[index]=wrong;
+                assert!(!Self::binding_values_match(COMPILED_TARGET,MANIFEST_ANCHOR,PROTOCOL_ANCHOR,Some(Self::TOOLING_SHA),changed));
+            }
+        }
+        let mut runtime=RuntimeConfig::packaged(PathBuf::from("/unopened-release-selector-DATA"));
+        let normal=|runtime:&RuntimeConfig| {
+            let profile=runtime.github_release_installed_profile().unwrap();
+            assert_eq!(profile.manifest_anchor().unwrap(),PassiveInstalledProfile::MANIFEST);
+            assert_eq!(profile.selection().unwrap().bootstrap,PathBuf::from("/var/lib/mobile-release-kit/versions")
+                .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST).join("github_release_bootstrap.py"));
+        };
+        normal(&runtime);
+        runtime.select_github_readonly_observation(GitHubReadOnlyObservationProfile::DialSyntheticCa).unwrap();
+        normal(&runtime); // Read-only selection is never R authority.
+        if GitHubPreflightObservationProfile::Synthetic.bindings_match() {
+            runtime.select_github_preflight_observation(GitHubPreflightObservationProfile::Synthetic).unwrap();
+            normal(&runtime);
+        }
+        runtime.select_github_release_observation(Self::Synthetic).unwrap();
+        assert!(runtime.select_github_release_observation(Self::Synthetic).is_err());
+        let profile=runtime.github_release_installed_profile().unwrap();
+        assert_eq!(profile.manifest_anchor().unwrap(),Self::MANIFEST);
+        let selected=profile.selection().unwrap();
+        assert_eq!(selected.cwd,PathBuf::from(Self::VERSION));
+        assert_eq!(selected.bootstrap,selected.cwd.join("github_release_bootstrap.py"));
+        assert_eq!(selected.python,selected.cwd.join("python/bin/python3"));
+        assert_eq!(selected.core,selected.cwd.join("core.zip"));
+        normal(&RuntimeConfig::packaged(PathBuf::from("/unopened-release-ordinary-DATA")));
+    }
+}
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl GitHubReleaseInstalledProfile {
+    // Selection DATA, not native/service qualification. Only this family's
+    // immutable publisher binding can authorize its exact normal payload.
+    fn binding_values_match(target: &str, manifest: Option<&str>, protocol: Option<&str>, publisher_bound: bool) -> bool {
+        publisher_bound && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
-        GITHUB_RELEASE_NATIVE_QUALIFIED && crate::github_release_protocol::publisher_bound()
-            && PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+        Self::binding_values_match(target, manifest, protocol, crate::github_release_protocol::publisher_bound())
+    }
+    pub(crate) fn manifest_anchor(&self) -> Result<&'static str, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.observation {
+            if !profile.bindings_match() { return Err(unavailable()); }
+            return Ok(GitHubReleaseObservationProfile::MANIFEST);
+        }
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        Ok(PassiveInstalledProfile::MANIFEST)
     }
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
-        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let manifest = self.manifest_anchor()?;
         let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
-            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            .join(PassiveInstalledProfile::TARGET).join(manifest);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_release_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
@@ -439,8 +649,12 @@ pub(crate) struct ProjectRecoveryInstalledProfile { _private: () }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl ProjectRecoveryInstalledProfile {
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
-    // Source/runtime/native review must bind the composed payload before enablement.
-    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    // Q source binding only. Ordinary native/runtime qualification stays closed
+    // until this exact profile's two-original recovery evidence is accepted.
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
+        "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
+        "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+    ));
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
             target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
@@ -708,6 +922,7 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 
 impl RuntimeConfig {
     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
+        android_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
         windows_passive: if cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -727,10 +942,35 @@ impl RuntimeConfig {
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
             target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         github_observation: None,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        github_preflight_observation: None,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        github_release_observation: None,
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         environment_fixture_core: None,
     } }
+    pub(crate) fn claim_original_android_owner(&self) -> bool {
+        !self.android_owner_claimed.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+    // Fixed compile DATA only, not passive/session qualification or runtime
+    // custody. AndroidNativeBooks still owns the actual original inspection.
+    pub(crate) fn android_build_installed_runtime_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer")))]
+        { PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+            feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+            not(feature = "macos-installed-installer"))))]
+        { false }
+    }
     pub(crate) fn claim_original_supervisor(&mut self) {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         self.installed_session.claim_supervisor();
@@ -823,7 +1063,10 @@ impl RuntimeConfig {
     pub(crate) fn project_path_selection_profile_available(&self) -> bool {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         { self.project_selection_profile_available() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && self.project_selection_profile_available() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
     }
     /// Separate C picker DATA. The native method intersection is checked again
@@ -999,12 +1242,34 @@ impl RuntimeConfig {
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
         { false }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn select_github_preflight_observation(&mut self, profile: GitHubPreflightObservationProfile) -> Result<(), BridgeError> {
+        // Called once before constructing the original Supervisor. No renderer,
+        // environment-at-launch, normal constructor or read-only profile can
+        // select this independent action domain.
+        if self.github_preflight_observation.is_some() || !profile.bindings_match() { return Err(unavailable()); }
+        self.github_preflight_observation = Some(profile); Ok(())
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn github_preflight_installed_profile(&self) -> Result<GitHubPreflightInstalledProfile, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.github_preflight_observation {
+            if profile.bindings_match() { return Ok(GitHubPreflightInstalledProfile { _private: (), observation: Some(profile) }); }
+            return Err(unavailable());
+        }
         #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if GitHubPreflightInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
-            return Ok(GitHubPreflightInstalledProfile { _private: () });
+            return Ok(GitHubPreflightInstalledProfile { _private: (),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: None,
+            });
         }
         Err(BridgeError::unavailable("The installed GitHub preflight action profile is not qualified."))
     }
@@ -1019,12 +1284,31 @@ impl RuntimeConfig {
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
         { false }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn select_github_release_observation(&mut self, profile: GitHubReleaseObservationProfile) -> Result<(), BridgeError> {
+        if self.github_release_observation.is_some() || !profile.bindings_match() { return Err(unavailable()); }
+        self.github_release_observation = Some(profile); Ok(())
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn github_release_installed_profile(&self) -> Result<GitHubReleaseInstalledProfile, BridgeError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(profile) = self.github_release_observation {
+            if profile.bindings_match() { return Ok(GitHubReleaseInstalledProfile { _private: (), observation: Some(profile) }); }
+            return Err(unavailable());
+        }
         #[cfg(all(feature = "desktop-shell", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if GitHubReleaseInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
-            return Ok(GitHubReleaseInstalledProfile { _private: () });
+            return Ok(GitHubReleaseInstalledProfile { _private: (),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: None,
+            });
         }
         Err(BridgeError::unavailable("The installed GitHub release action profile is not qualified."))
     }
@@ -1632,6 +1916,96 @@ mod tests {
             assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
         }
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_preflight_installed_selection_requires_its_own_normal_publisher_binding() {
+        let target = PassiveInstalledProfile::TARGET;
+        let manifest = Some(PassiveInstalledProfile::MANIFEST);
+        let protocol = Some(PassiveInstalledProfile::PROTOCOL);
+        assert!(GitHubPreflightInstalledProfile::binding_values_match(target, manifest, protocol, true));
+        for (target, manifest, protocol, publisher_bound) in [
+            ("aarch64-apple-darwin", manifest, protocol, true),
+            (target, None, protocol, true),
+            (target, Some("0000000000000000000000000000000000000000000000000000000000000000"), protocol, true),
+            (target, manifest, None, true),
+            (target, manifest, Some("0000000000000000000000000000000000000000000000000000000000000000"), true),
+            (target, manifest, protocol, false),
+        ] { assert!(!GitHubPreflightInstalledProfile::binding_values_match(target, manifest, protocol, publisher_bound)); }
+        assert!(!GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-preflight-installed-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_preflight_protocol::publisher_bound();
+        assert_eq!(runtime.github_preflight_profile_available(), expected);
+        let profile = runtime.github_preflight_installed_profile();
+        assert_eq!(profile.is_ok(), expected);
+        let release_expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_release_protocol::publisher_bound();
+        assert_eq!(runtime.github_release_profile_available(), release_expected);
+        if let Ok(profile) = profile {
+            assert_eq!(profile.manifest_anchor().unwrap(), PassiveInstalledProfile::MANIFEST);
+            let selected = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(target).join(manifest.unwrap());
+            assert_eq!(selected.bootstrap, root.join("github_preflight_bootstrap.py"));
+            assert_eq!(selected.python, root.join("python/bin/python3"));
+            assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        } else {
+            // Refusal happens before inspection: no ledger or launch authority.
+            let mut slots = crate::installed_runtime::GitHubPreflightRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_preflight_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn github_release_installed_selection_requires_its_own_normal_publisher_binding() {
+        let target = PassiveInstalledProfile::TARGET;
+        let manifest = Some(PassiveInstalledProfile::MANIFEST);
+        let protocol = Some(PassiveInstalledProfile::PROTOCOL);
+        assert!(GitHubReleaseInstalledProfile::binding_values_match(target, manifest, protocol, true));
+        for (target, manifest, protocol, publisher_bound) in [
+            ("", manifest, protocol, true),
+            ("aarch64-apple-darwin", manifest, protocol, true),
+            (target, None, protocol, true),
+            (target, Some("0000000000000000000000000000000000000000000000000000000000000000"), protocol, true),
+            (target, manifest, None, true),
+            (target, manifest, Some("0000000000000000000000000000000000000000000000000000000000000000"), true),
+            (target, manifest, protocol, false),
+        ] { assert!(!GitHubReleaseInstalledProfile::binding_values_match(target, manifest, protocol, publisher_bound)); }
+        assert!(!GITHUB_RELEASE_NATIVE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED);
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-github-release-installed-data-only"));
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)
+            && crate::github_release_protocol::publisher_bound();
+        assert_eq!(runtime.github_release_profile_available(), expected);
+        let profile = runtime.github_release_installed_profile();
+        assert_eq!(profile.is_ok(), expected);
+        if let Ok(profile) = profile {
+            let selected = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(target).join(manifest.unwrap());
+            assert_eq!(selected.bootstrap, root.join("github_release_bootstrap.py"));
+            assert_eq!(selected.python, root.join("python/bin/python3"));
+            assert_eq!(selected.core, root.join("core.zip")); assert_eq!(selected.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Darwin", b"x86_64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure-custom"));
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        } else {
+            // No publisher/normal tuple means no inspection or release capability.
+            let mut slots = crate::installed_runtime::GitHubReleaseRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_github_release_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && slots.no_child_effect() && slots.capability().is_err());
+        }
+    }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
         target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1686,6 +2060,24 @@ mod tests {
             assert!(tools.never_started() && !tools.settled() && tools.capability().is_err());
             assert!(offline.never_started() && !offline.settled() && offline.capability().is_err());
         }
+    }
+    #[test]
+    fn android_runtime_selection_is_compile_data_and_its_owner_claim_never_reopens() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-android-selection-data"));
+        let clone = runtime.clone();
+        assert!(runtime.claim_original_android_owner());
+        assert!(!clone.claim_original_android_owner() && !runtime.claim_original_android_owner());
+        drop(runtime);
+        assert!(!clone.clone().claim_original_android_owner());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let expected = false;
+        // The claim does not manufacture absent/mismatched runtime DATA. The
+        // shared exact tuple's missing/different vectors are tested below.
+        assert_eq!(clone.android_build_installed_runtime_available(), expected);
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]

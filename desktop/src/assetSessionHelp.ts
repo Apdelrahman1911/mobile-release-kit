@@ -32,6 +32,14 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
     failure: 'CMS format is not proof of Apple authenticity, valid dates, entitlements or team/bundle/signer correspondence. Those checks belong to core signing validation; session assessment cannot authorize a release.',
     suffixes: ['.mobileprovision'],
   },
+  'asc-p8/file': {
+    where: 'Obtain the original downloaded API private key from its authorized App Store Connect account owner. On an admitted Linux or Apple-silicon Mac session, select the private original outside registered projects; the app does not move, rename, change permissions or generate keys.',
+    format: 'An original .p8 file, at most 4 MiB: one unencrypted PRIVATE KEY PEM block with strict 64-column wrapping, or complete DER PKCS#8 version 0. Envelope and named EC/P-256 identifiers only. Encrypted, SEC1-only, version-1, attributes and explicit-curve variants are unsupported.',
+    failure: 'A recognized envelope and identifiers do not prove mathematical private-key validity, account ownership, revocation or App Store Connect permissions. No key derivation, signing or Store request occurs. Keep/Save and Assign remain separate reviews.',
+    suffixes: ['.p8'],
+  },
+  'asc-p8/keyId': { format: 'Exactly 10 uppercase ASCII letters or digits, as judged by the core. ' + privateValueFormat },
+  'asc-p8/issuerId': { format: 'UUID spelling: 8-4-4-4-12 hexadecimal characters with hyphens, as judged by the core. ' + privateValueFormat },
   'android-firebase/file': {
     where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. Select that private original outside registered project folders. Do not use an exported service-account private key.',
     format: 'An original UTF-8 .json file, at most 4 MiB, within this importer’s document/complexity limits. Decoded duplicate names are refused. The core checks every supported client structure and the configured application ID; CLI parsing rules are unchanged.',
@@ -110,7 +118,7 @@ const controls: Record<string, Partial<HelpContent>> = {
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',
     where: 'Click Select file and use the native picker. No manual registration, internal directory copying, path entry or renaming is required.',
-    format: 'One private original outside all registered projects on the separately admitted local filesystem. Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, and macOS-only P12 / DER CMS profile envelopes; native availability is a separate gate. Apple authenticity and password correctness are not format observations. P8 and binary plist are not enabled.',
+    format: 'One private original outside all registered projects on the separately admitted local filesystem. Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, unencrypted P8 PKCS#8 envelopes, and macOS-only P12 / DER CMS profile envelopes; native availability is a separate gate. P8 envelope/EC-P256 identifiers are not mathematical key, ownership, revocation or Store-access validation. Apple authenticity and password correctness are not format observations. Binary plist is not enabled.',
   },
   prepare: {
     requiredWhen: 'After file selection and companion entry, or when reviewing a scalar or retained record.',

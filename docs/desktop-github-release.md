@@ -3,10 +3,13 @@
 ## Availability and scope
 
 This is a **source implementation, not a qualified or delivered release feature**.
-`GITHUB_RELEASE_NATIVE_QUALIFIED` remains `false`. Browser preview never substitutes
-a mock release engine or dispatches a workflow. Native integration, independent
-implementation acceptance, platform verification and protected delivery remain
-required before enabling the feature.
+`GITHUB_RELEASE_NATIVE_QUALIFIED` remains `false` as a qualification status, not
+as the normal installed selector. Linux selection requires the exact normal
+installed target/manifest/protocol and this release family's own immutable
+publisher bindings. This source change does not supply those bindings or claim
+native/service verification. Browser preview never substitutes a mock release
+engine or dispatches a workflow. Independent implementation acceptance, native
+integration, platform verification and protected delivery remain required.
 
 The Releases page provides a guided path to the toolkit's existing canonical
 `candidate`, `external-testing` and `production-submit` workflows, one Android or
@@ -125,11 +128,90 @@ cleanup, **not remote cancellation, rollback or permission to resend**.
 - Real account roles, WIF/SSO, environment administrator setup, Store agreements,
   tester membership and supported build toolchains remain external facts.
 
-The source currently adds a Linux installed action profile, still disabled.
-macOS/Windows native action integration and qualification are not implied by
-cross-platform renderer code. Existing iOS workflow build/signing requires its
-genuine supported macOS runner. No physical-Mac-only prerequisite was identified
-for the remote dispatch slice; no Store mutation is needed merely to test it.
+The normal Linux installed action profile is selectable only in the supported
+desktop-shell/custom-protocol build, excluding development/runtime-publisher
+builds, with its exact installed payload and R's own publisher binding.
+`build.rs` derives the three canonical caller digests from the immutable
+`MRK_GITHUB_RELEASE_TOOLING_SHA`; missing bindings still refuse before native
+inspection. Passive, read-only and GitHub-preflight selection cannot supply
+release authority, and G's synthetic observations cannot qualify R.
+
+An R-specific installed/native three-journey route is now authored, but source
+authoring is not native execution, implementation acceptance or delivery.
+Reviewed production delivery bindings remain required. macOS/Windows native
+action integration and qualification are not implied by cross-platform renderer
+code. Existing iOS workflow build/signing
+requires its genuine supported macOS runner. No physical-Mac-only prerequisite
+was identified for the remote dispatch slice; no Store mutation is needed merely
+to test it.
+
+## Separate installed observation route (native3)
+
+`verify/desktop-installed-github-release` selects only
+`github-release-native3-v1`. It reuses the installed-shell workflow's original
+source, preparation, compiler, artifact, system-manager owner and final-output
+path. It does not run the historical full shell matrix, Android build cases,
+GitHub preflight's matrix or any release workflow. This is an engineering
+observation build, not an application to ship or a way to enable qualification.
+
+The dedicated compiler alone supplies
+`4c89f77c7a1e3f0b538a99ab12069b245484205d` as R's **observation source candidate**.
+`build.rs` derives all three canonical caller digests. The source candidate is
+not established as protected, delivered production tooling. Ambient release
+bindings, the preflight family's selector, mixed scopes and another ref/job/case
+are refused rather than accepted as equivalent proof.
+
+Each case uses the ordinary project picker, GitHub connection and Releases page,
+actual native IPC/status/consent controls and original release owner. The finite
+physical TLS fixture accepts only `owner/app`, account11/repository22 and the
+public noncredential sentinel `INERT_NOT_A_CREDENTIAL`; it has no GitHub or Store
+fallback. Real Connect is a separate read-only owner using the existing D-S
+fixture runtime. R's profile is independently selected:
+
+| Journey | R runtime and actions | Total local HTTP / POST | Original owners |
+|---|---|---|---|
+| Normal Pending | Normal V; local Pending after genuine Connect | 4 / 0 | 2 |
+| Response loss | D-S; Prepare, Dispatch, Pending, Reconcile | 25 / 1 | 5 |
+| Revocation before GO | D-S; Prepare, Dispatch refused after READY | 14 / 0 | 3 |
+
+- **Normal Pending:** the actual V helper opens, reads and closes an empty R
+  journal with `token:null`; it creates no intent/run and no release transport.
+- **Response loss:** the production-submit/iOS review keeps declared original
+  source/version1.2.3/build42 distinct from current source/version2.0.0/build99.
+  Exact typed consent and the checkbox authorize one Dispatch. The fixture
+  observes the actual durable intent before losing that POST's response. Local
+  Pending retains it without HTTP; explicit Reconcile records run9001/attempt1.
+  The UI preserves the “not authenticated release evidence” warning, with no
+  automatic resend or polling.
+- **Revocation:** only the original writer pauses after real READY. Ordinary UI
+  Disconnect stops/revokes that same owner before the retained sender releases
+  it. The actual final claim refuses the changed target: no GO, token or
+  Dispatch HTTP; one immutable intent/no run remains. The original first error
+  stays `cancelled`, its two-second cleanup endpoint is not renewed, and the
+  displayed terminal operation stays not-sent/cancelled.
+
+The observer adds no credential holder, scheduler, process owner or cleanup
+deadline. Product10s/cleanup2s/peer16s limits are unchanged. Success requires
+original child wait, both EOFs, writer/observer/driver/watchdog joins, actual
+native-slot settlement, peer/control closure and the normal application Quit
+gate. A result, READY frame or receipt alone is insufficient. Journal output
+exports only bounded identity/hash summaries, never raw intents or credentials;
+later cases must not change earlier journals or unrelated project material.
+
+Fixture inputs retain the original source and borrow only its common directory
+prefix. Borrowers keep their own leaf and suffix FDs, verify that same live
+anchor, and close owned suffixes once in reverse acquisition order before the
+source closes. Conservative descriptor peaks35/49/48 stay below the unchanged64
+limit; no directory, content or finality check is dropped to reduce usage.
+
+Native execution requires the reviewed disposable Linux x86_64
+`6.17.0-1022-azure` system-manager boundary, not a shared VPS or inert mocks.
+The newly authored route and contracts still need independent source acceptance,
+admitted focused local checks and actual source-bound native observations.
+Even successful native3 does not establish real GitHub dispatch/job naming,
+delivered production tooling, macOS/Windows action paths, Store behavior or
+kernel-close fault injection. These limitations are retained in the closed
+receipt rather than hidden behind a green test label.
 
 ## Focused regression coverage
 
@@ -147,6 +229,14 @@ cover corresponding native DATA contracts and exact-family claims. The workflow
 lifecycle subset verifies canonical packaged caller equality, manual input
 compatibility, actual builtin-only earliest guards and non-bypass of resolver /
 build / Store dependencies. It never runs a Store step or a release workflow.
+
+`tests/desktop/test_github_release_native_route.py` adds focused inert contracts
+for the separate ref/scope/caller binding, the three schedules, actual receipt
+parsers, source-bound closed exports, borrowed FD custody and original journal
+read/close/finality failures. Rust's private native3 contracts cover independent
+normal-V/D-S selection, READY/GO/token and revocation ordering, retained sender
+cleanup and UI terminal-data preservation. Authored tests are not a claim that
+they have executed or that native journeys passed.
 
 Passing these tests does not qualify the installed runtime, GitHub permissions,
 Store behavior, native platform boundaries or production delivery.

@@ -151,3 +151,33 @@ fn refusal_and_snapshots_do_not_hold_record_across_diagnostic_io() {
     ordered(refusal, &["self.with_order(", "self.publish()"]);
     assert!(STARTUP.contains("diagnostic.startup(word, &|| self.diagnostic_end().is_some())"));
 }
+
+#[test]
+fn normal_ui_source_idle_matches_v2_and_keeps_cancel_finality_guards() {
+    // SOURCE contract only: no native status, dialog, process or runtime is made.
+    let session = include_str!("../../../src-tauri/src/asset_session.rs");
+    let producer = between(session, "fn status_data(", "pub(crate) fn status(");
+    assert_eq!(producer.matches("schema_version: 2").count(), 2);
+    assert!(!producer.contains("schema_version: 1"));
+    let consumer = between(OBSERVER, "fn source_idle(", "// Synchronous expressions");
+    assert!(consumer.contains(r#"value["schemaVersion"] == 2 && value["mode"] == "closed""#));
+    assert!(!consumer.contains(r#"value["schemaVersion"] == 1"#));
+    for guard in [
+        "let status = document.status();", "edit::bounded(&status, 16 * 1024)",
+        r#"value["capability"]["available"] == false"#,
+        r#"value["context"].is_null()"#,
+        r#"value["records"].as_array().is_some_and(Vec::is_empty)"#,
+        r#"value["assignments"].as_array().is_some_and(Vec::is_empty)"#,
+        r#"operation["operationId"] == id && operation["operation"] == "choose-project""#,
+        r#"operation["phase"] == "idle" && operation["settlement"] == "known" && operation["reason"] == reason"#,
+        r#"operation["source"] == "not-run" && operation["selectionToken"].is_null()"#,
+        r#"operation["assessment"].is_null() && operation["preview"].is_null() && document.assets_can_exit()"#,
+    ] { assert!(consumer.contains(guard), "{guard}"); }
+    let cancelled = between(OBSERVER, "Step::CancelSettled => {", "Step::ProjectSettled => {");
+    ordered(cancelled, &[
+        "if !r.cancel_returned { return; }", "dialog.settled(false, false)",
+        r#"source_idle(&state.document, 1, "user-cancelled")"#,
+        "state.bridge.native_generation().ok() != Some(1)", "self.fail(Refusal::Tick)",
+        "r.step = Step::ReadCancelled",
+    ]);
+}

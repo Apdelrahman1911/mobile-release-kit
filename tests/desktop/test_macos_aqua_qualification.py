@@ -329,11 +329,11 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(label), 1)
         position = workflow.index(label)
         self.assertLess(workflow.index("      - name: Bind the complete reviewed first-party checkout before compilation\n"), position)
-        for later in ("Compile headless Mac library and run six exact DATA regressions first",
+        for later in ("Compile headless Mac libraries and run eleven exact DATA regressions first",
                       "Fail fast on native Scripts ownership and package format (never Installer)",
                       "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
-                      "Standard Installer only is privileged; never execute the app or Python as root"):
+                      "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
             self.assertLess(position, workflow.index("      - name: " + later + "\n"))
         step = workflow.split(label, 1)[1].split("\n      - name:", 1)[0]
         for required in (
@@ -343,20 +343,24 @@ class AquaDataTests(unittest.TestCase):
                 'module.IOSAquaDataTests("test_normal_macos_selection_is_original_bound_without_observer_grants")',
                 'module.CurrentIOSAquaDataTests("test_current_reports_are_closed_bounded_and_do_not_claim_successful_signing")',
                 'module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted")',
+                'module.ProjectFieldsAquaDataTests("test_complete_project_fields_report_is_bounded_and_fail_closed")',
+                'module.ProjectFieldsAquaDataTests("test_original_fixture_restoration_has_only_two_ctime_exceptions")',
                 "unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)",
-                "result.testsRun != 4", "not result.wasSuccessful()",
+                "result.testsRun != 6", "not result.wasSuccessful()",
                 "result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses",
                 "raise SystemExit(1)"):
             self.assertIn(required, step)
         self.assertNotIn("discover(", step)
         self.assertNotIn("loadTestsFrom", step)
 
-        headless_label = "      - name: Compile headless Mac library and run six exact DATA regressions first\n"
+        headless_label = "      - name: Compile headless Mac libraries and run eleven exact DATA regressions first\n"
         self.assertEqual(workflow.count(headless_label), 1)
         self.assertLess(workflow.index(headless_label), workflow.index(
             "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
         headless = workflow.split(headless_label, 1)[1].split("\n      - name:", 1)[0]
         self.assertLess(headless.index("cd desktop/src-tauri"), headless.index("cargo test --locked --no-default-features"))
+        self.assertEqual(headless.count("cargo test "), 1)
+        self.assertIn("--package mobile-release-kit-desktop --package mrk-macos-installed-native", headless)
         self.assertIn("--lib --no-run --message-format=json", headless)
         self.assertNotIn("--manifest-path", headless)
         self.assertNotIn("--features", headless)
@@ -368,22 +372,73 @@ class AquaDataTests(unittest.TestCase):
             "asset_source::macos::tests::entered_native_checks_remain_uncertain_after_descriptor_book_retirement",
             "asset_source::macos::tests::protected_objects_are_recognized_even_from_another_firmlink_parent_role",
             "asset_source::macos::tests::complete_alias_rosters_are_bounded_before_any_native_acquisition",
+            "asset_source::macos::tests::project_fields_are_strict_descendant_data_not_credential_capture",
+            "asset_source::macos::tests::project_spellings_are_bounded_without_canonicalization",
+            "asset_source::macos::tests::only_local_ownership_aware_apfs_is_admitted",
             "ios_toolchain::tests::fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup",
         ))
+        native_names = headless.split("          native_names = (\n", 1)[1].split("          )\n", 1)[0]
+        self.assertCountEqual(M.re.findall(r'"([^"]+)"', native_names), (
+            "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches",
+            "tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
+        ))
+        self.assertIn('"scope": "nine-main-and-two-native-macos-headless-data-regressions"', headless)
+        table = headless.split("          libraries = (\n", 1)[1].split("          )\n", 1)[0]
+        self.assertEqual(table,
+            '              ("main", "desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", [], names, 9, "headless"),\n'
+            '              ("native", "desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native",\n'
+            '               ["default"], native_names, 2, "headless-native"),\n')
+        for required in ("if len(targets) != 2:", "for role, directory, package, library, features, test_names, count, prefix in libraries:",
+                         'r.get("target", {}).get("name") == library', "if len(matches) != 1:",
+                         'package_id = "path+" + (checkout / directory).as_uri() + "#" + package + "@0.1.0"',
+                         'target.get("package_id") != package_id',
+                         'target.get("manifest_path") != str(checkout / directory / "Cargo.toml")',
+                         'target["target"].get("kind") != ["lib"]', 'target["target"].get("crate_types") != ["lib"]',
+                         'target["target"].get("src_path") != str(checkout / directory / "src/lib.rs")',
+                         'target.get("profile", {}).get("test") is not True', 'target.get("features") != features',
+                         'binary.parent != expected', 're.fullmatch(re.escape(library) + r"-[0-9a-f]+", binary.name)',
+                         "for binary, test_names, count, prefix, record in admitted:"):
+            self.assertIn(required, headless)
+        self.assertLess(headless.index("admitted.append("), headless.index("owner.run_owned("))
         self.assertEqual(headless.count("owner.run_owned("), 1)
-        for required in ('[str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *names]',
+        for required in ('[str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *test_names]',
                          "cwd=work, timeout=30, capture=True, text=False, output_limit=64 * 1024",
                          "type(result) is not subprocess.CompletedProcess", "type(result.stdout) is not bytes",
                          "type(result.stderr) is not bytes", "len(result.stdout) + len(result.stderr) > 64 * 1024",
-                         "len(names) != 6", "len(expected_rows) != 6", "len(lines) != 8",
-                         "len(set(lines[1:7])) != 6", "set(lines[1:7]) != expected_rows",
-                         "6 passed; 0 failed; 0 ignored; 0 measured;"):
+                         "len(test_names) != count", "len(expected_rows) != count", "len(lines) != count + 2",
+                         'heading = f"running {count} " + ("test" if count == 1 else "tests")', 'lines[0] != heading',
+                         "len(set(lines[1:-1])) != count", "set(lines[1:-1]) != expected_rows",
+                         "{count} passed; 0 failed; 0 ignored; 0 measured;"):
             self.assertIn(required, headless)
         reject = headless.index('if result.returncode != 0 or result.stderr:')
         for output in ("stdout", "stderr", "status"):
-            self.assertLess(headless.index('publish("headless-tests.' + output + '"'), reject)
+            self.assertLess(headless.index('publish(prefix + "-tests.' + output + '"'), reject)
+        self.assertLess(headless.index("originals.append(original)"), headless.index("before = os.fstat(binary_fd)"))
+        self.assertIn('os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)', headless)
+        for required in ('sig(before) != sig(os.fstat(binary_fd))', 'sig(before) != sig(binary.lstat())',
+                         'os.pread(binary_fd, min(before.st_size - offset, 1024 * 1024), offset)',
+                         'os.pread(binary_fd, 1, before.st_size)', 'return digest.hexdigest()'):
+            self.assertIn(required, headless)
+        digest_checks = [item.start() for item in M.re.finditer(M.re.escape('if original_digest() != digest:'), headless)]
+        self.assertEqual(len(digest_checks), 2)
+        self.assertLess(digest_checks[0], headless.index("owner.run_owned("))
+        self.assertGreater(digest_checks[1], headless.index('publish(prefix + "-tests.status"'))
         self.assertLess(headless.index('raise ValueError("headless-original-return-contract")'), headless.index("home.rmdir()"))
-        self.assertNotIn(".rmdir()", headless.split("          finally:\n", 1)[1])
+        settlement = headless.split("          finally:\n", 1)[1]
+        self.assertNotIn(".rmdir()", settlement)
+        for required in ('descriptor, original["fd"] = original["fd"], None',
+                         'original["record"]["artifactOriginalClosed"] = True',
+                         'close_errors.append({"role": original["record"]["role"], "type": type(error).__name__})',
+                         'if close_errors: receipt["closeErrors"] = close_errors',
+                         'receipt[key] = len(receipt["targets"]) == 2 and all(row[key] for row in receipt["targets"])',
+                         'receipt["passed"] = ("failure" not in receipt and not close_errors',
+                         'and receipt["originalReturned"] and receipt["artifactOriginalUnchanged"] and receipt["artifactOriginalClosed"]',
+                         'and all(row["testsPassed"] for row in receipt["targets"]))',
+                         'if close_errors and "failure" not in receipt: raise ValueError("headless-original-close-unconfirmed")'):
+            self.assertIn(required, settlement)
+        self.assertEqual(settlement.count("os.close(descriptor)"), 1)
+        self.assertLess(settlement.index("os.close(descriptor)"), settlement.index('receipt["passed"] ='))
+        self.assertLess(settlement.index('receipt["passed"] ='), settlement.index('publish("headless-tests.receipt.json", data)'))
         exporter = workflow.split("      - name: Export bounded diagnostics without altering original command evidence\n", 1)[1]
         for required in ('("headless-build.jsonl", "headless-build.status", 4 * 1024 * 1024, "headless-build.admitted.jsonl", False)',
                          '("headless-build.stderr", "headless-build.status", 64 * 1024, "headless-build.stderr.tail.txt", True)',
@@ -393,10 +448,69 @@ class AquaDataTests(unittest.TestCase):
                         exporter.index("data, metadata = snapshot(original, limit, tail)"))
         upload = exporter.split("          path: |\n", 1)[1]
         for output in ("headless-build.admitted.jsonl", "headless-build.stderr.tail.txt", "headless-build.status",
-                       "headless-tests.stdout", "headless-tests.stderr", "headless-tests.status", "headless-tests.receipt.json"):
+                       "headless-tests.stdout", "headless-tests.stderr", "headless-tests.status",
+                       "headless-native-tests.stdout", "headless-native-tests.stderr", "headless-native-tests.status",
+                       "headless-tests.receipt.json"):
             self.assertIn("${{ steps.work.outputs.root }}/" + output + "\n", upload)
         for unbounded in ("headless-build.jsonl\n", "headless-build.stderr\n", "cargo-target", "*", "**"):
             self.assertNotIn(unbounded, upload)
+
+
+    def test_directory_link_metadata_never_widens_ordinary_rosters_or_source_acquisition(self):
+        root = PATH.parents[2]
+        native = (root / "desktop/native/macos-installed-native/src/native.m").read_text()
+        decoder = native.split("int mrk_decode_directory_entries(", 1)[1].split("int mrk_entries(", 1)[0]
+        self.assertIn("(kind != VREG && kind != VDIR && kind != VLNK)) return EIO;", decoder)
+        self.assertIn("out[written + 8] = kind == VDIR ? DT_DIR : (kind == VLNK ? DT_LNK : DT_REG);", decoder)
+        self.assertEqual(decoder.count("*used ="), 2)
+        self.assertLess(decoder.index("*used = 0;"), decoder.index("for (int n = 0; n < count; ++n)"))
+        self.assertLess(decoder.index("offset += length;"), decoder.index("*used = written;"))
+        self.assertIn("if (capacity - written < 11 || name_length > capacity - written - 11) return EOVERFLOW;", decoder)
+        for forbidden in ("open(", "openat(", "readlink(", "stat(", "getattrlistbulk("):
+            self.assertNotIn(forbidden, decoder)
+        entries = native.split("int mrk_entries(", 1)[1].split("int mrk_sync(", 1)[0]
+        self.assertIn("getattrlistbulk(fd, &request, block, sizeof(block), 0)", entries)
+        self.assertIn("return mrk_decode_directory_entries(block, sizeof(block), count, out, capacity, used);", entries)
+        runtime = (root / "desktop/src-tauri/src/installed_runtime_macos.rs").read_text()
+        walk = runtime.split("    fn walk(", 1)[1].split("    fn inspect(", 1)[0]
+        guard = "if !matches!(buffer[offset+8], nix::libc::DT_DIR | nix::libc::DT_REG) { return Err(AdmissionFailure::Inventory); }"
+        self.assertEqual(walk.count(guard), 1)
+        self.assertLess(walk.index("if used - offset < 11"), walk.index(guard))
+        for after in ('if name == "."', 'if path == "manifest.json"', "self.open(Some(parent)"):
+            self.assertLess(walk.index(guard), walk.index(after))
+        installer = (root / "desktop/src-tauri/src/bin/macos_install.rs").read_text()
+        roster = installer.split("        fn roster(", 1)[1].split("        fn copy_file(", 1)[0]
+        guard = 'check(matches!(block[offset+8], nix::libc::DT_DIR | nix::libc::DT_REG), "directory-roster")?;'
+        self.assertEqual(roster.count(guard), 1)
+        self.assertLess(roster.index('check(used-offset >= 11,"directory-record")?;'), roster.index(guard))
+        for after in ('if name == "."', "found.insert("):
+            self.assertLess(roster.index(guard), roster.index(after))
+        for ordinary in (walk, roster):
+            self.assertNotIn("DT_LNK", ordinary)
+        observer = (root / "desktop/src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        rosters = observer.split("fn directory_rosters(", 1)[1].split("struct Fixture {", 1)[0]
+        for required in ('if alternate.is_some() && linked.is_some() { return Err(()); }',
+                         'if linked.is_some_and(|name| name != "linked.p12" || !entries.contains(&name)) { return Err(()); }',
+                         'kind == nix::libc::DT_LNK && linked == Some(name)',
+                         '!directory_roster_matches(&actual, entries, alternate)'):
+            self.assertIn(required, rosters)
+        self.assertIn("directory_with_link(path, uid, mode, entries, None)", observer)
+        source = (root / "desktop/src-tauri/src/asset_source_macos.rs").read_text()
+        child = source.split("    fn child(", 1)[1].split("    fn chain(", 1)[0]
+        acquisition = child.index("self.slots[index].state = OriginalState::Acquiring;")
+        self.assertLess(child.index("AtFlags::AT_SYMLINK_NOFOLLOW"), child.index("let expected = identity(&before, file)?;"))
+        self.assertLess(child.index("let expected = identity(&before, file)?;"), acquisition)
+        self.assertLess(acquisition, child.index("fcntl::openat("))
+        self.assertIn("OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK", child)
+        self.assertIn("if file { file_identity(stat).map(Identity::File) }", source)
+        self.assertIn("if stat.st_mode & SFlag::S_IFMT.bits() != SFlag::S_IFREG.bits() { return Err(Reason::SourceRefused); }", source)
+        session = (root / "desktop/src-tauri/src/installed_shell_observation_macos_session.rs").read_text()
+        self.assertIn('4 | 5 => Some(("refused", "source-refused"))', session)
+        self.assertIn('root.join("linked.p12")', session)
+        self.assertIn('self.link.as_ref().map(|_| "linked.p12")', session)
+        self.assertIn('std::fs::read_link(path).map_err(|_| ())? != Path::new("synthetic.p12")', session)
+        self.assertIn('link_fact(&root.join("linked.p12"), uid)?.identity != original.identity', session)
+
 
     def test_new_directory_group_normalization_precedes_widening(self):
         for gid in (GID, 0):
@@ -1809,7 +1923,7 @@ class AquaDataTests(unittest.TestCase):
         body = action.split("fn native_step_body(", 1)[1]
         entry = "if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }"
         self.assertLess(body.index(entry), body.index("observed_panel()"))
-        self.assertIn("fn quit_id(self) -> u32 { if self.inputs() { 12 } else if self == Self::FirstSave { 4 } else { 2 } }", observer)
+        self.assertIn("fn quit_id(self) -> u32 { if self.inputs() || self == Self::ProjectFields { 12 } else if self == Self::FirstSave { 4 } else { 2 } }", observer)
         for branch in ("Step::OpenProject => (self.case.selected_id(),PanelKind::Project)",
                        'Step::Session(session::Step::Native(i)) => (self.case.input_id(i).ok_or("native-step")?,PanelKind::File)',
                        "Step::Quit => (self.case.quit_id(),PanelKind::Quit)",
@@ -1880,10 +1994,18 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('first_failure_reason(&self.failure_reason) == Some("adapter-native-action")', observer)
         self.assertIn("r.native_action = action_diagnostic;", observer)
         report = observer.split("    fn report_failure(", 1)[1].split("    pub(super) fn attach(", 1)[0]
-        deferred = ('if matches!(reason, "adapter-native-action" | "native-default-binding") && r.pending == Some(Pending::Native(r.step))\n'
+        # Only these original-return reasons may defer their one-shot report.
+        # The two P2 additions remain scoped to its native step, and the same
+        # pending/entered/not-returned original gates the complete predicate.
+        deferred = ('if (matches!(reason, "adapter-native-action" | "native-default-binding")\n'
+                    '                || matches!(r.step, Step::ProjectFields(project_fields::Step::Native(_)))\n'
+                    '                    && matches!(reason, "adapter-native-observation" | "project-fields-original-contract"))\n'
+                    "            && r.pending == Some(Pending::Native(r.step))\n"
                     "            && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {\n"
                     "            return;\n        }")
-        self.assertIn(deferred, report)
+        self.assertEqual(report.count(deferred), 1)
+        self.assertEqual(report.count("r.native_dispatch.is_some_and("), 1)
+        self.assertLess(report.index("first_failure_reason(&self.failure_reason)"), report.index("let Ok(r) = self.record.try_lock()"))
         self.assertLess(report.index("let Ok(r) = self.record.try_lock()"), report.index(deferred))
         self.assertLess(report.index(deferred), report.index("FailureSnapshot::from_record(&r)"))
         self.assertLess(report.index("drop(r)"), report.index("self.diagnostic.submit(snapshot.frame(reason))"))
@@ -1916,7 +2038,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(configured.index("MRK_ID_PROMPT_ENTERED"), configured.index("setPrompt:prompt]"))
         self.assertLess(configured.index("setPrompt:prompt]"), configured.index("MRK_ID_PROMPT_RETURNED"))
         self.assertIn("d->prompt != MRK_ID_MATCH", configured)
-        start = native.split("int mrk_panel_start(", 1)[1].split("int mrk_panel_poll(", 1)[0]
+        start = native.split("static int mrk_panel_start_inner(", 1)[1].split("int mrk_panel_start(", 1)[0]
         self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
         for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_CONTROL_NODES = 17", "MRK_CONTROL_DEPTH = 8"):
             self.assertTrue(bound in native, "missing native bound: " + bound)
@@ -2031,9 +2153,10 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(timeout.index("AXUIElementSetMessagingTimeout"), timeout.index("mrk_ax_admit(s, timeout.required_ns"))
         entry = native.split("void mrk_observation_prompt_press(", 1)[1]
         self.assertIn("if (pthread_main_np())", entry)
-        self.assertIn("static MRKPrompt mrk_prompt_originals[8]", native)
+        self.assertIn("enum { MRK_PROMPT_ORIGINALS = 9 };", native)
+        self.assertIn("static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS]", native)
         self.assertIn("atomic_load(&mrk_prompt_unknown) || atomic_flag_test_and_set(&mrk_prompt_active)", entry)
-        self.assertIn("index >= 8 || !atomic_compare_exchange_strong(&mrk_prompt_next, &index, index + 1)", entry)
+        self.assertIn("index >= MRK_PROMPT_ORIGINALS || !atomic_compare_exchange_strong(&mrk_prompt_next, &index, index + 1)", entry)
         self.assertLess(entry.index("atomic_compare_exchange_strong(&mrk_prompt_next"), entry.index("MRKPrompt *s = &mrk_prompt_originals[index]"))
         # A serial successor receives another original ledger, never the old
         # Project ledger. Clearing active must not reset the monotonic roster.
@@ -2121,6 +2244,7 @@ class AquaDataTests(unittest.TestCase):
             self.assertLess(construct.index(binding), construct.index("panel.installed_arm_open_identity(target)"))
         self.assertLess(construct.index("q.open_identity_target(owner.id, choice)"), construct.index("panel.installed_arm_open_identity(target)"))
         self.assertLess(construct.index("panel.installed_arm_open_identity(target)"), construct.index("panel.start(choice)"))
+        self.assertLess(construct.index("panel.installed_arm_open_identity(target)"), construct.index("panel.start_project_field(choice, root)"))
         scope = observer.split("pub(super) fn open_identity_scope(", 1)[1].split("pub(super) fn completion_returned(", 1)[0]
         self.assertIn("self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
         self.assertIn("PanelKind::Project => self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
@@ -2128,15 +2252,23 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("PanelKind::Quit => false", scope)
         self.assertIn("self.project_path.as_path()", scope)
         configured = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split("static BOOL mrk_original_eligible(", 1)[0]
-        self.assertEqual(native.count("setDirectoryURL:"), 1)
-        self.assertLess(configured.index("MRK_ID_DIRECTORY_ENTERED"), configured.index("setDirectoryURL:url]"))
-        self.assertLess(configured.index("setDirectoryURL:url]"), configured.index("MRK_ID_DIRECTORY_RETURNED"))
-        self.assertLess(configured.index("MRK_ID_DIRECTORY_RETURNED"), configured.index("MRK_ID_CONFIG_COMPLETE"))
+        # Three disjoint purposes, not three competing ways to publish a choice:
+        # historical Project/File identity; ordinary P2 initial root; one-use
+        # synthetic P2 navigation after that root/options were observed.
+        production = native.split("static int mrk_panel_initial_directory(", 1)[1].split("static int mrk_panel_start_inner(", 1)[0]
+        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("enum { MRK_OPEN_ENTRY", 1)[0]
+        self.assertEqual(native.count("setDirectoryURL:"), 3)
+        for purpose in (configured, production, navigation):
+            self.assertEqual(purpose.count("setDirectoryURL:"), 1)
+        historical = configured.split("d->site = MRK_ID_DIRECTORY_URL;", 1)[1]
+        self.assertLess(historical.index("MRK_ID_DIRECTORY_ENTERED"), historical.index("setDirectoryURL:url]"))
+        self.assertLess(historical.index("setDirectoryURL:url]"), historical.index("MRK_ID_DIRECTORY_RETURNED"))
+        self.assertLess(historical.index("MRK_ID_DIRECTORY_RETURNED"), historical.index("MRK_ID_CONFIG_COMPLETE"))
         self.assertIn("!mrk_target_path(s->observationTarget) || s->observationDirectoryReturned", configured)
-        start = native.split("int mrk_panel_start(", 1)[1].split("int mrk_panel_poll(", 1)[0]
+        start = native.split("static int mrk_panel_start_inner(", 1)[1].split("int mrk_panel_start(", 1)[0]
         self.assertIn("#ifdef MRK_INSTALLED_OBSERVATION\n        if ((s->observationIdentity.flags & MRK_ID_ARMED)", start)
         self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("beginSheetModalForWindow:"))
-        for options in ("[panel setCanChooseFiles:kind == 3]", "[panel setCanChooseDirectories:kind == 1]",
+        for options in ("[panel setCanChooseFiles:kind == 3 || kind == 4]", "[panel setCanChooseDirectories:kind == 1 || (kind >= 5 && kind <= 7)]",
                         "[panel setAllowsMultipleSelection:NO]", "[panel setResolvesAliases:NO]"):
             self.assertIn(options, start)
         action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
@@ -3178,8 +3310,9 @@ class IOSAquaDataTests(unittest.TestCase):
         self.assertNotIn(".lock()", permits)
         self.assertIn("self.claimed.compare_exchange(false, true", child)
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        self.assertIn("macos_aqua_qualification.py --scope project-fields", workflow)
         self.assertIn("macos_aqua_qualification.py --scope ios-current-synthetic", workflow)
-        self.assertIn('"caseNames": ' + json.dumps(list(M.IOS_CURRENT_CASES)), workflow)
+        self.assertIn('"caseNames": ["project-fields", ' + ", ".join('"' + case + '"' for case in M.IOS_CURRENT_CASES) + "]", workflow)
 
     def test_five_reports_and_dynamic_original_ids_are_closed_and_bounded(self):
         for case in M.IOS_CASES:
@@ -3736,6 +3869,7 @@ class CurrentIOSAquaDataTests(unittest.TestCase):
         self.assertEqual(len(emitted), 9)
         for (argv, options), case in zip(calls, M.IOS_CURRENT_CASES):
             self.assertEqual(argv, [M.EXECUTABLE, case])
+            self.assertEqual(options["cwd"], BINDING.root() / "state" / case)
             self.assertEqual(options["timeout"], 60 if case == "ios-signing-inputs" else 325)
             self.assertEqual(options["environ"], M.app_environment(options["cwd"], UID, "runner"))
         for case in M.IOS_SESSION_CASES:
@@ -3759,6 +3893,398 @@ class CurrentIOSAquaDataTests(unittest.TestCase):
                     # verified rather than included in the source-directory snapshot.
                     self.assertEqual(".mobile-release" in directories["."][1], output)
                     self.assertNotIn(".mobile-release", directories)
+
+
+class ProjectFieldsAquaDataTests(unittest.TestCase):
+    """Closed P2 comparison/control-flow DATA, never an AppKit/APFS receipt."""
+
+    def test_scope_roots_are_disjoint_closed_and_collisions_are_not_adopted(self):
+        ordinary = Path("/private/tmp/mrk-macos-aqua-" + "a" * 40 + "-123-1")
+        fields = ordinary.with_name(ordinary.name + "-project-fields")
+        self.assertEqual(BINDING.root(), ordinary)
+        self.assertEqual(BINDING.root(project_fields=False), ordinary)
+        self.assertEqual(BINDING.root(project_fields=True), fields)
+        self.assertNotEqual(fields, ordinary)
+        for invalid in (0, 1, None, "project-fields"):
+            with self.subTest(selector=invalid), self.assertRaisesRegex(M.Refused, "^scope-not-supported$"):
+                BINDING.root(project_fields=invalid)
+        for scope in (None, "ios-unsigned-archive", "ios-current-synthetic", "project-fields"):
+            fixtures = M.Fixtures(BINDING, UID, GID, scope)
+            self.assertEqual(fixtures.path, fields if scope == "project-fields" else ordinary)
+            self.assertEqual(fixtures.cases, M.selected_cases(scope))
+            # An occupied namespace cannot acquire/adopt a later descriptor.
+            # These are inert tokens: no real mkdir/open/chmod is attempted.
+            parent = object()
+            collision = FileExistsError("inert occupied namespace")
+            with patch.object(M.os, "mkdir", side_effect=collision) as mkdir, \
+                    patch.object(fixtures, "_open", side_effect=AssertionError("collision acquired a descriptor")) as opening:
+                with self.assertRaises(FileExistsError) as failed:
+                    fixtures._mkdir(parent, fixtures.path.name)
+                self.assertIs(failed.exception, collision)
+                mkdir.assert_called_once_with(fixtures.path.name, 0o700, dir_fd=parent)
+                opening.assert_not_called()
+            self.assertEqual(fixtures.fds, set())
+        fixtures = InertFixtures()
+        fixtures.cases = M.IOS_CURRENT_CASES
+        with self.assertRaisesRegex(M.Refused, "^fixture-scope$"):
+            M.run_cases(BINDING, fixtures, lambda *args, **kwargs: self.fail("mismatched scope invoked"),
+                        UID, "runner", lambda value: self.fail("mismatched scope emitted"), "project-fields")
+        self.assertEqual(fixtures.before, [])
+        self.assertEqual(fixtures.reads, [])
+        self.assertFalse(fixtures.inflight)
+        source = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        route = source.split("fn route(case: Case)", 1)[1].split("fn native_recheck_data_check()", 1)[0]
+        self.assertIn('let suffix = if case == Case::ProjectFields { "-project-fields" } else { "" };', route)
+        self.assertIn('format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")', route)
+        self.assertIn("directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None)", route)
+        self.assertIn('directory(&root,uid,0o700,&[project_fields::NAME,"state"])', route)
+
+    def test_complete_project_fields_report_is_bounded_and_fail_closed(self):
+        case = "project-fields"
+        good = M.expected_result(BINDING, case)
+        self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
+        self.assertLessEqual(len(captured(good)) - len(M.MARKER) - 1, M.JSON_LIMIT)
+        fields = good["projectFields"]
+        self.assertEqual(fields["previewValidation"], "invalid-retained-ios-fields")
+        self.assertIs(fields["normalProfileAvailable"], False)
+        self.assertIs(fields["shippingProfileEnabledByThisReceipt"], False)
+        # Literal independent journey roster. The helper's own table is not
+        # used as the oracle for IDs, purpose, source entry, masks or results.
+        expected = (
+            (2, "version.source", "version-source", "inputs/VERSION", None, 8191, True),
+            (3, "ios.project", "ios-project", "ios/Example.xcodeproj", None, 6143, True),
+            (4, "ios.workspace", "ios-workspace", "ios/Example.xcworkspace", None, 6143, True),
+            (5, "metadata.root", "metadata-root", "metadata", None, 6143, True),
+            (6, "version.source", "version-source", None, None, 4607, False),
+            (7, "metadata.root", "metadata-root", None, None, 4607, False),
+            (8, "version.source", "version-source", None, "project_path_unsafe", 8191, False),
+            (9, "version.source", "version-source", None, "project_path_unsafe", 8191, True),
+            (10, "version.source", "version-source", None, "project_path_unsafe", 8191, True),
+            (11, "ios.workspace", "ios-workspace", None, "project_path_changed", 6143, True),
+        )
+        self.assertEqual(len(fields["rows"]), len(expected))
+        for row, (identifier, field, kind, relative, error, mask, started) in zip(fields["rows"], expected):
+            accepted = identifier not in (6, 7)
+            self.assertEqual(row, {
+                "operationId": identifier, "field": field, "kind": kind,
+                "nativeResponse": "accept" if accepted else "decline",
+                "initialRootAndOptions": {"result": "ok", "facts": mask},
+                "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
+                "sourceBookStarted": started, "originalSourceChildGuiAndCoordinatorSettled": True,
+                "relativePath": relative, "errorCode": error, "draftObserved": True})
+        histories = fields["acceptedOpenHistories"]
+        self.assertEqual([row["operationId"] for row in histories], [1, 2, 3, 4, 5, 8, 9, 10, 11])
+        self.assertEqual(len(histories), 9)
+        for mutation in (
+            lambda v: v.update(normalProfileAvailable=True),
+            lambda v: v.update(shippingProfileEnabledByThisReceipt=True),
+            lambda v: v.update(oneUseOriginalDocumentRegistration=False),
+            lambda v: v.update(allOriginalsSettled=False),
+            lambda v: v.update(originalOperations=11),
+            lambda v: v.update(fixtureMutationsRestored=False),
+            lambda v: v.update(completeDraftAndBaselineMatched=False),
+            lambda v: v.update(previewValidation="format-valid"),
+            lambda v: v["rows"][0].update(operationId=1),
+            lambda v: v["rows"][0].update(kind="file"),
+            lambda v: v["rows"][0].update(field="ios.bundleId"),
+            lambda v: v["rows"][0].update(sourceBookStarted=False),
+            lambda v: v["rows"][0].update(originalSourceChildGuiAndCoordinatorSettled=False),
+            lambda v: v["rows"][0]["initialRootAndOptions"].update(facts=4095),
+            lambda v: v["rows"][1].update(relativePath="../Example.xcodeproj"),
+            lambda v: v["rows"][4].update(nativeResponse="accept", exactNativeSelection=True),
+            lambda v: v["rows"][5].update(laterSyntheticNavigation=True),
+            lambda v: v["rows"][6].update(sourceBookStarted=True),
+            lambda v: v["rows"][9].update(errorCode=None),
+            lambda v: v["panelAttachments"].__setitem__(8, False),
+            lambda v: v["controlReturns"].__setitem__(5, False),
+            lambda v: v["acceptedOpenHistories"].pop(),
+            lambda v: v["acceptedOpenHistories"][1].update(operationId=1),
+            lambda v: v["acceptedOpenHistories"][1].update(kind="project"),
+            lambda v: v["acceptedOpenHistories"][8].update(originalBarrierRetired=False),
+            lambda v: v["acceptedOpenHistories"][8].update(originalBindingMatched=False),
+            lambda v: v["acceptedOpenHistories"][8].update(originalCompletionMatched=False),
+        ):
+            bad = deepcopy(good); mutation(bad["projectFields"])
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_original_fixture_restoration_has_only_two_ctime_exceptions(self):
+        case = "project-fields"
+        before = initial_snapshot(case)
+        after = dict(before)
+        for name in ("inputs/link-input", "inputs/kind-input"):
+            node = after[name]
+            after[name] = replace(node, identity=(*node.identity[:8], 101))
+        # Parent directory size/times may change with exclusive rename; its
+        # original inode/mode/owner/link count and the exact final roster may not.
+        for name in (".", "inputs"):
+            node = after[name]
+            after[name] = replace(node, identity=(*node.identity[:6], 8192, 102, 102))
+        result = M.validate_snapshot(before, after, case, True, UID, GID)
+        self.assertEqual(result["projectFieldRestoration"], {
+            "originalFileMetadataExceptRenameCtimeMatched": True,
+            "allowedRenameCtimeChanges": ["inputs/link-input", "inputs/kind-input"],
+            "rootModeRestored": True, "sameDirectoryOriginals": True})
+        for name in ("inputs/link-input", "inputs/kind-input"):
+            for index in range(8):
+                changed = dict(after); facts = list(changed[name].identity); facts[index] += 1
+                changed[name] = replace(changed[name], identity=tuple(facts))
+                with self.subTest(name=name, fact=index), self.assertRaises(M.Refused):
+                    M.validate_snapshot(before, changed, case, True, UID, GID)
+        for name in (".", "inputs", "ios/Example.xcodeproj", "metadata"):
+            for index in range(6):
+                changed = dict(after); facts = list(changed[name].identity); facts[index] += 1
+                changed[name] = replace(changed[name], identity=tuple(facts))
+                with self.subTest(name=name, fact=index), self.assertRaises(M.Refused):
+                    M.validate_snapshot(before, changed, case, True, UID, GID)
+        for name, replacement in (
+            ("inputs/link-input", replace(after["inputs/link-input"], sha256="0" * 64)),
+            ("inputs/link-input", replace(after["inputs/link-input"], identity=(*after["inputs/link-input"].identity[:8], 99))),
+            ("inputs/VERSION", replace(after["inputs/VERSION"], identity=(*after["inputs/VERSION"].identity[:8], 101))),
+            ("inputs", replace(after["inputs"], entries=("VERSION", "kind-input", "link-original"))),
+            (".", replace(after["."], identity=(*after["."].identity[:2], stat.S_IFDIR | 0o500, *after["."].identity[3:]))),
+        ):
+            changed = dict(after); changed[name] = replacement
+            with self.subTest(name=name), self.assertRaises(M.Refused):
+                M.validate_snapshot(before, changed, case, True, UID, GID)
+        with self.assertRaises(M.Refused):
+            M.validate_snapshot(before, after, case, False, UID, GID)
+        changed = dict(after); changed["link-original"] = before["inputs/link-input"]
+        with self.assertRaises(M.Refused):
+            M.validate_snapshot(before, changed, case, True, UID, GID)
+        # The outside selected file remains independently original-bound; it
+        # cannot be replaced by taking another successful-looking snapshot.
+        fixtures = M.Fixtures(BINDING, UID, GID)
+        original = {"original": object()}
+        fixtures.field_outside_originals[case] = original
+        with patch.object(fixtures, "_capture_field_outside", return_value=original):
+            fixtures._inputs_unchanged(case)
+        with patch.object(fixtures, "_capture_field_outside", return_value={}):
+            with self.assertRaisesRegex(M.Refused, "^project-field-outside-original-changed$"):
+                fixtures._inputs_unchanged(case)
+        self.assertIs(fixtures.field_outside_originals[case], original)
+
+    def test_one_case_route_keeps_original_deadline_environment_and_return_finality(self):
+        case = "project-fields"
+        self.assertEqual(M.argument_scope(["--scope", case]), case)
+        self.assertEqual(M.selected_cases(case), (case,))
+        self.assertEqual(M.case_timeout(case), 60)
+        for args in ([case], ["--scope", case, "--timeout", "600"], ["--scope", "project-fields-all"]):
+            with self.assertRaises(M.Refused):
+                M.argument_scope(args)
+        fixtures, calls, emitted = InertFixtures(), [], []
+        fixtures.cases = (case,)
+        def returned(argv, **options):
+            calls.append((argv, options))
+            return CompletedProcess(argv, 0, captured(M.expected_result(BINDING, case)), b"")
+        M.run_cases(BINDING, fixtures, returned, UID, "runner", emitted.append, case)
+        self.assertEqual((fixtures.before, fixtures.reads, len(emitted), len(calls)), ([case], [case], 1, 1))
+        argv, options = calls[0]
+        state = BINDING.root(project_fields=True) / "state" / case
+        self.assertEqual(argv, [M.EXECUTABLE, case])
+        self.assertEqual(options, {"environ": M.app_environment(state, UID, "runner"), "cwd": state,
+            "timeout": 60, "capture": True, "text": False, "output_limit": M.OUTPUT_LIMIT})
+        self.assertEqual(set(options["environ"]), {"HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "__CF_USER_TEXT_ENCODING"})
+        original = RuntimeError("inert original interruption")
+        def unknown(*args, **kwargs):
+            raise original
+        fixtures = InertFixtures()
+        with self.assertRaises(RuntimeError) as failed:
+            M.run_cases(BINDING, fixtures, unknown, UID, "runner", emitted.append, case)
+        self.assertIs(failed.exception, original)
+        self.assertTrue(fixtures.inflight); self.assertFalse(fixtures.last_returned)
+        self.assertEqual(fixtures.reads, [])
+        fixtures = InertFixtures()
+        def foreign(argv, **options):
+            return CompletedProcess([M.EXECUTABLE, "first-save"], 0, captured(M.expected_result(BINDING, case)), b"")
+        with self.assertRaisesRegex(M.Refused, "^owner-return-contract$"):
+            M.run_cases(BINDING, fixtures, foreign, UID, "runner", emitted.append, case)
+        self.assertTrue(fixtures.inflight); self.assertEqual(fixtures.reads, [])
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        self.assertIn('"scope": "one-project-fields-and-nine-current-ios-Aqua-engineering-cases"', workflow)
+        self.assertIn('"scopes": ["project-fields", "ios-current-synthetic"]', workflow)
+        self.assertIn('"caseNames": ["project-fields", ' + ", ".join('"' + name + '"' for name in M.IOS_CURRENT_CASES) + "]", workflow)
+        self.assertEqual(workflow.count("macos_aqua_qualification.py --scope project-fields"), 1)
+        self.assertEqual(workflow.count("macos_aqua_qualification.py --scope ios-current-synthetic"), 1)
+        self.assertNotIn("--scope ios-unsigned-archive", workflow)
+        p2_label = "      - name: One project-field Aqua journey through the reviewed original invocation owner\n"
+        ios_label = "      - name: Nine serial current-iOS Aqua cases through the reviewed original invocation owner\n"
+        self.assertLess(workflow.index(p2_label), workflow.index(ios_label))
+        p2_step = workflow.split(p2_label, 1)[1].split("\n      - name:", 1)[0]
+        ios_step = workflow.split(ios_label, 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 3", p2_step)
+        self.assertIn("timeout-minutes: 50", ios_step)
+        for step, prefix in ((p2_step, "aqua-project-fields"), (ios_step, "aqua")):
+            for required in ("set -euo pipefail", "set -o noclobber", "umask 077", "status=$?", "[[ $status == 0 ]]"):
+                self.assertIn(required, step)
+            self.assertIn('> "$MRK_MACOS_WORK/' + prefix + '-results.jsonl" 2> "$MRK_MACOS_WORK/' + prefix + '-failure.jsonl"', step)
+            status_write = 'printf \'%s\\n\' "$status" > "$MRK_MACOS_WORK/' + prefix + '.status"'
+            self.assertLess(step.index("status=$?"), step.index(status_write))
+            self.assertLess(step.index(status_write), step.index("[[ $status == 0 ]]"))
+            for unsafe in ("continue-on-error", "if:", "rm -", "|| true"):
+                self.assertNotIn(unsafe, step)
+        uploads = workflow.split("          path: |\n", 1)[1]
+        for name in ("aqua-project-fields-results.jsonl", "aqua-project-fields-failure.jsonl", "aqua-project-fields.status",
+                     "aqua-results.jsonl", "aqua-failure.jsonl", "aqua.status"):
+            self.assertIn("${{ steps.work.outputs.root }}/" + name + "\n", uploads)
+        for preserved in ("Bind the complete reviewed first-party checkout before compilation",
+                          "Prepare only the fixed disposable Xcode ancestor before any worker",
+                          "Reuse accepted Mac supplier and prepare only the current source payload",
+                          "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
+            self.assertIn(preserved, workflow)
+
+    def test_field_failure_diagnostics_bind_exact_original_and_never_fill_missing_evidence(self):
+        case = "project-fields"
+        for index, identifier, kind in ((0, 2, "version-source"), (1, 3, "ios-project"), (2, 4, "ios-workspace"),
+                                         (3, 5, "metadata-root"), (6, 8, "version-source"), (9, 11, "ios-workspace")):
+            step = f"ProjectFields(Native({index}))"
+            value = accessibility_context_data()
+            value.update(snapshotSource="record")
+            value["nativeHandler"]["step"] = step
+            value["lastPanel"].update(step=step, id=identifier, kind=kind)
+            value["accessibility"].update(step=step, id=identifier)
+            value["accessibilityBinding"] = deepcopy(M.expected_result(BINDING, case)["native"]["projectOpenBinding"])
+            value["completionSelection"] = deepcopy(M.expected_result(BINDING, case)["native"]["projectCompletionSelection"])
+            for field in ("accessibilityBinding", "completionSelection"):
+                value[field].update(id=identifier, kind=kind)
+            value["projectFieldPreparation"] = {"operationId": identifier, "kind": kind, "returned": True,
+                "result": "ok", "facts": 8191 if kind == "version-source" else 6143}
+            marker = f"MRK_MACOS_AQUA_FAILURE_STEP={step}\n".encode("ascii")
+            self.assertEqual(M.failure_context(b"", marker + context_row(value), case), value)
+            self.assertIsNone(M._accessibility_binding_context(value["accessibilityBinding"], case))
+            self.assertIsNone(M._completion_selection_context(value["completionSelection"], case))
+            for mutation in (lambda v: v["projectFieldPreparation"].update(operationId=12),
+                             lambda v: v["projectFieldPreparation"].update(kind="file"),
+                             lambda v: v["projectFieldPreparation"].update(returned=1),
+                             lambda v: v["projectFieldPreparation"].update(facts=8192),
+                             lambda v: v["projectFieldPreparation"].update(facts=512),
+                             lambda v: v["projectFieldPreparation"].update(result="would-block", facts=257)):
+                bad = deepcopy(value); mutation(bad)
+                expected = deepcopy(bad); expected["projectFieldPreparation"] = None
+                self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+            # Missing top-level original step is missing DATA, not permission
+            # to infer a preparation from a success-shaped mask or path.
+            expected = deepcopy(value); expected["projectFieldPreparation"] = None
+            self.assertEqual(M.failure_context(b"", context_row(value), case), expected)
+            bad = deepcopy(value); bad["accessibility"]["step"] = "OpenProject"
+            expected = deepcopy(bad); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+            bad = deepcopy(value); bad["lastPanel"]["kind"] = "file"
+            self.assertIsNone(M.failure_context(b"", marker + context_row(bad), case))
+        for index, identifier, kind, action in ((4, 6, "version-source", "file-cancel"),
+                                                (5, 7, "metadata-root", "project-cancel")):
+            step = f"ProjectFields(Native({index}))"
+            value = action_context_data(site=action)
+            value.update(snapshotSource="record")
+            value["nativeHandler"]["step"] = step
+            value["lastPanel"].update(step=step, id=identifier, kind=kind)
+            value["nativeAction"].update(step=step, id=identifier, action=action)
+            self.assertEqual(M.failure_context(b"", context_row(value), case), value)
+            self.assertIsNone(M._field_open_step(case, identifier))
+            self.assertNotIn("accessibility", value)
+        for result, flags in (("would-block", 0), ("io", 257), ("io", 511 | 512), ("io", None)):
+            value = {"operationId": 2, "kind": "version-source", "returned": True, "result": result, "facts": flags}
+            self.assertEqual(M._field_preparation_context(value, case, "ProjectFields(Native(0))"), value)
+        for entered, returned in ((False, False), (True, False), (True, True)):
+            partial = deepcopy(M.expected_result(BINDING, case)["native"]["projectOpenBinding"])
+            partial.update(id=2, kind="version-source", binding=None)
+            partial["start"]["result"] = "io"
+            partial["configuration"].update(site="initial-temporary-close", error="cleanup-unknown",
+                initialDirectorySetterEntered=entered, initialDirectorySetterReturned=returned)
+            self.assertEqual(M._accessibility_binding_context(partial, case, allow_files=True), partial)
+            self.assertIsNone(M._accessibility_binding_context(partial, case))
+            bad = deepcopy(partial); bad["configuration"]["error"] = "none"
+            self.assertIsNone(M._accessibility_binding_context(bad, case, allow_files=True))
+        for step in ("ProjectFields(Native(10))", "ProjectFields(Chosen(10))", "ProjectFields(Read(10))"):
+            self.assertNotIn(step, M.FAILURE_STEPS)
+
+    def test_source_reuses_original_document_sourcebook_and_draft_only_ui(self):
+        root = PATH.parents[1]
+        document = (root / "src-tauri/src/asset_session.rs").read_text()
+        source = (root / "src-tauri/src/asset_source_macos.rs").read_text()
+        runtime = (root / "src-tauri/src/runtime.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        fields = (root / "src-tauri/src/installed_shell_observation_macos_project_fields.rs").read_text()
+        owner = (root / "src-tauri/src/saved_command_owner.rs").read_text()
+        self.assertIn("const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = false;", runtime)
+        for name in ("IOS_SIGNED_NATIVE_QUALIFIED", "IOS_RECOVERY_NATIVE_QUALIFIED"):
+            self.assertIn(f"const {name}: bool = false;", owner)
+        registration = document.split("pub(crate) fn register_installed_macos_project_fields(", 1)[1].split("pub(super) fn installed_macos_record_original(", 1)[0]
+        for guard in ("state.next_operation != 0", "state.slot.is_some()", "state.unknown", "if observation.is_some()",
+                      "token.consume(&self.inner.session_identity", "project_fields: Some(control)"):
+            self.assertIn(guard, registration)
+        for fact in ("Arc::ptr_eq(&d, document)", "self.returned.swap(true", "self.control.claimed.compare_exchange(false, true",
+                     "self.bound(document)", "q.timely()"):
+            self.assertIn(fact, fields)
+        job = document.split("Job::ProjectPath { app, binding } => {", 1)[1].split("Job::", 1)[0]
+        self.assertLess(job.index("document.phase(owner, Phase::Capturing)"), job.index("q.path_selected(document, owner, binding.field, &path)"))
+        self.assertLess(job.index("q.path_selected(document, owner, binding.field, &path)"), job.index("match child(owner, Child"))
+        probe = source.split("pub(crate) fn probe_project_path(", 1)[1].split("#[cfg(test)]", 1)[0]
+        self.assertLess(probe.index("project_path_spelling(&root.path"), probe.index("book.begin("))
+        self.assertLess(probe.index("book.directory(parent)? != root_identity"), probe.index("for name in parents"))
+        for fact in ("book.child(parent, name, false, stop)", "AtFlags::AT_SYMLINK_NOFOLLOW", "book.probes.push(LeafProbe",
+                     "book.finish(result, stop)"):
+            self.assertIn(fact, probe)
+        for forbidden in ("canonicalize(", "read_to_end(", "private_file(", "std::fs::read("):
+            self.assertNotIn(forbidden, probe)
+        chosen = observer.split("Step::ProjectFields(step) => {", 1)[1].split("Step::Session(step)", 1)[0]
+        self.assertLess(chosen.index("record.ready_for_native(i, &snapshot)"), chosen.index("record.native_finished(i"))
+        self.assertLess(chosen.index("record.native_finished(i"), chosen.index("fixture.restore(i"))
+        for fact in ("publish_directory(file.as_fd(), name, file.as_fd(), saved)",
+                     "publish_directory(file.as_fd(), saved, file.as_fd(), name)",
+                     "mutation.temporary", "after[..8] != mutation.original[..8]", "self.verify(root, uid)?"):
+            self.assertIn(fact, fields)
+        script = fields.split("pub(super) fn script(", 1)[1].split("pub(super) fn data_checks()", 1)[0]
+        for forbidden in ("invoke(", "__TAURI", "window.", "dispatchEvent(", "new Event(", ".value =", ".value="):
+            self.assertNotIn(forbidden, script)
+        for literal in ("Browse existing…", "Help: ", "Format validation needs attention", "invalid-retained-ios-fields"):
+            self.assertIn(literal, fields)
+        self.assertIn('v["validation"]["valid"] == false', fields)
+        self.assertIn('rows.len() == 1 && rows[0]["code"] == "config.invalid"', fields)
+
+    def test_production_initial_root_and_later_navigation_have_separate_one_use_custody(self):
+        root = PATH.parents[1]
+        native = (root / "native/macos-installed-native/src/native.m").read_text()
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        adapter = (root / "src-tauri/src/shell_macos_dialog.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        start = native.split("static int mrk_panel_start_inner(", 1)[1].split("int mrk_panel_start(", 1)[0]
+        self.assertLess(start.index("length > 4096"), start.index("s->attempted = YES"))
+        self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("mrk_panel_initial_directory(s, initial, length)"))
+        self.assertLess(start.index("mrk_panel_initial_directory(s, initial, length)"), start.index("MRK_ID_CONFIG_COMPLETE"))
+        self.assertLess(start.index("MRK_ID_CONFIG_COMPLETE"), start.index("beginSheetModalForWindow:"))
+        for fact in ("[panel setCanChooseFiles:kind == 3 || kind == 4]",
+                     "[panel setCanChooseDirectories:kind == 1 || (kind >= 5 && kind <= 7)]",
+                     "[panel setTreatsFilePackagesAsDirectories:kind >= 5 && kind <= 7]",
+                     "[panel setAllowsMultipleSelection:NO]", "[panel setCanCreateDirectories:NO]", "[panel setResolvesAliases:NO]"):
+            self.assertIn(fact, start)
+        production = native.split("static int mrk_panel_initial_directory(", 1)[1].split("static int mrk_panel_start_inner(", 1)[0]
+        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("enum { MRK_OPEN_ENTRY", 1)[0]
+        self.assertNotIn("observationTarget", production)
+        self.assertIn("memcpy(s->observationInitialRoot, bytes, length)", production)
+        for temporary in ("initialDirectory", "initialPath"):
+            release = f"[s->{temporary} release]; s->{temporary} = nil;"
+            self.assertEqual(production.count(release), 1)
+            self.assertEqual(navigation.count(release), 1)
+        self.assertIn("if (s->observationProjectField) return EALREADY", navigation)
+        self.assertLess(navigation.index("strcmp(path, s->observationInitialRoot)"), navigation.index("[panel setDirectoryURL:"))
+        self.assertLess(navigation.index("s->observationProjectField |= 512u"), navigation.index("[panel setDirectoryURL:"))
+        self.assertLess(navigation.index("[panel setDirectoryURL:"), navigation.index("s->observationProjectField |= 1024u"))
+        self.assertLess(navigation.index("[s->observationFieldName release]"), navigation.index("s->observationProjectField |= 4096u"))
+        for forbidden in ("s->selected", "s->response =", "s->completion(", "beginSheet", "performClick", "cancel:nil"):
+            self.assertNotIn(forbidden, navigation)
+        prepare = adapter.split("pub(crate) fn prepare_project_field(", 1)[1].split("// Retained by", 1)[0]
+        for fact in ("original(entry)?", "entry.open_release.is_some()", "!allowed(&call, &owner)?", "owner.interrupted()",
+                     ".installed_project_field(kind, navigate, returned)"):
+            self.assertIn(fact, prepare)
+        dispatch = observer.split("fn native_step(&self", 1)[1].split("fn native_step_body(", 1)[0]
+        self.assertLess(dispatch.index("self.native_step_body("), dispatch.index("record.preparation(i, returned)"))
+        self.assertLess(dispatch.index("native.returned = true"), dispatch.index("record.preparation(i, returned)"))
+        self.assertIn("enum { MRK_PROMPT_ORIGINALS = 9 };", native)
+        self.assertIn("project_field_data_check()", rust.split("pub fn installed_observation_flags_data_check()", 1)[1])
+        pure = rust.split("fn project_field_data_check()", 1)[1].split('unsafe extern "C"', 1)[0]
+        for forbidden in ("Panel::", "mrk_panel_", "thread::spawn", "std::fs::"):
+            self.assertNotIn(forbidden, pure)
 
 
 if __name__ == "__main__":

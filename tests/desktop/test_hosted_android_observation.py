@@ -22,6 +22,8 @@ def load(name):
 S = load("observe_hosted_android")
 PYTHON = load("observe_hosted_python")
 L = load("ubuntu_publication_lifecycle")
+P = load("ci_ubuntu_publication")
+M = load("android_material_preparation")
 
 
 def canonical(value):
@@ -300,32 +302,177 @@ class HostedAndroidDataContracts(unittest.TestCase):
         steps = workflow.split("      - name: ")[1:]
         prerequisites = next(s for s in steps if s.startswith("Prepare shared Ubuntu shell inputs only on this disposable runner\n"))
         self.assertIn("packages=(libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy)", prerequisites)
-        self.assertIn('if [[ "$GITHUB_REF" == ' + S.METADATA_REF
-                      + ' || "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 ]]; then\n'
+        self.assertIn('if [[ "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 ]]; then\n'
                       + '            packages+=(libgif7)\n          fi\n', prerequisites)
         self.assertEqual(prerequisites.count("libgif7"), 1)
         self.assertIn('sudo apt-get install -y --no-install-recommends "${packages[@]}"', prerequisites)
         self.assertIn('dpkg-query -W -f=\'${Package} ${Version}\\n\' "${packages[@]}"', prerequisites)
-        observer = next(s for s in steps if s.startswith("Observe only the missing public Android and GitHub host DATA\n"))
+        observer = next(s for s in steps if s.startswith("Observe only the fixed public SDK and network DATA subset\n"))
         for item in ("if: github.ref == '" + S.METADATA_REF + "'", "timeout-minutes: 2", "/usr/bin/env -i",
                      "--signal=TERM --kill-after=2s 60s", "python3.12 -I -S -B desktop/tools/observe_hosted_android.py </dev/null",
                      'GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP"'):
             self.assertIn(item, observer)
         output = next(s for s in steps if s.startswith("Retain only the bounded public host delta"))
-        self.assertIn("path: ${{ steps.tools_inputs.outputs.root }}/" + S.OUTPUT_NAME, output)
+        self.assertIn("path: ${{ steps.host_metadata.outputs.root }}/" + S.OUTPUT_NAME, output)
         self.assertNotIn("**", output)
+        self.assertIn('mkdir -m 700 -- "$root"', observer)
+        self.assertIn('"$GITHUB_RUN_ATTEMPT" == 1', observer)
+        for forbidden in ("sudo", "apt-get", "update-alternatives", "prepare_hosted_ubuntu_data", "rm -", "chmod"):
+            self.assertNotIn(forbidden, observer)
         for label in ("Select the fixed frontend compiler", "Prepare a fresh bounded compiler owner",
-                      "Compile the normal shell", "Observe only the fixed installed shell route"):
+                      "Compile the normal shell", "Observe only the fixed installed shell route",
+                      "Prepare shared Ubuntu shell inputs", "Prepare the fixed JDK17 pair",
+                      "Establish only the reviewed forward glibc tuple set", "Prepare only fixed disposable Ubuntu DATA modes"):
             step = next(s for s in steps if s.startswith(label))
             condition = next(line for line in step.splitlines() if line.strip().startswith("if:"))
             self.assertNotIn(S.METADATA_REF, condition)
-        # The observer's only dynamic modules are the two closed DATA helpers;
+            self.assertIn("steps.route.outputs.native == 'true'", condition)
+        # The observer's dynamic modules are closed DATA helpers;
         # inspect source without executing either its main or any provider.
         module = ast.parse((SOURCE / "desktop/tools/observe_hosted_android.py").read_bytes())
         calls = {ast.unparse(n.func) for n in ast.walk(module) if isinstance(n, ast.Call)}
         for forbidden in ("subprocess.run", "subprocess.Popen", "os.system", "os.execve", "socket.socket",
                           "lifecycle._github_boundary_host_projection", "lifecycle._github_boundary_host_admission"):
             self.assertNotIn(forbidden, calls)
+        main = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        called = {ast.unparse(node.func) for node in ast.walk(main) if isinstance(node, ast.Call)}
+        self.assertIn("collect_sdk_network", called)
+        self.assertNotIn("collect", called)
+
+
+class FixedSdkNetworkDataContracts(unittest.TestCase):
+    def test_failed_original_check_records_exact_public_metadata_without_a_second_walk(self):
+        directory = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0,
+                                    st_nlink=2, st_size=4096, st_mtime_ns=1, st_ctime_ns=1)
+        ordinary = SimpleNamespace(**{**vars(directory), "st_mode": stat.S_IFREG | 0o644, "st_nlink": 1, "st_size": 41})
+        role = M.SDK_RECEIPT
+        for component, index, changed, invariant in (
+                ("/", 0, {"st_mode": stat.S_IFDIR | 0o777}, "protected-mode"),
+                ("/usr/local/lib/android", 4, {"st_uid": 1001}, "root-owner"),
+                ("/usr/local/lib/android", 4, {"st_mode": stat.S_IFDIR | 0o777}, "protected-mode"),
+                (role, 7, {"st_nlink": 2}, "single-link")):
+            failed = SimpleNamespace(**{**vars(ordinary if component == role else directory), **changed})
+            def original(path):
+                return failed if str(path) == component else ordinary if str(path) == role else directory
+            with self.subTest(component=component, invariant=invariant), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=original) as read, \
+                 patch.object(Path, "resolve", autospec=True, side_effect=lambda path, **_: path), \
+                 patch.object(P.D, "file_record") as body:
+                with self.assertRaises(P.D.Refused) as refused:
+                    P.protected_host_file(Path(role), 4096, fixed_android_data=True)
+                detail = S.public_host_failure(refused.exception, role)
+                self.assertEqual(detail, {"role": role, "componentIndex": index,
+                    "kind": "file" if component == role else "directory", "uid": failed.st_uid,
+                    "gid": failed.st_gid, "mode": stat.S_IMODE(failed.st_mode), "links": failed.st_nlink,
+                    "failedInvariants": [invariant]})
+                # No best-effort diagnostic rewalk after the failed original.
+                self.assertEqual(str(read.call_args_list[-1].args[0]), component)
+                self.assertEqual(read.call_count, index + (2 if component == role else 1))
+                body.assert_not_called()
+        for detail in ({"private": "DO-NOT-EXPORT"}, {**detail, "kind": ["DO-NOT-EXPORT"]},
+                       {**detail, "role": "/private/DO-NOT-EXPORT"}, {**detail, "uid": True},
+                       {**detail, "failedInvariants": ["DO-NOT-EXPORT"]}):
+            error = P.D.Refused("DO-NOT-EXPORT")
+            error.host_file_failure = detail
+            self.assertIsNone(S.public_host_failure(error, role))
+
+    def test_unknown_resolver_alias_is_rejected_before_its_target_is_observed(self):
+        directory = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0,
+                                    st_nlink=2, st_size=4096, st_mtime_ns=1, st_ctime_ns=1)
+        link = SimpleNamespace(**{**vars(directory), "st_mode": stat.S_IFLNK | 0o777, "st_nlink": 1})
+        observed = []
+        def original(path):
+            observed.append(str(path))
+            self.assertIn(str(path), ("/", "/etc", "/etc/resolv.conf"))
+            return link if str(path) == "/etc/resolv.conf" else directory
+        with patch.object(Path, "lstat", autospec=True, side_effect=original), \
+             patch.object(P.os, "readlink", return_value="/private/DO-NOT-EXPORT"), \
+             patch.object(P.D, "file_record") as body:
+            with self.assertRaises(P.D.Refused) as refused:
+                P.protected_host_file(Path("/etc/resolv.conf"), 128 << 10, fixed_android_data=True)
+            detail = S.public_host_failure(refused.exception, "/etc/resolv.conf")
+            self.assertEqual(detail["componentIndex"], 2)
+            self.assertEqual(detail["failedInvariants"], ["fixed-resolver-target"])
+            self.assertEqual(observed, ["/", "/etc", "/etc/resolv.conf"])
+            self.assertNotIn("DO-NOT-EXPORT", json.dumps(detail))
+            body.assert_not_called()
+
+    def test_fixed_reader_retains_both_exact_resolver_spellings_and_direct_files(self):
+        directory = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0,
+                                    st_nlink=2, st_size=4096, st_mtime_ns=1, st_ctime_ns=1)
+        ordinary = SimpleNamespace(**{**vars(directory), "st_mode": stat.S_IFREG | 0o644, "st_nlink": 1, "st_size": 5})
+        link = SimpleNamespace(**{**vars(ordinary), "st_mode": stat.S_IFLNK | 0o777})
+        for target in (None, M.RESOLVER_CANONICAL, "../run/systemd/resolve/stub-resolv.conf"):
+            selected = Path("/etc/resolv.conf")
+            canonical_path = Path(M.RESOLVER_CANONICAL) if target is not None else selected
+            def original(path):
+                if path == selected and target is not None:
+                    return link
+                return ordinary if path == canonical_path else directory
+            with self.subTest(target=target), patch.object(Path, "lstat", autospec=True, side_effect=original), \
+                 patch.object(Path, "resolve", return_value=canonical_path), patch.object(P.os, "readlink", return_value=target), \
+                 patch.object(P.D, "file_record", return_value={"path": canonical_path.name, "size": 5, "sha256": "a" * 64}) as body:
+                value = P.protected_host_file(selected, 128 << 10, fixed_android_data=True)
+                self.assertEqual(value["path"], str(canonical_path))
+                self.assertEqual(value["selectedPath"], str(selected))
+                self.assertEqual(len(value["links"]), int(target is not None))
+                body.assert_called_once_with(canonical_path, 128 << 10)
+
+    def test_network_summary_reuses_real_semantics_without_exporting_private_values(self):
+        fixtures = {
+            "/etc/hosts": b"127.0.0.1 localhost\n127.0.1.1 private-host\n",
+            "/etc/resolv.conf": b"nameserver 127.0.0.53\nsearch private.example\noptions edns0 trust-ad\n",
+            "/etc/nsswitch.conf": b"passwd: files systemd\nhosts: files dns\nprivate: private-module\n",
+            "/etc/host.conf": b"multi on\n", "/etc/gai.conf": b"# defaults\n"}
+        with patch.object(M.time, "monotonic", return_value=0):
+            for role, raw in fixtures.items():
+                with self.subTest(role=role):
+                    value = S.public_network_summary(M, role, raw, 10)
+                    self.assertEqual(len(value["configurationSha256"]), 64)
+                    self.assertNotIn("private", json.dumps(value))
+                    self.assertEqual(value["allConfiguredValuesExported"], role in {"/etc/host.conf", "/etc/gai.conf"})
+            with self.assertRaises(M.D.Refused):
+                S.public_network_summary(M, "/etc/hosts", b"127.0.0.1 dl.google.com\n", 10)
+
+    def test_fixed_subset_preserves_independent_failures_and_never_runs_the_broad_census(self):
+        for outcome in ("direct", "alias", "unavailable", "changed", "deadline", "output-budget"):
+            fake = SimpleNamespace(remaining=S.SDK_NETWORK_READ_LIMIT, point=Mock(), phase="observation")
+            def file(name, limit, parse=None):
+                fake.phase = "file-bind"
+                if name == M.SDK_RECEIPT:
+                    raise PermissionError("DO-NOT-EXPORT")
+                if name == M.NETWORK_ROLES[0] and outcome == "deadline":
+                    raise S.Stopped("deadline")
+                if name == "/etc/resolv.conf" and outcome == "unavailable":
+                    raise S.Refused("Native fixed Android DATA alias differs")
+                canonical_path = M.RESOLVER_CANONICAL if name == "/etc/resolv.conf" and outcome in {"alias", "changed"} else name
+                result = {"status": "observed", "file": {"path": canonical_path, "selectedPath": name,
+                    "identity": [1, 2, 3], "size": 1, "sha256": "a" * 64, "uid": 0, "gid": 0, "mode": 0o644}, "data": {}}
+                if name == M.RESOLVER_CANONICAL and outcome == "changed":
+                    result["file"]["sha256"] = "b" * 64
+                if name == M.NETWORK_ROLES[0] and outcome == "output-budget":
+                    result["data"] = "x" * S.OUTPUT_LIMIT
+                return result
+            fake.file = Mock(side_effect=file)
+            with self.subTest(outcome=outcome), patch.object(S, "Reader", return_value=fake), \
+                 patch.object(S, "local", return_value=M), patch.object(S, "collect") as broad, \
+                 patch.object(S, "github_materials") as github, patch.object(S, "supplier_cas") as ca:
+                value = S.collect_sdk_network(P, {}, 10)
+                self.assertEqual(set(value["observations"]), set(P.ANDROID_PUBLIC_DATA_ROLES))
+                self.assertEqual(value["subset"], S.SDK_NETWORK_SUBSET)
+                for flag in ("runtimeAdmission", "nativeQualification", "newConsent", "collectionComplete", "producerOriginProven"):
+                    self.assertIs(value[flag], False)
+                self.assertEqual(value["readBounds"]["combined"], S.SDK_NETWORK_READ_LIMIT)
+                self.assertEqual(value["readBounds"]["github"], 0)
+                self.assertEqual(value["observations"][M.SDK_RECEIPT]["reason"], "permission-denied")
+                self.assertNotIn("DO-NOT-EXPORT", json.dumps(value))
+                target = value["observations"][M.RESOLVER_CANONICAL]
+                self.assertEqual(target["status"], {"direct": "not-required", "alias": "observed", "unavailable": "not-observed",
+                    "changed": "unavailable", "deadline": "not-observed", "output-budget": "not-observed"}[outcome])
+                self.assertEqual(value["stopped"], outcome if outcome in {"deadline", "output-budget"} else None)
+                if outcome != "changed" and outcome != "alias":
+                    self.assertNotIn(M.RESOLVER_CANONICAL, [call.args[0] for call in fake.file.call_args_list])
+                broad.assert_not_called(); github.assert_not_called(); ca.assert_not_called()
 
 
 class GithubHostDiagnosticContracts(unittest.TestCase):

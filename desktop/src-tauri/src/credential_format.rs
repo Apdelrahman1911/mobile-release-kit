@@ -39,7 +39,7 @@ const NO_KEY: u32 = u32::MAX;
 const PARSE_ERROR: &str = "credential document refused";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile }
+pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile, AscP8 }
 
 pub(crate) struct Interrupted;
 
@@ -78,6 +78,8 @@ enum Observed {
     Pkcs12 { #[serde(rename = "byteCount")] byte_count: u64, version: u8, #[serde(rename = "authSafe")] auth_safe: Pkcs12AuthSafe },
     #[serde(rename = "cms-signed-data")]
     CmsSignedData { #[serde(rename = "byteCount")] byte_count: u64, encoding: CmsEncoding },
+    #[serde(rename = "pkcs8")]
+    Pkcs8 { #[serde(rename = "byteCount")] byte_count: u64, encoding: Pkcs8Encoding, algorithm: Pkcs8Algorithm, curve: Option<Pkcs8Curve> },
 }
 
 #[derive(Serialize)]
@@ -91,6 +93,18 @@ enum Pkcs12AuthSafe { Data, SignedData }
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum CmsEncoding { Der }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Encoding { Pem, Der }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Algorithm { Ec, Rsa, Other }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Curve { P256, Other }
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -138,7 +152,7 @@ pub(crate) fn inspect(
 ) -> Result<FileObservation, Interrupted> {
     if stop() { return Err(Interrupted); }
     let maximum = match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => JKS_LIMIT,
-        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile => JSON_LIMIT };
+        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => JSON_LIMIT };
     let observation = if bytes.len() > maximum {
         FileObservation::unavailable(UnavailableReason::MaterialLimit)
     } else if bytes.is_empty() {
@@ -150,6 +164,7 @@ pub(crate) fn inspect(
             FileKind::IosFirebase => plist_xml::inspect(bytes, stop),
             FileKind::AppleP12 => apple::pfx(bytes, stop),
             FileKind::AppleProfile => apple::profile(bytes, stop),
+            FileKind::AscP8 => apple::p8(bytes, stop),
         };
         match parsed {
             Ok(observation) => observation,

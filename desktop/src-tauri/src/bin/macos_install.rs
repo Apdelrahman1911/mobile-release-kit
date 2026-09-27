@@ -499,6 +499,9 @@ mod installer {
                 if used == 0 { break; } let mut offset = 0;
                 while offset < used {
                     check(used-offset >= 11,"directory-record")?;
+                    // Native metadata can describe links, but no Installer
+                    // source or publication roster permits them.
+                    check(matches!(block[offset+8], nix::libc::DT_DIR | nix::libc::DT_REG), "directory-roster")?;
                     let inode = u64::from_ne_bytes(block[offset..offset+8].try_into().map_err(|_| "directory-record")?);
                     let length = usize::from(u16::from_ne_bytes([block[offset+9],block[offset+10]]));
                     let next = offset.checked_add(11+length).filter(|n| *n <= used).ok_or("directory-record")?;

@@ -31,7 +31,22 @@ FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, 
                       for case, ids in IOS_INPUT_IDS.items()}
 IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
 IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty",)
-ALL_CASES = CASES + IOS_CURRENT_CASES
+PROJECT_FIELDS_CASE = "project-fields"
+PROJECT_FIELD_CHOICES = (
+    ("version.source", "version-source", "inputs/VERSION", None),
+    ("ios.project", "ios-project", "ios/Example.xcodeproj", None),
+    ("ios.workspace", "ios-workspace", "ios/Example.xcworkspace", None),
+    ("metadata.root", "metadata-root", "metadata", None),
+    ("version.source", "version-source", None, None),
+    ("metadata.root", "metadata-root", None, None),
+    ("version.source", "version-source", None, "project_path_unsafe"),
+    ("version.source", "version-source", None, "project_path_unsafe"),
+    ("version.source", "version-source", None, "project_path_unsafe"),
+    ("ios.workspace", "ios-workspace", None, "project_path_changed"),
+)
+PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
+                        for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE,)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -61,6 +76,9 @@ FAILURE_STEPS |= frozenset(f"Session({name})" for name in (
 ).split() for number in range(7)) | frozenset(
     f"Session({name}({number}, {kept}))" for name in ("Discard", "Discarded")
     for number in range(7) for kept in ("true", "false"))
+FAILURE_STEPS |= frozenset(f"ProjectFields({name}({i}))" for name in (
+    "Navigate Section Browse Native Chosen Read").split() for i in range(10)) | frozenset(
+    f"ProjectFields({name})" for name in ("PreviewPage Preview Previewed Done").split())
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
@@ -95,7 +113,9 @@ FAILURE_REASONS = frozenset((
     "native-completion-custody native-completion-data native-completion-unknown native-completion-selection "
     "ios-original-witness ios-request-contract ios-status-contract ios-version-contract "
     "ios-finality-contract ios-fixture-contract ios-dom-contract "
-    "session-request-contract session-result-contract session-original-contract session-dom-contract"
+    "session-request-contract session-result-contract session-original-contract session-dom-contract "
+    "project-fields-request-contract project-fields-result-contract project-fields-original-contract "
+    "project-fields-fixture-contract project-fields-dom-contract"
 ).split())
 PROJECT_SELECTION_CUSTODY = frozenset(("bound-original-data", "unavailable-original-data", "inconsistent-original-data"))
 PROJECT_SELECTION_OBJECTS = frozenset(("fixture-root-all5", "captured-app-all5", "captured-release-all5",
@@ -158,7 +178,7 @@ ACCESSIBILITY_ERRORS = frozenset((
 ACCESSIBILITY_BINDING_CLASSES = frozenset(("nil", "match", "different", "type-invalid"))
 ACCESSIBILITY_BINDING_SITES = frozenset((
     "objects", "parent-tag", "parent-set", "parent-get", "prompt-set", "prompt-get", "complete",
-    "initial-directory-url", "initial-directory-set",
+    "initial-directory-url", "initial-directory-set", "initial-temporary-close",
     "file-name-set", "file-name-get",
 ))
 ACCESSIBILITY_PANEL_CLASSES = frozenset((
@@ -527,9 +547,11 @@ class Binding:
         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
         return self
 
-    def root(self):
+    def root(self, *, project_fields=False):
         self.checked()
-        return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}"
+        need(type(project_fields) is bool, "scope-not-supported")
+        suffix = "-project-fields" if project_fields else ""
+        return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
 
     def public(self):
         return {"sourceCommit": self.source, "runId": self.run, "runAttempt": self.attempt}
@@ -559,7 +581,9 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic"), "scope-not-supported")
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE), "scope-not-supported")
+    if scope == PROJECT_FIELDS_CASE:
+        return (PROJECT_FIELDS_CASE,)
     if scope == "ios-current-synthetic":
         return IOS_CURRENT_CASES
     return IOS_CASES if scope == "ios-unsigned-archive" else CASES
@@ -568,7 +592,8 @@ def selected_cases(scope=None):
 def argument_scope(argv):
     # Closed scopes only; no executable/path/env/timeout passthrough.
     need(type(argv) is list and (argv == [] or argv == ["--scope", "ios-unsigned-archive"]
-                               or argv == ["--scope", "ios-current-synthetic"]), "arguments-not-supported")
+                               or argv == ["--scope", "ios-current-synthetic"]
+                               or argv == ["--scope", PROJECT_FIELDS_CASE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
@@ -895,16 +920,42 @@ def _ios_report(value, case):
     return value
 
 
+def _expected_project_fields():
+    """Closed comparison DATA, never the producer of a qualification receipt."""
+    rows = []
+    for i, (field, kind, relative, error) in enumerate(PROJECT_FIELD_CHOICES):
+        accepted = i not in (4, 5)
+        facts = 511 | 4096 | ((512 | 1024 | (2048 if kind == "version-source" else 0)) if accepted else 0)
+        rows.append({"operationId": i + 2, "field": field, "kind": kind,
+            "nativeResponse": "accept" if accepted else "decline",
+            "initialRootAndOptions": {"result": "ok", "facts": facts},
+            "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
+            "sourceBookStarted": accepted and i != 6, "originalSourceChildGuiAndCoordinatorSettled": True,
+            "relativePath": relative, "errorCode": error, "draftObserved": True})
+    return {"schemaVersion": 1, "oneUseOriginalDocumentRegistration": True, "normalProfileAvailable": False,
+        "selection": "original-bound-installed-macos-project-fields", "rows": rows, "originalOperations": 12,
+        "allOriginalsSettled": True, "completeDraftAndBaselineMatched": True,
+        "previewValidation": "invalid-retained-ios-fields", "fixtureMutationsRestored": True,
+        "shippingProfileEnabledByThisReceipt": False, "panelAttachments": [True] * 10, "controlReturns": [True] * 10,
+        "acceptedOpenHistories": [{"operationId": identifier,
+            "kind": "project" if identifier == 1 else PROJECT_FIELD_CHOICES[identifier - 2][1],
+            "originalInputSucceeded": True, "originalBarrierRetired": True,
+            "originalBindingMatched": True, "originalCompletionMatched": True}
+            for identifier in (1, 2, 3, 4, 5, 8, 9, 10, 11)]}
+
+
 def expected_result(binding, case):
     binding.checked()
     need(case in ALL_CASES, "case-binding")
-    if case in IOS_CURRENT_CASES:
+    if case in IOS_CURRENT_CASES or case == PROJECT_FIELDS_CASE:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case in IOS_OPERATION_CASES:
             value["iosArchive"] = _expected_ios_report(case)
         if case in IOS_SESSION_CASES:
             value["signingInputs"] = _expected_signing_inputs(case)
+        if case == PROJECT_FIELDS_CASE:
+            value["projectFields"] = _expected_project_fields()
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
         return value
@@ -1012,6 +1063,12 @@ RESULT_LOCATION_KEYS |= frozenset((
     "check status disposition snapshot work output relativeDirectory usedConfig usedVersion entries limitations "
     "lifetime complete fatal contained commandDispatched profileCalls stopObserved inputClosed handlersRestored "
     "invocationClosed snapshotClosed filesClosed namespaceClosed"
+).split())
+RESULT_LOCATION_KEYS |= frozenset((
+    "projectFields normalProfileAvailable field initialRootAndOptions laterSyntheticNavigation "
+    "sourceBookStarted originalSourceChildGuiAndCoordinatorSettled relativePath errorCode draftObserved "
+    "completeDraftAndBaselineMatched previewValidation fixtureMutationsRestored shippingProfileEnabledByThisReceipt "
+    "acceptedOpenHistories originalInputSucceeded originalBarrierRetired originalBindingMatched originalCompletionMatched"
 ).split())
 RESULT_LOCATION_KEYS |= frozenset((
     "signingInputs oneUseOriginalDocumentRegistration mode rows role nativeResponse exactNativeSelection "
@@ -1170,11 +1227,22 @@ def _file_open_step(case, identifier):
                  if original == identifier and step != "Session(Native(6))"), None)
 
 
+def _field_native_panels(case):
+    return PROJECT_FIELD_PANELS if case == PROJECT_FIELDS_CASE else {}
+
+
+def _field_open_step(case, identifier):
+    return next((step for step, (original, _) in _field_native_panels(case).items()
+                 if original == identifier and original not in (6, 7)), None)
+
+
 def _open_sample_kind(case, identifier, *, allow_files=False):
     if type(case) is not str or case not in ALL_CASES or case == "picker-loss" or type(identifier) is not int:
         return None
     if identifier == (2 if case == "first-save" else 1):
         return "project"
+    if allow_files and _field_open_step(case, identifier) is not None:
+        return PROJECT_FIELD_CHOICES[identifier - 2][1]
     return "file" if allow_files and _file_open_step(case, identifier) is not None else None
 
 
@@ -1188,10 +1256,14 @@ def _native_action_context(value, native, panel, *, case=None):
         need(all(type(value[key]) is str for key in ("step", "action", "domain", "site", "error"))
              and type(value["id"]) is int, "native-action-data")
         spec = NATIVE_ACTION_STEPS.get(value["step"])
-        if value["step"] == "Quit" and type(case) is str and case in IOS_SESSION_CASES:
+        if value["step"] == "Quit" and type(case) is str and (case in IOS_SESSION_CASES or case == PROJECT_FIELDS_CASE):
             spec = ("quit-confirm", "quit", (12,), 16)
         elif value["step"] == "Session(Native(6))" and case == "ios-signing-inputs":
             spec = ("file-cancel", "file", (11,), 32)
+        elif value["step"] == "ProjectFields(Native(4))" and case == PROJECT_FIELDS_CASE:
+            spec = ("file-cancel", "version-source", (6,), 32)
+        elif value["step"] == "ProjectFields(Native(5))" and case == PROJECT_FIELDS_CASE:
+            spec = ("project-cancel", "metadata-root", (7,), 1)
         need(spec is not None and value["action"] == spec[0] and value["id"] in spec[2], "native-action-data")
         need(native is not None and native["entered"] and native["returned"] and native["step"] == value["step"]
              and panel is not None and panel["step"] == value["step"] and panel["id"] == value["id"]
@@ -1301,15 +1373,20 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None)
         observed = ("bodyEntered", "nativeEntered", "attempted", "pressReturned", "triggered", "timely", "custodyKnown", "rechecksSettled")
         need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
              "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed}, label)
-        need(value["mechanism"] == "accessibility-preconfigured-original-press-v5" and value["step"] == "OpenProject"
-             and type(value["id"]) is int, label)
+        need(value["mechanism"] == "accessibility-preconfigured-original-press-v5" and type(value["id"]) is int, label)
         # The actual File OpenInput projection retains its historical
         # OpenProject label. Only failure DATA with an exact case/ID/native
         # panel binding may describe File; Project success callers stay closed.
         file_step = _file_open_step(case, value["id"]) if expected_id is None else None
-        need(value["id"] in (1, 2) or file_step is not None, label)
+        field_step = _field_open_step(case, value["id"]) if expected_id is None else None
+        need(value["step"] == (field_step or "OpenProject")
+             and (value["id"] in (1, 2) or file_step is not None or field_step is not None), label)
         if expected_id is not None:
             need(value["id"] == expected_id, label)
+        elif field_step is not None:
+            need(native is not None and native["step"] == field_step and native["entered"] and native["returned"]
+                 and panel is not None and panel["step"] == field_step and panel["id"] == value["id"]
+                 and panel["kind"] == PROJECT_FIELD_PANELS[field_step][1], label)
         elif file_step is not None:
             need(native is not None and native["step"] == file_step and native["entered"] and native["returned"]
                  and panel is not None and panel["step"] == file_step and panel["kind"] == "file"
@@ -1497,6 +1574,11 @@ def _accessibility_binding_context(value, case, *, allow_files=False):
             elif site == "initial-directory-set":
                 need(bits == (True, True, True, True, True, False) and parent is not None and prompt == "match"
                      and error == "objc-exception", label)
+            elif site == "initial-temporary-close":
+                need(kind in ("version-source", "ios-project", "ios-workspace", "metadata-root")
+                     and bits in ((True, True, True, True, False, False), (True, True, True, True, True, False),
+                                  (True, True, True, True, True, True))
+                     and parent is not None and prompt == "match" and error == "cleanup-unknown", label)
             elif site == "file-name-set":
                 need(kind == "file" and all(bits) and file_bits == (True, False) and parent is not None
                      and prompt == "match" and error == "objc-exception", label)
@@ -1616,6 +1698,29 @@ def _project_selection_context(value, source, step, reason, case):
     return value
 
 
+def _field_preparation_context(value, case, step):
+    if value is None:
+        return None
+    try:
+        need(case == PROJECT_FIELDS_CASE and type(value) is dict
+             and set(value) == {"operationId", "kind", "returned", "result", "facts"}, "project-field-preparation-data")
+        identifier = value["operationId"]
+        need(type(identifier) is int and 2 <= identifier <= 11
+             and value["kind"] == PROJECT_FIELD_CHOICES[identifier - 2][1] and value["returned"] is True
+             and step in (f"ProjectFields(Native({identifier - 2}))", f"ProjectFields(Chosen({identifier - 2}))")
+             and type(value["result"]) is str and value["result"] in (
+                 "ok", "permission-denied", "io", "invalid-input", "would-block", "already", "invalid-return"),
+             "project-field-preparation-data")
+        flags = value["facts"]
+        need(flags is None or type(flags) is int and 0 <= flags <= 8191
+             and (flags == 0 or flags & 257 == 257) and (not flags & 512 or flags & 511 == 511)
+             and (not flags & 1024 or flags & 512) and (not flags & 2048 or flags & 1024)
+             and (value["result"] != "would-block" or flags == 0), "project-field-preparation-data")
+        return value
+    except (Refused, KeyError, TypeError):
+        return None  # Diagnostic loss cannot become success or replace failure.
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -1623,7 +1728,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -1639,14 +1744,17 @@ def failure_context(stdout, stderr, case=None):
             # No native handler/Press receipt is invented to fill missing DATA.
             value["completionSelection"] = (_completion_selection_context(value["completionSelection"], case, allow_files=True)
                                              if value.get("snapshotSource") == "record" else None)
+        if "projectFieldPreparation" in value:
+            value["projectFieldPreparation"] = _field_preparation_context(value["projectFieldPreparation"], case, failure_step(stdout, stderr))
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
-        file_panels = _file_native_panels(case)
-        native_steps = NATIVE_STEPS | file_panels.keys()
+        file_panels, field_panels = _file_native_panels(case), _field_native_panels(case)
+        native_steps = NATIVE_STEPS | file_panels.keys() | field_panels.keys()
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
                  and type(pending["kind"]) is str, "failure-context")
             kind, step = pending["kind"], pending["step"]
-            allowed = {"dom": FAILURE_STEPS, "native": native_steps, "accessibility": {"OpenProject"},
+            allowed = {"dom": FAILURE_STEPS, "native": native_steps,
+                       "accessibility": {"OpenProject"} | {step for step, (identifier, _) in field_panels.items() if identifier not in (6, 7)},
                        "close": {"Close", "CloseCancel"}}
             need(kind in ("reload", "failure-close") and step is None
                  or kind in allowed and type(step) is str and step in allowed[kind], "failure-context")
@@ -1661,10 +1769,12 @@ def failure_context(stdout, stderr, case=None):
                  and native is not None and native["entered"] and panel["step"] == native["step"]
                  and type(panel["id"]) is int and type(panel["kind"]) is str
                  and type(panel["parentPresent"]) is bool and type(panel["panelPresent"]) is bool, "failure-context")
-            if panel["kind"] == "file" or panel["step"] in file_panels:
+            if panel["kind"] in {choice[1] for choice in PROJECT_FIELD_CHOICES} or panel["step"] in field_panels:
+                need(panel["step"] in field_panels and (panel["id"], panel["kind"]) == field_panels[panel["step"]], "failure-context")
+            elif panel["kind"] == "file" or panel["step"] in file_panels:
                 need(panel["kind"] == "file" and panel["step"] in file_panels
                      and panel["id"] == file_panels[panel["step"]], "failure-context")
-            elif panel["step"] == "Quit" and type(case) is str and case in IOS_SESSION_CASES:
+            elif panel["step"] == "Quit" and type(case) is str and (case in IOS_SESSION_CASES or case == PROJECT_FIELDS_CASE):
                 need(panel["kind"] == "quit" and panel["id"] == 12, "failure-context")
             else:
                 need(1 <= panel["id"] <= 4 and panel["kind"] in ("project", "quit"), "failure-context")
@@ -1679,10 +1789,11 @@ def failure_context(stdout, stderr, case=None):
             value["accessibility"] = _accessibility_context(value["accessibility"], native, panel, case=case)
         if value.get("snapshotSource") == "prearm-open-progress":
             sample = value.get("accessibility")
-            native_step = (_file_open_step(case, sample["id"]) if sample is not None else None) or "OpenProject"
+            field_step = _field_open_step(case, sample["id"]) if sample is not None else None
+            native_step = field_step or (_file_open_step(case, sample["id"]) if sample is not None else None) or "OpenProject"
             # The fixed pre-arm original fields are historical, while only the
             # one atomic progress/expiry sample was refreshed at the deadline.
-            need(pending == {"kind": "accessibility", "step": "OpenProject"}
+            need(pending == {"kind": "accessibility", "step": field_step or "OpenProject"}
                  and "projectSelection" not in value and "completionSelection" not in value
                  and native == {"step": native_step, "entered": True, "returned": True}
                  and sample is not None and sample["prepared"] and sample["requested"]
@@ -1796,6 +1907,15 @@ def fixture_data(case, final, *, ios_output_created=None):
     if case in IOS_CURRENT_CASES:
         return ios_fixture_data(case, final, output_created=ios_output_created)
     need(ios_output_created is None, "fixture-output-kind")
+    if case == PROJECT_FIELDS_CASE:
+        return {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
+            ".gitignore": IGNORE_PREFIX + IGNORE_RULES, "release/mobile-release.json": CONFIG,
+            "inputs/VERSION": VERSION, "inputs/link-input": b"MRK_PROJECT_FIELD_LINK_ORIGINAL\n",
+            "inputs/kind-input": b"MRK_PROJECT_FIELD_KIND_ORIGINAL\n"}, {
+            ".": (0o700, (".gitignore", "app", "inputs", "ios", "keep.txt", "metadata", "release", "version.properties")),
+            "app": (0o700, ("build.gradle.kts",)), "inputs": (0o700, ("VERSION", "kind-input", "link-input")),
+            "ios": (0o700, ("Example.xcodeproj", "Example.xcworkspace")), "ios/Example.xcodeproj": (0o700, ()),
+            "ios/Example.xcworkspace": (0o700, ()), "metadata": (0o700, ()), "release": (0o755, ("mobile-release.json",))}
     saved = case == "noop-stale" or final and case == "first-save"
     files = {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
              ".gitignore": IGNORE_PREFIX + (IGNORE_RULES if saved else b"") + (STALE if final and case == "noop-stale" else b"")}
@@ -1868,13 +1988,25 @@ def validate_snapshot(original, current, case, final, uid, gid, *, ios_output_cr
             need(after.identity[:6] == before.identity[:6], "stale-ignore-replaced")
         elif final and case == "ios-version-stale" and path == "version.properties":
             need(after.identity[:7] == before.identity[:7], "stale-version-replaced")
+        elif final and case == PROJECT_FIELDS_CASE and path in ("inputs/link-input", "inputs/kind-input"):
+            # Exclusive rename/restoration changes original ctime, never its
+            # inode, ownership, mode, size, link count, mtime or file contents.
+            need(after.identity[:8] == before.identity[:8] and after.identity[8] >= before.identity[8], "project-field-original-not-restored")
         else:
             need(after.identity == before.identity, "fixture-original-changed")
-    return {"completeRoster": True, "expectedBytesAndModes": True, "originalIdentitiesMatched": True,
+    result = {"completeRoster": True, "expectedBytesAndModes": True, "originalIdentitiesMatched": True,
             "transactionResidueAbsent": True,
             "files": len(fixture_data(case, final, ios_output_created=ios_output_created)[0]),
             "configSha256": current.get("release/mobile-release.json").sha256 if "release/mobile-release.json" in current else None,
             "ignoreSha256": current[".gitignore"].sha256, "ignoreBytes": current[".gitignore"].identity[6]}
+    if case == PROJECT_FIELDS_CASE:
+        result["projectFieldRestoration"] = {"originalFileMetadataExceptRenameCtimeMatched": True,
+            "allowedRenameCtimeChanges": [name for name in ("inputs/link-input", "inputs/kind-input")
+                if current[name].identity[8] != original[name].identity[8]], "rootModeRestored": True,
+            "sameDirectoryOriginals": all(before.identity[:6] == current[path].identity[:6]
+                for path, before in original.items() if before.entries is not None)}
+        need(result["projectFieldRestoration"]["sameDirectoryOriginals"], "project-field-original-directory-changed")
+    return result
 
 
 def app_environment(state, uid, username):
@@ -1902,7 +2034,7 @@ class Fixtures:
     def __init__(self, binding, uid, gid, scope=None):
         self.binding, self.uid, self.gid = binding, uid, gid
         self.cases = selected_cases(scope)
-        self.path = binding.root()
+        self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE))
         self.fds = set()
         self.close_errors = 0
         self.first_close_error = None
@@ -1912,7 +2044,7 @@ class Fixtures:
         self.inner_failure_context = self.inner_diagnostic_source = None
         self.case = None
         self.stage = "prepare"
-        self.projects, self.states, self.originals, self.input_originals = {}, {}, {}, {}
+        self.projects, self.states, self.originals, self.input_originals, self.field_outside_originals = {}, {}, {}, {}, {}
 
     def _open(self, name, parent=None, *, directory=False, create=False):
         flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -2030,6 +2162,10 @@ class Fixtures:
                     for name, target in links.items():
                         os.symlink(target, name, dir_fd=inputs)
                 self.input_originals[case] = self._capture_inputs(case)
+            if case == PROJECT_FIELDS_CASE:
+                with self._temporary(self._mkdir(state, "outside")) as outside:
+                    self._write(outside, "VERSION", VERSION)
+                self.field_outside_originals[case] = self._capture_field_outside(case)
             self.originals[case] = self._capture(case, False)
         self._namespace()
 
@@ -2119,6 +2255,19 @@ class Fixtures:
     def _inputs_unchanged(self, case):
         if case in IOS_SESSION_CASES:
             need(self._capture_inputs(case) == self.input_originals[case], "signing-fixture-original-changed")
+        if case == PROJECT_FIELDS_CASE:
+            need(self._capture_field_outside(case) == self.field_outside_originals[case], "project-field-outside-original-changed")
+
+    def _capture_field_outside(self, case):
+        need(case == PROJECT_FIELDS_CASE and case in self.states, "project-field-outside-case")
+        with self._temporary(self._open("outside", self.states[case], directory=True)) as outside:
+            self._named(self.states[case], "outside", outside, 0o700)
+            before = signature(os.fstat(outside))
+            entries = self._roster(outside, ("VERSION",), "project-field-outside-roster")
+            version = self._file(outside, "VERSION", VERSION)
+            need(signature(os.fstat(outside)) == before, "project-field-outside-changed")
+            self._named(self.states[case], "outside", outside, 0o700)
+            return {".": Node(before, None, entries), "VERSION": version}
 
     def _capture(self, case, final, *, ios_output_created=None):
         files, directories = fixture_data(case, final, ios_output_created=ios_output_created)
@@ -2154,7 +2303,8 @@ class Fixtures:
         self._namespace()
         validate_snapshot(self.originals[case], self._capture(case, False), case, False, self.uid, self.gid)
         state = self.states[case]
-        self._roster(state, ("home", "tmp", "inputs") if case in IOS_SESSION_CASES else ("home", "tmp"), "fresh-state-roster")
+        self._roster(state, ("home", "tmp", "inputs") if case in IOS_SESSION_CASES
+                     else ("home", "tmp", "outside") if case == PROJECT_FIELDS_CASE else ("home", "tmp"), "fresh-state-roster")
         self._inputs_unchanged(case)
         for name in ("home", "tmp"):
             with self._temporary(self._open(name, state, directory=True)) as fd:
@@ -2334,7 +2484,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
     for case in cases:
         fixtures.before_call(case)
-        state = binding.root() / "state" / case
+        state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE)) / "state" / case
         argv = [EXECUTABLE, case]
         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None

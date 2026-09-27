@@ -2,7 +2,7 @@
 // invoke or view. This controller never claims to cancel by dropping a Promise.
 import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
-import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, TokenFields, WifFields } from './assetSessionTypes.ts';
+import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields } from './assetSessionTypes.ts';
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
 
 function freeze<T>(value: T): T {
@@ -355,7 +355,7 @@ export class AssetSessionController {
     this.update({ selectionKind: kind });
     return this.run('choose-file', () => this.api!.chooseAsset(request), this.phase({ type: 'record', kind, change: replacement ? 'replace' : 'new', record: replacement }, 'choose-file', null));
   }
-  prepareSelection(fields: KeystoreFields | P12Fields | Record<string, never>, label: string | null = null): boolean {
+  prepareSelection(fields: KeystoreFields | P12Fields | AscP8Fields | Record<string, never>, label: string | null = null): boolean {
     const operation = this.state.status?.operation;
     const phase = this.intentPhase;
     if (!this.contextReady() || !operation?.selectionToken || operation.selectionToken === this.spentSelection || !this.state.selectionKind ||
