@@ -116,7 +116,7 @@ class DefaultCancellation:
         self._environment_source: Any = None
         self._environment_source_installed = False
         self._environment_source_removed = False
-        # One slot for two exact saved-command input types, never diagnostics
+        # One slot for exact declared saved-command input types, never diagnostics
         # or a caller cancellation callback. No domain can replace a past one.
         self._saved_command_source: Any = None
         self._saved_command_source_installed = False
@@ -336,6 +336,22 @@ class DefaultCancellation:
         from ._desktop_saved_command_control import SavedCommandDomain
         return source if source.domain is SavedCommandDomain.AndroidBuild else None
 
+    @property
+    def _project_recovery_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.ProjectRecovery else None
+
+    @property
+    def _ios_archive_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.IOSArchive else None
+
     def _install_saved_command_source(self, source: Any) -> None:
         from ._desktop_saved_command_control import source_domain
         self._check_owner()
@@ -379,6 +395,30 @@ class DefaultCancellation:
         from ._desktop_android_build_control import AndroidBuildInput
         if type(source) is not AndroidBuildInput:
             raise self.restore_error("Android build cancellation source did not settle")
+        self._remove_saved_command_source(source)
+
+    def _install_project_recovery_source(self, source: Any) -> None:
+        from ._desktop_project_recovery_control import ProjectRecoveryInput
+        if type(source) is not ProjectRecoveryInput:
+            raise self.restore_error("invalid project recovery cancellation source ownership")
+        self._install_saved_command_source(source)
+
+    def _remove_project_recovery_source(self, source: Any) -> None:
+        from ._desktop_project_recovery_control import ProjectRecoveryInput
+        if type(source) is not ProjectRecoveryInput:
+            raise self.restore_error("project recovery cancellation source did not settle")
+        self._remove_saved_command_source(source)
+
+    def _install_ios_archive_source(self, source: Any) -> None:
+        from ._desktop_ios_archive_control import IOSArchiveInput
+        if type(source) is not IOSArchiveInput:
+            raise self.restore_error("invalid iOS archive cancellation source ownership")
+        self._install_saved_command_source(source)
+
+    def _remove_ios_archive_source(self, source: Any) -> None:
+        from ._desktop_ios_archive_control import IOSArchiveInput
+        if type(source) is not IOSArchiveInput:
+            raise self.restore_error("iOS archive cancellation source did not settle")
         self._remove_saved_command_source(source)
 
     @contextmanager

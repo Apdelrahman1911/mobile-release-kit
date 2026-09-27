@@ -84,12 +84,19 @@ class _Paths:
 class _Budget:
     def __init__(self, deadline: InspectionDeadline) -> None:
         self.deadline, self.count, self.size = deadline, 0, 0
+        # Desktop's generated archive retains the existing build ceiling, not
+        # the larger three-artifact Store-set ceiling. The adapter is exact.
+        self.maximum_bytes = MAX_TOTAL_BYTES
+        if type(deadline) is not InspectionDeadline:
+            from .ios_archive_operation import _IOSInspectionDeadline
+            if type(deadline) is _IOSInspectionDeadline:
+                self.maximum_bytes = 8 * 1024**3
 
     def tick(self, size: int = 0, *, entry: bool = False) -> None:
         self.deadline.check()
         self.size += size
         self.count += int(entry)
-        _require(self.count <= MAX_FILES and self.size <= MAX_TOTAL_BYTES,
+        _require(self.count <= MAX_FILES and self.size <= self.maximum_bytes,
                  "inspection exceeds its count/size bound")
 
 
@@ -124,6 +131,9 @@ class _SnapshotFailures:
             self.first = error
         if self.guard.pid == os.getpid():
             try:
+                source = getattr(self.guard, "_ios_archive_source", None)
+                if source is not None:
+                    source.failure_observed()
                 if abort:
                     self.guard._abort(error)
                 else:
@@ -177,7 +187,7 @@ def _snapshot_no_cleanup() -> None:
 
 
 class _SnapshotScope(CleanupScope):
-    """Fixed Store finish -> snapshot cleanup entry, prearmed before acquire.
+    """Fixed original finish -> snapshot cleanup, prearmed before acquire.
 
     In particular there is no post-claim allocation of the generic _scope's
     [finish, owner.cleanup] action list. Failure before/inside finish cannot
@@ -187,7 +197,7 @@ class _SnapshotScope(CleanupScope):
     def __init__(self, owner) -> None:
         self.owner = owner
         self.failures = _SnapshotFailures(owner.cancellation)
-        self.finish = owner._lane_binding._record.finish
+        self.finish = owner.finish_consumers
         self.owner_cleanup = owner.cleanup
         super().__init__(owner.cancellation, self._close_owner,
             owns_cancellation=False, fork_cleanup=owner.fork_close, first_primary=True)
@@ -274,10 +284,12 @@ def _snapshot_scope(owner):
         scope.release_healthy_callbacks()
 
 
-class _LaneSnapshotOwner(FiniteScratch):
-    """Bounded original-created snapshot entries under one exact Store binding."""
+class _IOSSnapshotOwner(FiniteScratch):
+    """The same finite tree under one of two mutually exclusive exact origins."""
 
-    def __init__(self, guard, record, *, deadline: InspectionDeadline) -> None:
+    def __init__(self, guard, record, *, deadline: InspectionDeadline, desktop_operation=None) -> None:
+        _require((record is None) is (desktop_operation is not None),
+                 "snapshot requires exactly one original Store or Desktop origin")
         super().__init__("ios-snapshot", guard, None, lane_evidence=record)
         self.deadline = deadline
         self.entries: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -294,6 +306,20 @@ class _LaneSnapshotOwner(FiniteScratch):
         self._registry_close_callback = self._close_registry
         self._root_close_callback = self.slot.close
         self._parents_close_callback = self._close_parents
+        if desktop_operation is not None:
+            from .ios_archive_operation import IOSArchiveOperation, _IOSInspectionDeadline
+            _require(type(desktop_operation) is IOSArchiveOperation and desktop_operation.guard is guard
+                     and type(deadline) is _IOSInspectionDeadline and desktop_operation.inspection_deadline is deadline,
+                     "Desktop snapshot requires its original operation and inspection clock")
+            self._desktop_binding = desktop_operation.snapshot_binding
+            self._desktop_binding.bind_owner(self)
+
+    def finish_consumers(self, *, cancellation, primary=None) -> None:
+        if self._desktop_binding is not None:
+            _require(self._lane_binding is None, "snapshot cannot mix Store and Desktop origins")
+            self._desktop_binding.finish_consumers(cancellation=cancellation, primary=primary)
+        else:
+            self._lane_binding._record.finish(cancellation=cancellation, primary=primary)
 
     @staticmethod
     def _entry(kind: str, parts: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -324,6 +350,10 @@ class _LaneSnapshotOwner(FiniteScratch):
 
     def _producer(self) -> None:
         self._owner()
+        if self._desktop_binding is not None:
+            _require(self._lane_binding is None, "snapshot cannot mix Store and Desktop origins")
+            self._desktop_binding.producer(self, self.cancellation)
+            return
         record = self._lane_binding._record
         record._origin(self.cancellation)
         _require(not record._sealed and not record._attempted and not record._finished,
@@ -642,7 +672,7 @@ class _LaneSnapshotOwner(FiniteScratch):
                 errors.remember(ValidationError("iOS snapshot original directory revision changed"))
             count = 0
             try:
-                with os.scandir(number) as iterator:
+                with _source_entries(number, owner=self) as iterator:
                     for observed in iterator:
                         self._step(cleanup=cleanup)
                         count += 1
@@ -706,7 +736,8 @@ class _LaneSnapshotOwner(FiniteScratch):
 
     def admit(self, record, guard) -> None:
         self._producer()
-        _require(guard is self.cancellation and self._lane_binding._record is record,
+        _require(self._desktop_binding is None and self._lane_binding is not None
+                 and guard is self.cancellation and self._lane_binding._record is record,
                  "snapshot admission has a different original owner")
         record._origin(guard)
         record._resource(self._lane_binding, self)
@@ -747,7 +778,7 @@ class _LaneSnapshotOwner(FiniteScratch):
                          for child in entry["children"].values()), "snapshot has foreign or unsettled children")
                 with self.directory(self._path.joinpath(*parts), cleanup=True) as number:
                     self._cleanup_view(number, entry, epoch)
-                    with os.scandir(number) as iterator:
+                    with _source_entries(number, owner=self) as iterator:
                         _require(next(iterator, None) is None, "snapshot contains an unknown survivor")
             entry["state"] = "REMOVE_ATTEMPTED"
             (os.rmdir if entry["kind"] == "directory" else os.unlink)(parts[-1], dir_fd=parent)
@@ -762,7 +793,7 @@ class _LaneSnapshotOwner(FiniteScratch):
     def _dispose(self, *, recovery_idle: bool = False) -> None:
         self._owner(cleanup=True)
         _require(not recovery_idle and _consumer_idle(
-            self.cancellation, lane_binding=self._lane_binding, owner=self),
+            self.cancellation, lane_binding=self._lane_binding, desktop_binding=self._desktop_binding, owner=self),
             "original snapshot consumers are unconfirmed")
         _check_creation(self.creation, self.identity)
         if not self.created:
@@ -829,10 +860,25 @@ class _LaneSnapshotOwner(FiniteScratch):
 
     def _lane_closed_for(self, record, binding, guard) -> bool:
         self._owner(cleanup=True)
-        if binding is not self._lane_binding or binding is None or guard is not self.cancellation:
+        if (self._desktop_binding is not None or binding is not self._lane_binding
+                or binding is None or guard is not self.cancellation):
             return False
         record._origin(guard)
         record._resource(binding, self)
+        return self._originals_closed()
+
+    def _desktop_closed_for(self, binding, guard) -> bool:
+        self._owner(cleanup=True)
+        if (self._lane_binding is not None or binding is None or binding is not self._desktop_binding
+                or guard is not self.cancellation):
+            return False
+        from .ios_archive_operation import IOSArchiveSnapshotBinding
+        if type(binding) is not IOSArchiveSnapshotBinding:
+            return False
+        binding.origin(self, guard)
+        return binding.finished and binding.finish_claimed and not binding.consumer_active and self._originals_closed()
+
+    def _originals_closed(self) -> bool:
         if not (self.claimed and not self.active and self._cleanup_complete and not self.created
                 and self.creation["state"] in ("NEW", "NO_EFFECT", "RETIRED")
                 and not self._accounting_pending and not self._accounting_failed
@@ -860,6 +906,25 @@ class _LaneSnapshotOwner(FiniteScratch):
         errors.raise_first()
 
 
+# Existing internal Store imports keep their exact type predicate; this alias
+# is the same closed implementation, not a new permissive subclass or wrapper.
+_LaneSnapshotOwner = _IOSSnapshotOwner
+
+
+@contextmanager
+def _source_entries(number: int, *, owner=None):
+    # The original Desktop operation keeps failed iterator acquisition/close
+    # charged. Store and standalone paths keep their existing iterator policy.
+    if owner is not None and owner._desktop_binding is not None:
+        binding = owner._desktop_binding
+        binding.origin(owner, owner.cancellation)
+        with binding.operation.files.entries(number) as iterator:
+            yield iterator
+    else:
+        with os.scandir(number) as iterator:
+            yield iterator
+
+
 @contextmanager
 def _source_descriptor(path, flags, *, parent=None, owner=None):
     if owner is None:
@@ -869,6 +934,18 @@ def _source_descriptor(path, flags, *, parent=None, owner=None):
         finally:
             os.close(number)
     else:
+        if parent is None and owner._desktop_binding is not None:
+            operation = owner._desktop_binding.operation
+            originals = (operation.artifact(),) if operation.signing is None else (operation.artifact(), operation.ipa())
+            for original in originals:
+                if path == original.path:
+                    with original.root() as number:
+                        yield number
+                    return
+            if flags & os.O_DIRECTORY:
+                with owner.directory(path) as number:
+                    yield number
+                return
         with owner.descriptor(path, flags, parent=parent) as number:
             yield number
 
@@ -918,6 +995,12 @@ def _copy_file(fd: int, target: Path | None, budget: _Budget, *, owner=None) -> 
 
 def _tree(path: Path, target: Path | None = None, *, deadline: InspectionDeadline, owner=None) -> Inventory:
     """Anchored descriptor traversal: never follow an input entry's symlink."""
+    if type(deadline) is not InspectionDeadline:
+        from .ios_archive_operation import _IOSInspectionDeadline
+        if type(deadline) is _IOSInspectionDeadline:
+            original_owner = deadline.snapshot_owner()
+            _require(owner is None or owner is original_owner, "parser snapshot origin differs")
+            owner = original_owner
     inventory: Inventory = {}
     paths, budget = _Paths(), _Budget(deadline)
     budget.tick()
@@ -926,7 +1009,7 @@ def _tree(path: Path, target: Path | None = None, *, deadline: InspectionDeadlin
         before = os.fstat(fd)
         _require(stat.S_ISDIR(before.st_mode), "tree input is not a directory")
         entries = []
-        with os.scandir(fd) as iterator:
+        with _source_entries(fd, owner=owner) as iterator:
             for entry in iterator:
                 budget.tick(entry=True)
                 entries.append((entry.name, entry.stat(follow_symlinks=False)))
@@ -988,7 +1071,7 @@ class IOSArtifactSnapshot:
     deadline: InspectionDeadline
     unpacked: dict[str, Path] = field(default_factory=dict)
     cancellation: object | None = None
-    _owner: _LaneSnapshotOwner | None = field(default=None, repr=False)
+    _owner: _IOSSnapshotOwner | None = field(default=None, repr=False)
 
     def assert_unchanged(self) -> None:
         self.deadline.check()
@@ -1028,14 +1111,20 @@ class IOSArtifactSnapshot:
 
 @contextmanager
 def snapshot_ios_artifacts(artifacts: Mapping[str, Path], *, cancellation=None,
-                           lane_evidence=None) -> Iterator[IOSArtifactSnapshot]:
+                           lane_evidence=None, desktop_operation=None) -> Iterator[IOSArtifactSnapshot]:
     """Only yielded private copies may be passed to native/content checks.
 
     A Store input binds its original finite owner before acquisition and never
     carries a delayed TemporaryDirectory finalizer. Standalone callers retain
     their existing scoped behavior.
     """
-    deadline = InspectionDeadline()
+    if desktop_operation is not None:
+        from .ios_archive_operation import IOSArchiveOperation
+        _require(type(desktop_operation) is IOSArchiveOperation and lane_evidence is None,
+                 "Desktop snapshot cannot borrow a Store origin")
+        deadline = desktop_operation.begin_inspection(artifacts, cancellation)
+    else:
+        deadline = InspectionDeadline()
     selected = {name: path for name, path in artifacts.items() if name in IOS_ARTIFACT_NAMES}
     owner = None
     if lane_evidence is not None:
@@ -1045,7 +1134,10 @@ def snapshot_ios_artifacts(artifacts: Mapping[str, Path], *, cancellation=None,
         _require(type(lane_evidence) is StoreLaneCallEvidence and type(cancellation) is DefaultCancellation,
                  "Store snapshot needs its original composite and cancellation owner")
         lane_evidence._origin(cancellation)
-        owner = _LaneSnapshotOwner(cancellation, lane_evidence, deadline=deadline)
+        owner = _IOSSnapshotOwner(cancellation, lane_evidence, deadline=deadline)
+        context = _snapshot_scope(owner)
+    elif desktop_operation is not None:
+        owner = _IOSSnapshotOwner(cancellation, None, deadline=deadline, desktop_operation=desktop_operation)
         context = _snapshot_scope(owner)
     else:
         context = first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-ios-snapshot-"),
@@ -1057,21 +1149,26 @@ def snapshot_ios_artifacts(artifacts: Mapping[str, Path], *, cancellation=None,
         else:
             _require(acquired is owner, "snapshot acquisition changed its original owner")
             temporary = owner._path
-        copies, bindings = {}, {}
-        for name, path in selected.items():
-            _parts(path.name)
-            parent = temporary / name
-            owner.mkdir(parent) if owner is not None else parent.mkdir(mode=0o700)
-            copies[name] = parent / path.name
-            bindings[name] = _input(path, copies[name], deadline=deadline, owner=owner)
-            if name == "ios-ipa":
-                _require(isinstance(bindings[name], _File), "IPA must be a regular ZIP file")
-        snapshot = IOSArtifactSnapshot(copies, selected, bindings, temporary, deadline,
-                                       cancellation=cancellation, _owner=owner)
-        if owner is not None:
-            owner.audit()
-        deadline.check()
-        yield snapshot
+        from contextlib import nullcontext
+        consumer = desktop_operation.snapshot_binding.consumer() if desktop_operation is not None else nullcontext()
+        # The original synchronous read consumer exits BEFORE fixed finish and
+        # independent owner cleanup, including a parser/capture exception.
+        with consumer:
+            copies, bindings = {}, {}
+            for name, path in selected.items():
+                _parts(path.name)
+                parent = temporary / name
+                owner.mkdir(parent) if owner is not None else parent.mkdir(mode=0o700)
+                copies[name] = parent / path.name
+                bindings[name] = _input(path, copies[name], deadline=deadline, owner=owner)
+                if name == "ios-ipa":
+                    _require(isinstance(bindings[name], _File), "IPA must be a regular ZIP file")
+            snapshot = IOSArtifactSnapshot(copies, selected, bindings, temporary, deadline,
+                                           cancellation=cancellation, _owner=owner)
+            if owner is not None:
+                owner.audit()
+            deadline.check()
+            yield snapshot
 
 
 def _zip_entry_offset(header: tuple[Any, ...], extra: bytes, *, deadline: InspectionDeadline) -> int:
@@ -1189,7 +1286,7 @@ def _zip_directory_bound(archive: Path, *, deadline: InspectionDeadline, owner=N
 
 
 def safe_extract_zip(path: Path, destination: Path, *, deadline: InspectionDeadline | None = None,
-                     _owner: _LaneSnapshotOwner | None = None) -> None:
+                     _owner: _IOSSnapshotOwner | None = None) -> None:
     """Extract untrusted bytes into a new toolkit-owned directory, never app paths."""
     deadline = deadline if deadline is not None else InspectionDeadline()
     try:
@@ -1259,9 +1356,28 @@ def typed_plist(path: Path, *, deadline: InspectionDeadline | None = None) -> An
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     try:
-        _require(path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_PLIST_BYTES,
-                 "Info.plist must be a bounded regular file")
-        data = path.read_bytes()
+        from .ios_archive_operation import _IOSInspectionDeadline
+        if type(deadline) is _IOSInspectionDeadline:
+            with deadline.descriptor(path) as number:
+                before = os.fstat(number)
+                _require(stat.S_ISREG(before.st_mode) and before.st_size <= MAX_PLIST_BYTES,
+                         "Info.plist must be a bounded regular file")
+                blocks, size = [], 0
+                while True:
+                    deadline.check()
+                    block = os.read(number, min(64 * 1024, MAX_PLIST_BYTES + 1 - size))
+                    if not block:
+                        break
+                    size += len(block)
+                    _require(size <= MAX_PLIST_BYTES, "Info.plist exceeds its byte bound")
+                    blocks.append(block)
+                _require(size == before.st_size and _attributes(before) == _attributes(os.fstat(number)),
+                         "Info.plist changed during its original read")
+                data = b"".join(blocks)
+        else:
+            _require(path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_PLIST_BYTES,
+                     "Info.plist must be a bounded regular file")
+            data = path.read_bytes()
         value = load_plist_dictionary(data, deadline=deadline)
         return typed_value(value, deadline=deadline)
     except OSError as error:
@@ -1351,11 +1467,17 @@ def _archive_application(archive: Path, expected_bundle_id: str, release: Releas
              "unsupported archive root (Watch/ODR/bitcode/recompiled or unknown ancillary content)")
     if "Info.plist" in inventory:
         typed_plist(archive / "Info.plist", deadline=deadline)
-    apps = list((archive / "Products/Applications").iterdir())
-    _require(len(apps) == 1 and apps[0].is_dir() and apps[0].suffix == ".app" and
-             {item.name for item in (archive / "Products").iterdir()} == {"Applications"},
+    # Reuse the complete bounded inventory rather than a second unowned
+    # directory enumeration. A missing Applications entry is not a directory.
+    apps = [name for name, value in inventory.items()
+            if name.startswith("Products/Applications/") and name.count("/") == 2]
+    products = {name for name in inventory if name.startswith("Products/") and name.count("/") == 1}
+    _require(len(apps) == 1 and inventory[apps[0]] is None and apps[0].endswith(".app")
+             and products == {"Products/Applications"}
+             and "Products/Applications" in inventory and inventory["Products/Applications"] is None,
              "archive must contain exactly one Products/Applications app")
-    return apps[0], _application(apps[0], expected_bundle_id, release, deadline=deadline)
+    application = archive / apps[0]
+    return application, _application(application, expected_bundle_id, release, deadline=deadline)
 
 
 def _require_symbols_policy(symbols_policy: str) -> None:

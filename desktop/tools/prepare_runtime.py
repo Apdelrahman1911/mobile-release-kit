@@ -36,6 +36,12 @@ BOOTSTRAPS = (
     "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
     "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
 )
+# Keep the historical supplier preparation exact. Current product callers must
+# select this complete roster explicitly; file presence never selects a domain.
+CURRENT_BOOTSTRAPS = (
+    *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+    "ios_archive_bootstrap.py", "github_release_bootstrap.py",
+)
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
@@ -170,6 +176,17 @@ def digest(data: bytes) -> str:
 
 
 def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
+    """Historical fixed preparation; does not include newer product domains."""
+    return _prepare(source, runtime, target, current=False)
+
+
+def prepare_current(source: Path, runtime: Path, target: str) -> dict[str, str]:
+    """Current complete fixed roster, still DATA only and never qualification."""
+    return _prepare(source, runtime, target, current=True)
+
+
+def _prepare(source: Path, runtime: Path, target: str, *, current: bool) -> dict[str, str]:
+    bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     if target not in TARGETS:
         raise PreparationError("Unsupported desktop package target")
     source, runtime = _root(source), _root(runtime)
@@ -183,7 +200,7 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     _root(executable.parent)
     # Every fixed entry point, the core ZIP and the fixed CA are payload. Their
     # presence/digests do not qualify an owner, TLS, or native execution custody.
-    generated_payloads = len(BOOTSTRAPS) + 2
+    generated_payloads = len(bootstrap_names) + 2
     # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
     if len(files(runtime, reserve_entries=generated_payloads + 1)) > MAX_FILES - generated_payloads:
@@ -203,11 +220,11 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     if version is None:
         raise PreparationError("Core version must be an explicit package version")
     desktop = _root(source / "desktop")
-    # Admit all six fixed entry points and the CA before creating output;
+    # Admit every selected fixed entry point and the CA before creating output;
     # an absent source must not leave a deceptively complete passive bundle.
     # CA bytes are opaque publisher input, not an acquired trust store or proof
     # of certificate correctness. Never synthesize a placeholder or use the OS.
-    bootstraps = [(name, read_checked(desktop / name, limit=MAX_BOOTSTRAP_BYTES)) for name in BOOTSTRAPS]
+    bootstraps = [(name, read_checked(desktop / name, limit=MAX_BOOTSTRAP_BYTES)) for name in bootstrap_names]
     github_ca = read_checked(desktop / GITHUB_CA_NAME, limit=MAX_GITHUB_CA_BYTES)
     if not github_ca:
         raise PreparationError("The fixed GitHub CA payload is empty")

@@ -302,7 +302,7 @@ def credential_values_for_purpose(
     stage: str,
     purpose: str,
     platforms: Iterable[str],
-) -> dict[str, str]:
+) -> Mapping[str, str]:
     """Select the minimum credential subset for one execution capability."""
 
     allowed: set[str] = set()
@@ -312,6 +312,11 @@ def credential_values_for_purpose(
         allowed.update(item.alternatives)
     if purpose == "store" and "android" in selected:
         allowed.add("GOOGLE_APPLICATION_CREDENTIALS")
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    if type(values) is CapturedBuildValues:
+        # Captured file bytes are not environment/renderer mapping values.
+        # Preserve their original source while applying the SAME core policy.
+        return values.select(allowed)
     return {name: values[name] for name in allowed if values.get(name)}
 
 
@@ -523,6 +528,9 @@ def _selected_material_bytes(
     project_root: Path, cancellation: _ProfileCancellation | None = None,
 ) -> bytes | None:
     """Select an external source once, never return its filename to consumers."""
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    if type(values) is CapturedBuildValues:
+        return values.material(base64_name, root=project_root, cancellation=cancellation)
     if values.get(base64_name) and values.get(path_name):
         raise CredentialError("private material has mutually exclusive input sources")
     maximum_size = _material_size_limit(base64_name)
@@ -2134,7 +2142,10 @@ def materialize_build_inputs(
             raise CredentialError("signed iOS material requires its unused original account lease")
     scratch = build_inputs.scratch
     _material_guard(scratch, cancellation)
-    values = dict(values)  # After environment/account/project admission, not before.
+    from ._desktop_ios_signing_material import CapturedBuildValues
+    # After environment/account/project admission, not before. Captured bytes
+    # keep their exact operation binding instead of becoming path/base64 data.
+    values = values.for_invocation(invocation) if type(values) is CapturedBuildValues else dict(values)
     material: dict[str, InputSnapshot] = {}
     for platform, base64_name, path_name, role in (
         ("android", "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH", "android-keystore"),
