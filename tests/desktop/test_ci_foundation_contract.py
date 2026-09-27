@@ -14768,6 +14768,19 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
 
     def test_unexpected_entry_closed_cases_preserve_original_failure_and_legacy(self):
         cases = []
+        families = (
+            "app-identifier", "fixture-project", "fixture-app", "fixture-release", "ebwebview", "webview2",
+            "app-data", "local", "roaming", "microsoft", "temp", "default", "crashpad", "crash-dumps", "browser-metrics",
+            "cache", "code-cache", "gpu-cache", "dawn-cache", "shader-cache", "session-storage", "local-storage",
+            "desktop", "documents", "downloads", "favorites", "links", "recent",
+            "literal-userprofile", "literal-localappdata", "literal-appdata", "literal-temp", "literal-tmp",
+            "mrk-webview2-shape", "webview2-suffix",
+        )
+        self.assertEqual(helper.WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES, families)
+        self.assertEqual(len(families), len(set(families))); self.assertEqual(len(families), 35)
+        for family in families:
+            cases.append((0, {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                              "attributes": 0x10, "directoryFamily": family}))
         for expected, position in helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS.items():
             kind = "directory" if expected in ("project", "app", "release") else "file"
             cases.append((position, {"class": "expected-name-case-alias", "expected": expected, "log": None,
@@ -14786,6 +14799,9 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                     self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
                     self.assertEqual(frame["captureFailure"]["error"], "Unsafe")
                     self.assertEqual(frame["projection"]["reason"], 1)
+                    if "directoryFamily" in entry:
+                        legacy = deepcopy(frame); del legacy["captureFailure"]["entry"]["directoryFamily"]
+                        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
                     del frame["captureFailure"]["entry"]
                     self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
         # Historical seven-field failures stay readable without inventing details.
@@ -14806,7 +14822,8 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                            ("attributes", "32"), ("attributes", 32.0), ("attributes", 0x10),
                            ("kind", "pipe"), ("kind", True), ("kind", "directory"),
                            ("class", "permitted-log"), ("class", "other"), ("expected", "result"),
-                           ("log", None), ("log", "debug.log"), ("log", 1), ("name", "private"), ("content", "private")):
+                           ("log", None), ("log", "debug.log"), ("log", 1), ("name", "private"), ("content", "private"),
+                           ("directoryFamily", "ebwebview"), ("directoryFamily", None)):
             frame = self.entry_frame_data(); frame["captureFailure"]["entry"][key] = value
             with self.subTest(entry=(key, value)), self.assertRaises(helper.CheckFailure):
                 helper.windows_normal_ui_observer_frame(self.frame(frame))
@@ -14824,24 +14841,59 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         for key in (b'"entry":', b'"attributes":', b'"class":'):
             with self.subTest(duplicate=key), self.assertRaises(helper.CheckFailure):
                 helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'null,' + key, 1))
+        family_entry = {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                        "attributes": 0x10, "directoryFamily": "ebwebview"}
+        for key, value in (("directoryFamily", None), ("directoryFamily", True), ("directoryFamily", 1),
+                           ("directoryFamily", []), ("directoryFamily", {}), ("directoryFamily", "EBWebView"),
+                           ("directoryFamily", "private.exe.WebView2"), ("directoryFamily", "unknown"),
+                           ("class", "known-cwd-log"), ("class", "expected-name-case-alias"), ("class", "other-regular"),
+                           ("class", "other"), ("kind", "file"), ("attributes", 0), ("attributes", True),
+                           ("expected", "project"), ("log", "debug-log"), ("name", "EBWebView"), ("sha256", "a" * 64)):
+            frame = self.entry_frame_data(family_entry); frame["captureFailure"]["entry"][key] = value
+            with self.subTest(family=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        # Otherwise valid legacy categories cannot smuggle a family, even when
+        # all of their own cross-fields and the original provenance are valid.
+        for legacy in (
+            {"class": "expected-name-case-alias", "expected": "project", "log": None, "kind": "directory", "attributes": 0x10},
+            {"class": "known-cwd-log", "expected": None, "log": "debug-log", "kind": "directory", "attributes": 0x10},
+            {"class": "other-regular", "expected": None, "log": None, "kind": "file", "attributes": 0},
+            {"class": "other", "expected": None, "log": None, "kind": "file", "attributes": 0x10},
+        ):
+            frame = self.entry_frame_data(legacy)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+            frame["captureFailure"]["entry"]["directoryFamily"] = "ebwebview"
+            with self.subTest(family_category=legacy), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for key, value in (("operation", "directory-roster"), ("check", "entry-kind"), ("index", 4),
+                           ("error", "Unavailable"), ("detail", "input.PathText")):
+            frame = self.entry_frame_data(family_entry); frame["captureFailure"][key] = value
+            with self.subTest(family_provenance=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        raw = self.frame(self.entry_frame_data(family_entry)); key = b'"directoryFamily":'
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'"ebwebview",' + key, 1))
 
     def test_unexpected_entry_collector_never_upgrades_failure_or_reads_offender(self):
         for role in self.OWNERS:
-            parts = list(self.original_log(role)); frame = self.entry_frame_data(role=role)
-            parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
-            parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
-            with patch.object(helper, "run", side_effect=AssertionError("no process/native")), \
-                    patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no filesystem read")):
-                data = self.joined(parts)
-            self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
-            self.assertTrue(data["originalSelectedFailure"]); self.assertEqual(data["projection"]["reason"], 1)
-            self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
-            self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
-            self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
+            for entry in (None, {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                                 "attributes": 0x10, "directoryFamily": "ebwebview"}):
+                parts = list(self.original_log(role)); frame = self.entry_frame_data(entry, role=role)
+                parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
+                parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+                with patch.object(helper, "run", side_effect=AssertionError("no process/native")), \
+                        patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no filesystem read")):
+                    data = self.joined(parts)
+                self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
+                self.assertTrue(data["originalSelectedFailure"]); self.assertEqual(data["projection"]["reason"], 1)
+                self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
+                self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
+                self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
 
     def test_unexpected_entry_source_uses_only_same_mismatch_and_closed_copy_data(self):
         root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
         ui, diagnostic = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs"))
+        self.assertEqual(hashlib.sha256(ui.encode()).hexdigest(), "af22b27be8f53299c62e49764692c813bbb524a4155fdc8320ab6a5e17ac4a4a")
         poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
         lookup = "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)"
         self.assertEqual(poststate.count(lookup), 1)
@@ -14854,14 +14906,21 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
             self.assertNotIn(forbidden, seam)
         for name, expected in (("ObserverEntryClass", helper.WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES),
                                ("ObserverExpectedName", tuple(helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS)),
-                               ("ObserverKnownLog", helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS)):
+                               ("ObserverKnownLog", helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS),
+                               ("ObserverDirectoryFamily", helper.WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES)):
             body = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
-            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', body)), expected)
+            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z0-9-]+)"', body)), expected)
         classifier = diagnostic.split("impl ObserverCaptureEntry {", 1)[1].split("pub(crate) struct ObserverCaptureFailure", 1)[0]
         for required in ("kind: entry.kind, attributes: entry.attributes", "if !value.consistent() { return value; }",
                          "name.eq_ignore_ascii_case(&entry.name)", "ObserverExpectedName::of(role, name)",
-                         "ObserverKnownLog::of(&entry.name)", "Some(name.position()) == position"):
+                         "ObserverKnownLog::of(&entry.name)", "Some(name.position()) == position",
+                         "if value.class == ObserverEntryClass::OtherDirectory", "ObserverDirectoryFamily::of(&entry.name)",
+                         "if let Some(family) = self.directory_family"):
             self.assertIn(required, classifier)
+        family = diagnostic.split("impl ObserverDirectoryFamily {", 1)[1].split("// Same decoded entry only.", 1)[0]
+        for required in ('name.strip_prefix("mrk-webview2-")', 'tail.len() == 32', "name.rsplit_once('.')",
+                         '!prefix.is_empty() && suffix.eq_ignore_ascii_case("WebView2")'):
+            self.assertIn(required, family)
         fields = diagnostic.split("pub(crate) struct ObserverCaptureEntry {", 1)[1].split("}\n", 1)[0]
         for forbidden in ("String", "Vec<", "Path", "file_id", "name:"):
             self.assertNotIn(forbidden, fields)
@@ -14869,7 +14928,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         self.assertIn("if self.first.get().is_none()", first)
         self.assertIn("check: ObserverCaptureCheck::ExpectedChild", first)
         self.assertIn("error: Some(Error::Unsafe), native: None, detail: None", first)
-        for body in (classifier, first):
+        for body in (classifier, first, family):
             for forbidden in ("unsafe", "native.", "std::fs", "std::env", "Instant::", "GetTickCount", "GetLastError", "open_child", "read_next"):
                 self.assertNotIn(forbidden, body)
         selected = ui.split("fn observer_capture_failure_contract()", 1)[1].split("    #[test]", 1)[0]

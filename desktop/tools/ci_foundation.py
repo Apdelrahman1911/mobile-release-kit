@@ -14558,12 +14558,21 @@ WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS = {
     "gradle": 2, "version": 1, "keep": 1, "config": 3,
 }
 WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS = ("debug-log", "chrome-debug-log", "msedge-debug-log")
+WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES = (
+    "app-identifier", "fixture-project", "fixture-app", "fixture-release", "ebwebview", "webview2",
+    "app-data", "local", "roaming", "microsoft", "temp", "default", "crashpad", "crash-dumps", "browser-metrics",
+    "cache", "code-cache", "gpu-cache", "dawn-cache", "shader-cache", "session-storage", "local-storage",
+    "desktop", "documents", "downloads", "favorites", "links", "recent",
+    "literal-userprofile", "literal-localappdata", "literal-appdata", "literal-temp", "literal-tmp",
+    "mrk-webview2-shape", "webview2-suffix",
+)
 
 
 def windows_normal_ui_observer_capture_entry(value: object, position: int) -> dict:
     """Closed DATA from the original mismatch, never an allowed child/producer."""
-    closed_object(value, {"class", "expected", "log", "kind", "attributes"},
-                  "Windows observer unexpected-entry fields differ")
+    keys = {"class", "expected", "log", "kind", "attributes"}
+    require(type(value) is dict and set(value) in (keys, keys | {"directoryFamily"}),
+            "Windows observer unexpected-entry fields differ")
     require(integer_between(position, 0, 3)
             and type(value["class"]) is str and value["class"] in WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES
             and type(value["kind"]) is str and value["kind"] in ("file", "directory")
@@ -14584,6 +14593,11 @@ def windows_normal_ui_observer_capture_entry(value: object, position: int) -> di
         else:
             require(expected is log is None and value["kind"] == ("file" if category == "other-regular" else "directory"),
                     "Windows observer unexpected-entry category differs")
+    if "directoryFamily" in value:
+        require(category == "other-directory" and consistent and value["kind"] == "directory"
+                and expected is log is None and type(value["directoryFamily"]) is str
+                and value["directoryFamily"] in WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES,
+                "Windows observer directory family differs")
     return dict(value)
 
 
