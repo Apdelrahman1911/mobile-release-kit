@@ -8133,6 +8133,16 @@ class WindowsReaderGateTests(unittest.TestCase):
             ("tokio-macros", "2.6.1", {}, []),
             ("der_derive", "0.7.3", {}, []),
             ("syn", "2.0.119", syn_features, sorted(syn_features)),
+            ("time", "0.3.55", {
+                "alloc": ["serde_core?/alloc"], "default": ["std"],
+                "formatting": ["std", "time-macros?/formatting"],
+                "parsing": ["time-macros?/parsing"], "std": ["alloc"],
+                "serde": ["dep:serde_core", "time-macros?/serde", "deranged/serde"],
+            }, ["alloc", "default", "formatting", "parsing", "std"]),
+            ("deranged", "0.5.8", {"default": [], "serde": ["dep:serde_core"]}, ["default"]),
+            ("indexmap", "2.14.2", {
+                "default": ["std"], "std": [], "serde": ["dep:serde_core", "dep:serde"],
+            }, ["default", "std"]),
         )
         for name, version, features, selected in specifications:
             directory = root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
@@ -8177,12 +8187,14 @@ class WindowsReaderGateTests(unittest.TestCase):
         declaration["features"] = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"]
         # The additional paths make the two typenum parents and two host macro
         # consumers reachable without adding an application direct dependency.
-        def edge(parent_name, name, requirement, features=(), defaults=True, optional=False, target=None):
+        def edge(parent_name, name, requirement, features=(), defaults=True, optional=False, target=None, active=True):
             parent, child = packages[parent_name], packages[name]
             parent.setdefault("dependencies", []).append({
                 "name": name, "source": registry, "req": requirement, "kind": None, "rename": None,
                 "optional": optional, "uses_default_features": defaults, "features": list(features),
                 "target": target, "registry": None})
+            if not active:
+                return
             node = nodes[parent["id"]]
             node["dependencies"].append(child["id"])
             node["deps"].append({"name": name.replace("-", "_"), "pkg": child["id"],
@@ -8197,6 +8209,23 @@ class WindowsReaderGateTests(unittest.TestCase):
         edge("serde", "serde_derive", "^1", optional=True)
         edge("serde", "serde_core", "=1.0.228", ("result",), defaults=False)
         edge("serde_json", "serde_core", "^1.0.220", defaults=False)
+        # Observed metadata retains time's weak optional core edge while its
+        # serde activation is absent. Connect the exact target-normal path.
+        plist_feature = "enable_unstable_features_that_may_break_with_minor_version_bumps"
+        packages["plist"]["features"] = {
+            "default": ["serde"], plist_feature: [], "serde": ["dep:serde"],
+        }
+        nodes[packages["plist"]["id"]]["features"] = [plist_feature]
+        edge("plist", "time", "^0.3.47", ("parsing", "formatting"))
+        edge("time", "serde_core", "^1.0.220", defaults=False, optional=True)
+        edge("time", "deranged", "^0.5.8")
+        edge("plist", "indexmap", "^2.14.0")
+        # These genuine optional declarations do not have metadata edges.
+        # A generic optional-parent exception would incorrectly admit them.
+        edge("deranged", "serde_core", "^1.0.220", defaults=False, optional=True, active=False)
+        edge("indexmap", "serde_core", "^1.0.220", defaults=False, optional=True, active=False)
+        edge("indexmap", "serde", "^1.0.220", defaults=False, optional=True, target="cfg(any())", active=False)
+        edge("plist", "serde", "^1.0.2", optional=True, active=False)
         # Inactive cfg(any()) and nonroot dev declarations are not normal
         # consumers. Keep them without fabricating active resolution edges.
         for parent, child, requirement, kind, target, defaults, features in (
@@ -8825,6 +8854,10 @@ class WindowsReaderGateTests(unittest.TestCase):
                 for index, (name, expected) in enumerate([*wanted.items(), ("serde_core", wanted["serde_core"])]):
                     surplus = graph["nodes"][packages[name]["id"]]["features"]
                     invalid = [surplus]
+                    if name == "serde_core":
+                        # Both its library and custom-build unit must refuse
+                        # rc and alloc+rc, not only the observed alloc surplus.
+                        invalid += [sorted(expected + ["rc"]), sorted(expected + ["alloc", "rc"])]
                     if name == "syn":
                         invalid.append([feature for feature in expected if feature != "extra-traits"])
                     if expected:
@@ -8849,6 +8882,47 @@ class WindowsReaderGateTests(unittest.TestCase):
         with self.assertRaisesRegex(helper.CheckFailure, "selected feature definitions differ"):
             helper.windows_installed_app_unit_features(graph)
 
+    def test_windows_reader_fixed_normal_time_weak_edge_remains_metadata_only(self):
+        """Source-lock-joined observation shape, not a native compiler receipt."""
+        value, _, context = self.graph_data(publication=True)
+        packages = {row["name"]: row for row in value["packages"]}
+        nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+        # The broader fixture deliberately exercises extra serde/json metadata
+        # features. This regression instead uses their observed selected lists.
+        for name, features in (("serde", ["default", "derive", "serde_derive", "std"]),
+                               ("serde_json", ["default", "std"])):
+            nodes[packages[name]["id"]]["features"] = features
+        lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.lock").read_text(encoding="utf-8"))
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        locked = {(row["name"], row["version"], row.get("source")): row for row in lock["package"]}
+        for name, version in (("plist", "1.10.1"), ("time", "0.3.55"), ("serde_core", "1.0.228"),
+                              ("deranged", "0.5.8"), ("indexmap", "2.14.2")):
+            self.assertEqual(packages[name]["version"], version)
+            self.assertEqual(packages[name]["source"], registry)
+            self.assertRegex(locked[(name, version, registry)]["checksum"], r"^[0-9a-f]{64}$")
+        # Use the actual source lock, not the fixture's fabricated checksums.
+        graph = helper.windows_installed_app_graph(
+            value, lock, source=Path(context["source"]), root=Path(context["root"]), publication=True)
+        selected = helper.windows_installed_app_unit_features(graph, helper=True)
+        core, time = packages["serde_core"], packages["time"]
+        incoming = sorted(graph["packages"][key]["name"] for key, node in graph["nodes"].items()
+                          for edge in node["deps"] if edge["pkg"] == core["id"])
+        self.assertEqual(incoming, ["serde", "serde_json", "time"])
+        self.assertEqual(nodes[core["id"]]["features"], ["alloc", "result", "std"])
+        self.assertEqual(selected[core["id"]], ["result", "std"])
+        self.assertNotIn("serde", nodes[time["id"]]["features"])
+        self.assertEqual(time["features"]["alloc"], ["serde_core?/alloc"])
+        declaration = next(row for row in time["dependencies"] if row["name"] == "serde_core")
+        self.assertIs(declaration["optional"], True)
+        self.assertIs(declaration["uses_default_features"], False)
+        self.assertEqual(declaration["features"], [])
+        for name in ("serde", "serde_json"):
+            self.assertEqual(selected[packages[name]["id"]], nodes[packages[name]["id"]]["features"])
+        for name in ("deranged", "indexmap"):
+            self.assertTrue(any(row["name"] == "serde_core" and row["optional"] is True
+                                for row in packages[name]["dependencies"]))
+            self.assertFalse(any(edge["pkg"] == core["id"] for edge in nodes[packages[name]["id"]]["deps"]))
+
     def test_windows_reader_fixed_normal_unit_declarations_and_metadata_fail_closed(self):
         def reject(label, change):
             value, lock, context = self.graph_data(publication=True)
@@ -8861,23 +8935,26 @@ class WindowsReaderGateTests(unittest.TestCase):
                 helper.windows_installed_app_unit_features(graph, helper=True)
         def declaration(packages, parent, child):
             return next(row for row in packages[parent]["dependencies"] if row["name"] == child)
-        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core", "der_derive"):
+        for name in ("typenum", "tokio", "syn", "serde", "serde_json", "serde_core", "der_derive", "time", "plist"):
             reject("version-" + name, lambda g, p, n, name=name: p[name].update(version="0.0.0"))
             reject("source-" + name, lambda g, p, n, name=name: p[name].update(source="git+https://example.invalid/other"))
             reject("missing-" + name, lambda g, p, n, name=name: g["nodes"].pop(p[name]["id"]))
-        def duplicate_unit(graph, packages, nodes):
-            copy = deepcopy(packages["typenum"]); copy["id"] = "duplicate-typenum"
+        def duplicate_unit(graph, packages, nodes, name):
+            copy = deepcopy(packages[name]); copy["id"] = "duplicate-" + name
             graph["packages"][copy["id"]] = copy
-            graph["nodes"][copy["id"]] = {**deepcopy(nodes["typenum"]), "id": copy["id"]}
-        reject("duplicated-unit", duplicate_unit)
+            graph["nodes"][copy["id"]] = {**deepcopy(nodes[name]), "id": copy["id"]}
+        for name in ("typenum", "time", "plist"):
+            reject("duplicated-unit-" + name, lambda g, p, n, name=name: duplicate_unit(g, p, n, name))
         for parent, child in (("crypto-common", "typenum"), ("generic-array", "typenum"),
                               ("mobile-release-kit-desktop", "tokio"), ("serde_derive", "syn"), ("tokio-macros", "syn"),
                               ("der_derive", "syn"),
                               ("mobile-release-kit-desktop", "serde"), ("mobile-release-kit-desktop", "serde_json"),
-                              ("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive")):
-            for field, value in (("req", "*"), ("rename", "alias"), ("kind", "build"), ("target", "cfg(unix)"),
-                                 ("optional", 0), ("uses_default_features", 1),
-                                 ("features", ()), ("features", ["const-generics"]), ("registry", "other")):
+                              ("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive"),
+                              ("time", "serde_core"), ("plist", "time"), ("mobile-release-kit-desktop", "plist")):
+            for field, value in (("name", "other"), ("source", "git+https://example.invalid/other"),
+                                 ("req", "*"), ("rename", "alias"), ("kind", "build"), ("kind", "dev"), ("target", "cfg(unix)"),
+                                 ("optional", 0), ("optional", 1), ("uses_default_features", 0), ("uses_default_features", 1),
+                                 ("features", ()), ("features", ["const-generics"]), ("registry", "other"), ("extra", None)):
                 reject(parent + "-" + child + "-" + field + "-" + str(value),
                        lambda g, p, n, parent=parent, child=child, field=field, value=value:
                            declaration(p, parent, child).update({field: value}))
@@ -8893,6 +8970,9 @@ class WindowsReaderGateTests(unittest.TestCase):
             reject(parent + "-" + child + "-duplicate-declaration",
                    lambda g, p, n, parent=parent, child=child:
                        p[parent]["dependencies"].append(deepcopy(declaration(p, parent, child))))
+            reject(parent + "-" + child + "-missing-declaration",
+                   lambda g, p, n, parent=parent, child=child:
+                       p[parent]["dependencies"].remove(declaration(p, parent, child)))
         reject("missing-parent-edge", lambda g, p, n: n["generic-array"].update(deps=[]))
         reject("duplicate-parent-edge", lambda g, p, n:
                n["generic-array"]["deps"].append(deepcopy(n["generic-array"]["deps"][0])))
@@ -8930,7 +9010,8 @@ class WindowsReaderGateTests(unittest.TestCase):
         def incoming(packages, nodes, parent, child):
             return next(edge for edge in nodes[parent]["deps"] if edge["pkg"] == packages[child]["id"])
         for parent, child in (("serde", "serde_core"), ("serde_json", "serde_core"), ("serde", "serde_derive"),
-                              ("der_derive", "syn")):
+                              ("der_derive", "syn"), ("time", "serde_core"), ("plist", "time"),
+                              ("mobile-release-kit-desktop", "plist")):
             reject(parent + "-" + child + "-missing-edge", lambda g, p, n, parent=parent, child=child:
                    n[parent]["deps"].remove(incoming(p, n, parent, child)))
             reject(parent + "-" + child + "-duplicate-edge", lambda g, p, n, parent=parent, child=child:
@@ -8941,6 +9022,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                            incoming(p, n, parent, child)["dep_kinds"][0].update({field: value}))
             reject(parent + "-" + child + "-alias", lambda g, p, n, parent=parent, child=child:
                    incoming(p, n, parent, child).update(name="other"))
+            reject(parent + "-" + child + "-duplicate-kind", lambda g, p, n, parent=parent, child=child:
+                   incoming(p, n, parent, child)["dep_kinds"].append(deepcopy(incoming(p, n, parent, child)["dep_kinds"][0])))
         for child in ("serde", "serde_json", "serde_core"):
             reject(child + "-additional-parent", lambda g, p, n, child=child:
                    n["tokio"]["deps"].append({"name": child, "pkg": p[child]["id"],
@@ -8948,6 +9031,81 @@ class WindowsReaderGateTests(unittest.TestCase):
         reject("metadata-feature-type", lambda g, p, n: n["tokio"].update(features=True))
         reject("metadata-feature-duplicate", lambda g, p, n: n["syn"]["features"].append("full"))
         reject("declaration-list-type", lambda g, p, n: p["crypto-common"].update(dependencies=None))
+
+        for name in ("time", "plist"):
+            reject(name + "-became-macro", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(kind=["proc-macro"], crate_types=["proc-macro"]))
+            reject(name + "-crate-type", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(crate_types=["rlib"]))
+            reject(name + "-library-name", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(name="other"))
+            reject(name + "-library-source", lambda g, p, n, name=name:
+                   p[name]["targets"][0].update(src_path="/unrelated/lib.rs"))
+            reject(name + "-missing-library", lambda g, p, n, name=name: p[name].update(targets=[]))
+            reject(name + "-duplicate-library", lambda g, p, n, name=name:
+                   p[name]["targets"].append(deepcopy(p[name]["targets"][0])))
+        reject("plist-time-request-order", lambda g, p, n:
+               declaration(p, "plist", "time").update(features=["formatting", "parsing"]))
+
+        def reparent(graph, packages, nodes, parent, child, kind):
+            edge = incoming(packages, nodes, parent, child)
+            declared = declaration(packages, parent, child)
+            nodes[parent]["deps"].remove(edge)
+            nodes[parent]["dependencies"].remove(packages[child]["id"])
+            packages[parent]["dependencies"].remove(declared)
+            edge["dep_kinds"][0]["kind"] = kind
+            declared["kind"] = kind
+            nodes["sha2"]["deps"].append(edge)
+            nodes["sha2"]["dependencies"].append(packages[child]["id"])
+            packages["sha2"].setdefault("dependencies", []).append(declared)
+            # Both tables and the entire graph remain connected. Reject the
+            # changed source role, not an accidental orphan or dangling edge.
+            for node in nodes.values():
+                self.assertEqual(len(node["dependencies"]), len(set(node["dependencies"])))
+                self.assertEqual(set(node["dependencies"]), {item["pkg"] for item in node["deps"]})
+            seen, pending = set(), [graph["appId"]]
+            while pending:
+                key = pending.pop()
+                if key not in seen:
+                    seen.add(key)
+                    pending.extend(graph["nodes"][key]["dependencies"])
+            self.assertEqual(seen, set(graph["nodes"]))
+        for parent, child in (("mobile-release-kit-desktop", "plist"), ("plist", "time")):
+            for kind in (None, "build", "dev"):
+                reject(parent + "-" + child + "-reparent-" + str(kind),
+                       lambda g, p, n, parent=parent, child=child, kind=kind: reparent(g, p, n, parent, child, kind))
+
+        for name in ("deranged", "indexmap"):
+            def extra_optional_parent(graph, packages, nodes, name=name):
+                self.assertIs(declaration(packages, name, "serde_core")["optional"], True)
+                nodes[name]["dependencies"].append(packages["serde_core"]["id"])
+                nodes[name]["deps"].append({"name": "serde_core", "pkg": packages["serde_core"]["id"],
+                                           "dep_kinds": [{"kind": None, "target": None}]})
+            reject(name + "-optional-core-edge-is-not-time", extra_optional_parent)
+        for feature in ("alloc", "default", "formatting", "parsing", "std"):
+            reject("time-missing-selected-" + feature, lambda g, p, n, feature=feature:
+                   n["time"]["features"].remove(feature))
+        reject("time-serde-activation", lambda g, p, n:
+               n["time"].update(features=sorted(n["time"]["features"] + ["serde"])))
+        def extra_time_feature(graph, packages, nodes):
+            packages["time"]["features"]["extra"] = []
+            nodes["time"]["features"] = sorted(nodes["time"]["features"] + ["extra"])
+        reject("time-extra-selected-feature", extra_time_feature)
+        reject("time-strong-alloc-forwarding", lambda g, p, n:
+               p["time"]["features"].update(alloc=["serde_core/alloc"]))
+        for name, features in (("time", ("alloc", "default", "formatting", "parsing", "std", "serde")),
+                               ("plist", ("default", "serde", "enable_unstable_features_that_may_break_with_minor_version_bumps"))):
+            for feature in features:
+                reject(name + "-changed-definition-" + feature, lambda g, p, n, name=name, feature=feature:
+                       p[name]["features"].update({feature: ["unreviewed"]}))
+                reject(name + "-missing-definition-" + feature, lambda g, p, n, name=name, feature=feature:
+                       p[name]["features"].pop(feature))
+        reject("plist-extra-feature-definition", lambda g, p, n: p["plist"]["features"].update(extra=[]))
+        reject("plist-missing-selected-feature", lambda g, p, n: n["plist"].update(features=[]))
+        for feature in ("default", "serde"):
+            reject("plist-activated-" + feature, lambda g, p, n, feature=feature:
+                   n["plist"].update(features=sorted(n["plist"]["features"] + [feature])))
+        reject("core-missing-weak-metadata-alloc", lambda g, p, n: n["serde_core"]["features"].remove("alloc"))
 
     def test_windows_reader_selected_eleven_and_compile_argv_are_closed(self):
         names = (

@@ -13196,6 +13196,60 @@ def windows_installed_fixed_normal_features(graph: dict) -> dict:
                           if ref.startswith(name + "/") or ref.startswith(name + "?/")]
             require(same_compile_json(forwarding, ["serde_core/std"] if name == "serde_core" else []),
                     "Windows fixed normal unit parent forwarding differs: " + name)
+        if name == "serde_core":
+            # The pinned time manifest has weak alloc forwarding. Cargo's
+            # metadata includes its optional edge without selecting time/serde;
+            # that edge is DATA, not a normal compiler-feature grant.
+            time_key, time_package = package("time", "0.3.55")
+            plist_key, plist_package = package("plist", "1.10.1")
+            app_key, app_package = package("mobile-release-kit-desktop", "0.1.0", local=True)
+            library(time_package)
+            library(plist_package)
+            time_mapping, time_selected = feature_data(time_key, time_package)
+            time_definitions = {
+                "alloc": ["serde_core?/alloc"], "default": ["std"],
+                "formatting": ["std", "time-macros?/formatting"],
+                "parsing": ["time-macros?/parsing"], "std": ["alloc"],
+                "serde": ["dep:serde_core", "time-macros?/serde", "deranged/serde"],
+            }
+            require(same_compile_json(time_selected, ["alloc", "default", "formatting", "parsing", "std"])
+                    and all(same_compile_json(time_mapping.get(feature), refs)
+                            for feature, refs in time_definitions.items()),
+                    "Windows fixed normal unit time weak metadata features differ")
+            plist_mapping, plist_selected = feature_data(plist_key, plist_package)
+            plist_feature = "enable_unstable_features_that_may_break_with_minor_version_bumps"
+            require(same_compile_json(plist_selected, [plist_feature])
+                    and same_compile_json(plist_mapping, {
+                        "default": ["serde"], plist_feature: [], "serde": ["dep:serde"],
+                    }), "Windows fixed normal unit plist metadata features differ")
+            # These two sole normal hops bind time to the target app, rather
+            # than a same-named library reached through a host/build parent.
+            for child_name, child_key, parent_key, parent, requirement, defaults, requested in (
+                    ("plist", plist_key, app_key, app_package, "=1.10.1", False, [plist_feature]),
+                    ("time", time_key, plist_key, plist_package, "^0.3.47", True, ["parsing", "formatting"])):
+                incoming = [(owner, edge) for owner, node in nodes.items() for edge in node["deps"]
+                            if edge["pkg"] == child_key]
+                require(len(incoming) == 1 and incoming[0][0] == parent_key
+                        and incoming[0][1]["name"] == child_name
+                        and same_compile_json(incoming[0][1]["dep_kinds"], [{"kind": None, "target": None}]),
+                        "Windows fixed normal unit time upstream role/edge differs: " + child_name)
+                declarations = parent.get("dependencies")
+                require(type(declarations) is list and 0 < len(declarations) <= 512
+                        and all(type(declaration) is dict for declaration in declarations),
+                        "Windows fixed normal unit time upstream declarations differ: " + child_name)
+                matching = [declaration for declaration in declarations if declaration.get("name") == child_name]
+                require(len(matching) == 1 and same_compile_json(matching[0], {
+                    "name": child_name, "source": registry, "req": requirement, "kind": None, "rename": None,
+                    "optional": False, "uses_default_features": defaults, "features": requested,
+                    "target": None, "registry": None,
+                }), "Windows fixed normal unit time upstream declaration differs: " + child_name)
+            require(time_key not in expected_parents and "alloc" in metadata_features,
+                    "Windows fixed normal unit time weak metadata effect differs")
+            expected_parents[time_key] = {
+                "name": name, "source": registry, "req": "^1.0.220", "kind": None, "rename": None,
+                "optional": True, "uses_default_features": False, "features": [],
+                "target": None, "registry": None,
+            }
         seen = set()
         for parent_key, node in nodes.items():
             for edge in node["deps"]:
