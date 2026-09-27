@@ -122,9 +122,13 @@ jobs:
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          # Match the real-UID CF default before Python/native imports; never
+          # inherit an ambient encoding or consult the runner's preferences.
+          printf -v mrk_cf_encoding '0x%X:0:0' "$UID"
           exec /usr/bin/env -i \
             PATH=/usr/bin:/bin:/usr/sbin:/sbin \
             HOME='${{ steps.work.outputs.root }}' LANG=C LC_ALL=C TZ=UTC \
+            __CF_USER_TEXT_ENCODING="$mrk_cf_encoding" \
             RUNNER_ENVIRONMENT='${{ runner.environment }}' \
             RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             RUNNER_TEMP='${{ runner.temp }}' \

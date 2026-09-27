@@ -88,6 +88,7 @@ ENVIRONMENT_KEYS = frozenset((
     "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_WORKFLOW_SHA",
     "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "GITHUB_WORKSPACE",
     "MRK_EXPECTED_SHA", "MRK_MACOS_INSTALL_SOURCE_COMMIT", "MRK_MACOS_WORK",
+    "__CF_USER_TEXT_ENCODING",
 ))
 
 
@@ -129,8 +130,21 @@ def _pairs(pairs):
 
 def _validate_context(environment, identity, uname, version, python_flags):
     """Pure validation; no environment value selects an effect path or mode."""
-    if set(environment) != ENVIRONMENT_KEYS:
-        raise Refused("startup-environment-not-closed")
+    actual_keys = set(environment)
+    if actual_keys != ENVIRONMENT_KEYS:
+        # Key names only: never inspect values on a set mismatch. Bound each
+        # intermediate before escaping, then the displayed escaped name too.
+        details = []
+        for kind, names in (("missing", ENVIRONMENT_KEYS - actual_keys),
+                            ("extra", actual_keys - ENVIRONMENT_KEYS)):
+            selected = sorted(names)[:8]
+            escaped = [ascii(name[:64]) for name in selected]
+            truncated = any(len(name) > 64 or len(shown) > 64
+                            for name, shown in zip(selected, escaped))
+            details.append(f"{kind}Count={len(names)} {kind}ListTruncated={len(names) > 8} "
+                           f"{kind}NameTruncated={truncated} "
+                           f"{kind}=[{', '.join(shown[:64] for shown in escaped)}]")
+        raise Refused("startup-environment-not-closed " + " ".join(details))
     if any(not isinstance(v, str) or not v or len(v.encode()) > MAX_PATH
            or "\0" in v or "\n" in v or "\r" in v for v in environment.values()):
         raise Refused("startup-value-shape")
@@ -140,6 +154,8 @@ def _validate_context(environment, identity, uname, version, python_flags):
     uid, euid, gid, egid = identity
     if uid == 0 or uid != euid or gid != egid:
         raise Refused("nonroot-real-user-required")
+    if environment["__CF_USER_TEXT_ENCODING"] != f"0x{uid:X}:0:0":
+        raise Refused("startup-cf-encoding-not-fixed")
     if (uname != ("Darwin", "arm64") or tuple(version) != (3, 14, 7)
             or tuple(python_flags) != (1, 1, 1)):
         raise Refused("fixed-platform-data-python-required")

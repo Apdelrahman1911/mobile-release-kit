@@ -62,6 +62,7 @@ def environment():
     source = "0123456789abcdef0123456789abcdef01234567"
     work = M.RUNNER_TEMP + "/mrk-macos-aqua.A1B2C3D4"
     return {"PATH": M.SAFE_PATH, "HOME": work, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+            "__CF_USER_TEXT_ENCODING": "0x1F5:0:0",
             "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64",
             "RUNNER_TEMP": M.RUNNER_TEMP, "GITHUB_REPOSITORY": M.REPOSITORY,
             "GITHUB_EVENT_NAME": "push", "GITHUB_REF": M.REF, "GITHUB_SHA": source,
@@ -546,7 +547,55 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
 
     def test_shared_wrong_source_wrong_platform_or_root_hosts_refuse(self):
         self.assertEqual(set(environment()), M.ENVIRONMENT_KEYS)
+        self.assertEqual(len(M.ENVIRONMENT_KEYS), 23)
         self.assertEqual(valid_context()["jobKey"], "aqua")
+        another_user = environment()
+        another_user["__CF_USER_TEXT_ENCODING"] = "0x3E9:0:0"
+        self.assertEqual(M._validate_context(another_user, (1001, 1001, 20, 20),
+                                            ("Darwin", "arm64"), (3, 14, 7), (1, 1, 1))["uid"], 1001)
+        for encoding in ("0x1F6:0:0", "0x1F5:1:1", "not-an-encoding", "0x1f5:0:0",
+                         "501:0:0", "0x01F5:0:0", "0x1F5:0:0 "):
+            candidate = environment()
+            candidate["__CF_USER_TEXT_ENCODING"] = encoding
+            with self.subTest(encoding=encoding), self.assertRaisesRegex(
+                    M.Refused, "^startup-cf-encoding-not-fixed$"):
+                M._validate_context(candidate, (501, 501, 20, 20),
+                                    ("Darwin", "arm64"), (3, 14, 7), (1, 1, 1))
+
+        class KeysOnly(dict):
+            def values(self):
+                raise AssertionError("set mismatch must not inspect values")
+
+            def __getitem__(self, key):
+                raise AssertionError("set mismatch must not inspect values")
+
+        missing = KeysOnly(environment())
+        del missing["__CF_USER_TEXT_ENCODING"]
+        with self.assertRaises(M.Refused) as caught:
+            M._validate_context(missing, (), (), (), ())
+        self.assertIn("missingCount=1", str(caught.exception))
+        self.assertIn("missing=['__CF_USER_TEXT_ENCODING']", str(caught.exception))
+        self.assertIn("extraCount=0", str(caught.exception))
+        unknown = KeysOnly(environment())
+        sentinel = "private-value-must-not-be-disclosed"
+        # Include raw controls and long escaped non-ASCII names. Both list and
+        # per-name bounds matter; no value lookup is allowed even on failure.
+        unknown["\x01\t\n\r\x1b" + "\u202e" * 1000] = sentinel
+        for number in range(9):
+            unknown[f"unreviewed-{number}-" + "\U0001f600" * 1000] = sentinel
+        with self.assertRaises(M.Refused) as caught:
+            M._validate_context(unknown, (), (), (), ())
+        diagnostic = str(caught.exception)
+        self.assertTrue(diagnostic.startswith("startup-environment-not-closed "))
+        self.assertIn("missingCount=0", diagnostic)
+        self.assertIn("extraCount=10", diagnostic)
+        self.assertIn("extraListTruncated=True", diagnostic)
+        self.assertIn("extraNameTruncated=True", diagnostic)
+        self.assertEqual(diagnostic.count("unreviewed-"), 7)
+        self.assertLess(len(diagnostic.encode("ascii")), 2048)
+        self.assertNotIn(sentinel, diagnostic)
+        for control in ("\x01", "\t", "\n", "\r", "\x1b", "\u202e", "\U0001f600"):
+            self.assertNotIn(control, diagnostic)
         changes = (("RUNNER_ENVIRONMENT", "self-hosted"), ("GITHUB_REPOSITORY", "other/repository"),
                    ("GITHUB_EVENT_NAME", "workflow_dispatch"), ("GITHUB_REF", "refs/heads/main"),
                    ("GITHUB_WORKFLOW_SHA", "f" * 40), ("MRK_EXPECTED_SHA", "f" * 40),
@@ -866,6 +915,13 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 2", preparation)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", preparation)
         self.assertIn("exec /usr/bin/env -i", preparation)
+        producer = 'printf -v mrk_cf_encoding \'0x%X:0:0\' "$UID"'
+        self.assertIn(producer, preparation)
+        self.assertLess(preparation.index(producer), preparation.index("exec /usr/bin/env -i"))
+        self.assertIn('__CF_USER_TEXT_ENCODING="$mrk_cf_encoding"', preparation)
+        self.assertNotIn("$EUID", preparation)
+        self.assertNotIn("$__CF_USER_TEXT_ENCODING", preparation)
+        self.assertNotIn("${__CF_USER_TEXT_ENCODING", preparation)
         self.assertIn("'${{ steps.python.outputs.python-path }}' -I -S -B", preparation)
         self.assertNotIn("sudo", preparation)
         inventory = block(workflow, "PY_SOURCE")
