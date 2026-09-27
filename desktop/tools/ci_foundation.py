@@ -1192,7 +1192,7 @@ WINDOWS_FULLWALK_ZIP_BYTES = 12673227
 WINDOWS_FULLWALK_ZIP_SHA256 = "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15"
 WINDOWS_FULLWALK_PINS = {
     "desktop/tools/prepare_windows_embedded_payload.py": (17398, "79c9933b1bb273226ac4b893cd5a08d5ced752875a090d22385215518056a053"),
-    "desktop/tools/prepare_runtime.py": (12355, "4d9f0e52b7cbe1f9d648a96512cf0c0ca5ab01b5b06738282133b57e1830e4f8"),
+    "desktop/tools/prepare_runtime.py": (13227, "dd554d59850d6b059a2c05de92dcdddc9373b154c53d9536e84d13497137f88d"),
     "desktop/licenses/windows-embedded-runtime.txt": (240822, "6c814672403bec2064b22e54dbd028b055e0cacdc6837557a66cd5c0a04af360"),
     "desktop/cpython-source-inputs/github-ca.pem": (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"),
 }
