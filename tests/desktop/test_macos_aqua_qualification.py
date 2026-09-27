@@ -333,7 +333,7 @@ class AquaDataTests(unittest.TestCase):
                       "Fail fast on native Scripts ownership and package format (never Installer)",
                       "Download only the exact accepted M archive (no rebuild or fallback)",
                       "Compile the fixed debug actual-main observer and normal embedded frontend once",
-                      "Standard Installer only is privileged; never execute the app or Python as root"):
+                      "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
             self.assertLess(position, workflow.index("      - name: " + later + "\n"))
         step = workflow.split(label, 1)[1].split("\n      - name:", 1)[0]
         for required in (

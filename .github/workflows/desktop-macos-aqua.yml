@@ -57,12 +57,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
-      - name: Select fixed frontend compiler
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24.20.0'
-          package-manager-cache: false
-      - name: Reserve fresh work and record exact source and actual tool bindings
+      - name: Reserve fresh private work before every candidate and toolchain query
         id: work
         shell: bash
         env:
@@ -71,10 +66,92 @@ jobs:
           set -euo pipefail
           umask 077
           [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-aqua.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
-          "$MRK_PYTHON" -I -S -B - "$root/source-binding.json" <<'PY'
+      - name: Bind the complete reviewed first-party checkout before compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
+          import hashlib, json, os, stat, subprocess, sys
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
+          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
+          files = []
+          for row in rows[:-1]:
+              header, raw_name = row.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              name = raw_name.decode("utf-8", "strict")
+              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
+              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
+                  digest = hashlib.sha256()
+                  size = 0
+                  while block := os.read(fd, 65536):
+                      size += len(block)
+                      if size > before.st_size: raise ValueError("tracked input grew")
+                      digest.update(block)
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if size != before.st_size or sig(before) != sig(after) or sig(after) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
+              finally:
+                  os.close(fd)
+              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
+          value = {"source": os.environ["GITHUB_SHA"], "tree": git("rev-parse", "HEAD^{tree}").decode().strip(), "files": files}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 2 * 1024 * 1024: raise ValueError("source inventory output bound")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data)
+              stream.flush()
+              os.fsync(stream.fileno())
+          PY_SOURCE
+      - name: Prepare only the fixed disposable Xcode ancestor before any worker
+        timeout-minutes: 2
+        # Empty environment before even this noninteractive shell starts. The
+        # second env -i carries only provider-owned, fixed-route inputs into
+        # the nonroot DATA Python; no loader/shell/tool override survives.
+        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME='${{ steps.work.outputs.root }}' LANG=C LC_ALL=C TZ=UTC \
+            RUNNER_ENVIRONMENT='${{ runner.environment }}' \
+            RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
+            RUNNER_TEMP='${{ runner.temp }}' \
+            GITHUB_REPOSITORY='${{ github.repository }}' \
+            GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
+            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' \
+            GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \
+            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \
+            GITHUB_JOB='${{ github.job }}' GITHUB_WORKSPACE='${{ github.workspace }}' \
+            MRK_EXPECTED_SHA='${{ github.sha }}' \
+            MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \
+            MRK_MACOS_WORK='${{ steps.work.outputs.root }}' \
+            '${{ steps.python.outputs.python-path }}' -I -S -B \
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_xcode_host_preparation.py
+          # Only this original helper's exit0 after every final close admits
+          # later steps. Its immutable JSON is explicitly provisional, not a
+          # substitute for workflow status. Never restore0775 before VM disposal.
+      - name: Select fixed frontend compiler
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Record exact source and actual tool bindings only after host preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-binding.json" <<'PY'
           import json, os, subprocess, sys
           tools = {}
           for name, command in (
@@ -188,50 +265,6 @@ jobs:
                   stream.flush()
                   os.fsync(stream.fileno())
           PY_XCODE
-      - name: Bind the complete reviewed first-party checkout before compilation
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
-          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
-          import hashlib, json, os, stat, subprocess, sys
-          def git(*args):
-              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
-          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
-          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
-          files = []
-          for row in rows[:-1]:
-              header, raw_name = row.split(b"\t", 1)
-              mode, kind, blob = header.split(b" ")
-              name = raw_name.decode("utf-8", "strict")
-              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
-              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-              try:
-                  before = os.fstat(fd)
-                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
-                  digest = hashlib.sha256()
-                  size = 0
-                  while block := os.read(fd, 65536):
-                      size += len(block)
-                      if size > before.st_size: raise ValueError("tracked input grew")
-                      digest.update(block)
-                  after = os.fstat(fd)
-                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
-                  if size != before.st_size or sig(before) != sig(after) or sig(after) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
-              finally:
-                  os.close(fd)
-              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
-          value = {"source": os.environ["GITHUB_SHA"], "tree": git("rev-parse", "HEAD^{tree}").decode().strip(), "files": files}
-          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          if len(data) > 2 * 1024 * 1024: raise ValueError("source inventory output bound")
-          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          with os.fdopen(fd, "wb") as stream:
-              stream.write(data)
-              stream.flush()
-              os.fsync(stream.fileno())
-          PY_SOURCE
       - name: Check current owner pins before native preparation
         timeout-minutes: 1
         shell: bash
@@ -614,7 +647,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
             --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
-      - name: Standard Installer only is privileged; never execute the app or Python as root
+      - name: Application installation uses only standard privileged Installer; app and Python stay nonroot
         timeout-minutes: 5
         shell: bash
         run: |
@@ -785,6 +818,8 @@ jobs:
             ${{ steps.work.outputs.root }}/package-format-audit.json
             ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
             ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/xcode-host-preparation-intent.json
+            ${{ steps.work.outputs.root }}/xcode-host-preparation-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
             ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl
             ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt
