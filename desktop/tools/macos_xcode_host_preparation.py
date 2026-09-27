@@ -66,8 +66,10 @@ SA_NOCLDSTOP = 0x0008
 SA_NOCLDWAIT = 0x0020
 SAFE_SIGCHLD_FLAGS = SA_RESTART | SA_NOCLDSTOP
 # These are public Darwin fcntl.h constants, only used after the ARM64 gate.
-O_EVTONLY = 0x00008000
+O_EXEC = 0x40000000
 O_SYMLINK = 0x00200000
+UF_COMPRESSED = 0x00000020
+UF_HIDDEN = 0x00008000
 SF_RESTRICTED = 0x00080000
 SF_NOUNLINK = 0x00100000
 SF_FIRMLINK = 0x00800000
@@ -517,6 +519,15 @@ def _unchanged_payload(snapshot):
             if key not in ("full9", "aclDiagnostic")}
 
 
+def _observation_flags(policy, kind):
+    # Public stat.h: visibility/compression do not confer permission. These
+    # allowances never reach the writable Applications target or private work.
+    extra = UF_HIDDEN if policy == "native" and kind == "directory" else 0
+    if policy in ("native", "sudo") and kind == "file":
+        extra |= UF_COMPRESSED
+    return KNOWN_PROTECTIVE_FLAGS | extra
+
+
 def _same_snapshot(before, after, transition=False):
     if not before or not after or _unchanged_payload(before) != _unchanged_payload(after):
         return False
@@ -566,6 +577,7 @@ class Originals:
         self.result_pin = None
         self.result_bytes = None
         self.source_binding = None
+        self.receipt_attempts = set()
 
     def error(self, stage, role, code, observed_errno=0):
         if len(self.errors) >= 256:
@@ -674,7 +686,7 @@ class Originals:
             except (OSError, Refused, UnicodeError) as error:
                 self.error(phase, node.role, "xattr-" + type(error).__name__, getattr(error, "errno", 0))
             flags = value["flags"]
-            if not isinstance(flags, int) or flags & ~KNOWN_PROTECTIVE_FLAGS:
+            if not isinstance(flags, int) or flags & ~_observation_flags(node.policy, node.kind):
                 self.error(phase, node.role, "unknown-immutable-append-or-dataless-flags")
             elif (node.policy == "applications" and initial.st_mode == stat.S_IFDIR | 0o775
                   and flags & ~MODE_ONLY_FLAGS):
@@ -718,14 +730,18 @@ class Originals:
             if not expected(named.st_mode):
                 self.error("acquire", role, "unavailable-invalid-type-no-follow")
                 return node
-            flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-            # An OS sudo may be execute-only. O_EVTONLY retains metadata without
-            # requiring content-read privilege; it never weakens a native tool FD.
-            flags |= O_EVTONLY if policy == "sudo" else os.O_RDONLY
+            flags = os.O_NONBLOCK | os.O_CLOEXEC
+            if kind == "alias":
+                # Darwin O_SYMLINK clears FOLLOW itself (vfs_vnops.c). Acquire
+                # the alias vnode, not its target, through the original parent.
+                flags |= O_SYMLINK | os.O_RDONLY
+            else:
+                flags |= os.O_NOFOLLOW
+                # O_EXEC explicitly excludes FREAD/FWRITE. O_EVTONLY alone
+                # does not: it may still require content-read authorization.
+                flags |= O_EXEC if policy == "sudo" else os.O_RDONLY
             if kind == "directory":
                 flags |= os.O_DIRECTORY
-            if kind == "alias":
-                flags |= O_SYMLINK
             node.fd = os.open(name, flags, **({} if parent is None else {"dir_fd": parent.fd}))
             node.close_state = "owned"
             if full9(os.fstat(node.fd)) != full9(named):
@@ -797,16 +813,45 @@ class Originals:
         self.absences.append((parent, observation))
 
     def refresh_work(self, added):
+        errors_before = len(self.errors)
         current = self.snapshot(self.work, "own-receipt-create")
         previous = self.work.expected
         expected_names = sorted([*self.work_names, added])
-        if (not previous or current["full9"][:6] != previous["full9"][:6]
-                or current["full9"][7] < previous["full9"][7]
-                or current["full9"][8] < previous["full9"][8]
-                or {k: v for k, v in _unchanged_payload(current).items() if k != "roster"}
-                != {k: v for k, v in _unchanged_payload(previous).items() if k != "roster"}
-                or current.get("roster") != expected_names):
-            raise Refused("private-work-changed-beyond-own-receipt")
+        required = {"full9", "flags", "filesystem", "aclDiagnostic", "acl",
+                    "birthtimeNs", "xattrs", "roster"}
+        if (not previous or not required.issubset(previous) or not required.issubset(current)
+                or len(previous["full9"]) != 9 or len(current["full9"]) != 9):
+            raise Refused("private-work-changed-beyond-own-receipt:incomplete-snapshot")
+        before, after = previous["full9"], current["full9"]
+        faults = []
+        if len(self.errors) != errors_before:
+            faults.append("snapshot-errors")
+        if previous["roster"] != self.work_names:
+            faults.append("prior-roster")
+        if added not in (INTENT, RESULT) or added in self.work_names:
+            faults.append("receipt-name")
+        if after[:5] != before[:5]:
+            faults.append("identity")
+        if previous["filesystem"].get("typeName") != "apfs":
+            faults.append("not-apfs")
+        # This APFS private directory contains only independently admitted
+        # regular inventory/receipt leaves. One exclusive own entry adds one
+        # link; arbitrary nlink drift or any extra roster entry is not allowed.
+        if (before[5] != 2 + len(self.work_names) or after[5] != before[5] + 1
+                or after[5] != 2 + len(expected_names)):
+            faults.append("links")
+        if after[7] < before[7] or after[8] < before[8]:
+            faults.append("clock")
+        if ({k: v for k, v in _unchanged_payload(current).items() if k != "roster"}
+                != {k: v for k, v in _unchanged_payload(previous).items() if k != "roster"}):
+            faults.append("extras")
+        if current["roster"] != expected_names:
+            faults.append("roster")
+        if faults:
+            # Fixed labels and native link integers only, never arbitrary names
+            # or environment/file contents. Useful even if RESULT already exists.
+            raise Refused("private-work-changed-beyond-own-receipt:"
+                          + ",".join(faults) + f";links={before[5]}->{after[5]}")
         self.work_names = expected_names
         self.work_transitions.append({"added": added, "full9": current["full9"], "roster": expected_names})
         self.work.expected = current
@@ -876,10 +921,13 @@ class Originals:
         if (self.work is None or self.work.fd is None or not self.work_admitted
                 or name not in (INTENT, RESULT)):
             raise Refused("receipt-private-work-unavailable")
+        if name in self.receipt_attempts:
+            raise Refused("receipt-name-already-attempted")
         self.deadline.check()
         if sum(n.fd is not None for n in self.nodes.values()) + int(self.result_fd is not None) >= MAX_ORIGINALS:
             raise Refused("receipt-descriptor-bound")
         data = _json_bytes(value)
+        self.receipt_attempts.add(name)
         descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                              0o600, dir_fd=self.work.fd)
         retained = False
@@ -1396,7 +1444,8 @@ def main():
         if book is not None:
             try:
                 book.error("helper", "preparation", final_errors[-1], getattr(error, "errno", 0))
-                if not result_written and book.work is not None and book.work.fd is not None:
+                if (not result_written and RESULT not in book.receipt_attempts
+                        and book.work is not None and book.work.fd is not None):
                     # Exclusive create only. A partial/existing result is never
                     # overwritten or converted into success by another attempt.
                     book.receipt(RESULT, _report(book, context, command,

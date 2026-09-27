@@ -55,7 +55,8 @@ def application(mode=0o775):
 def observation(mode=0o775):
     return {"full9": application(mode), "flags": 0, "birthtimeNs": 100,
             "roster": ["Xcode.app"], "filesystem": {"typeName": "apfs", "fsid": [1, 2]},
-            "acl": {"empty": True, "kind": "absent", "present": 0}, "xattrs": []}
+            "acl": {"empty": True, "kind": "absent", "present": 0},
+            "aclDiagnostic": {"unitDataOnly": True}, "xattrs": []}
 
 
 def environment():
@@ -184,6 +185,7 @@ class OrchestrationBookData:
         self.close_errors = list(close_errors)
         self.close_calls = 0
         self.fail_final = fail_final
+        self.receipt_attempts = set()
 
     def recheck(self, phase, applications_transition=False):
         self.checks.append((phase, applications_transition))
@@ -191,6 +193,7 @@ class OrchestrationBookData:
             self.errors.append({"unitOnlyFinalPostError": True})
 
     def receipt(self, name, value, retain=False):
+        self.receipt_attempts.add(name)
         self.records.append((name, copy.deepcopy(value), retain))
         return {"name": name, "unitDataOnly": True}
 
@@ -377,6 +380,19 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertEqual(M._eligible_action(book), "chmod")
         book.errors.append({"anotherPrerequisiteFailed": True})
         self.assertIsNone(M._eligible_action(book))
+        self.assertEqual(M.UF_COMPRESSED, 0x20)
+        self.assertEqual(M.UF_HIDDEN, 0x8000)
+        for policy, kind, extra in (("native", "directory", M.UF_HIDDEN),
+                                    ("native", "file", M.UF_COMPRESSED),
+                                    ("sudo", "file", M.UF_COMPRESSED),
+                                    ("applications", "directory", 0), ("alias", "alias", 0),
+                                    ("work", "directory", 0), ("source-file", "file", 0)):
+            with self.subTest(policy=policy, kind=kind):
+                allowed = M._observation_flags(policy, kind)
+                self.assertEqual(allowed, M.KNOWN_PROTECTIVE_FLAGS | extra)
+                for forbidden in (0x80, 0x2, 0x4, 0x8, 0x20000, 0x40000, 0x40000000):
+                    self.assertNotEqual(forbidden & ~allowed, 0)
+        self.assertEqual(M.MODE_ONLY_FLAGS & (M.UF_HIDDEN | M.UF_COMPRESSED), 0)
 
     def test_identity_roster_acl_flags_or_other_metadata_changes_refuse(self):
         before = observation()
@@ -415,6 +431,44 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
             book.work = types.SimpleNamespace(expected=previous)
             with mock.patch.object(book, "snapshot", return_value=current), self.assertRaises(M.Refused):
                 book.refresh_work(M.INTENT)
+        # APFS counts each known child. These are labelled synthetic snapshots,
+        # not a claim about the failed run's unpersisted post-result state.
+        previous = observation(0o700)
+        previous["full9"][3:6] = [501, 20, 3]
+        previous["roster"] = [M.INVENTORY]
+        current = copy.deepcopy(previous)
+        current["full9"][5] = 4
+        current["full9"][6] += 32
+        current["full9"][7] += 1
+        current["full9"][8] += 1
+        current["roster"] = sorted([M.INVENTORY, M.INTENT])
+        def transition(candidate, snapshot_error=False):
+            book = M.Originals(None, {"uid": 501, "gid": 20}, M.Deadline())
+            book.work = types.SimpleNamespace(expected=copy.deepcopy(previous))
+            def observe(*arguments):
+                if snapshot_error:
+                    book.error("unit", "work", "unit-snapshot-error")
+                return candidate
+            with mock.patch.object(book, "snapshot", side_effect=observe):
+                book.refresh_work(M.INTENT)
+            return book
+        accepted = transition(copy.deepcopy(current))
+        self.assertEqual(accepted.work.expected, current)
+        self.assertEqual(accepted.work_names, current["roster"])
+        self.assertEqual(len(accepted.work_transitions), 1)
+        for fault in ("nlink-stays", "nlink-jumps", "identity", "extra-name", "flags",
+                      "clock", "incomplete", "snapshot-error"):
+            candidate = copy.deepcopy(current)
+            if fault == "nlink-stays": candidate["full9"][5] = 3
+            elif fault == "nlink-jumps": candidate["full9"][5] = 5
+            elif fault == "identity": candidate["full9"][1] += 1
+            elif fault == "extra-name": candidate["roster"].append("unit-unrelated")
+            elif fault == "flags": candidate["flags"] = M.UF_HIDDEN
+            elif fault == "clock": candidate["full9"][8] = previous["full9"][8] - 1
+            elif fault == "incomplete": del candidate["acl"]
+            with self.subTest(workFault=fault), self.assertRaisesRegex(
+                    M.Refused, "^private-work-changed-beyond-own-receipt:"):
+                transition(candidate, snapshot_error=fault == "snapshot-error")
         # Result readback must name the same original AFTER the bytes are read.
         book = M.Originals(None, {"uid": 501, "gid": 20}, M.Deadline())
         fields = {"st_dev": 7, "st_ino": 11, "st_mode": stat.S_IFREG | 0o400,
@@ -489,7 +543,32 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
             self.assertIsNone(node.fd)
             opened.assert_not_called()
         self.assertTrue(any(e["code"] == "unavailable-invalid-type-no-follow" for e in book.errors))
-        self.assertIn("os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC", PATH.read_text())
+        self.assertEqual(M.O_EXEC, 0x40000000)
+        self.assertEqual(M.O_SYMLINK, 0x00200000)
+        # Every syscall is intercepted: these FD integers are unit DATA only.
+        for kind, policy, name, parent_path, expected_flags in (
+                ("alias", "alias", "Xcode.app", "/Applications", M.O_SYMLINK | os.O_RDONLY),
+                ("file", "sudo", "sudo", "/usr/bin", M.O_EXEC | os.O_NOFOLLOW),
+                ("file", "native", "codesign", "/usr/bin", os.O_RDONLY | os.O_NOFOLLOW)):
+            mode = (stat.S_IFLNK | 0o777) if kind == "alias" else stat.S_IFREG | 0o4555
+            fields = dict(st_dev=7, st_ino=111, st_mode=mode, st_uid=0, st_gid=0,
+                          st_nlink=1, st_size=12, st_mtime_ns=100, st_ctime_ns=101)
+            named = types.SimpleNamespace(**fields)
+            book = M.Originals(None, {"uid": 501, "gid": 20}, M.Deadline())
+            parent = types.SimpleNamespace(path=parent_path, fd=72)
+            snap = {"full9": M.full9(named), "aliasTarget": "Xcode_26.app"}
+            with self.subTest(openRole=policy), mock.patch.object(book, "named_stat", return_value=named), \
+                    mock.patch.object(book, "snapshot", return_value=snap), \
+                    mock.patch.object(M.os, "open", return_value=71) as opened, \
+                    mock.patch.object(M.os, "fstat", return_value=named), \
+                    mock.patch.object(M.os, "close") as closed:
+                node = book.open(parent, name, kind, policy, "unit-role")
+                self.assertEqual(node.fd, 71)
+                opened.assert_called_once_with(name, expected_flags | os.O_NONBLOCK | os.O_CLOEXEC,
+                                               dir_fd=72)
+                self.assertEqual(book.errors, [])
+                self.assertEqual(book.close_all(), [])
+                closed.assert_called_once_with(71)
 
     def test_acl_absence_needs_successful_populated_same_fd_snapshot(self):
         library = ACLLibraryData()
@@ -641,6 +720,29 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertFalse(result["consumerQualified"])
         self.assertFalse(result["disposal"]["physicallyVerified"])
         self.assertIsNone(result["disposal"]["restore0775Command"])
+        # An exclusive result collision is one attempt, never overwrite/retry.
+        originals = M.Originals(None, {"uid": 501, "gid": 20}, M.Deadline())
+        originals.work = types.SimpleNamespace(fd=77)
+        originals.work_admitted = True
+        with mock.patch.object(M.os, "open", side_effect=FileExistsError(errno.EEXIST, "unit")) as opened:
+            with self.assertRaises(FileExistsError):
+                originals.receipt(M.RESULT, {"unitDataOnly": True})
+            with self.assertRaisesRegex(M.Refused, "^receipt-name-already-attempted$"):
+                originals.receipt(M.RESULT, {"unitDataOnly": True})
+            self.assertEqual(opened.call_count, 1)
+        # Main must preserve a failed attempted result and close originals,
+        # rather than hide its postcondition failure behind a second EEXIST.
+        failed = OrchestrationBookData()
+        record = failed.receipt
+        def failed_result(name, value, retain=False):
+            pin = record(name, value, retain)
+            if name == M.RESULT:
+                raise M.Refused("unit-own-result-postcondition")
+            return pin
+        with mock.patch.object(failed, "receipt", side_effect=failed_result):
+            returned, command_calls = orchestrated_no_effect(failed)
+        self.assertEqual((returned, command_calls, failed.close_calls), (1, 0, 1))
+        self.assertEqual([name for name, _, _ in failed.records].count(M.RESULT), 1)
 
     def test_failed_or_unsettled_command_cannot_publish_prepared(self):
         for code, stdout in ((0, b""), (17, b""), (0, b"x" * (M.MAX_STREAM + 1))):
