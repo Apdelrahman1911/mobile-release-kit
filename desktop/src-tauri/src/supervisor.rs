@@ -672,6 +672,16 @@ impl Supervisor {
     pub(crate) fn github_release_profile_available(&self) -> bool { self.inner.runtime.github_release_profile_available() }
     pub(crate) fn bind_original_session_document(&self, identity: &Arc<()>) { self.inner.runtime.bind_original_session_document(identity); }
     pub(crate) fn installed_session_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_session_available(identity) }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn admit_installed_session_once(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
+        let owners = lock(&self.inner.owners);
+        if !owners.is_empty() || self.inner.next.load(Ordering::SeqCst) != 1 || self.stopping() || self.disabled() {
+            return Err(BridgeError::invalid());
+        }
+        self.inner.runtime.admit_installed_session_once(identity)
+    }
     pub fn disabled(&self) -> bool { self.inner.disabled.load(Ordering::SeqCst) }
     pub fn stopping(&self) -> bool { self.inner.stopping.load(Ordering::SeqCst) }
     pub fn can_exit(&self) -> bool { lock(&self.inner.owners).is_empty() }
