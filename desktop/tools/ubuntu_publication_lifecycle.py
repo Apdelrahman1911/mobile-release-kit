@@ -28,8 +28,8 @@ import time
 ENTRY = "desktop/tools/ubuntu_publication_lifecycle.py"
 TARGET = "x86_64-unknown-linux-gnu"
 PACKAGE = "mobile-release-kit-desktop"
-M = "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2"
-F1 = "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2"
+M = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba"
+F1 = "2e6ca2cac4939019e2ab720eb782ba4ae4e0a61d528e68bbbdc38fa0a53e0e80"
 Q = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"
@@ -2552,11 +2552,11 @@ def _xattrs(path, is_directory):
 def _tree(root, manifest, *, published):
     directory(root, protected=True)
     raw = read(root / "manifest.json")
-    need(hashlib.sha256(raw).hexdigest() == manifest and len(raw) == (85440 if manifest == M else 85441), "Published manifest bytes differ")
+    need(hashlib.sha256(raw).hexdigest() == manifest and len(raw) == (85945 if manifest == M else 85946), "Published manifest bytes differ")
     data = _D.decode(raw, JSON_LIMIT)
     need(data["target"] == TARGET and data["protocolSha256"] == Q and data["protocol"] == data["schemaVersion"] == 1, "Runtime DATA profile differs")
     files = _D.records(data["files"])
-    need(len(files) == 606, "Runtime payload roster count differs")
+    need(len(files) == 610, "Runtime payload roster count differs")
     files["manifest.json"] = {"path": "manifest.json", "size": len(raw), "sha256": manifest}
     directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
     pending, seen, rows, aliases = [root], set(), {}, set()

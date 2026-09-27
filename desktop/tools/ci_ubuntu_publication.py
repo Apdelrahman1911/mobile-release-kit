@@ -405,7 +405,7 @@ LOG_TOTAL = 64 << 20
 MAX_BINARY = 512 << 20
 MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
-F1_MANIFEST_SHA256 = "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2"
+F1_MANIFEST_SHA256 = "2e6ca2cac4939019e2ab720eb782ba4ae4e0a61d528e68bbbdc38fa0a53e0e80"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
 NOTICE_INPUTS_SHA256 = "88405397949e3528141d0b9adb5246b72e4d052e1e802df8855c8bc8c8adbe6c"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
@@ -2078,11 +2078,11 @@ def package_inputs(source, work, *, fixtures=True):
     stager = local("stage_ubuntu_deb")
     p0 = work / "prepared/runtime"
     runtime_rows = stager.runtime_records(p0, admission["manifestSha256"], admission["protocolSha256"])
-    D.need(len(runtime_rows) == 607, "Original A runtime roster differs")
+    D.need(len(runtime_rows) == 611, "Original A runtime roster differs")
     for name, row in runtime_rows.items():
         D.bound(p0 / name, row)
     raw = D.read(p0 / "manifest.json", 1 << 20)
-    D.need(len(raw) == 85440 and hashlib.sha256(raw + b"\n").hexdigest() == F1_MANIFEST_SHA256,
+    D.need(len(raw) == 85945 and hashlib.sha256(raw + b"\n").hexdigest() == F1_MANIFEST_SHA256,
            "Fixed F1 trailing-whitespace anchor differs")
     if not fixtures:
         return stager, artifact, original, p0, runtime_rows, None, None, None
@@ -3156,9 +3156,9 @@ def verify(*, installed_compile=False):
         check.phase = "original-a-data"
         prepared = package_inputs(source, work, fixtures=not installed_compile)
         D.write(public / "runtime-inputs.json", D.canonical({"admission": C.CONVENTIONAL_SMOKE_INPUTS,
-                "runtimeFiles": 607, "fixtureManifestSha256": F1_MANIFEST_SHA256,
+                "runtimeFiles": 611, "fixtureManifestSha256": F1_MANIFEST_SHA256,
                 "fixtureChange": ("F1 anchor checked as DATA; no F1 copy or package materialized in this compile-only job."
-                    if installed_compile else "Exactly one LF appended to the original 85440-byte manifest; all606 payload bodies unchanged.")}))
+                    if installed_compile else "Exactly one LF appended to the original 85945-byte manifest; all610 payload bodies unchanged.")}))
         # Current-job package metadata, not invented historical H evidence.
         check.phase = "kernel-package-metadata"
         D.need(re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,127}", kernel.release) is not None, "Kernel package query name differs")
