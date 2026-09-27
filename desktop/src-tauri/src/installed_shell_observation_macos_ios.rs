@@ -82,16 +82,19 @@ pub(crate) struct Snapshot { pub(crate) facts: OriginalFacts, pub(crate) termina
 // Private, non-cloneable token. Exact original identities are consumed before
 // navigation/IPC, not inferred from a path, label, owner clone or environment.
 pub(crate) struct Admission { control: Arc<Control>, document: Weak<()>, owner: Weak<()> }
-/// A separate, noncloneable claim for the same original document/Supervisor.
-/// Archive permission cannot by itself admit private inputs or another document.
-pub(crate) struct SessionAdmission { control: Arc<Control>, document: Weak<()> }
-impl SessionAdmission {
+/// A separate, noncloneable observation registration on the original document.
+/// Neither this token nor the archive observer can enable private inputs.
+pub(crate) struct SessionRegistration { control: Arc<Control>, document: Weak<()> }
+impl SessionRegistration {
+    fn claim_original(&self, original: &Arc<()>) -> bool {
+        self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
+            && self.control.session_registered.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    }
     pub(crate) fn consume(self, original: &Arc<()>) -> Result<(), BridgeError> {
         let q = self.control.original.get().and_then(Weak::upgrade).ok_or_else(BridgeError::invalid)?;
         let r = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
         if !self.control.case.inputs() || !self.control.permits() || !r.attached || r.started || r.loaded
-            || !self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
-            || self.control.session_admitted.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            || !self.claim_original(original) {
             return Err(BridgeError::invalid());
         }
         Ok(())
@@ -104,7 +107,8 @@ impl Admission {
     pub(crate) fn consume(self, original: &Arc<()>) -> Result<Arc<Control>, BridgeError> {
         let q = self.control.original.get().and_then(Weak::upgrade).ok_or_else(BridgeError::invalid)?;
         let r = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
-        if self.document.upgrade().is_none() || !self.owner.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
+        if self.control.normal_selection_observed.get().is_none()
+            || self.document.upgrade().is_none() || !self.owner.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
             || !r.attached || r.started || r.loaded || !q.timely()
             || q.case != ShellCase::Ios(self.control.case)
             || !q.ios.as_ref().is_some_and(|control| Arc::ptr_eq(control, &self.control))
@@ -120,7 +124,8 @@ struct Hold {
 }
 pub(crate) struct Control {
     pub(crate) case: Case, original: OnceLock<Weak<Observation>>, document: OnceLock<Weak<()>>, owner: OnceLock<Weak<()>>,
-    admitted: AtomicBool, session_admitted: AtomicBool, claimed: AtomicBool, failed: AtomicBool, hold: Mutex<Hold>,
+    normal_selection_observed: OnceLock<()>, normal_session_registration_returned: OnceLock<()>,
+    admitted: AtomicBool, session_registered: AtomicBool, claimed: AtomicBool, failed: AtomicBool, hold: Mutex<Hold>,
     signed_boundary: Mutex<Option<(String, String, Instant)>>,
 }
 impl Control {
@@ -128,7 +133,8 @@ impl Control {
         // Created before any owner work; the channel carries no native custody.
         let (sender, receiver) = oneshot::channel();
         Arc::new(Self { case, original: OnceLock::new(), document: OnceLock::new(), owner: OnceLock::new(),
-            admitted: AtomicBool::new(false), session_admitted: AtomicBool::new(false), claimed: AtomicBool::new(false), failed: AtomicBool::new(false),
+            normal_selection_observed: OnceLock::new(), normal_session_registration_returned: OnceLock::new(),
+            admitted: AtomicBool::new(false), session_registered: AtomicBool::new(false), claimed: AtomicBool::new(false), failed: AtomicBool::new(false),
             signed_boundary: Mutex::new(None),
             hold: Mutex::new(Hold { snapshot: None, entered: false, released: false, sender: Some(sender), receiver: Some(receiver) }) })
     }
@@ -139,17 +145,33 @@ impl Control {
         }
         let (doc, bound_owner) = document.installed_ios_identities();
         let direct = owner.installed_ios_identity();
-        if doc.upgrade().is_none() || !Weak::ptr_eq(&bound_owner, &direct) || direct.upgrade().is_none()
+        if doc.upgrade().is_none() || !Weak::ptr_eq(&bound_owner, &direct) || direct.upgrade().is_none() {
+            return Err(BridgeError::invalid());
+        }
+        // Inspect the SAME originals while both observer slots are still empty.
+        // The retained marker records returned ordinary availability, not a grant.
+        document.observe_installed_macos_normal_selection()?;
+        if self.normal_selection_observed.set(()).is_err()
             || self.original.set(Arc::downgrade(q)).is_err() || self.document.set(doc.clone()).is_err()
             || self.owner.set(bound_owner.clone()).is_err() { return Err(BridgeError::invalid()); }
         document.admit_installed_ios(Admission { control: self.clone(), document: doc.clone(), owner: bound_owner })?;
-        if self.case.inputs() { document.admit_installed_macos_session(SessionAdmission { control: self.clone(), document: doc })?; }
+        if self.case.inputs() {
+            document.register_installed_macos_session(SessionRegistration { control: self.clone(), document: doc })?;
+            // The claim above is not success until the original document has
+            // installed its Book and returned. Preserve that historical fact
+            // after shutdown, without keeping its original owners alive.
+            if self.normal_session_registration_returned.set(()).is_err() { return Err(BridgeError::invalid()); }
+        }
         Ok(())
+    }
+    pub(super) fn normal_session_registered(&self) -> bool {
+        self.normal_selection_observed.get().is_some() && self.session_registered.load(Ordering::SeqCst)
+            && self.normal_session_registration_returned.get().is_some()
     }
     pub(crate) fn permits(&self) -> bool {
         // Called while the actual owner registry may be held. Never acquire the
         // observation Record or a native/document lock on this eligibility path.
-        self.admitted.load(Ordering::SeqCst) && !self.failed.load(Ordering::SeqCst)
+        self.admitted.load(Ordering::SeqCst) && self.normal_selection_observed.get().is_some() && !self.failed.load(Ordering::SeqCst)
             && self.document.get().and_then(Weak::upgrade).is_some() && self.owner.get().and_then(Weak::upgrade).is_some()
             && self.original.get().and_then(Weak::upgrade).is_some_and(|q| q.timely()
                 && q.case == ShellCase::Ios(self.case)
@@ -1055,11 +1077,32 @@ fn current_data_checks(unsigned: &Snapshot) -> bool {
     let document = Arc::new(());
     for case in Case::ALL {
         let control = Control::new(case);
-        let token = SessionAdmission { control: control.clone(), document: Arc::downgrade(&document) };
-        if token.consume(&document).is_ok() || control.session_admitted.load(Ordering::SeqCst)
+        let token = SessionRegistration { control: control.clone(), document: Arc::downgrade(&document) };
+        if token.consume(&document).is_ok() || control.session_registered.load(Ordering::SeqCst)
             || [wire::Operation::IOSUnsignedArchive, wire::Operation::IOSSignedExport, wire::Operation::IOSLocalRecovery]
                 .into_iter().any(|mode| control.permits_mode(mode)) { return false; }
     }
+    // Exercise the actual one-use identity transition without a native owner,
+    // original Observation, availability marker or permission to consume it.
+    let control = Control::new(Case::SigningInputs); let wrong = Arc::new(());
+    let registration = SessionRegistration { control: control.clone(), document: Arc::downgrade(&document) };
+    if registration.claim_original(&wrong) || control.session_registered.load(Ordering::SeqCst)
+        || !registration.claim_original(&document) || registration.claim_original(&document)
+        || control.normal_session_registered() || control.permits() { return false; }
+    // DATA-only history model. No original Observation, native owner or
+    // positive execution permit is constructed by this contract. The source
+    // contract separately binds the returned marker to the actual ? return.
+    let owner = Arc::new(());
+    if control.document.set(Arc::downgrade(&document)).is_err() || control.owner.set(Arc::downgrade(&owner)).is_err()
+        || control.normal_selection_observed.set(()).is_err() || control.normal_session_registered()
+        || control.normal_session_registration_returned.set(()).is_err() || !control.normal_session_registered()
+        || control.permits() { return false; }
+    let dead = Arc::downgrade(&document); drop(document); drop(owner);
+    if control.document.get().and_then(Weak::upgrade).is_some() || control.owner.get().and_then(Weak::upgrade).is_some()
+        || control.permits() || !control.normal_session_registered() { return false; }
+    let control = Control::new(Case::SigningInputs);
+    let registration = SessionRegistration { control: control.clone(), document: dead };
+    if registration.claim_original(&wrong) || control.session_registered.load(Ordering::SeqCst) { return false; }
     true
 }
 

@@ -4735,7 +4735,19 @@ mod installed_macos_observation {
         left.id == right.id && left.name == right.name && left.path == right.path
     }
     impl DocumentBinding {
-        pub(crate) fn admit_installed_macos_session(&self, token: crate::shell::installed_observation::ios::SessionAdmission) -> Result<(), BridgeError> {
+        // Sample the same original document and command owner BEFORE either
+        // observation registration. These reads cannot enable either domain.
+        pub(crate) fn observe_installed_macos_normal_selection(&self) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+                || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+            let observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if observation.is_some() { return Err(BridgeError::invalid()); }
+            self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
+            self.inner.bridge.ios_archive.observe_installed_unsigned_selection()
+        }
+        pub(crate) fn register_installed_macos_session(&self, token: crate::shell::installed_observation::ios::SessionRegistration) -> Result<(), BridgeError> {
             let state = self.lock();
             if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
                 || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
@@ -4743,7 +4755,7 @@ mod installed_macos_observation {
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
             token.consume(&self.inner.session_identity)?;
-            self.inner.bridge.supervisor.admit_installed_session_once(&self.inner.session_identity)?;
+            self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
             *observation = Some(SessionBook { originals: Vec::new() }); Ok(())
         }
         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
@@ -5802,7 +5814,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
         assert_eq!(common_document_gate(&ready, false, || Err(AssetError::new(refusal))).err().map(|error| error.reason), Some(refusal));
     }
     assert_eq!(reason(&ready), None);
-    let platform = if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { None } else { Some(Reason::UnsupportedPlatform) };
+    let platform = if cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64"))) { None } else { Some(Reason::UnsupportedPlatform) };
     assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);
     assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
     assert!(idle(&ready).is_ok());

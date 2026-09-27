@@ -28,8 +28,6 @@ const RECOVERY_NATIVE_QUALIFIED: bool = false;
 const RECOVERY_RUNTIME_QUALIFIED: bool = false;
 const RECOVERY_WORK: Duration = Duration::from_secs(120);
 const RECOVERY_HARD: Duration = Duration::from_secs(130);
-// Separate iOS production gate. Source wiring is not installed Mac qualification.
-const IOS_ARCHIVE_NATIVE_QUALIFIED: bool = false;
 // Signed account/material/export qualification is not inherited from an
 // installed unsigned-archive observation or a successful format assessment.
 const IOS_SIGNED_NATIVE_QUALIFIED: bool = false;
@@ -1556,12 +1554,15 @@ impl Inner {
                 };
                 // A different observed mode never falls through to production
                 // qualification, including unsigned use of a signed Control.
-                return same_original && observation.control.permits_mode(selected.operation);
+                return same_original && observation.control.permits_mode(selected.operation)
+                    && (selected.operation != ios_wire::Operation::IOSUnsignedArchive || self.ios_unsigned_installed_selected());
             }
         }
         let _ = original;
         (!context.signed_ios() || IOS_SIGNED_NATIVE_QUALIFIED)
             && (!context.recovery_ios() || IOS_RECOVERY_NATIVE_QUALIFIED)
+            && (context.domain() != SavedCommandDomain::IOSArchive || context.signed_ios() || context.recovery_ios()
+                || self.ios_unsigned_installed_selected())
     }
     fn start_clocks(&self, admitted: Instant) -> Clocks {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
@@ -1576,12 +1577,28 @@ impl Inner {
         self.domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && self.runtime.offline_preflight_installed_profile_available()
     }
+    fn ios_unsigned_installed_selected(&self) -> bool {
+        self.domain == SavedCommandDomain::IOSArchive && cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))
+            && self.runtime.ios_archive_installed_profile_available()
+    }
     fn qualified(&self) -> bool {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
-        if self.domain == SavedCommandDomain::IOSArchive && self.runtime.ios_archive_installed_profile_available()
-            && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
-                [ios_wire::Operation::IOSUnsignedArchive, ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]
-                    .into_iter().any(|operation| o.control.permits_mode(operation)))) { return true; }
+        if self.domain == SavedCommandDomain::IOSArchive {
+            let Ok(book) = self.ios_observation.lock() else { return false; };
+            if let Some(observation) = book.as_ref() {
+                // Only signed/refusal and empty-recovery observations grant a
+                // held mode. Unsigned uses ordinary selection; no other mode
+                // or failed Control falls through to that normal availability.
+                return self.runtime.ios_archive_installed_profile_available()
+                    && ([ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]
+                        .into_iter().any(|operation| observation.control.permits_mode(operation))
+                        || self.ios_unsigned_installed_selected()
+                            && observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive));
+            }
+        }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.domain == SavedCommandDomain::AndroidBuild
             && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)
@@ -1594,7 +1611,7 @@ impl Inner {
             SavedCommandDomain::OfflinePreflight => self.offline_installed_selected(),
             SavedCommandDomain::AndroidBuild => ANDROID_NATIVE_QUALIFIED && ANDROID_RUNTIME_QUALIFIED && ANDROID_TOOLCHAIN_QUALIFIED && self.toolchain.is_some(),
             SavedCommandDomain::ProjectRecovery => RECOVERY_NATIVE_QUALIFIED && RECOVERY_RUNTIME_QUALIFIED && self.recovery_installed_selected(),
-            SavedCommandDomain::IOSArchive => IOS_ARCHIVE_NATIVE_QUALIFIED && self.runtime.ios_archive_installed_profile_available(),
+            SavedCommandDomain::IOSArchive => self.ios_unsigned_installed_selected(),
         }
     }
     fn lock(&self) -> MutexGuard<'_, Registry> {
@@ -2886,6 +2903,15 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 impl SavedCommandOwner {
     pub(crate) fn installed_ios_identity(&self) -> std::sync::Weak<()> { Arc::downgrade(&self.inner.ios_observation_identity) }
+    pub(crate) fn observe_installed_unsigned_selection(&self) -> Result<(), BridgeError> {
+        let r = self.inner.lock();
+        if self.inner.domain != SavedCommandDomain::IOSArchive || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
+            || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
+            || !self.inner.ios_unsigned_installed_selected() { return Err(self.inner.domain.unavailable()); }
+        let slot = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if slot.is_some() { return Err(self.inner.domain.unavailable()); }
+        Ok(())
+    }
     pub(crate) fn admit_installed_ios_observation(&self, token: crate::shell::installed_observation::ios::Admission) -> Result<(), BridgeError> {
         let r = self.inner.lock();
         if self.inner.domain != SavedCommandDomain::IOSArchive || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()

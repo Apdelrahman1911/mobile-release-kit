@@ -675,12 +675,15 @@ impl Supervisor {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
         target_os = "macos", target_arch = "aarch64"))]
-    pub(crate) fn admit_installed_session_once(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
+    pub(crate) fn assert_installed_session_available(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
         let owners = lock(&self.inner.owners);
         if !owners.is_empty() || self.inner.next.load(Ordering::SeqCst) != 1 || self.stopping() || self.disabled() {
             return Err(BridgeError::invalid());
         }
-        self.inner.runtime.admit_installed_session_once(identity)
+        if !self.inner.runtime.installed_session_available(identity) {
+            return Err(BridgeError::unavailable("The packaged runtime is absent, incompatible, or fails its trusted inventory."));
+        }
+        Ok(())
     }
     pub fn disabled(&self) -> bool { self.inner.disabled.load(Ordering::SeqCst) }
     pub fn stopping(&self) -> bool { self.inner.stopping.load(Ordering::SeqCst) }
