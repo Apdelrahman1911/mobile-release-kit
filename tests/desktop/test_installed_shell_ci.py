@@ -4055,9 +4055,9 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
     def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
         workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
         entry = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
-        self.assertEqual(workflow.count("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:"), 2)
+        self.assertEqual(workflow.count("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:"), 3)
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(entry).hexdigest()] * 2)
+                         [hashlib.sha256(entry).hexdigest()] * 3)
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         github_source = (SOURCE / "desktop/src-tauri/src/installed_shell_github_observation.rs").read_text()
@@ -4129,11 +4129,26 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         assessment = assessment.split("impl AssessmentError {", 1)[1].split("fn invalid(", 1)[0]
         asset_codes = set(re.findall(r'=> "([a-z_]+)"', asset))
         assessment_codes = set(re.findall(r'=> \("([a-z_]+)",', assessment))
-        self.assertEqual((len(asset_codes), len(assessment_codes)), (21, 11))
+        self.assertEqual((len(asset_codes), len(assessment_codes)), (30, 11))
+        # The ordinary SESSION observer does not enable the separately gated
+        # encrypted-vault mode. Keep its diagnostics closed without ignoring
+        # unknown future AssetError codes or widening the native label set.
+        vault_codes = {
+            "vault_uninitialized", "vault_key_missing", "vault_keyring_locked",
+            "vault_keyring_denied", "vault_keyring_unavailable", "vault_provider_unsupported",
+            "vault_corrupt", "vault_interrupted", "vault_durability_unknown",
+        }
+        self.assertEqual(len(vault_codes), 9)
+        self.assertTrue(vault_codes <= asset_codes)
+        session_asset_codes = asset_codes - vault_codes
+        self.assertEqual(len(session_asset_codes), 21)
+        self.assertTrue(session_asset_codes.isdisjoint(vault_codes))
+        self.assertEqual(asset_codes, session_asset_codes | vault_codes)
         self.assertEqual(asset_codes & assessment_codes, {"assessment_context_stale"})
         mapped = re.findall(r'"([a-z_]+)" => SessionRejection::([A-Za-z]+)', reply)
         self.assertEqual(len(mapped), 31)
-        self.assertEqual({code for code, _ in mapped}, asset_codes | assessment_codes)
+        self.assertEqual({code for code, _ in mapped}, session_asset_codes | assessment_codes)
+        self.assertTrue(vault_codes.isdisjoint({code for code, _ in mapped}))
         self.assertEqual(len({variant for _, variant in mapped}), 31)
         shortened = {"asset_unsupported_filesystem": "reply-asset-unsupported-fs",
                      "asset_exclusion_unconfirmed": "reply-asset-excl-unconfirmed"}
@@ -4205,7 +4220,7 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(canonical).hexdigest(), "bf18de45262438226bbc80a1cc8a3c078821b4a1dc88ec16a00961c05c990710")
         self.assertEqual(public_tokens, lifecycle.SHELL_SESSION_PUBLIC_MAP_WORKERS)
         self.assertTrue(set(public_tokens).isdisjoint(map_tokens))
-        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66"
+        version = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba"
         accepted = {version + suffix for suffix in ("/python/bin/python3", "/python/lib/libssl.so.3", "/python/lib/libcrypto.so.3")}
         accepted.update(prefix + name for prefix in ("/usr/lib/x86_64-linux-gnu/", "/lib/x86_64-linux-gnu/")
                         for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"))

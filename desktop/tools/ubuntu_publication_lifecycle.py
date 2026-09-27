@@ -29,8 +29,8 @@ import time
 ENTRY = "desktop/tools/ubuntu_publication_lifecycle.py"
 TARGET = "x86_64-unknown-linux-gnu"
 PACKAGE = "mobile-release-kit-desktop"
-M = "8c9879847841370c06c0b9283f76ad93eace3fa8c66295857f421f3367c530d2"
-F1 = "a8f3704d706a8fbe665d5b843b02ac9d5084921c0e43ec804138d989d3677dd2"
+M = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba"
+F1 = "2e6ca2cac4939019e2ab720eb782ba4ae4e0a61d528e68bbbdc38fa0a53e0e80"
 Q = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"
@@ -2142,11 +2142,11 @@ PUBLISHED = b"Immutable runtime payload published. Product execution remains unq
 REFUSAL = "Runtime publication refused: {}. Partial or published objects were not removed; do not repair or retry automatically.\n"
 CORE_PINS = {
     "__init__.py": (144, "557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"),
-    "owned_process.py": (7631, "430a596c5069b7acf248334d1f60fdd12ad8212cf9c2e9dfef717c9ba2179c02"),
-    "_command_process.py": (170410, "803226dd3252d97763758a20222ec41bdfc3f9a75021bf6412d1c5590eb1e75b"),
+    "owned_process.py": (8793, "d832b81894372f3c48b110f6e381fe00f6d71b75940f63a3d7eb5d61c1e2fad1"),
+    "_command_process.py": (170856, "1ea5035578ae8ba0da31367f018d02b3669529077a65e2970cf92d1cc084b1c5"),
     "_native_process.py": (62175, "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"),
-    "cancellation.py": (29094, "1840232213e877e26c4cebd1434b3b851f9fa4c6961baa26eeaae9fa1442db78"),
-    "_lifetime_evidence.py": (18536, "d64948f26984ed692030834221f0cfd93b85117da89b4860f8b69a6f7919e1b3"),
+    "cancellation.py": (31041, "5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35"),
+    "_lifetime_evidence.py": (19072, "f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3"),
     "_store_lane_contract.py": (9500, "8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"),
     "errors.py": (749, "26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"),
 }
@@ -2714,32 +2714,33 @@ SHELL_GITHUB_AMBIENT_CASES = ("github-ambient-fixed", "github-ambient-no-rescue"
 # Deliberately absent from the automatic roster/handoff/CI route. A separately
 # reviewed original action is required for the one N /user noncredential GET.
 SHELL_GITHUB_NORMAL_NEGATIVE = "github-normal-negative"
-SHELL_GITHUB_PAYLOADS = {
-    "N": {"manifestSha256": M, "manifestBytes": 85440,
-          "coreSha256": "6b0010179373626cff884301bdb9155755643eabc177fd6bb1862a368ea651c0",
-          "caSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
-          "inventorySha256": "0162527ab2c4dc45b4385d9ee95ca51c8c0d87786a9d195130824ae151a61b2a"},
-    "D-R": {"manifestSha256": "d0bbe240f5301938b211705e5a250ee338410b79ea088b2af02de9e11db7ee34",
-            "manifestBytes": 106080, "coreSha256": "5f8d102784209c33699854b8af6c6ec0b0024e6cf3d303eb5b9a66560a00fff0",
-            "caSha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f",
-            "inventorySha256": "7e491db3ea2bf5641c698f631511e59a2aee8c206355f5d5ef7cbe75c68cde9a"},
-    "D-S": {"manifestSha256": "0f6b03dcf385646611f22cdfdc365e50bcbc51306d938bab4b0cea6cb94c3e42",
-            "manifestBytes": 106077, "coreSha256": "5f8d102784209c33699854b8af6c6ec0b0024e6cf3d303eb5b9a66560a00fff0",
-            "caSha256": "3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025",
-            "inventorySha256": "5204fabc05a6a6d165443c3d83dfa4abea9c37eceae926047c6e4b05a2d0089f"},
-}
-SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256 = "ea0e7d5580e7fdda7bc125dd9ddd143838ad8c4218eca94c25c36e10f1aec2fd"
-SHELL_GITHUB_PEER_PINS = {'github_tls/api-expired.pem': (790, 'd0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f'), 'github_tls/api-valid.pem': (786, '33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2'), 'github_tls/other-root-ca.pem': (778, '69b4eda8770c518de6e83caa5037bcf5d38f9f9ec16ef3c1e7c11023627a018c'), 'github_tls/root-ca.pem': (761, '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025'), 'github_tls/server-key.pem': (241, '33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109'), 'github_tls/wrong-san.pem': (786, '8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108'), 'github_tls_peer.py': (61665, '85fb9f73077426672efdc64a08de41baf9b117753b59f4a87b4b4c591c8561da')}
+SHELL_GITHUB_PAYLOADS = {'N': {'caSha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f',
+       'coreSha256': '701d234dc84c0729438917b487c522f04001e07cb18f65a875485928493d2c55',
+       'inventorySha256': '3aacdc2d8e72c3d828d03aed850f6ea50c8639f7942e2d660c1190bf444258c5',
+       'manifestBytes': 85945,
+       'manifestSha256': M},
+ 'D-R': {'caSha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f',
+         'coreSha256': 'db5a3dd069af123f41575bde631ac540acf3f35ae1fbf741888e5104ff0adfaf',
+         'inventorySha256': 'c5e287c7246f46529c3e2a735f0d0a09b098cb60601a27f80c30eafa6e0046d4',
+         'manifestBytes': 106721,
+         'manifestSha256': '87237111b05fe6e5849d68ad74e02871223ae7d3aaaf05e8f0d6f6c48bffbe35'},
+ 'D-S': {'caSha256': '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025',
+         'coreSha256': 'db5a3dd069af123f41575bde631ac540acf3f35ae1fbf741888e5104ff0adfaf',
+         'inventorySha256': '67f17e1cfc88b4d4b9c5b173cd0667e3741ecb272d470a308654e8dea9d0db47',
+         'manifestBytes': 106718,
+         'manifestSha256': '90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb'}}
+SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256 = "ccaf7231bde4cead31ff9e82b4141e09bf308ae7275949aa8a9d0fe4d4192c88"
+SHELL_GITHUB_PEER_PINS = {'github_tls/api-expired.pem': (790, 'd0613acb9ef97d2b421d13a279e9f6b5674688210a5cb80441bcd89a183b4c0f'), 'github_tls/api-valid.pem': (786, '33f6acd10b8d466078525b80464a1c5938266b1084ea5aabf43b348bd7dca6f2'), 'github_tls/other-root-ca.pem': (778, '69b4eda8770c518de6e83caa5037bcf5d38f9f9ec16ef3c1e7c11023627a018c'), 'github_tls/root-ca.pem': (761, '3d785e2a47139241c55b340b4d07a5de79aed18b9c28157f9dbe9f694b461025'), 'github_tls/server-key.pem': (241, '33332bb26fd6e394d067f7e2df563d496f934e0a098de1e3039169fb8d4ee109'), 'github_tls/wrong-san.pem': (786, '8d9b1bcc7c3ca1a9118af18993d2cd01a45439e76c0b1407103f1e6689ee9108'), 'github_tls_peer.py': (61665, '5e917b35b320b05cb3c7fcf1bc7ad02ab9fcd44e29f743b53a8471da96ac475c')}
 SHELL_GITHUB_MATERIAL_LIMIT = 2 << 20
 SHELL_GITHUB_FIXTURE_LIMIT = 8192
 SHELL_GITHUB_PUBLIC_FILE_LIMIT = 135
-SHELL_GITHUB_DIAL_BEFORE = b"                    http.client.HTTPConnection.connect(self)\n"
+SHELL_GITHUB_DIAL_BEFORE = b'                http.client.HTTPConnection.connect(self)\n'
 SHELL_GITHUB_DIAL_AFTER = (
-    b"                    # TEST ONLY: exact fixed numeric dial; all TLS/HTTP policy is unchanged.\n"
-    b"                    import socket\n"
-    b"                    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
-    b"                    self.sock.settimeout(budget.remaining())\n"
-    b'                    self.sock.connect(("127.0.0.1", 18443))\n'
+    b'                # TEST ONLY: exact fixed numeric dial; all TLS/HTTP policy is unchanged.\n'
+    b'                import socket\n'
+    b'                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n'
+    b'                self.sock.settimeout(budget.remaining())\n'
+    b'                self.sock.connect(("127.0.0.1", 18443))\n'
 )
 
 
@@ -5378,7 +5379,7 @@ def _xattrs(path, is_directory):
 def _tree(root, manifest, *, published, github=False):
     directory(root, protected=True)
     raw = read(root / "manifest.json")
-    sizes = {M: 85440, F1: 85441}
+    sizes = {M: 85945, F1: 85946}
     if github:
         derivatives = {row["manifestSha256"]: row["manifestBytes"] for role, row in SHELL_GITHUB_PAYLOADS.items() if role != "N"}
         need(manifest in derivatives and root == PREFIX / manifest, "GitHub derivative tree root/role differs")
@@ -5387,7 +5388,7 @@ def _tree(root, manifest, *, published, github=False):
     data = _D.decode(raw, JSON_LIMIT)
     need(data["target"] == TARGET and data["protocolSha256"] == Q and data["protocol"] == data["schemaVersion"] == 1, "Runtime DATA profile differs")
     files = _D.records(data["files"])
-    need(len(files) == 606, "Runtime payload roster count differs")
+    need(len(files) == 610, "Runtime payload roster count differs")
     files["manifest.json"] = {"path": "manifest.json", "size": len(raw), "sha256": manifest}
     directories = {""} | {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
     pending, seen, rows, aliases = [root], set(), {}, set()
@@ -7790,14 +7791,14 @@ def shell_github_dial_core(raw):
     """One exact, inventoried ZIP DATA transform; never import its members."""
     import io
     import zipfile
-    need(type(raw) is bytes and len(raw) == 710642
+    need(type(raw) is bytes and len(raw) == 801091
          and hashlib.sha256(raw).hexdigest() == SHELL_GITHUB_PAYLOADS["N"]["coreSha256"],
          "GitHub normal core ZIP differs")
     output = io.BytesIO()
     originals = {}
     with zipfile.ZipFile(io.BytesIO(raw), "r") as source:
         infos = source.infolist()
-        need(len(infos) == 108 and len({info.filename for info in infos}) == 108
+        need(len(infos) == 127 and len({info.filename for info in infos}) == 127
              and sum(info.file_size for info in infos) <= 16 << 20,
              "GitHub normal inner core roster differs")
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as target:
@@ -7810,18 +7811,18 @@ def shell_github_dial_core(raw):
                 need(len(body) == info.file_size, "GitHub core ZIP member size differs")
                 original_body = body
                 if info.filename == "mobile_release/_github_connection_transport.py":
-                    need(len(body) == 40759 and hashlib.sha256(body).hexdigest()
-                         == "f5e0b3e750b4ed0ff7753d2f8e9de9ba940e9db7eecbf314a1b9fe7ae8990e0a"
+                    need(len(body) == 44396 and hashlib.sha256(body).hexdigest()
+                         == "83f920465937d6d2443606413469229e47022370ad4813f0266afe3ca393e5a1"
                          and body.count(SHELL_GITHUB_DIAL_BEFORE) == 1, "GitHub exact TCP dial source differs")
                     body = body.replace(SHELL_GITHUB_DIAL_BEFORE, SHELL_GITHUB_DIAL_AFTER, 1)
-                    need(len(body) == 41028 and hashlib.sha256(body).hexdigest()
-                         == "faa4988237ab0ef4faee21484d641a23eed9060ec786a22a2a63c0c73630b2f1",
+                    need(len(body) == 44649 and hashlib.sha256(body).hexdigest()
+                         == "b6e4816be44cd7e5e6c5c177edd02dc88f30f2e4ae8049c8235ede0038b5b6cd",
                          "GitHub exact TCP dial delta differs")
                 originals[info.filename] = (body, original_body, info.date_time, info.external_attr, info.create_system, info.compress_type)
                 target.writestr(deepcopy(info), body, compress_type=info.compress_type, compresslevel=9)
     result = output.getvalue()
     output.close()
-    need(len(result) == 705899 and hashlib.sha256(result).hexdigest() == SHELL_GITHUB_PAYLOADS["D-R"]["coreSha256"],
+    need(len(result) == 795803 and hashlib.sha256(result).hexdigest() == SHELL_GITHUB_PAYLOADS["D-R"]["coreSha256"],
          "GitHub derivative ZIP reproduction differs; no alternative compressor is permitted")
     with zipfile.ZipFile(io.BytesIO(result), "r") as check:
         infos = check.infolist()
@@ -7836,7 +7837,7 @@ def shell_github_dial_core(raw):
 
 
 def shell_github_manifest(normal_raw, role):
-    need(role in SHELL_GITHUB_PAYLOADS and type(normal_raw) is bytes and len(normal_raw) == 85440
+    need(role in SHELL_GITHUB_PAYLOADS and type(normal_raw) is bytes and len(normal_raw) == 85945
          and hashlib.sha256(normal_raw).hexdigest() == M, "GitHub N manifest binding differs")
     normal = decode(normal_raw)
     need(canonical(normal) == normal_raw and set(normal) == {"coreSha256", "coreVersion", "files", "inventorySha256",
@@ -7846,18 +7847,18 @@ def shell_github_manifest(normal_raw, role):
          and normal["target"] == TARGET and normal["protocolSha256"] == Q
          and type(normal["protocol"]) is int and normal["protocol"] == 1
          and type(normal["schemaVersion"]) is int and normal["schemaVersion"] == 1
-         and type(normal["files"]) is list and len(normal["files"]) == 606,
+         and type(normal["files"]) is list and len(normal["files"]) == 610,
          "GitHub N manifest schema/profile differs")
     rows = _D.records(normal["files"])
-    need(len(rows) == 606 and normal["files"] == sorted(normal["files"], key=lambda row: row["path"])
-         and rows["core.zip"] == {"path": "core.zip", "size": 710642, "sha256": SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]}
+    need(len(rows) == 610 and normal["files"] == sorted(normal["files"], key=lambda row: row["path"])
+         and rows["core.zip"] == {"path": "core.zip", "size": 801091, "sha256": SHELL_GITHUB_PAYLOADS["N"]["coreSha256"]}
          and rows["github-ca.pem"] == {"path": "github-ca.pem", "size": 240216, "sha256": SHELL_GITHUB_PAYLOADS["N"]["caSha256"]}
          and hashlib.sha256(canonical(normal["files"])[:-1]).hexdigest() == normal["inventorySha256"],
          "GitHub N complete inventory differs")
     if role == "N":
         return normal_raw
     changed = deepcopy(normal)
-    replacements = {"core.zip": {"path": "core.zip", "size": 705899, "sha256": SHELL_GITHUB_PAYLOADS[role]["coreSha256"]}}
+    replacements = {"core.zip": {"path": "core.zip", "size": 795803, "sha256": SHELL_GITHUB_PAYLOADS[role]["coreSha256"]}}
     if role == "D-S":
         replacements["github-ca.pem"] = {"path": "github-ca.pem", "size": 761, "sha256": SHELL_GITHUB_PAYLOADS[role]["caSha256"]}
     changed["files"] = [replacements.get(row["path"], row) for row in changed["files"]]
@@ -7940,7 +7941,7 @@ def _shell_github_publish_payload(value, role, normal, core, normal_raw):
 
 
 def _shell_github_materials_snapshot(value):
-    normal_raw = read(PREFIX / M / "manifest.json", 85440)
+    normal_raw = read(PREFIX / M / "manifest.json", 85945)
     shell_github_manifest(normal_raw, "N")
     return {"schema": "installed-github-readonly-materials-v1", "sourceSha": value["sourceSha"],
             "runId": value["runId"], "attempt": value["attempt"], "profile": value["shell"]["githubReadOnly"]["profile"],
@@ -7954,8 +7955,8 @@ def _shell_github_materials_snapshot(value):
 def _shell_github_materials_prepare(value, proof, normal, normal_maps):
     need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES)
          and _tree(PREFIX / M, M, published=True) == normal, "GitHub N original changed before derivative construction")
-    normal_raw = read(PREFIX / M / "manifest.json", 85440)
-    core = shell_github_dial_core(read(PREFIX / M / "core.zip", 710642))
+    normal_raw = read(PREFIX / M / "manifest.json", 85945)
+    core = shell_github_dial_core(read(PREFIX / M / "core.zip", 801091))
     for role in ("D-R", "D-S"):
         _shell_github_publish_payload(value, role, normal, core, normal_raw)
         need(_tree(PREFIX / M, M, published=True) == normal, "GitHub derivative construction changed N")

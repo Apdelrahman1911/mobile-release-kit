@@ -617,8 +617,8 @@ pub(crate) mod installed {
     use sha2::{Digest, Sha256};
     use crate::runtime::GitHubReadOnlyObservationProfile as RuntimeProfile;
 
-    pub(crate) const N: &str = "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66";
-    pub(crate) const PEER_SHA: &str = "85fb9f73077426672efdc64a08de41baf9b117753b59f4a87b4b4c591c8561da";
+    pub(crate) const N: &str = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
+    pub(crate) const PEER_SHA: &str = "5e917b35b320b05cb3c7fcf1bc7ad02ab9fcd44e29f743b53a8471da96ac475c";
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Case { ConnectRefresh, RealCa, WrongName, Expired, Ragged, Length, Chunk,
         HeaderLimit, BodyLimit, ChunkLimit, Unauthorized, Rate, Identity, Redirect,

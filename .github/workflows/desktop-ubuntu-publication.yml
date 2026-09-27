@@ -53,7 +53,7 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a1d94bb223ba42cc884839ad4048863dc888825925490bde4b90b138258f0550'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'd025db3677f34466d73e5774d1c02e450b341cd21f271c4d94f38aa021b493f5'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-source-admission
       - name: Select the fixed frontend compiler
         if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
@@ -604,8 +604,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: '36252225056'
-          artifact-ids: '10909746838'
+          run-id: '36282923412'
+          artifact-ids: '10919138502'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
@@ -624,7 +624,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a1d94bb223ba42cc884839ad4048863dc888825925490bde4b90b138258f0550'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'd025db3677f34466d73e5774d1c02e450b341cd21f271c4d94f38aa021b493f5'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain the compiler artifact or typed private-transport summary
         id: upload
@@ -725,8 +725,8 @@ jobs:
         with:
           repository: Apdelrahman1911/mobile-release-kit
           # Independently accepted U originals; full artifact membership is verified.
-          run-id: '36254859549'
-          artifact-ids: '10911095325'
+          run-id: '36284691187'
+          artifact-ids: '10920207680'
           github-token: ${{ github.token }}
           path: ${{ steps.prepare_native.outputs.root }}/work/admitted-u
           merge-multiple: true
@@ -746,7 +746,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a1d94bb223ba42cc884839ad4048863dc888825925490bde4b90b138258f0550'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'd025db3677f34466d73e5774d1c02e450b341cd21f271c4d94f38aa021b493f5'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

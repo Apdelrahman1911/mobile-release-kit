@@ -247,9 +247,9 @@ pub(crate) struct PassiveInstalledProfile { _private: () }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl PassiveInstalledProfile {
-    // Current payload V 36238334234/1. Any later profile requires separate source review.
+    // Current payload V 36282923412/1. Any later profile requires separate source review.
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
-    const MANIFEST: &'static str = "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66";
+    const MANIFEST: &'static str = "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba";
     const PROTOCOL: &'static str = "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5";
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
@@ -317,8 +317,8 @@ impl GitHubReadOnlyObservationProfile {
     pub(crate) fn manifest_sha256(self) -> &'static str {
         match self {
             Self::Normal => PassiveInstalledProfile::MANIFEST,
-            Self::DialRealCa => "d0bbe240f5301938b211705e5a250ee338410b79ea088b2af02de9e11db7ee34",
-            Self::DialSyntheticCa => "0f6b03dcf385646611f22cdfdc365e50bcbc51306d938bab4b0cea6cb94c3e42",
+            Self::DialRealCa => "87237111b05fe6e5849d68ad74e02871223ae7d3aaaf05e8f0d6f6c48bffbe35",
+            Self::DialSyntheticCa => "90a4ff34a02f3bc72d1909261dbe9d77c9d0fbbf8c89d33fb296c976eaedaadb",
         }
     }
 }
@@ -422,7 +422,7 @@ pub(crate) struct ReleaseVersionInstalledProfile { _private: () }
 impl ReleaseVersionInstalledProfile {
     const TARGET: &'static str = "x86_64-unknown-linux-gnu";
     const SOURCE_BINDING: Option<(&'static str, &'static str)> = Some((
-        "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66",
+        "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
         "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
     ));
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
@@ -1850,7 +1850,7 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) fn version_candidate_bindings_are_exactly_the_current_payload() {
         let (target, manifest, protocol) = ("x86_64-unknown-linux-gnu",
-            "8ef2fefe057a1773acb8d5d514adc08c28baebc98d4178f448ad2b74be204d66",
+            "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
             "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5");
         assert_eq!(ReleaseVersionInstalledProfile::TARGET, target);
         assert_eq!(ReleaseVersionInstalledProfile::SOURCE_BINDING, Some((manifest, protocol)));
