@@ -3278,13 +3278,49 @@ class IOSAquaDataTests(unittest.TestCase):
                     with patch("time.monotonic", side_effect=[0, 21]), self.assertRaisesRegex(M.Refused, "^ios-output-readback-deadline$"):
                         data.fixtures._archive_readback(data.fd, data.result)
                 elif variant == "bytes":
-                    # Sparse DATA file avoids allocating/reading the byte budget.
+                    # Project only this original's observed size; do not grow a
+                    # sparse file beyond the DATA runner's per-file size limit.
                     path = data.archive / "oversized"
-                    with path.open("wb") as stream:
-                        stream.truncate(64 * 1024 * 1024 + 1)
+                    payload = b"bounded DATA"
+                    path.write_bytes(payload)
                     path.chmod(0o600)
-                    with self.assertRaisesRegex(M.Refused, "^ios-output-byte-budget$"):
+                    real_stat, real_fstat, real_read = M.os.stat, M.os.fstat, M.os.read
+                    original = real_stat(path, follow_symlinks=False)
+                    original_signature = M.signature(original)
+                    original_key = (original.st_dev, original.st_ino)
+                    observed = {"stat": 0, "fstat": 0, "read": 0}
+
+                    def projected(info, kind):
+                        if (info.st_dev, info.st_ino) != original_key:
+                            return info
+                        self.assertEqual(M.signature(info), original_signature)
+                        observed[kind] += 1
+                        fields = {name: getattr(info, name) for name in (
+                            "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                            "st_size", "st_mtime_ns", "st_ctime_ns")}
+                        fields["st_size"] = 64 * 1024 * 1024 + 1
+                        return SimpleNamespace(**fields)
+
+                    def named(*args, **kwargs):
+                        return projected(real_stat(*args, **kwargs), "stat")
+
+                    def held(fd):
+                        return projected(real_fstat(fd), "fstat")
+
+                    def bounded_read(fd, size):
+                        info = real_fstat(fd)
+                        if (info.st_dev, info.st_ino) == original_key:
+                            observed["read"] += 1
+                            self.fail("Oversized DATA must be rejected before reading")
+                        return real_read(fd, size)
+
+                    with patch.object(M.os, "stat", named), patch.object(M.os, "fstat", held), \
+                            patch.object(M.os, "read", bounded_read), \
+                            self.assertRaisesRegex(M.Refused, "^ios-output-byte-budget$"):
                         data.fixtures._archive_readback(data.fd, data.result)
+                    self.assertEqual(observed, {"stat": 2, "fstat": 1, "read": 0})
+                    self.assertEqual(path.read_bytes(), payload)
+                    self.assertEqual(M.signature(real_stat(path, follow_symlinks=False)), original_signature)
                 else:
                     with self.assertRaises(M.Refused):
                         data.fixtures._archive_readback(data.fd, data.result)
