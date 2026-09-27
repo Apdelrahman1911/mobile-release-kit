@@ -16,10 +16,11 @@ fn need(condition: bool) -> Result<(), BridgeError> {
 
 impl Supervisor {
     #[cfg(all(debug_assertions, feature = "custom-protocol"))]
-    pub(crate) fn admit_installed_session_once(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
+    pub(crate) fn require_installed_session_available(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
         let owners = lock(&self.inner.owners);
         need(owners.is_empty() && self.inner.next.load(Ordering::SeqCst) == 1 && !self.stopping() && !self.disabled())?;
-        self.inner.runtime.admit_installed_session_once(identity)
+        if self.installed_session_available(identity) { Ok(()) }
+        else { Err(BridgeError::unavailable("The installed session profile is unavailable for this original document.")) }
     }
     pub(crate) fn arm_initial_app_info_shutdown(&self) -> Result<(), BridgeError> {
         let owners = lock(&self.inner.owners);

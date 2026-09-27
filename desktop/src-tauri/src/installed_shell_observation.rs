@@ -30,15 +30,15 @@ impl Case {
     fn commands(self) -> Option<commands::Case> { match self { Self::Commands(case) => Some(case), _ => None } }
     fn github(self) -> Option<github::Case> { match self { Self::GitHub(case) => Some(case), _ => None } }
 }
-// A moved, private, one-use setup token, never renderer/environment authority.
-pub(crate) struct SessionAdmission { original: std::sync::Weak<Observation>, case: SessionCase }
-impl SessionAdmission {
+// A moved, private, one-use observation registration, never an enable grant.
+pub(crate) struct SessionRegistration { original: std::sync::Weak<Observation>, case: SessionCase }
+impl SessionRegistration {
     pub(crate) fn consume(self) -> Result<SessionCase, BridgeError> {
         let original = self.original.upgrade().ok_or_else(BridgeError::invalid)?;
         let mut r = original.record().ok_or_else(BridgeError::cleanup_unknown)?;
         if original.failed.load(Ordering::SeqCst) || !route() || original.case != Case::Session(self.case)
-            || !r.attached || r.started || !r.session.admission_issued || r.session.admitted { return Err(BridgeError::invalid()); }
-        r.session.admitted = true; Ok(self.case)
+            || !r.attached || r.started || !r.session.registration_issued || r.session.registration_consumed { return Err(BridgeError::invalid()); }
+        r.session.registration_consumed = true; Ok(self.case)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -696,7 +696,7 @@ impl SessionFile {
     }
 }
 struct SessionRecord {
-    admission_issued: bool, admitted: bool, fixture: Option<SessionFixture>,
+    registration_issued: bool, registration_consumed: bool, fixture: Option<SessionFixture>,
     diagnostic: Option<SessionDiagnostic>,
     draft: Option<Value>,
     requests: [u8;10], returns: [u8;10], base_requests: [u8;10], replies: [SessionReply;10],
@@ -712,7 +712,7 @@ struct SessionRecord {
 }
 impl SessionRecord {
     fn new(_case: Option<SessionCase>) -> Self { Self {
-        admission_issued:false,admitted:false,fixture:None,diagnostic:None,draft:None,requests:[0;10],returns:[0;10],base_requests:[0;10],replies:std::array::from_fn(|_| SessionReply::default()),
+        registration_issued:false,registration_consumed:false,fixture:None,diagnostic:None,draft:None,requests:[0;10],returns:[0;10],base_requests:[0;10],replies:std::array::from_fn(|_| SessionReply::default()),
         before:None,sampled:None,remembered:None,replacement:None,files:Vec::new(),kind:"android-keystore",platform:"android",recipe_done:0,
         captures:0,captures_closed:0,assessed:0,kept:0,assigned:0,removed:0,reassessed:false,context_revoked:false,replaced:false,refused:Vec::new(),
         missing:false,mismatch:false,ios_matched:false,stale_keep:false,stale_assign:false,cancel_preserved:false,cancel_revoked:false,reopened:false,
@@ -1290,8 +1290,8 @@ const APP_ID: &str = "org.example.mrk.observed";
 const FIELD: &str = "version.source";
 // Inventory is not qualification. The positive recipe below exercises only
 // one candidate-stage lifecycle observation, not the wider stage/layout matrix.
-const METHODS: [&str; 13] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-    "github.setup.propose", "metadata.text.observe", "metadata.text.validate", "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"];
+const METHODS: [&str; 14] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+    "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate", "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"];
 const TOOLKIT_REPOSITORY: &str = "example/toolkit";
 const TOOLKIT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONFLICT_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -4672,10 +4672,10 @@ impl Observation {
     pub(super) fn attach_session(self: &Arc<Self>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
         let Some(case) = self.case.session() else { return Ok(()); };
         let mut r = self.record().ok_or_else(BridgeError::cleanup_unknown)?;
-        if !r.attached || r.session.admission_issued || r.started || self.project_path().is_none() { return Err(BridgeError::invalid()); }
+        if !r.attached || r.session.registration_issued || r.started || self.project_path().is_none() { return Err(BridgeError::invalid()); }
         r.session.fixture = Some(SessionFixture::capture(self.project_path().ok_or_else(BridgeError::invalid)?,case).map_err(|_| BridgeError::invalid())?);
-        r.session.admission_issued = true; drop(r);
-        document.admit_installed_session(SessionAdmission { original: Arc::downgrade(self), case })
+        r.session.registration_issued = true; drop(r);
+        document.register_installed_session(SessionRegistration { original: Arc::downgrade(self), case })
     }
     pub(super) fn attach_commands(self: &Arc<Self>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
         if let Some(commands) = &self.commands { commands.attach(self, document)?; } Ok(())
@@ -4713,9 +4713,8 @@ impl Observation {
             && info.app_name == "Mobile Release Kit" && info.app_version == env!("CARGO_PKG_VERSION")
             && info.project_selection.available && info.project_selection.reason.is_none()
             && (self.case != Case::ProjectPaths || info.project_path_selection.available && info.project_path_selection.reason.is_none())
-            && methods.iter().filter(available).count() == METHODS.len() + usize::from(self.case.session().is_some())
+            && methods.iter().filter(available).count() == METHODS.len()
             && METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m.get("method").and_then(Value::as_str) == Some(*name)).count() == 1)
-            && (self.case.session().is_none() || methods.iter().filter(available).filter(|m| m["method"].as_str() == Some("credentials.assess")).count() == 1)
             && methods.iter().all(|m| m.get("available").and_then(Value::as_bool).is_some())
             && actions.iter().all(|a| a.get("available").and_then(Value::as_bool) == Some(false));
         let Some(mut r) = self.record_at(Boundary::Result) else { return; };
@@ -6728,7 +6727,7 @@ impl Observation {
                     && available.is_some_and(|a| a.len() == METHODS.len() && a.iter().zip([
                         "Read engine capabilities", "Load schema & field help", "Read a static project observation",
                         "Validate a configuration draft", "Suggest an unverified configuration draft", "Review draft changes and field requirements",
-                        "Prepare a GitHub setup preview", "Read selected public metadata text", "Validate supplied public text",
+                        "Prepare a GitHub setup preview", "Assess explicitly supplied credential data", "Read selected public metadata text", "Validate supplied public text",
                         "Explain project toolchain requirements", "release.version.observe", "artifacts.candidate.observe",
                         "Inspect selected local release documents",
                     ]).all(|(actual, expected)| actual.as_str() == Some(expected)))
@@ -7497,7 +7496,7 @@ impl Observation {
         let prepared: Vec<_> = r.sessions.iter().filter_map(|session| session.projection.prepared.as_ref()).collect();
         if prepared.len() != 2 { return None; }
         serde_json::to_vec(&serde_json::json!({
-            "schemaVersion":3,"fixture":"android-saved-readonly-v1","projectGateContract":true,"methods":"thirteen-passive","passiveActions":false,
+            "schemaVersion":4,"fixture":"android-saved-readonly-v1","projectGateContract":true,"methods":"14-input-assess","passiveActions":false,
             "cancel":{"operation":1,"widget":"cancel","guiSettled":r.pickers[0].settled(false),"originalsSettled":r.cancelled,"registered":false},
             "select":{"operation":2,"widget":"select","filenameRead":r.pickers[1].filename,"guiSettled":r.pickers[1].settled(true),"originalsSettled":r.selected,"registered":r.project.is_some()},
             "snapshot":{"initial":"missing","sourceFiles":2,"androidHint":r.snapshot},
@@ -7604,7 +7603,7 @@ impl Observation {
             || action == SA::Stale("bind") && command == SessionCommand::Bind)
             || self.case == Case::Session(SessionCase::Loss) && r.step == Step::Session(SessionStep::Loss) && command == SessionCommand::Discard;
         let index = command.index();
-        if self.case.session().is_none() || !r.session.admitted || !expected || r.session.requests[index] == u8::MAX
+        if self.case.session().is_none() || !r.session.registration_consumed || !expected || r.session.requests[index] == u8::MAX
             || r.session.requests[index] != r.session.returns[index] { self.fail(); return; }
         r.session.requests[index] += 1;
     }
@@ -8092,7 +8091,7 @@ impl Observation {
     }
     fn session_behavior_complete(&self, r: &Record) -> bool {
         let Some(case)=self.case.session() else { return false; }; let s=&r.session;
-        s.admitted && s.draft.is_some() && s.requests==s.returns && s.recipe_done==case.recipe().len() && s.assessed==case.assessments() as u8
+        s.registration_consumed && s.draft.is_some() && s.requests==s.returns && s.recipe_done==case.recipe().len() && s.assessed==case.assessments() as u8
             && s.requests[SessionCommand::Prepare.index()]==s.assessed && s.returns[SessionCommand::Prepare.index()]==s.assessed
             && s.files.iter().all(|file| file.navigation_matches() && file.picker.settled(file.select))
             && match case {

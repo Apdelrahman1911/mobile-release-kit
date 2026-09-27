@@ -143,11 +143,10 @@ enum PassiveInstalledSelection {
     CandidateA,
 }
 
-// Separate, initially CLOSED four-kind session selection. A working project
-// picker or the twelve-method passive profile does not grant collection/R1.
-// Activation of the normal constructor requires genuine installed-session
-// qualification and a separately reviewed activation change.
-pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = false;
+// Linux session inputs use the ordinary original constructor. The fixed native
+// profile, one Supervisor claim and original document binding remain mandatory;
+// the selection bit alone cannot authorize collection or an assessment borrower.
+pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = true;
 // Independently CLOSED Mac signing-input profile; unsigned/project evidence
 // cannot activate selected P12/profile collection or the assessment borrower.
 pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = false;
@@ -197,7 +196,8 @@ impl InstalledSessionSelection {
             .is_some_and(|original| identity.is_none_or(|identity| std::sync::Arc::ptr_eq(&original, identity)))
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
-        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        feature = "macos-installed-observation", target_os = "macos", target_arch = "aarch64",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
     fn admit_once(&self, identity: &std::sync::Arc<()>) -> Result<(), BridgeError> {
         if !self.supervisor || session_inputs_qualified() { return Err(unavailable()); }
         let document = self.original.document.lock().map_err(|_| unavailable())?;
@@ -215,10 +215,20 @@ pub(crate) fn assert_installed_session_selection_contract() {
     // Pure shared-selection bookkeeping only. No installed runtime is opened.
     let mut first = InstalledSessionSelection::new();
     let mut other = first.clone();
-    first.claim_supervisor(); other.claim_supervisor();
     let original = Arc::new(()); let replacement = Arc::new(());
+    assert!(session_inputs_qualified()); // Linux's normal constructor, not an observer grant.
+    assert_eq!(first.original.enabled.load(Ordering::SeqCst), session_inputs_qualified());
+    assert!(!first.matches(None) && !other.matches(None));
+    first.bind_document(&original); // An unclaimed copy cannot bind a document.
+    assert!(first.original.document.lock().unwrap().is_none());
+    first.claim_supervisor();
+    assert!(!first.matches(None)); // Normal enabled state still needs its document.
+    other.claim_supervisor();
     other.bind_document(&replacement); first.bind_document(&original);
     first.bind_document(&replacement);
+    assert_eq!(first.matches(Some(&original)), session_inputs_qualified());
+    assert_eq!(first.clone().matches(Some(&original)), session_inputs_qualified());
+    assert!(!first.matches(Some(&replacement)) && !other.matches(None));
     first.original.enabled.store(false, Ordering::SeqCst);
     assert!(!first.matches(Some(&original)) && !other.matches(Some(&replacement)));
     first.original.enabled.store(true, Ordering::SeqCst);
@@ -756,8 +766,7 @@ impl RuntimeConfig {
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
-        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
     pub(crate) fn admit_installed_session_once(&self, identity: &std::sync::Arc<()>) -> Result<(), BridgeError> {
         self.passive_installed_profile()?;
         self.installed_session.admit_once(identity)
@@ -1483,7 +1492,7 @@ impl RuntimeConfig {
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 pub(crate) fn assert_packaged_shell_allowlist_contract() {
-    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-shell-path-must-not-be-opened"));
+    let mut runtime = RuntimeConfig::packaged(PathBuf::from("/inert-shell-path-must-not-be-opened"));
     assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
     let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
     assert_eq!(runtime.project_selection_profile_available(), bindings);
@@ -1503,6 +1512,23 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     assert!(originals.never_started());
     assert!(runtime.resolve(Instant::now()).is_err());
     assert!(runtime.resolve_edit(Instant::now()).is_err());
+
+    let original = std::sync::Arc::new(());
+    let replacement = std::sync::Arc::new(());
+    runtime.claim_original_supervisor();
+    assert!(!runtime.passive_method_available("credentials.assess"));
+    runtime.bind_original_session_document(&original);
+    let available = bindings && session_inputs_qualified()
+        && cfg!(all(feature = "custom-protocol", not(feature = "macos-installed-installer")));
+    assert_eq!(runtime.installed_session_available(&original), available);
+    assert_eq!(runtime.passive_method_available("credentials.assess"), available);
+    assert!(!runtime.installed_session_available(&replacement));
+    let mut wrong_profile = RuntimeConfig::packaged(PathBuf::from("/inert-wrong-profile-must-not-be-opened"));
+    wrong_profile.passive_installed = PassiveInstalledSelection::Closed;
+    wrong_profile.claim_original_supervisor();
+    wrong_profile.bind_original_session_document(&original);
+    assert!(!wrong_profile.installed_session_available(&original));
+    assert!(!wrong_profile.passive_method_available("credentials.assess"));
 }
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
@@ -2015,6 +2041,7 @@ mod tests {
     #[test]
     fn passive_candidate_selects_only_fixed_data_and_never_opens_path_launch() {
         // No native inspection or capability is performed/fabricated here.
+        assert_installed_session_selection_contract();
         let candidate = RuntimeConfig::installed_passive_candidate_a();
         assert!(matches!(candidate.passive_installed, PassiveInstalledSelection::CandidateA));
         assert!(!candidate.project_selection_profile_available());

@@ -1748,15 +1748,15 @@ impl DocumentBinding {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
         target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    pub(crate) fn admit_installed_session(&self, permit: crate::shell::installed_observation::SessionAdmission) -> Result<(), BridgeError> {
-        // Setup only, before original navigation/IPC. The ordinary constructor
-        // has already bound this exact identity to its one Supervisor.
+    pub(crate) fn register_installed_session(&self, registration: crate::shell::installed_observation::SessionRegistration) -> Result<(), BridgeError> {
+        // Observe only, before original navigation/IPC. Ordinary construction
+        // must already make this exact identity available through its Supervisor.
         let state = self.lock();
         if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
             || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
             || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
-        let case = permit.consume()?;
-        self.inner.bridge.supervisor.admit_installed_session_once(&self.inner.session_identity)?;
+        let case = registration.consume()?;
+        self.inner.bridge.supervisor.require_installed_session_available(&self.inner.session_identity)?;
         let mut observation = self.inner.installed_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if observation.is_some() { return Err(BridgeError::invalid()); }
         *observation = Some(installed_session_observation::Book::new(case)); Ok(())

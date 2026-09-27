@@ -1669,8 +1669,8 @@ SHELL_METADATA_ABSENT = (".mobile-release", ".mobile-release-init-prepare", ".mo
     ".mobile-release-metadata-text-cleanup", ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup")
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
-    "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
-    "methods": "thirteen-passive", "passiveActions": False,
+    "schemaVersion": 4, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+    "methods": "14-input-assess", "passiveActions": False,
     "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
     "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
     "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
