@@ -334,11 +334,12 @@ impl ObserverDirectoryFamily {
 pub(crate) struct ObserverCaptureEntry {
     class: ObserverEntryClass, expected: Option<ObserverExpectedName>, log: Option<ObserverKnownLog>,
     kind: FileKind, attributes: u32, directory_family: Option<ObserverDirectoryFamily>,
+    source_relation: Option<data::OutputDirectoryRelation>,
 }
 impl ObserverCaptureEntry {
     fn of<'a>(role: UiRole, entry: &DirectoryEntry, mut expected: impl Iterator<Item = &'a str>) -> Self {
         let mut value = Self { class: ObserverEntryClass::Other, expected: None, log: None,
-            kind: entry.kind, attributes: entry.attributes, directory_family: None };
+            kind: entry.kind, attributes: entry.attributes, directory_family: None, source_relation: None };
         if !value.consistent() { return value; } // DATA fallback, never a new decoder admission.
         value.expected = expected.find(|name| *name != entry.name.as_str() && name.eq_ignore_ascii_case(&entry.name))
             .and_then(|name| ObserverExpectedName::of(role, name));
@@ -354,6 +355,8 @@ impl ObserverCaptureEntry {
     }
     fn consistent(self) -> bool { (self.attributes & FS::FILE_ATTRIBUTE_DIRECTORY != 0) == (self.kind == FileKind::Directory) }
     fn valid(self, position: Option<u8>) -> bool {
+        if self.source_relation.is_some_and(|relation| position != Some(0)
+            || self.class != ObserverEntryClass::OtherDirectory || !self.consistent() || !relation.valid()) { return false; }
         if self.directory_family.is_some() && (self.class != ObserverEntryClass::OtherDirectory || !self.consistent()) { return false; }
         if !self.consistent() { return self.class == ObserverEntryClass::Other && self.expected.is_none() && self.log.is_none(); }
         match self.class {
@@ -372,6 +375,7 @@ impl ObserverCaptureEntry {
         write!(output, ",\"kind\":\"{}\",\"attributes\":{}",
             match self.kind { FileKind::File => "file", FileKind::Directory => "directory" }, self.attributes)?;
         if let Some(family) = self.directory_family { write!(output, ",\"directoryFamily\":\"{}\"", family.label())?; }
+        if let Some(relation) = self.source_relation { output.write_all(b",\"sourceRelation\":")?; relation.write_json(output)?; }
         output.write_all(b"}")
     }
 }
@@ -440,10 +444,22 @@ impl ObserverCaptureTrace {
             operation: self.operation.get(), check, index: self.index.get(), error, native, detail, entry: None })); }
     }
     pub(crate) fn unexpected_entry<'a>(&self, role: UiRole, entry: &DirectoryEntry, expected: impl Iterator<Item = &'a str>) {
-        if self.first.get().is_none() { self.first.set(Some(ObserverCaptureFailure {
-            operation: self.operation.get(), check: ObserverCaptureCheck::ExpectedChild, index: self.index.get(),
-            error: Some(Error::Unsafe), native: None, detail: None, entry: Some(ObserverCaptureEntry::of(role, entry, expected)),
-        })); }
+        self.unexpected_entry_with_relation(role, entry, expected, None);
+    }
+    pub(crate) fn unexpected_entry_with_relation<'a>(&self, role: UiRole, entry: &DirectoryEntry,
+        expected: impl Iterator<Item = &'a str>, relation: Option<data::OutputDirectoryRelation>) {
+        if self.first.get().is_none() {
+            let mut classified = ObserverCaptureEntry::of(role, entry, expected);
+            if self.operation.get() == ObserverCaptureOperation::DirectoryEntry && self.index.get() == Some(0)
+                && classified.class == ObserverEntryClass::OtherDirectory && classified.consistent() {
+                // Invalid added DATA is omitted; it cannot replace the original failure.
+                classified.source_relation = relation.filter(|value| value.valid());
+            }
+            self.first.set(Some(ObserverCaptureFailure {
+                operation: self.operation.get(), check: ObserverCaptureCheck::ExpectedChild, index: self.index.get(),
+                error: Some(Error::Unsafe), native: None, detail: None, entry: Some(classified),
+            }));
+        }
     }
     pub(crate) fn gate(&self, check: ObserverCaptureCheck, admitted: bool) -> bool {
         if !admitted { self.remember(check, None, None, None); } admitted
@@ -498,6 +514,7 @@ fn read_streams(trace: Option<&ObserverCaptureTrace>, raw: &[u8]) -> Result<()> 
 #[cfg(test)]
 impl ObserverCaptureTrace {
     pub(crate) fn unexpected_entry_contract() -> Result<()> {
+        Self::output_directory_relation_contract()?;
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O; use ObserverEntryClass as Class;
         use ObserverDirectoryFamily as D;
         fn entry(name: &str, kind: FileKind, attributes: u32) -> DirectoryEntry {
@@ -679,6 +696,65 @@ impl ObserverCaptureTrace {
         trace.unexpected_entry(role, &entry("EBWebView", FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), std::iter::empty());
         assert_eq!(trace.first(), first); assert!(trace.first().unwrap().entry.is_none());
         assert_eq!((ObserverEntryClass::ALL.len(), ObserverExpectedName::ALL.len(), ObserverKnownLog::ALL.len()), (5, 9, 3));
+        Ok(())
+    }
+    fn output_directory_relation_contract() -> Result<()> {
+        use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
+        let relation = data::OutputDirectoryRelation { available_mask: 31, roster_mask: 4, exact_name_mask: 0, identity_mask: 8 };
+        let entry = DirectoryEntry { name: "private-unlisted-directory".to_owned(), file_id: [0x37; 16],
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+            let trace = Self::default();
+            let original = trace.scope(O::DirectoryEntry, Some(0), || {
+                trace.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(relation));
+                trace.result::<()>(C::ExpectedChild, Err(Error::Unsafe))
+            });
+            let first = trace.first().unwrap(); assert!(first.valid());
+            assert_eq!(first.entry.unwrap().source_relation, Some(relation)); assert_eq!(original, Err(Error::Unsafe));
+            let mut bytes = Vec::new(); trace.write_json(&mut bytes).map_err(|_| Error::State)?;
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(text.contains("\"sourceRelation\":{\"availableMask\":31,\"rosterMask\":4,\"exactNameMask\":0,\"identityMask\":8}"));
+            for private in [entry.name.as_str(), "file_id", "volume", "path"] { assert!(!text.contains(private)); }
+            trace.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(Default::default()));
+            let _ = trace.scope(O::JournalOpen, Some(16), || trace.result::<()>(C::HelperReturn, Err(Error::Unavailable)));
+            assert_eq!(trace.first(), Some(first));
+            let mut short = [0u8; 8]; assert!(trace.write_json(&mut std::io::Cursor::new(&mut short[..])).is_err());
+            assert_eq!(trace.first(), Some(first));
+            for position in 1..=3 {
+                let trace = Self::default();
+                trace.scope(O::DirectoryEntry, Some(position), || {
+                    trace.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(relation)); Ok(())
+                })?;
+                assert!(trace.first().unwrap().entry.unwrap().source_relation.is_none());
+                let mut invalid = first; invalid.index = Some(position); assert!(!invalid.valid());
+            }
+            for value in [DirectoryEntry { name: "debug.log".to_owned(), ..entry.clone() },
+                DirectoryEntry { kind: FileKind::File, attributes: 0, ..entry.clone() },
+                DirectoryEntry { attributes: 0, ..entry.clone() }] {
+                let trace = Self::default();
+                trace.scope(O::DirectoryEntry, Some(0), || {
+                    trace.unexpected_entry_with_relation(role, &value, std::iter::empty(), Some(relation)); Ok(())
+                })?;
+                assert!(trace.first().unwrap().entry.unwrap().source_relation.is_none());
+            }
+            for invalid in [data::OutputDirectoryRelation { available_mask: 32, ..relation },
+                data::OutputDirectoryRelation { exact_name_mask: 4, ..relation },
+                data::OutputDirectoryRelation { available_mask: 0, ..relation }] {
+                let trace = Self::default();
+                trace.scope(O::DirectoryEntry, Some(0), || {
+                    trace.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(invalid)); Ok(())
+                })?;
+                let first = trace.first().unwrap(); assert_eq!(first.error, Some(Error::Unsafe));
+                assert!(first.entry.unwrap().source_relation.is_none()); assert!(first.valid());
+            }
+            let trace = Self::default();
+            let _ = trace.scope(O::JournalOpen, Some(16), || trace.result::<()>(C::HelperReturn, Err(Error::Unavailable)));
+            let before = trace.first();
+            trace.scope(O::DirectoryEntry, Some(0), || {
+                trace.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(relation)); Ok(())
+            })?;
+            assert_eq!(trace.first(), before);
+        }
         Ok(())
     }
     pub(crate) fn reader_contract() -> Result<()> {

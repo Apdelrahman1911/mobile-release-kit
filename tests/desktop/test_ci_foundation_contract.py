@@ -14972,7 +14972,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
             "    ObserverCaptureCheck, ObserverCaptureNative, ObserverCaptureOperation, ObserverCaptureTrace};",
             "pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnosticOriginal};")
         self.assertEqual(digest(qualifier), "d37c28c1d01371e3b4ea67ef2983dad80dfb20228eb07d79b0c7905ffd1e3115")
-        self.assertEqual(hashlib.sha256((root / "ui_observer_diagnostic_data.rs").read_bytes()).hexdigest(), "ecde59e3428f28fd61f48bfe459492c0c0910a97c8e6e237afae98469e1ba287")
+        self.assertEqual(hashlib.sha256(self.source_relation_legacy((root / "ui_observer_diagnostic_data.rs").read_text(), "data").encode()).hexdigest(), "ecde59e3428f28fd61f48bfe459492c0c0910a97c8e6e237afae98469e1ba287")
         journal = span(diagnostic, "impl JournalFile {", "/// Existing native owner retains")
         self.assertEqual(__import__("re").findall(r"unsafe\s*\{\s*([A-Z]+::[A-Za-z0-9_]+)\s*\(", journal),
             ["FS::CreateFileW", "F::GetLastError", "FS::GetFileInformationByHandleEx", "F::GetLastError", "FS::ReadFile", "F::GetLastError"])
@@ -15153,7 +15153,9 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
     def test_unexpected_entry_collector_never_upgrades_failure_or_reads_offender(self):
         for role in self.OWNERS:
             for entry in (None, {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
-                                 "attributes": 0x10, "directoryFamily": "ebwebview"}):
+                                 "attributes": 0x10, "directoryFamily": "ebwebview"},
+                          {"class": "other-directory", "expected": None, "log": None, "kind": "directory", "attributes": 0x10,
+                           "sourceRelation": {"availableMask": 31, "rosterMask": 4, "exactNameMask": 0, "identityMask": 8}}):
                 parts = list(self.original_log(role)); frame = self.entry_frame_data(entry, role=role)
                 parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
                 parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
@@ -15166,15 +15168,38 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                 self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
                 self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
 
+    @staticmethod
+    def source_relation_legacy(source, kind):
+        # Freeze all old bytes; only the independently scoped DATA additions and
+        # the one original-error-preserving seam may be normalized away.
+        labels = ("DATA", "DATA TESTS") if kind == "data" else ("ADAPTER", "OWNER TESTS")
+        for label in labels:
+            indent = "    " if label.endswith("TESTS") else ""
+            begin = indent + "// BEGIN OUTPUT SOURCE RELATION " + label + "\n"
+            end = indent + "// END OUTPUT SOURCE RELATION " + label + "\n"
+            assert source.count(begin) == source.count(end) == 1
+            at = source.index(begin); finish = source.index(end, at) + len(end)
+            source = source[:at] + source[finish:]
+        if kind == "data":
+            source = source.replace('//! No native API, paths, handles, SIDs, clock or application owner.\n//! Source-relation inputs may borrow names/IDs; only fixed masks are retained or written.\n', '//! No native API, paths, handles, SIDs, arbitrary text, clock or application owner.\n', 1)
+            # The added test block has one separate preceding newline.
+            source = source[:-4] + "\n}\n" if source.endswith("\n\n}\n") else source
+        else:
+            source = source.replace("        observer_output_source_relation_contract()?;\n", "", 1)
+            before = '                        if let Some(trace) = read_trace {\n                            let relation = if position == 0 {\n                                observer_output_source_relation(output, index,\n                                    entries.get(parent).map(|(_, metadata, _)| metadata),\n                                    entries.get(index).map(|(_, metadata, _)| metadata), &children, &entry)\n                            } else { None };\n                            trace.unexpected_entry_with_relation(role, &entry,\n                                children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str()), relation);\n                        }\n'
+            assert source.count(before) == 1
+            source = source.replace(before, '                        if let Some(trace) = read_trace { trace.unexpected_entry(role, &entry,\n                            children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str())); }\n', 1)
+        return source
+
     def test_unexpected_entry_source_uses_only_same_mismatch_and_closed_copy_data(self):
         root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
         ui, diagnostic = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs"))
-        self.assertEqual(hashlib.sha256(ui.encode()).hexdigest(), "af22b27be8f53299c62e49764692c813bbb524a4155fdc8320ab6a5e17ac4a4a")
+        self.assertEqual(hashlib.sha256(self.source_relation_legacy(ui, "owner").encode()).hexdigest(), "af22b27be8f53299c62e49764692c813bbb524a4155fdc8320ab6a5e17ac4a4a")
         poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
         lookup = "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)"
         self.assertEqual(poststate.count(lookup), 1)
         seam = poststate.split("let (_, _, expected, kind) =", 1)[1].split("output_result!(OutputEntryBinding", 1)[0]
-        for required in (lookup + ".map_err(|error| {", "if let Some(trace) = read_trace { trace.unexpected_entry(role, &entry,",
+        for required in (lookup + ".map_err(|error| {", "if let Some(trace) = read_trace {", "trace.unexpected_entry_with_relation(role, &entry,",
                          "children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str())",
                          "error\n                    }))?;"):
             self.assertIn(required, seam)
@@ -15213,6 +15238,101 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         self.assertIn('"bounded original entry DATA"', selected)
         self.assertIn("assert_eq!(trace.first(), Some(first))", diagnostic)
         self.assertIn("assert!(trace.first().unwrap().entry.is_none())", diagnostic)
+
+    def test_source_relation_closed_masks_and_legacy_projection(self):
+        relations = [{"availableMask": 0, "rosterMask": 0, "exactNameMask": 0, "identityMask": 0},
+                     {"availableMask": 31, "rosterMask": 4, "exactNameMask": 0, "identityMask": 0},
+                     {"availableMask": 31, "rosterMask": 4, "exactNameMask": 27, "identityMask": 31}]
+        relations.extend({"availableMask": bit, "rosterMask": 0, "exactNameMask": bit, "identityMask": bit}
+                         for bit in (1, 2, 4, 8, 16))
+        for role in self.OWNERS:
+            for relation in relations:
+                for family in (None, "fixture-app"):
+                    entry = {"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                             "attributes": 0x10, "sourceRelation": relation}
+                    if family is not None:
+                        entry["directoryFamily"] = family
+                    frame = self.entry_frame_data(entry, role=role); raw = self.frame(frame)
+                    with self.subTest(role=role, relation=relation, family=family):
+                        self.assertLessEqual(len(raw), 4096)
+                        self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+                        self.assertEqual(frame["captureFailure"]["error"], "Unsafe")
+                        self.assertEqual(frame["projection"]["reason"], 1)
+                        legacy = deepcopy(frame); del legacy["captureFailure"]["entry"]["sourceRelation"]
+                        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
+
+    def test_source_relation_refuses_foreign_provenance_masks_and_fields(self):
+        def frame():
+            return self.entry_frame_data({"class": "other-directory", "expected": None, "log": None, "kind": "directory",
+                "attributes": 0x10, "sourceRelation": {"availableMask": 31, "rosterMask": 4, "exactNameMask": 0, "identityMask": 8}})
+        for value in (None, True, 0, [], "private"):
+            changed = frame(); changed["captureFailure"]["entry"]["sourceRelation"] = value
+            with self.subTest(object=value), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key in ("availableMask", "rosterMask", "exactNameMask", "identityMask"):
+            changed = frame(); del changed["captureFailure"]["entry"]["sourceRelation"][key]
+            with self.subTest(missing=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+            for value in (True, False, -1, 32, 256, 1.0, "1", None, [], {}):
+                changed = frame(); changed["captureFailure"]["entry"]["sourceRelation"][key] = value
+                with self.subTest(mask=(key, value)), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key in ("name", "path", "fileId", "volume", "producer"):
+            changed = frame(); changed["captureFailure"]["entry"]["sourceRelation"][key] = "private"
+            with self.subTest(extra=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for values in ({"availableMask": 0}, {"availableMask": 4}, {"exactNameMask": 4},
+                       {"availableMask": 3, "rosterMask": 0, "exactNameMask": 4, "identityMask": 0},
+                       {"availableMask": 3, "rosterMask": 4, "identityMask": 0}):
+            changed = frame(); changed["captureFailure"]["entry"]["sourceRelation"].update(values)
+            with self.subTest(contradiction=values), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key, value in (("index", 1), ("index", 2), ("index", 3), ("index", None), ("index", True),
+                           ("operation", "directory-roster"), ("check", "entry-kind"), ("error", "Unavailable"),
+                           ("detail", "input.PathText"), ("native", {}), ("kind", "not-attempted")):
+            changed = frame(); changed["captureFailure"][key] = value
+            with self.subTest(provenance=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for legacy in (
+            {"class": "expected-name-case-alias", "expected": "project", "log": None, "kind": "directory", "attributes": 0x10},
+            {"class": "known-cwd-log", "expected": None, "log": "debug-log", "kind": "directory", "attributes": 0x10},
+            {"class": "other-regular", "expected": None, "log": None, "kind": "file", "attributes": 0},
+            {"class": "other", "expected": None, "log": None, "kind": "file", "attributes": 0x10},
+        ):
+            changed = self.entry_frame_data(legacy)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(changed)), changed)
+            changed["captureFailure"]["entry"]["sourceRelation"] = frame()["captureFailure"]["entry"]["sourceRelation"]
+            with self.subTest(category=legacy), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        for key in (b'"sourceRelation":', b'"availableMask":', b'"rosterMask":', b'"exactNameMask":', b'"identityMask":'):
+            raw = self.frame(frame())
+            with self.subTest(duplicate=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'null,' + key, 1))
+
+    def test_source_relation_source_adapter_is_total_and_same_original_roster_only(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic, data = ((root / name).read_text() for name in
+            ("ordinary_owner_ui.rs", "observer_diagnostic.rs", "ui_observer_diagnostic_data.rs"))
+        adapter = ui.split("// BEGIN OUTPUT SOURCE RELATION ADAPTER\n", 1)[1].split("// END OUTPUT SOURCE RELATION ADAPTER\n", 1)[0]
+        for required in ("let current = current?;", "output.parent().and_then(Path::file_name)", ".zip(parent)",
+                         "*parent == current_index", "child == name", "stamp.volume == volume", "stamp.id == file_id",
+                         'fixture("project"), fixture("app"), fixture("release")'):
+            self.assertIn(required, adapter)
+        for forbidden in ("native.", "clock.", "std::fs", "std::env", ".stamp(", ".stamp_traced(", ".unwrap(", ".expect(", "entries[", "children["):
+            self.assertNotIn(forbidden, adapter)
+        poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
+        seam = poststate.split("let (_, _, expected, kind) =", 1)[1].split("output_result!(OutputEntryBinding", 1)[0]
+        for required in ("if position == 0", "entries.get(parent)", "entries.get(index)", "&children, &entry",
+                         "trace.unexpected_entry_with_relation", "error\n                    }))?;"):
+            self.assertIn(required, seam)
+        masks = data.split("pub struct OutputDirectoryRelation {", 1)[1].split("}\n", 1)[0]
+        for forbidden in ("str", "String", "Vec", "Path", "file_id", "volume"):
+            self.assertNotIn(forbidden, masks)
+        self.assertIn("volume == witness.volume && file_id == witness.file_id", data)
+        self.assertIn("if name == witness.name", data)
+        self.assertEqual(ui.count("observer_output_source_relation_contract()?;"), 1)
+        self.assertEqual(diagnostic.count("Self::output_directory_relation_contract()?;"), 1)
+        self.assertIn("classified.source_relation = relation.filter(|value| value.valid())", diagnostic)
 
 class WindowsNormalUiGuiTests(unittest.TestCase):
     """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""

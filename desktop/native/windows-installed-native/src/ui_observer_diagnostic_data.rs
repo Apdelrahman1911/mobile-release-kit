@@ -1,5 +1,6 @@
 //! Closed qualification-only DATA and the append attempt's finite ordering.
-//! No native API, paths, handles, SIDs, arbitrary text, clock or application owner.
+//! No native API, paths, handles, SIDs, clock or application owner.
+//! Source-relation inputs may borrow names/IDs; only fixed masks are retained or written.
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::ui_startup_data::{Event as StartupEvent, Word};
@@ -330,6 +331,45 @@ impl Projection {
     }
 }
 
+// BEGIN OUTPUT SOURCE RELATION DATA
+/// Comparison inputs only. Names and complete IDs never enter the returned
+/// mask value, a capture, or JSON. The fixed array order is task/output/project/
+/// app/release; it is not caller-selected text or evidence of a creating process.
+#[derive(Clone, Copy)]
+pub struct OutputDirectoryWitness<'a> {
+    pub name: &'a str, pub volume: u64, pub file_id: [u8; 16], pub roster: bool,
+}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OutputDirectoryRelation {
+    pub available_mask: u8, pub roster_mask: u8, pub exact_name_mask: u8, pub identity_mask: u8,
+}
+impl OutputDirectoryRelation {
+    pub fn from_observed(name: &str, volume: u64, file_id: [u8; 16],
+        witnesses: [Option<OutputDirectoryWitness<'_>>; 5]) -> Self {
+        let mut value = Self::default();
+        for (position, witness) in witnesses.into_iter().enumerate() {
+            let Some(witness) = witness else { continue; };
+            let bit = 1u8 << position; // The fixed five-element array bounds this shift.
+            value.available_mask |= bit;
+            if witness.roster { value.roster_mask |= bit; }
+            if name == witness.name { value.exact_name_mask |= bit; }
+            if volume == witness.volume && file_id == witness.file_id { value.identity_mask |= bit; }
+        }
+        value
+    }
+    pub fn valid(self) -> bool {
+        (self.available_mask | self.roster_mask | self.exact_name_mask | self.identity_mask) & !31 == 0
+            && (self.roster_mask | self.exact_name_mask | self.identity_mask) & !self.available_mask == 0
+            && self.exact_name_mask & self.roster_mask == 0
+    }
+    pub fn write_json(self, output: &mut impl Write) -> io::Result<()> {
+        if !self.valid() { return Err(io::ErrorKind::InvalidData.into()); }
+        write!(output, "{{\"availableMask\":{},\"rosterMask\":{},\"exactNameMask\":{},\"identityMask\":{}}}",
+            self.available_mask, self.roster_mask, self.exact_name_mask, self.identity_mask)
+    }
+}
+
+// END OUTPUT SOURCE RELATION DATA
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,4 +557,92 @@ mod tests {
         assert!(order.begin(Event::MainAdmitted).is_none());
         assert!(order.disabled.load(Ordering::SeqCst));
     }
+    // BEGIN OUTPUT SOURCE RELATION DATA TESTS
+    fn output_directory_witness(name: &str, id: u8, roster: bool) -> OutputDirectoryWitness<'_> {
+        OutputDirectoryWitness { name, volume: 0x8000_0000_0000_0042, file_id: [id; 16], roster }
+    }
+    #[test]
+    fn output_directory_relation_exact_name_and_complete_identity() {
+        let witnesses = ["private-task", "private-output", "project", "app", "release"]
+            .map(|name| output_directory_witness(name, 0, false));
+        let mut witnesses = witnesses.map(Some);
+        for (position, witness) in witnesses.iter_mut().enumerate() {
+            let witness = witness.as_mut().unwrap();
+            witness.file_id = [position as u8 + 10; 16]; witness.roster = position == 2;
+        }
+        for (position, witness) in witnesses.iter().enumerate() {
+            let witness = witness.unwrap(); let bit = 1 << position;
+            let exact = OutputDirectoryRelation::from_observed(witness.name, witness.volume, witness.file_id, witnesses);
+            assert_eq!((exact.available_mask, exact.roster_mask, exact.exact_name_mask, exact.identity_mask), (31, 4, bit, bit));
+            assert_eq!(exact.valid(), position != 2); // An exact roster hit is not a failed lookup.
+            let renamed = OutputDirectoryRelation::from_observed("private-renamed", witness.volume, witness.file_id, witnesses);
+            assert_eq!((renamed.exact_name_mask, renamed.identity_mask), (0, bit)); assert!(renamed.valid());
+            let alias = OutputDirectoryRelation::from_observed(&witness.name.to_ascii_uppercase(), witness.volume, witness.file_id, witnesses);
+            assert_eq!((alias.exact_name_mask, alias.identity_mask), (0, bit));
+            for difference in [1, 1u64 << 63] {
+                let other_volume = OutputDirectoryRelation::from_observed(witness.name, witness.volume ^ difference, witness.file_id, witnesses);
+                assert_eq!(other_volume.identity_mask, 0); assert_eq!(other_volume.exact_name_mask, bit);
+            }
+            for byte in 0..16 {
+                let mut other_id = witness.file_id; other_id[byte] ^= 0x80;
+                let other = OutputDirectoryRelation::from_observed(witness.name, witness.volume, other_id, witnesses);
+                assert_eq!(other.identity_mask, 0); assert_eq!(other.exact_name_mask, bit);
+            }
+        }
+        let unicode = output_directory_witness("privé-日本語", 247, false);
+        for name in ["PRIVÉ-日本語", "prive-日本語", "privé-日本語-extra"] {
+            let value = OutputDirectoryRelation::from_observed(name, unicode.volume, unicode.file_id, [Some(unicode), None, None, None, None]);
+            assert_eq!((value.exact_name_mask, value.identity_mask), (0, 1));
+        }
+    }
+    #[test]
+    fn output_directory_relation_absence_duplicates_and_actual_roster() {
+        let absent = OutputDirectoryRelation::from_observed("private", 1, [7; 16], [None; 5]);
+        assert_eq!(absent, OutputDirectoryRelation::default()); assert!(absent.valid());
+        let first = output_directory_witness("private-duplicate", 247, false);
+        let second = OutputDirectoryWitness { roster: true, ..first };
+        let witnesses = [Some(first), None, None, Some(second), None];
+        let value = OutputDirectoryRelation::from_observed("private-renamed", first.volume, first.file_id, witnesses);
+        assert_eq!((value.available_mask, value.roster_mask, value.exact_name_mask, value.identity_mask), (9, 8, 0, 9));
+        assert!(value.valid()); // Identity matches are not forced to one guessed role.
+        let exact = OutputDirectoryRelation::from_observed(first.name, first.volume, first.file_id, witnesses);
+        assert_eq!(exact.exact_name_mask, 9); assert!(!exact.valid());
+        let neither = OutputDirectoryRelation::from_observed("private-unrecognized", first.volume ^ 1, first.file_id, witnesses);
+        assert_eq!((neither.exact_name_mask, neither.identity_mask), (0, 0)); assert!(neither.valid());
+    }
+    #[test]
+    fn output_directory_relation_closed_masks_and_private_encoding() {
+        for available in 0..=31 {
+            for mask in 0..=31 {
+                for field in 0..3 {
+                    let mut value = OutputDirectoryRelation { available_mask: available, ..Default::default() };
+                    match field { 0 => value.roster_mask = mask, 1 => value.exact_name_mask = mask, _ => value.identity_mask = mask }
+                    assert_eq!(value.valid(), mask & !available == 0);
+                }
+            }
+        }
+        for high in [32, 64, 128, 255] {
+            for field in 0..4 {
+                let mut value = OutputDirectoryRelation { available_mask: 31, ..Default::default() };
+                match field { 0 => value.available_mask = high, 1 => value.roster_mask = high,
+                    2 => value.exact_name_mask = high, _ => value.identity_mask = high }
+                assert!(!value.valid()); let mut bytes = Vec::new();
+                assert!(value.write_json(&mut bytes).is_err()); assert!(bytes.is_empty());
+            }
+        }
+        let conflict = OutputDirectoryRelation { available_mask: 31, roster_mask: 4, exact_name_mask: 4, identity_mask: 0 };
+        assert!(!conflict.valid());
+        let source = output_directory_witness("private-unserialized-source", 247, false);
+        let value = OutputDirectoryRelation::from_observed("private-unserialized-offender", source.volume, source.file_id,
+            [Some(source), None, None, None, None]);
+        let mut bytes = Vec::new(); value.write_json(&mut bytes).unwrap();
+        assert_eq!(bytes, br#"{"availableMask":1,"rosterMask":0,"exactNameMask":0,"identityMask":1}"#);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        for private in [source.name, "private-unserialized-offender", "file_id", "volume", "247", "path"] { assert!(!text.contains(private)); }
+        assert!(!text.contains(&source.volume.to_string()));
+        let mut small = [0u8; 8]; assert!(value.write_json(&mut std::io::Cursor::new(&mut small[..])).is_err());
+        assert!(bytes.len() < 128);
+    }
+    // END OUTPUT SOURCE RELATION DATA TESTS
+
 }

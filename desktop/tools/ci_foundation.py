@@ -14632,7 +14632,8 @@ WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES = (
 def windows_normal_ui_observer_capture_entry(value: object, position: int) -> dict:
     """Closed DATA from the original mismatch, never an allowed child/producer."""
     keys = {"class", "expected", "log", "kind", "attributes"}
-    require(type(value) is dict and set(value) in (keys, keys | {"directoryFamily"}),
+    require(type(value) is dict and set(value) in (keys, keys | {"directoryFamily"}, keys | {"sourceRelation"},
+                                                  keys | {"directoryFamily", "sourceRelation"}),
             "Windows observer unexpected-entry fields differ")
     require(integer_between(position, 0, 3)
             and type(value["class"]) is str and value["class"] in WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES
@@ -14659,6 +14660,19 @@ def windows_normal_ui_observer_capture_entry(value: object, position: int) -> di
                 and expected is log is None and type(value["directoryFamily"]) is str
                 and value["directoryFamily"] in WINDOWS_NORMAL_UI_OBSERVER_DIRECTORY_FAMILIES,
                 "Windows observer directory family differs")
+    if "sourceRelation" in value:
+        require(position == 0 and category == "other-directory" and consistent and value["kind"] == "directory"
+                and expected is log is None, "Windows observer source relation provenance differs")
+        relation = value["sourceRelation"]
+        relation_keys = {"availableMask", "rosterMask", "exactNameMask", "identityMask"}
+        require(type(relation) is dict and set(relation) == relation_keys,
+                "Windows observer source relation fields differ")
+        require(all(integer_between(relation[key], 0, 31) for key in relation_keys),
+                "Windows observer source relation mask differs")
+        available = relation["availableMask"]
+        require(all(relation[key] & ~available == 0 for key in ("rosterMask", "exactNameMask", "identityMask"))
+                and relation["exactNameMask"] & relation["rosterMask"] == 0,
+                "Windows observer source relation contradicts original failed lookup")
     return dict(value)
 
 
