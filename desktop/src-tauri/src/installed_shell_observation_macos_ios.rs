@@ -1,4 +1,4 @@
-//! Finite unsigned-iOS observations inside the original installed Mac relay.
+//! Finite iOS observations inside the original installed Mac relay.
 //! This module owns only comparison DATA and one final-observer hold. The real
 //! document, saved-command owner, native books and invocation keep all effects.
 use std::{ffi::OsStr, sync::{Arc, Mutex, OnceLock, Weak, atomic::{AtomicBool, Ordering}}, time::Instant};
@@ -10,15 +10,26 @@ use crate::{asset_session::DocumentBinding, error::BridgeError, ios_archive_owne
 use super::{Case as ShellCase, Observation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Case { ToolchainPrerequisite, VersionStale, UnsignedArchive, Cancel, Finality }
+pub(crate) enum Case { ToolchainPrerequisite, VersionStale, UnsignedArchive, Cancel, Finality,
+    SigningInputs, SignedRefusal, SignedCancel, RecoveryEmpty }
 impl Case {
-    pub(super) const ALL: [Self; 5] = [Self::ToolchainPrerequisite, Self::VersionStale,
-        Self::UnsignedArchive, Self::Cancel, Self::Finality];
+    pub(super) const ALL: [Self; 9] = [Self::ToolchainPrerequisite, Self::VersionStale,
+        Self::UnsignedArchive, Self::Cancel, Self::Finality, Self::SigningInputs, Self::SignedRefusal,
+        Self::SignedCancel, Self::RecoveryEmpty];
     pub(super) fn name(self) -> &'static str { match self {
         Self::ToolchainPrerequisite => "ios-toolchain-prerequisite", Self::VersionStale => "ios-version-stale",
         Self::UnsignedArchive => "ios-unsigned-archive", Self::Cancel => "ios-cancel", Self::Finality => "ios-finality",
+        Self::SigningInputs => "ios-signing-inputs", Self::SignedRefusal => "ios-signed-refusal",
+        Self::SignedCancel => "ios-signed-cancel", Self::RecoveryEmpty => "ios-recovery-empty",
     } }
     pub(super) fn parse(value: &OsStr) -> Option<Self> { Self::ALL.into_iter().find(|case| value == OsStr::new(case.name())) }
+    pub(super) fn inputs(self) -> bool { matches!(self, Self::SigningInputs | Self::SignedRefusal | Self::SignedCancel) }
+    pub(super) fn signed(self) -> bool { matches!(self, Self::SignedRefusal | Self::SignedCancel) }
+    pub(super) fn operation(self) -> Option<wire::Operation> { match self {
+        Self::SigningInputs => None, Self::SignedRefusal | Self::SignedCancel => Some(wire::Operation::IOSSignedExport),
+        Self::RecoveryEmpty => Some(wire::Operation::IOSLocalRecovery), _ => Some(wire::Operation::IOSUnsignedArchive),
+    } }
+    pub(super) fn holds_finality(self) -> bool { matches!(self, Self::Finality | Self::SignedRefusal) }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Command { Prepare, Start, Status, Cancel }
@@ -36,6 +47,12 @@ pub(crate) struct OriginalFacts {
     pub(crate) driver_joined: bool, pub(crate) manager_joined: bool, pub(crate) observer_joined: bool,
     pub(crate) watchdog_joined: bool, pub(crate) retired_before_cutoff: bool, pub(crate) active_retained: bool,
     pub(crate) resource_unknown: bool, pub(crate) work_ms: u64, pub(crate) hard_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cleanup_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) material_loan_retired: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) material_loan_present: Option<bool>,
 }
 impl OriginalFacts {
     fn settled_body(&self) -> bool {
@@ -44,12 +61,20 @@ impl OriginalFacts {
             && self.stdin_closed && self.stdout_eof_closed && self.stderr_eof_closed && self.io_joined
             && self.core_lifetime_settled && self.runtime_ledger_settled && self.tools_ledger_settled
             && self.native_settlement_joined && self.native_integrity && self.driver_joined && self.manager_joined
-            && !self.resource_unknown && self.work_ms == 300_000 && self.hard_ms == 310_000
+            && !self.resource_unknown
     }
-    fn held(&self) -> bool { self.settled_body() && !self.observer_joined && !self.watchdog_joined
-        && !self.retired_before_cutoff && self.active_retained }
-    fn final_for(&self) -> bool { self.settled_body() && self.observer_joined && self.watchdog_joined
-        && self.retired_before_cutoff && !self.active_retained }
+    fn clocks_for(&self, case: Case) -> bool {
+        if case.signed() || case == Case::RecoveryEmpty {
+            (self.work_ms, self.hard_ms, self.cleanup_ms) == (120_000, 250_000, Some(240_000))
+        } else { case != Case::SigningInputs && (self.work_ms, self.hard_ms, self.cleanup_ms) == (300_000, 310_000, None)
+            && self.material_loan_present.is_none() && self.material_loan_retired.is_none() }
+    }
+    fn held(&self, case: Case) -> bool { self.settled_body() && self.clocks_for(case) && case.holds_finality()
+        && !self.observer_joined && !self.watchdog_joined && !self.retired_before_cutoff && self.active_retained
+        && (!case.signed() || self.material_loan_present == Some(true) && self.material_loan_retired == Some(false)) }
+    fn final_for(&self, case: Case) -> bool { self.settled_body() && self.clocks_for(case) && self.observer_joined && self.watchdog_joined
+        && self.retired_before_cutoff && !self.active_retained
+        && (!(case.signed() || case == Case::RecoveryEmpty) || self.material_loan_present == Some(false) && self.material_loan_retired == Some(true)) }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct Snapshot { pub(crate) facts: OriginalFacts, pub(crate) terminal: wire::Terminal }
@@ -57,6 +82,21 @@ pub(crate) struct Snapshot { pub(crate) facts: OriginalFacts, pub(crate) termina
 // Private, non-cloneable token. Exact original identities are consumed before
 // navigation/IPC, not inferred from a path, label, owner clone or environment.
 pub(crate) struct Admission { control: Arc<Control>, document: Weak<()>, owner: Weak<()> }
+/// A separate, noncloneable claim for the same original document/Supervisor.
+/// Archive permission cannot by itself admit private inputs or another document.
+pub(crate) struct SessionAdmission { control: Arc<Control>, document: Weak<()> }
+impl SessionAdmission {
+    pub(crate) fn consume(self, original: &Arc<()>) -> Result<(), BridgeError> {
+        let q = self.control.original.get().and_then(Weak::upgrade).ok_or_else(BridgeError::invalid)?;
+        let r = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
+        if !self.control.case.inputs() || !self.control.permits() || !r.attached || r.started || r.loaded
+            || !self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
+            || self.control.session_admitted.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err(BridgeError::invalid());
+        }
+        Ok(())
+    }
+}
 impl Admission {
     pub(crate) fn document_matches(&self, original: &Arc<()>) -> bool {
         self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
@@ -80,14 +120,16 @@ struct Hold {
 }
 pub(crate) struct Control {
     pub(crate) case: Case, original: OnceLock<Weak<Observation>>, document: OnceLock<Weak<()>>, owner: OnceLock<Weak<()>>,
-    admitted: AtomicBool, claimed: AtomicBool, failed: AtomicBool, hold: Mutex<Hold>,
+    admitted: AtomicBool, session_admitted: AtomicBool, claimed: AtomicBool, failed: AtomicBool, hold: Mutex<Hold>,
+    signed_boundary: Mutex<Option<(String, String, Instant)>>,
 }
 impl Control {
     pub(super) fn new(case: Case) -> Arc<Self> {
         // Created before any owner work; the channel carries no native custody.
         let (sender, receiver) = oneshot::channel();
         Arc::new(Self { case, original: OnceLock::new(), document: OnceLock::new(), owner: OnceLock::new(),
-            admitted: AtomicBool::new(false), claimed: AtomicBool::new(false), failed: AtomicBool::new(false),
+            admitted: AtomicBool::new(false), session_admitted: AtomicBool::new(false), claimed: AtomicBool::new(false), failed: AtomicBool::new(false),
+            signed_boundary: Mutex::new(None),
             hold: Mutex::new(Hold { snapshot: None, entered: false, released: false, sender: Some(sender), receiver: Some(receiver) }) })
     }
     pub(super) fn attach(self: &Arc<Self>, q: &Arc<Observation>, document: &DocumentBinding, owner: &IOSArchiveOwner)
@@ -100,7 +142,9 @@ impl Control {
         if doc.upgrade().is_none() || !Weak::ptr_eq(&bound_owner, &direct) || direct.upgrade().is_none()
             || self.original.set(Arc::downgrade(q)).is_err() || self.document.set(doc.clone()).is_err()
             || self.owner.set(bound_owner.clone()).is_err() { return Err(BridgeError::invalid()); }
-        document.admit_installed_ios(Admission { control: self.clone(), document: doc, owner: bound_owner })
+        document.admit_installed_ios(Admission { control: self.clone(), document: doc.clone(), owner: bound_owner })?;
+        if self.case.inputs() { document.admit_installed_macos_session(SessionAdmission { control: self.clone(), document: doc })?; }
+        Ok(())
     }
     pub(crate) fn permits(&self) -> bool {
         // Called while the actual owner registry may be held. Never acquire the
@@ -112,10 +156,23 @@ impl Control {
                 && q.ios.as_ref().is_some_and(|control| std::ptr::eq(control.as_ref(), self)))
     }
     pub(crate) fn claim(&self) -> Result<(), BridgeError> {
-        if !self.permits() || self.claimed.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if self.case.operation().is_none() || !self.permits() || self.claimed.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
             return Err(BridgeError::invalid());
         }
         Ok(())
+    }
+    pub(crate) fn permits_mode(&self, operation: wire::Operation) -> bool {
+        self.case.operation() == Some(operation) && self.permits()
+    }
+    pub(crate) fn holds_finality(&self) -> bool { self.case.holds_finality() }
+    pub(crate) fn signed_cancel_boundary(&self, operation: &str, generation: &str) {
+        let Ok(mut original) = self.signed_boundary.lock() else { self.unavailable_witness(); return; };
+        if self.case != Case::SignedCancel || !self.permits_mode(wire::Operation::IOSSignedExport)
+            || !self.claimed.load(Ordering::SeqCst) || original.is_some()
+            || !crate::edit_protocol::token(operation) || !crate::edit_protocol::token(generation) {
+            self.unavailable_witness(); return;
+        }
+        *original = Some((operation.to_owned(), generation.to_owned(), Instant::now()));
     }
     pub(crate) fn unavailable_witness(&self) {
         self.failed.store(true, Ordering::SeqCst);
@@ -123,9 +180,9 @@ impl Control {
     }
     pub(crate) fn prepare_hold(&self, snapshot: Snapshot) -> bool {
         let Ok(mut hold) = self.hold.lock() else { self.unavailable_witness(); return false; };
-        if self.case != Case::Finality || !self.permits() || !self.claimed.load(Ordering::SeqCst)
-            || hold.snapshot.is_some() || hold.entered || hold.released || !snapshot.facts.held()
-            || !terminal_for(Case::Finality, &snapshot) {
+        if !self.holds_finality() || !self.permits() || !self.claimed.load(Ordering::SeqCst)
+            || hold.snapshot.is_some() || hold.entered || hold.released || !snapshot.facts.held(self.case)
+            || !terminal_for(self.case, &snapshot) {
             self.unavailable_witness(); return false;
         }
         hold.snapshot = Some(snapshot); true
@@ -208,6 +265,48 @@ const CONFIG: &[u8] = br#"{
     "nameKey": "VERSION_NAME",
     "source": "version.properties"
   }
+}
+"#;
+const CONFIG_SIGNED: &[u8] = br#"{
+  "android": {"enabled": false},
+  "ios": {
+    "archiveConfiguration": "Release",
+    "bundleId": "org.example.mrk.observed",
+    "distributionCertificateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "enabled": true,
+    "identityStatus": "unverified",
+    "project": "ios/MRKObserved.xcodeproj",
+    "scheme": "MRKObserved",
+    "symbols": {"policy": "retain"},
+    "teamId": "INERT12345"
+  },
+  "metadata": {"androidLocales": [], "iosLocales": ["en-US"], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
+  "source": {"candidateBranch": "main", "productionBranch": "main"},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+"#;
+const CONFIG_INPUTS: &[u8] = br#"{
+  "android": {"enabled": false},
+  "ios": {
+    "archiveConfiguration": "Release",
+    "bundleId": "org.example.mrk.observed",
+    "distributionCertificateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "enabled": true,
+    "identityStatus": "unverified",
+    "project": "ios/MRKObserved.xcodeproj",
+    "scheme": "MRKObserved",
+    "symbols": {"policy": "retain"},
+    "teamId": "INERT12345"
+  },
+  "metadata": {"androidLocales": [], "iosLocales": ["en-US"], "root": "release/store"},
+  "projectChecks": {"androidArtifact": [], "iosArtifact": [], "preflight": []},
+  "schemaVersion": 1,
+  "services": {"androidFirebase": "disabled", "iosFirebase": "required"},
+  "source": {"candidateBranch": "main", "productionBranch": "main"},
+  "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
 }
 "#;
 const CONFIG_PREREQUISITE: &[u8] = br#"{
@@ -399,7 +498,8 @@ const WORKSPACE: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <Workspace version="1.0"><FileRef location="self:"/></Workspace>
 "#;
 pub(super) fn config(case: Case) -> &'static [u8] { match case {
-    Case::ToolchainPrerequisite => CONFIG_PREREQUISITE, Case::Cancel => CONFIG_CANCEL, _ => CONFIG,
+    Case::ToolchainPrerequisite => CONFIG_PREREQUISITE, Case::Cancel => CONFIG_CANCEL,
+    Case::SignedRefusal | Case::SignedCancel => CONFIG_SIGNED, Case::SigningInputs => CONFIG_INPUTS, _ => CONFIG,
 } }
 
 const STALE_VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=8\n";
@@ -412,44 +512,57 @@ const DIRS: &[(&str, u32, &[&str])] = &[
     ("ios/MRKObserved.xcodeproj/xcshareddata/xcschemes", 0o700, &["MRKObserved.xcscheme"]),
     ("release", 0o755, &["mobile-release.json"]),
 ];
-fn files(case: Case, stale: bool) -> [(&'static str, &'static [u8]); 9] { [
+fn files(case: Case, stale: bool) -> Vec<(&'static str, &'static [u8])> {
+    let ignore = b"# MRK Mac Aqua user ignore\nuser-output/\n.mobile-release/\n".as_slice();
+    if case == Case::RecoveryEmpty { return vec![(".gitignore", ignore), ("keep.txt", super::KEEP)]; }
+    let mut files = vec![
     (".gitignore", b"# MRK Mac Aqua user ignore\nuser-output/\n.mobile-release/\n"),
     ("keep.txt", super::KEEP), ("version.properties", if stale { STALE_VERSION } else { super::VERSION }),
     ("release/mobile-release.json", config(case)), ("ios/MRKObserved.xcodeproj/project.pbxproj", PROJECT),
     ("ios/MRKObserved.xcodeproj/xcshareddata/xcschemes/MRKObserved.xcscheme", SCHEME),
     ("ios/MRKObserved.xcodeproj/project.xcworkspace/contents.xcworkspacedata", WORKSPACE),
     ("ios/MRKObserved/main.m", MAIN), ("ios/MRKObserved/Info.plist", PLIST),
-] }
+];
+    if case == Case::SigningInputs { files.push(("overlap.p12", super::session::PFX)); }
+    files
+}
 /// Source originals only. Archive contents remain the real core's retained
 /// inventory; the helper performs independent finite post-exit readback.
 struct Output { operation: String, archive: bool }
 pub(super) struct Fixture {
-    case: Case, files: [super::FileFact; 9], directories: Vec<[u64; 6]>,
+    case: Case, files: Vec<super::FileFact>, directories: Vec<[u64; 6]>,
+    inputs: Option<super::session::Fixture>,
     stale: bool, output: Option<Output>, finalized: bool,
 }
 impl Fixture {
     pub(super) fn capture(root: &std::path::Path, uid: u32, case: Case) -> Result<Self, ()> {
         let files = files(case, false).into_iter().map(|(path, body)| super::file_fact(&root.join(path), body, uid))
-            .collect::<Result<Vec<_>, _>>()?.try_into().map_err(|_| ())?;
-        let directories = DIRS.iter().map(|(path, mode, entries)| super::directory(&root.join(path), uid, *mode, entries))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { case, files, directories, stale: false, output: None, finalized: false })
+        let dirs = if case == Case::RecoveryEmpty { &[][..] } else { DIRS };
+        let directories = dirs.iter().map(|(path, mode, entries)| super::directory(&root.join(path), uid, *mode, entries))
+            .collect::<Result<Vec<_>, _>>()?;
+        let inputs = if case.inputs() { Some(super::session::Fixture::capture(root, uid, case)?) } else { None };
+        Ok(Self { case, files, directories, inputs, stale: false, output: None, finalized: false })
     }
     pub(super) fn root_entries(&self) -> Vec<&str> {
-        let mut entries = vec![".gitignore", "ios", "keep.txt", "release", "version.properties"];
+        let mut entries = if self.case == Case::RecoveryEmpty { vec![".gitignore", "keep.txt"] }
+            else { vec![".gitignore", "ios", "keep.txt", "release", "version.properties"] };
+        if self.case == Case::SigningInputs { entries.push("overlap.p12"); }
         if self.output.is_some() { entries.push(".mobile-release"); } entries
     }
-    pub(super) fn source_identity(&self) -> [u64; 6] { self.directories[0] }
-    pub(super) fn release_identity(&self) -> [u64; 6] { self.directories[6] }
+    pub(super) fn source_identity(&self) -> Option<[u64; 6]> { self.directories.first().copied() }
+    pub(super) fn release_identity(&self) -> Option<[u64; 6]> { self.directories.get(6).copied() }
     pub(super) fn ignore(&self) -> super::FileFact { self.files[0].clone() }
-    pub(super) fn config(&self) -> super::FileFact { self.files[3].clone() }
+    pub(super) fn config(&self) -> Option<super::FileFact> { self.files.get(3).cloned() }
     pub(super) fn verify(&self, root: &std::path::Path, uid: u32) -> Result<(), ()> {
         for ((path, bytes), original) in files(self.case, self.stale).into_iter().zip(&self.files) {
             if &super::file_fact(&root.join(path), bytes, uid)? != original { return Err(()); }
         }
-        for ((path, mode, entries), original) in DIRS.iter().zip(&self.directories) {
+        let dirs = if self.case == Case::RecoveryEmpty { &[][..] } else { DIRS };
+        for ((path, mode, entries), original) in dirs.iter().zip(&self.directories) {
             if &super::directory(&root.join(path), uid, *mode, entries)? != original { return Err(()); }
         }
+        if let Some(inputs) = &self.inputs { inputs.verify(root, uid)?; }
         if let Some(output) = &self.output {
             super::directory(&root.join(".mobile-release"), uid, 0o700, &["desktop-ios-archive"])?;
             super::directory(&root.join(".mobile-release/desktop-ios-archive"), uid, 0o700, &[&output.operation])?;
@@ -495,9 +608,13 @@ impl Fixture {
         current().then_some(()).ok_or(())
     }
     pub(super) fn finalize(&mut self, root: &std::path::Path, uid: u32, snapshot: &Snapshot) -> Result<(), ()> {
-        if self.finalized || !snapshot.facts.final_for() || !terminal_for(self.case, snapshot)
+        if self.finalized || !snapshot.facts.final_for(self.case) || !terminal_for(self.case, snapshot)
             || self.stale != (self.case == Case::VersionStale) { return Err(()); }
         use wire::OutputDisposition as O;
+        if self.case == Case::RecoveryEmpty {
+            if snapshot.terminal.disposition.is_some() { return Err(()); }
+            self.verify(root, uid)?; self.finalized = true; return Ok(());
+        }
         let disposition = snapshot.terminal.disposition.as_ref().ok_or(())?;
         self.output = match disposition.output {
             O::NotCreated => None,
@@ -510,7 +627,7 @@ impl Fixture {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Step { Navigate, ReadVersion, VersionRead, Prepare, Review, Acknowledge, Acknowledged,
+pub(super) enum Step { Navigate, SignedMode, ReadVersion, VersionRead, Prepare, Review, Acknowledge, Acknowledged,
     MutateVersion, Start, Running, Cancel, Hold, ReleaseHold, Final }
 #[derive(Clone, Default)]
 pub(super) struct Record {
@@ -521,6 +638,9 @@ pub(super) struct Record {
     status_requested: u16, status_returned: u16, status: Option<wire::Status>,
     prepared: Option<wire::Projection>, held: Option<Snapshot>, held_dom: bool, reciprocal_blocked: bool,
     released: bool, terminal: Option<Snapshot>, final_dom: bool,
+    signed_policy: Option<wire::SigningPolicy>, signed_boundary: Option<(String, String)>,
+    cancel_dom_stage: Option<wire::Stage>,
+    recovery_actions_blocked: bool,
 }
 fn version_value(case: Case) -> Value {
     json!({"schemaVersion":2,"source":"version.properties","version":{"name":"1.2.3","build":7},
@@ -530,23 +650,57 @@ fn version_value(case: Case) -> Value {
         "savedConfig":{"bytes":config(case).len(),"sha256":super::digest(config(case))},
         "savedVersion":{"bytes":super::VERSION.len(),"sha256":super::digest(super::VERSION)}})
 }
-fn context_matches(case: Case, project: &str, context: &wire::Context) -> bool {
+fn context_matches(case: Case, project: &str, context: &wire::Context, signing: Option<&wire::SigningPolicy>) -> bool {
+    if context.project_id != project || context.platform != wire::Platform::Ios || Some(context.operation) != case.operation() { return false; }
+    if case == Case::RecoveryEmpty {
+        return context.draft_revision.is_none() && context.baseline_generation.is_none()
+            && context.saved_config.is_none() && context.saved_version.is_none() && context.signing.is_none() && signing.is_none()
+            && context.recovery == Some(wire::RecoveryIntent { action: wire::RecoveryAction::Inspect, session: None });
+    }
     let (Some(saved_config), Some(saved_version)) = (&context.saved_config, &context.saved_version) else { return false; };
-    context.project_id == project && context.platform == wire::Platform::Ios && context.operation == wire::Operation::IOSUnsignedArchive
-        && context.signing.is_none() && context.recovery.is_none()
+    context.signing.as_ref() == signing && case.signed() == signing.is_some() && context.recovery.is_none()
         && serde_json::to_value(saved_config).ok() == Some(version_value(case)["savedConfig"].clone())
         && serde_json::to_value(saved_version).ok() == Some(json!({"source":"version.properties","name":"1.2.3","build":7,
             "bytes":super::VERSION.len(),"sha256":super::digest(super::VERSION)}))
 }
 fn terminal_for(case: Case, snapshot: &Snapshot) -> bool {
     let t = &snapshot.terminal;
-    if t.context.operation != wire::Operation::IOSUnsignedArchive || t.context.platform != wire::Platform::Ios
-        || t.context.signing.is_some() || t.context.recovery.is_some() || t.report.is_some() || !t.settled() { return false; }
-    let (Some(activity), Some(disposition)) = (t.activity.archive_activity(), t.disposition.as_ref()) else { return false; };
+    if Some(t.context.operation) != case.operation() || t.context.platform != wire::Platform::Ios || !t.settled()
+        || !context_matches(case, &t.context.project_id, &t.context, t.context.signing.as_ref()) { return false; }
     use wire::{CommandOutcome as C, Outcome as O, Reason as R, OutputDisposition as D};
+    if case == Case::RecoveryEmpty {
+        return t.outcome == O::Complete && t.reason == R::None && t.disposition.is_none() && t.result.is_none()
+            && t.activity.archive_activity().is_none() && t.activity.stage == wire::Stage::DisposingWork
+            && t.lifetime.stop_observed == wire::CoreStop::None && t.lifetime.profile_calls == 0
+            && t.lifetime.commands <= wire::RECOVERY_COMMAND_LIMIT
+            && t.report.as_ref().is_some_and(|r| [&r.account, &r.project].into_iter().all(|row| row.as_ref().is_some_and(|row|
+                row.status == wire::RecoveryState::Idle && row.session.is_none() && row.next == wire::RecoveryNext::None)));
+    }
+    if t.report.is_some() { return false; }
+    let (Some(activity), Some(disposition)) = (t.activity.archive_activity(), t.disposition.as_ref()) else { return false; };
     let zero = |c: &wire::CommandData| c.outcome == C::Exited && c.exit_code == Some(0);
     let not_dispatched = |c: &wire::CommandData| c.outcome == C::NotDispatched && c.exit_code.is_none();
     let commands = &activity.commands;
+    if case.signed() {
+        if !commands.export.as_ref().is_some_and(not_dispatched) || !not_dispatched(&commands.archive)
+            || commands.prepare.outcome != C::NotConfigured || commands.prepare.exit_code.is_some()
+            || t.result.is_some() || t.lifetime.profile_calls > wire::SIGNED_PROFILE_LIMIT
+            || t.lifetime.commands > wire::SIGNED_COMMAND_LIMIT { return false; }
+        return match case {
+            Case::SignedRefusal => t.outcome == O::Failed && t.reason == R::SigningValidationFailed
+                && zero(&commands.xcode_version) && zero(&commands.ios_sdk)
+                && t.activity.stage == wire::Stage::ValidatingSigning && disposition.output == D::RetainedIncomplete
+                && t.lifetime.stop_observed == wire::CoreStop::None
+                && activity.findings.iter().any(|f| matches!(f.check, wire::CheckId::SigningMaterial | wire::CheckId::ProfileMaterial)
+                    && matches!(f.status, wire::CoreStatus::Fail | wire::CoreStatus::Missing | wire::CoreStatus::Blocked | wire::CoreStatus::Invalid)),
+            Case::SignedCancel => t.outcome == O::Cancelled && t.reason == R::Cancelled
+                && t.lifetime.stop_observed == wire::CoreStop::Cancelled
+                && matches!(disposition.output, D::NotCreated | D::RetainedIncomplete)
+                && [&commands.xcode_version, &commands.ios_sdk].into_iter().all(|command|
+                    matches!(command.outcome, C::NotDispatched | C::Exited | C::Unknown)),
+            _ => false,
+        };
+    }
     if commands.export.is_some() { return false; }
     match case {
         Case::ToolchainPrerequisite => t.outcome == O::Failed && t.reason == R::CommandFailed
@@ -568,9 +722,14 @@ fn terminal_for(case: Case, snapshot: &Snapshot) -> bool {
             && commands.prepare.outcome == C::NotConfigured && commands.prepare.exit_code.is_none()
             && activity.selection.as_ref().is_some_and(|s| s.symbols_policy == wire::SymbolsPolicy::Required)
             && t.result.is_some() && disposition.output == D::RetainedLocalResult,
+        Case::SigningInputs | Case::SignedRefusal | Case::SignedCancel | Case::RecoveryEmpty => false,
     }
 }
 impl Record {
+    pub(super) fn bind_signing(&mut self, policy: wire::SigningPolicy) -> bool {
+        if self.signed_policy.is_some() || self.version_requested || self.prepare_requested || self.start_requested { return false; }
+        self.signed_policy = Some(policy); true
+    }
     pub(super) fn version_mutated(&mut self) -> bool {
         if self.version_mutated || !self.review_visible || !self.acknowledged || self.start_requested { return false; }
         self.version_mutated = true; true
@@ -582,22 +741,25 @@ impl Record {
                 self.status_requested += 1; true
             },
             Command::Prepare => {
-                if !matches!(step, Step::Prepare | Step::Review) || self.prepare_requested || self.version.is_none() { return false; }
+                if !matches!(step, Step::Prepare | Step::Review) || self.prepare_requested
+                    || (case == Case::RecoveryEmpty) != self.version.is_none() { return false; }
                 let Ok(input) = wire::prepare(value) else { return false; };
                 let context = input.context();
-                if !project.is_some_and(|project| context_matches(case, project, &context)) { return false; }
+                if !project.is_some_and(|project| context_matches(case, project, &context, self.signed_policy.as_ref())) { return false; }
                 self.context = Some(context); self.prepare_requested = true; true
             },
             Command::Start => {
                 if !matches!(step, Step::Start | Step::Running) || !self.prepare_returned || !self.review_visible || !self.acknowledged || self.start_requested { return false; }
                 let (Ok(input), Some(prepared)) = (wire::start(value), self.prepared.as_ref()) else { return false; };
-                if input.operation_id != prepared.operation_id || input.owner_generation != prepared.owner_generation { return false; }
+                if input.operation_id != prepared.operation_id || input.owner_generation != prepared.owner_generation
+                    || !input.consent_matches(&prepared.context) { return false; }
                 self.start_requested = true; true
             },
             Command::Cancel => {
-                if case != Case::Cancel || !matches!(step, Step::Cancel | Step::Running) || !self.start_requested || self.cancel_requested { return false; }
+                if !matches!(case, Case::Cancel | Case::SignedCancel) || !matches!(step, Step::Cancel | Step::Running) || !self.start_requested || self.cancel_requested { return false; }
                 let (Ok(input), Some(prepared)) = (wire::cancel(value), self.prepared.as_ref()) else { return false; };
                 if input.operation_id != prepared.operation_id || input.owner_generation != prepared.owner_generation { return false; }
+                if case == Case::SignedCancel && self.signed_boundary.as_ref() != Some(&(input.operation_id.clone(),input.owner_generation.clone())) { return false; }
                 self.cancel_requested = true; true
             },
         }
@@ -635,9 +797,9 @@ impl Record {
     }
     fn original(&mut self, case: Case, snapshot: Snapshot) -> bool {
         let Some(op) = self.status.as_ref().and_then(|s| s.operation.as_ref()) else { return false; };
-        if !self.start_requested || !self.start_returned || op.phase != wire::Phase::Terminal || !snapshot.facts.final_for()
+        if !self.start_requested || !self.start_returned || op.phase != wire::Phase::Terminal || !snapshot.facts.final_for(case)
             || snapshot.facts.operation_id != op.operation_id || snapshot.facts.owner_generation != op.owner_generation
-            || snapshot.terminal.context != op.context || op.report.is_some()
+            || snapshot.terminal.context != op.context || op.report != snapshot.terminal.report
             || !terminal_for(case, &snapshot) || op.outcome != Some(snapshot.terminal.outcome)
             || op.reason != snapshot.terminal.reason || op.activity.as_ref() != Some(&snapshot.terminal.activity)
             || op.disposition != snapshot.terminal.disposition || op.result != snapshot.terminal.result { return false; }
@@ -656,7 +818,17 @@ impl Record {
                 if control.case == Case::Cancel && !self.cancel_requested && self.start_returned
                     && self.status.as_ref().and_then(|s| s.operation.as_ref()).is_some_and(|op|
                         op.phase == wire::Phase::Running && op.stage == Some(wire::Stage::Preparing)) { return Some(Step::Cancel); }
-                if control.case == Case::Finality && !self.released {
+                if control.case == Case::SignedCancel && !self.cancel_requested && self.start_returned {
+                    let boundary = control.signed_boundary.try_lock().ok()?.clone();
+                    if let Some((operation, generation, observed_at)) = boundary {
+                        if !control.permits() || observed_at > Instant::now() || !self.prepared.as_ref().is_some_and(|op|
+                            op.operation_id == operation && op.owner_generation == generation) || self.signed_boundary.is_some() {
+                            control.unavailable_witness(); return None;
+                        }
+                        self.signed_boundary = Some((operation, generation)); return Some(Step::Cancel);
+                    }
+                }
+                if control.case.holds_finality() && !self.released {
                     if let Some(snapshot) = control.held_snapshot() {
                         if !self.prepared.as_ref().is_some_and(|op| snapshot.facts.operation_id == op.operation_id
                             && snapshot.facts.owner_generation == op.owner_generation) { control.unavailable_witness(); return None; }
@@ -707,15 +879,15 @@ pub(super) fn data_checks() -> bool {
             "bytes":super::VERSION.len(),"sha256":super::digest(super::VERSION)}});
     let Ok(preparation) = wire::prepare(&input) else { return false; };
     let context = preparation.context();
-    if !context_matches(case, "inert-ios-parser", &context) || context_matches(Case::Cancel, "inert-ios-parser", &context)
-        || context_matches(case, "foreign-project", &context) { return false; }
+    if !context_matches(case, "inert-ios-parser", &context, None) || context_matches(Case::Cancel, "inert-ios-parser", &context, None)
+        || context_matches(case, "foreign-project", &context, None) { return false; }
     let mut old_pair = context.clone();
     let Some(old_version) = old_pair.saved_version.as_mut() else { return false; }; old_version.build = 8;
-    if context_matches(case, "inert-ios-parser", &old_pair) { return false; }
+    if context_matches(case, "inert-ios-parser", &old_pair, None) { return false; }
     let mut missing_version = context.clone(); missing_version.saved_version = None;
     let mut missing_config = context.clone(); missing_config.saved_config = None;
-    if context_matches(case, "inert-ios-parser", &missing_version)
-        || context_matches(case, "inert-ios-parser", &missing_config) { return false; }
+    if context_matches(case, "inert-ios-parser", &missing_version, None)
+        || context_matches(case, "inert-ios-parser", &missing_config, None) { return false; }
     let operation = "a".repeat(32); let generation = "b".repeat(32);
     let prepared = wire::Projection { operation_id: operation.clone(), owner_generation: generation.clone(), context: context.clone(),
         phase: wire::Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: wire::Reason::None,
@@ -748,11 +920,12 @@ pub(super) fn data_checks() -> bool {
         stdin_closed: true, stdout_eof_closed: true, stderr_eof_closed: true, io_joined: true, core_lifetime_settled: true,
         runtime_ledger_settled: true, tools_ledger_settled: true, native_settlement_joined: true, native_integrity: true,
         driver_joined: true, manager_joined: true, observer_joined: true, watchdog_joined: true,
-        retired_before_cutoff: true, active_retained: false, resource_unknown: false, work_ms: 300_000, hard_ms: 310_000 };
-    if !facts.final_for() || facts.held() { return false; }
+        retired_before_cutoff: true, active_retained: false, resource_unknown: false, work_ms: 300_000, hard_ms: 310_000,
+        cleanup_ms: None, material_loan_retired: None, material_loan_present: None };
+    if !facts.final_for(case) || facts.held(case) { return false; }
     let held = OriginalFacts { observer_joined: false, watchdog_joined: false, retired_before_cutoff: false,
         active_retained: true, ..facts.clone() };
-    if !held.held() || held.final_for() { return false; }
+    if !held.held(Case::Finality) || held.held(case) || held.final_for(Case::Finality) { return false; }
     let mutations: &[fn(&mut OriginalFacts)] = &[
         |f| f.inspection_joined = false, |f| f.acquisition_joined = false, |f| f.child_waited_success = false,
         |f| f.stdin_closed = false, |f| f.stdout_eof_closed = false, |f| f.stderr_eof_closed = false, |f| f.io_joined = false,
@@ -763,7 +936,7 @@ pub(super) fn data_checks() -> bool {
     for mutate in mutations {
         let mut late = facts.clone(); mutate(&mut late);
         let mut incomplete = held.clone(); mutate(&mut incomplete);
-        if late.final_for() || incomplete.held() { return false; }
+        if late.final_for(case) || incomplete.held(Case::Finality) { return false; }
     }
     let snapshot = Snapshot { facts, terminal };
     if !terminal_for(case, &snapshot) || !terminal_for(Case::Finality, &snapshot)
@@ -771,7 +944,7 @@ pub(super) fn data_checks() -> bool {
     // The additive signed/recovery wire cannot widen this unsigned observer.
     for mode in [wire::Operation::IOSSignedExport, wire::Operation::IOSLocalRecovery] {
         let mut other = snapshot.clone(); other.terminal.context.operation = mode;
-        if context_matches(case, "inert-ios-parser", &other.terminal.context)
+        if context_matches(case, "inert-ios-parser", &other.terminal.context, None)
             || Case::ALL.into_iter().any(|case| terminal_for(case, &other)) { return false; }
     }
     let mut missing_disposition = snapshot.clone(); missing_disposition.terminal.disposition = None;
@@ -795,7 +968,99 @@ pub(super) fn data_checks() -> bool {
     let mut held_record = record.clone(); held_record.held = Some(Snapshot { facts: held, terminal: snapshot.terminal.clone() });
     if !held_record.original(Case::Finality, snapshot.clone()) { return false; }
     held_record.held.as_mut().unwrap().terminal.activity.stage = wire::Stage::Inspecting;
-    !held_record.original(Case::Finality, snapshot)
+    !held_record.original(Case::Finality, snapshot.clone()) && current_data_checks(&snapshot)
+}
+
+fn current_data_checks(unsigned: &Snapshot) -> bool {
+    // Comparison DATA only. Neither these typed values nor their reports are
+    // installed in Control/Observation or returned as native observations.
+    let facts = OriginalFacts { work_ms: 120_000, hard_ms: 250_000, cleanup_ms: Some(240_000),
+        material_loan_present: Some(false), material_loan_retired: Some(true), ..unsigned.facts.clone() };
+    if [Case::SignedRefusal, Case::SignedCancel, Case::RecoveryEmpty].into_iter().any(|case| !facts.final_for(case))
+        || facts.final_for(Case::UnsignedArchive) || facts.final_for(Case::SigningInputs) { return false; }
+    let held = OriginalFacts { observer_joined: false, watchdog_joined: false, retired_before_cutoff: false,
+        active_retained: true, material_loan_present: Some(true), material_loan_retired: Some(false), ..facts.clone() };
+    if !held.held(Case::SignedRefusal) || held.held(Case::SignedCancel) || held.held(Case::Finality) { return false; }
+    let mutations: &[fn(&mut OriginalFacts)] = &[|f| f.cleanup_ms = None, |f| f.cleanup_ms = Some(240_001),
+        |f| f.material_loan_retired = None, |f| f.material_loan_present = None,
+        |f| f.work_ms = 300_000, |f| f.hard_ms = 310_000];
+    for mutate in mutations {
+        let mut final_facts = facts.clone(); mutate(&mut final_facts);
+        let mut held_facts = held.clone(); mutate(&mut held_facts);
+        if final_facts.final_for(Case::SignedRefusal) || held_facts.held(Case::SignedRefusal) { return false; }
+    }
+    let mut outstanding = facts.clone(); outstanding.material_loan_present = Some(true);
+    let mut unretired = facts.clone(); unretired.material_loan_retired = Some(false);
+    if outstanding.final_for(Case::SignedCancel) || unretired.final_for(Case::RecoveryEmpty) { return false; }
+    let policy = wire::SigningPolicy { team_id: "INERT12345".into(), distribution_certificate_sha256: "c".repeat(64),
+        assignments: ["apple-p12", "apple-profile"].into_iter().enumerate().map(|(i,kind)| wire::SigningAssignment {
+            kind: kind.into(), record_id: (i + 1).to_string().repeat(32), record_revision: 1, context_revision: 1 }).collect() };
+    let observed = version_value(Case::SignedRefusal);
+    let input = json!({"projectId":"inert-ios-parser","draftRevision":1,"baselineGeneration":1,
+        "savedConfig":observed["savedConfig"],"savedVersion":unsigned.terminal.context.saved_version,"signing":policy});
+    let Ok(preparation) = wire::prepare(&input) else { return false; };
+    let context = preparation.context();
+    if !context_matches(Case::SignedRefusal, "inert-ios-parser", &context, Some(&policy))
+        || context_matches(Case::UnsignedArchive, "inert-ios-parser", &context, Some(&policy))
+        || context_matches(Case::SignedRefusal, "inert-ios-parser", &context, None) { return false; }
+    let mut foreign = policy.clone(); foreign.assignments[0].record_id = "d".repeat(32);
+    if context_matches(Case::SignedRefusal, "inert-ios-parser", &context, Some(&foreign)) { return false; }
+    let mut value = match serde_json::to_value(&unsigned.terminal) { Ok(value) => value, Err(_) => return false };
+    value["context"] = json!(context); value["outcome"] = json!("failed"); value["reason"] = json!("signing-validation-failed");
+    value["activity"]["stage"] = json!("validating-signing"); value["activity"]["selection"]["symbolsPolicy"] = json!("retain");
+    for role in ["archive", "export"] { value["activity"]["commands"][role] = json!({"outcome":"not-dispatched","exitCode":null}); }
+    value["activity"]["findings"] = json!([{"check":"signing-material","status":"FAIL"}]);
+    value["result"] = Value::Null; value["disposition"]["output"] = json!("retained-incomplete");
+    value["lifetime"]["commands"] = json!(2);
+    for field in ["signingClosed", "buildInputsClosed", "materialRetired"] { value["lifetime"][field] = json!(true); }
+    let Ok(terminal) = wire::terminal(&value, &context, &facts.operation_id) else { return false; };
+    let refusal = Snapshot { facts: facts.clone(), terminal };
+    if !terminal_for(Case::SignedRefusal, &refusal) || terminal_for(Case::SignedCancel, &refusal) { return false; }
+    let mut unsupported = value.clone(); unsupported["activity"]["findings"] = json!([]);
+    if wire::terminal(&unsupported, &context, &facts.operation_id).is_ok_and(|terminal|
+        terminal_for(Case::SignedRefusal, &Snapshot { facts: facts.clone(), terminal })) { return false; }
+    value["outcome"] = json!("cancelled"); value["reason"] = json!("cancelled");
+    value["lifetime"]["stopObserved"] = json!("cancelled");
+    let Ok(terminal) = wire::terminal(&value, &context, &facts.operation_id) else { return false; };
+    if !terminal_for(Case::SignedCancel, &Snapshot { facts: facts.clone(), terminal }) { return false; }
+    let mut cancel = Record::default(); cancel.start_requested = true;
+    cancel.prepared = Some(wire::Projection { operation_id: facts.operation_id.clone(), owner_generation: facts.owner_generation.clone(),
+        context: context.clone(), phase: wire::Phase::Running, intent_usable: false, outcome: None, reason: wire::Reason::None,
+        stage: Some(wire::Stage::InputsBound), activity: None, disposition: None, result: None, report: None });
+    let request = json!({"operationId":facts.operation_id,"ownerGeneration":facts.owner_generation});
+    if cancel.request(Case::SignedCancel, Step::Cancel, Command::Cancel, &request, Some("inert-ios-parser")) { return false; }
+    cancel.signed_boundary = Some((facts.operation_id.clone(), facts.owner_generation.clone()));
+    let mut wrong = request.clone(); wrong["ownerGeneration"] = json!("f".repeat(32));
+    if cancel.request(Case::SignedCancel, Step::Cancel, Command::Cancel, &wrong, Some("inert-ios-parser"))
+        || !cancel.request(Case::SignedCancel, Step::Cancel, Command::Cancel, &request, Some("inert-ios-parser"))
+        || cancel.request(Case::SignedCancel, Step::Cancel, Command::Cancel, &request, Some("inert-ios-parser"))
+        || cancel.dom(Case::SignedCancel, Step::Cancel, &json!({"state":"ready","stageAtClick":"accepted"})).is_ok()
+        || cancel.dom(Case::SignedCancel, Step::Cancel, &json!({"state":"ready","stageAtClick":"validating-signing"})) != Ok(Some(Step::Running))
+        || cancel.cancel_dom_stage != Some(wire::Stage::ValidatingSigning) { return false; }
+    let Ok(recovery) = wire::prepare(&json!({"projectId":"inert-ios-parser","recovery":{"action":"inspect"}})) else { return false; };
+    let recovery = recovery.context();
+    if !context_matches(Case::RecoveryEmpty, "inert-ios-parser", &recovery, None)
+        || context_matches(Case::SignedCancel, "inert-ios-parser", &recovery, None) { return false; }
+    let mut lifetime = value["lifetime"].clone(); lifetime["commands"] = json!(0);
+    lifetime["commandDispatched"] = json!(false); lifetime["stopObserved"] = json!("none");
+    let idle = json!({"status":"idle","session":null,"next":"none"});
+    let mut result = json!({"schemaVersion":1,"context":recovery,"outcome":"complete","reason":"none",
+        "activity":{"stage":"disposing-work"},"lifetime":lifetime,
+        "report":{"schemaVersion":1,"scope":"local-ios-recovery","account":idle,"project":idle,"limitations":wire::RECOVERY_LIMITATIONS}});
+    let Ok(terminal) = wire::terminal(&result, &recovery, &facts.operation_id) else { return false; };
+    if !terminal_for(Case::RecoveryEmpty, &Snapshot { facts: facts.clone(), terminal }) { return false; }
+    result["report"]["account"] = json!({"status":"pending","session":"d".repeat(32),"next":"ordinary"});
+    let Ok(terminal) = wire::terminal(&result, &recovery, &facts.operation_id) else { return false; };
+    if terminal_for(Case::RecoveryEmpty, &Snapshot { facts, terminal }) { return false; }
+    let document = Arc::new(());
+    for case in Case::ALL {
+        let control = Control::new(case);
+        let token = SessionAdmission { control: control.clone(), document: Arc::downgrade(&document) };
+        if token.consume(&document).is_ok() || control.session_admitted.load(Ordering::SeqCst)
+            || [wire::Operation::IOSUnsignedArchive, wire::Operation::IOSSignedExport, wire::Operation::IOSLocalRecovery]
+                .into_iter().any(|mode| control.permits_mode(mode)) { return false; }
+    }
+    true
 }
 
 pub(super) fn snapshot_failure(value: &Value, root: &std::path::Path, case: Case, base: &Value) -> Option<&'static str> {
@@ -805,6 +1070,15 @@ pub(super) fn snapshot_failure(value: &Value, root: &std::path::Path, case: Case
     if config_value["path"] != "release/mobile-release.json" { return Some("snapshot-config-path"); }
     if !super::assurance(value, "static-text") { return Some("snapshot-value-assurance"); }
     if !value["issues"].as_array().is_some_and(Vec::is_empty) { return Some("snapshot-value-issues"); }
+    if case == Case::RecoveryEmpty {
+        if hints != &json!({}) { return Some("ios-fixture-contract"); }
+        if value["discovery"]["partial"] != false || value["discovery"]["state"] != "unverified" { return Some("snapshot-discovery-state"); }
+        if config_value["state"] != "missing" || !config_value["data"].is_null() || !config_value["content"].is_null()
+            || !config_value["issues"].as_array().is_some_and(|rows| rows.len() == 1 && rows[0]["code"] == "config.missing") {
+            return Some("snapshot-config-state");
+        }
+        return None;
+    }
     if !hints["android"].is_null() || hints["ios"]["projects"] != json!(["ios/MRKObserved.xcodeproj"])
         || hints["ios"]["workspaces"] != json!([]) || hints["ios"]["schemes"] != json!(["MRKObserved"])
         || hints["ios"]["bundleIds"] != json!([super::APP_ID]) || hints["ios"]["bundleId"] != super::APP_ID {
@@ -851,6 +1125,10 @@ impl Observation {
     }
     pub(crate) fn ios_request(&self, command: Command, value: &Value) {
         let Some(control) = &self.ios else { return; };
+        if control.case == Case::SigningInputs {
+            if !self.timely() || command != Command::Status || wire::status_request(value).is_err() { self.fail_with("ios-request-contract"); }
+            return;
+        }
         let Some(mut r) = self.record() else { return; };
         let step = match r.step { super::Step::Ios(step) => step, _ if command == Command::Status => Step::Navigate,
             _ => { self.fail_with("ios-request-contract"); return; } };
@@ -861,6 +1139,12 @@ impl Observation {
     }
     pub(crate) fn ios_result(&self, command: Command, result: &Result<wire::Status, BridgeError>) {
         if self.ios.is_none() { return; }
+        if self.ios.as_ref().is_some_and(|c| c.case == Case::SigningInputs) {
+            if !self.timely() || command != Command::Status || !result.as_ref().is_ok_and(|s| s.operation.is_none() && wire::status_bytes(s).is_ok()) {
+                self.fail_with("ios-status-contract");
+            }
+            return;
+        }
         let Some(mut r) = self.record() else { return; };
         if !self.timely() || !r.ios_record.as_mut().is_some_and(|ios| ios.result(command, result)) {
             self.fail_with("ios-status-contract");
@@ -868,6 +1152,10 @@ impl Observation {
     }
     pub(crate) fn ios_status(&self, status: &wire::Status, owner: &IOSArchiveOwner) {
         let Some(control) = &self.ios else { return; };
+        if control.case == Case::SigningInputs {
+            if !self.timely() || status.operation.is_some() || wire::status_bytes(status).is_err() { self.fail_with("ios-status-contract"); }
+            return;
+        }
         // Read the actual original owner without holding this observer Record.
         // Busy native guards yield no sample, never a guessed join or fallback.
         let terminal = status.operation.as_ref().is_some_and(|op| op.phase == wire::Phase::Terminal);
@@ -885,7 +1173,32 @@ impl Observation {
     }
 }
 
-pub(super) fn script(step: Step) -> Option<&'static str> { Some(match step {
+pub(super) fn script(case: Case, step: Step) -> Option<&'static str> {
+    if case == Case::RecoveryEmpty { return recovery_script(step); }
+    if case.signed() {
+        match step {
+            Step::SignedMode => return Some(r#"const r=ios();if(!r)return wait();const f=r.querySelector('fieldset.session-context'),radios=f?.querySelectorAll('input[type="radio"]');
+                if(!f||!radios||radios.length!==2||f.disabled)return wait();if(!radios[0].checked||radios[1].checked||!text(f).includes('Sign and export IPA'))throw 0;
+                show(radios[1]);radios[1].click();return ready();"#),
+            Step::Review => return Some(r#"const r=ios();if(!r)return wait();if(r.dataset.phase!=='awaiting-consent')return wait();
+                const check=r.querySelector('[data-mrk-ios-archive-action="acknowledge"]'),start=r.querySelector('[data-mrk-ios-archive-action="start"]');
+                if(!check||!start)return wait();show(check);return {state:'ready',checked:check.checked,startAvailable:!start.disabled,
+                    identityVisible:text(r).includes('org.example.mrk.observed')&&text(r).includes('ios/MRKObserved.xcodeproj')
+                        &&text(r).includes('scheme MRKObserved')&&text(r).includes('saved version 1.2.3')&&text(r).includes('build 7')
+                        &&text(r).includes('INERT12345')&&text(r).includes('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc')
+                        &&text(r).includes('2 exact session input revisions.')&&text(start)==='Sign and export local IPA'};"#),
+            Step::Cancel => return Some(r#"const r=ios();if(!r)return wait();if(r.dataset.phase==='terminal')throw 0;
+                const b=r.querySelector('[data-mrk-ios-archive-action="cancel"]');if(!b||b.disabled||!['running','stopping'].includes(r.dataset.phase))return wait();
+                const stage=r.dataset.stage;show(b);b.click();return {state:'ready',stageAtClick:stage};"#),
+            Step::Hold => return Some(r#"const r=ios();if(!r)return wait();if(!['running','stopping'].includes(r.dataset.phase)||r.dataset.stage!=='validating-signing')return wait();
+                const read=r.querySelector('[data-mrk-ios-archive-action="observe-version"]'),review=r.querySelector('[data-mrk-ios-archive-action="review"]');
+                const refresh=[...r.querySelectorAll('button')].find(b=>text(b)==='Refresh saved configuration');if(!read||!review||!refresh)return wait();show(r);
+                return {state:'ready',publicSuccessHidden:r.dataset.outcome===''&&!r.querySelector('.offline-report'),
+                    readBlocked:read.disabled,reviewBlocked:review.disabled,refreshBlocked:refresh.disabled};"#),
+            _ => {},
+        }
+    }
+    Some(match step {
     Step::Navigate => "return nav('Releases');",
     Step::ReadVersion => r#"const r=ios();if(!r)return wait();const b=r.querySelector('[data-mrk-ios-archive-action="observe-version"]');
         if(!b||b.disabled)return wait();show(b);b.click();return ready();"#,
@@ -916,13 +1229,36 @@ pub(super) fn script(step: Step) -> Option<&'static str> { Some(match step {
         if(!p)return wait();show(p);return {state:'ready',phase:r.dataset.phase,outcome:r.dataset.outcome,
             commands:[...p.querySelectorAll(':scope > ul > li')].map(text),resultPresent:!!report,
             archive:report?text(report.querySelector('p > code')):null};"#,
-    Step::Running | Step::MutateVersion | Step::ReleaseHold => return None,
+    Step::SignedMode | Step::Running | Step::MutateVersion | Step::ReleaseHold => return None,
+}) }
+fn recovery_script(step: Step) -> Option<&'static str> { Some(match step {
+    Step::Navigate => "return nav('Recovery');",
+    Step::Prepare => r#"const r=recovery();if(!r)return wait();const b=r.querySelector('[data-mrk-ios-recovery-action="review-inspect"]');
+        if(!b||b.disabled)return wait();if(r.dataset.phase!=='idle')throw 0;show(b);b.click();return ready();"#,
+    Step::Review => r#"const r=recovery();if(!r||r.dataset.phase!=='awaiting-consent')return wait();
+        const review=r.querySelector('[aria-label="Confirm this exact local recovery action"]'),check=r.querySelector('[data-mrk-ios-recovery-action="acknowledge"]'),start=r.querySelector('[data-mrk-ios-recovery-action="start"]');
+        if(!review||!check||!start)return wait();show(review);return {state:'ready',checked:check.checked,startAvailable:!start.disabled,
+            identityVisible:text(review).includes('Inspect account and project state once?')&&text(start)==='Inspect local state once'&&!review.querySelector('code')};"#,
+    Step::Acknowledge => r#"const r=recovery();if(!r)return wait();const c=r.querySelector('[data-mrk-ios-recovery-action="acknowledge"]');
+        if(!c||c.disabled)return wait();if(c.type!=='checkbox'||c.checked||r.dataset.phase!=='awaiting-consent')throw 0;show(c);c.click();return ready();"#,
+    Step::Acknowledged => r#"const r=recovery();if(!r)return wait();const c=r.querySelector('[data-mrk-ios-recovery-action="acknowledge"]'),b=r.querySelector('[data-mrk-ios-recovery-action="start"]');
+        if(!c||!b||!c.checked||b.disabled)return wait();show(b);return {state:'ready',checked:c.checked,startAvailable:!b.disabled};"#,
+    Step::Start => r#"const r=recovery();if(!r)return wait();const c=r.querySelector('[data-mrk-ios-recovery-action="acknowledge"]'),b=r.querySelector('[data-mrk-ios-recovery-action="start"]');
+        if(!c||!b||b.disabled)return wait();if(!c.checked||r.dataset.phase!=='awaiting-consent')throw 0;show(b);b.click();return ready();"#,
+    Step::Final => r#"const r=recovery();if(!r||r.dataset.phase!=='terminal')return wait();const p=r.querySelector('.session-progress'),report=r.querySelector('[aria-label="Original native local recovery report"]');
+        if(!p||!report)return wait();const rows=[...report.querySelectorAll(':scope > div')];if(rows.length!==2)throw 0;show(p);show(report);
+        return {state:'ready',phase:r.dataset.phase,outcome:[...p.querySelectorAll(':scope > p')].filter(p=>text(p).startsWith('Operation outcome:')).map(text),
+            rows:rows.map(row=>({heading:text(row.querySelector('h4')),sessionVisible:!!row.querySelector('code'),
+                recoveryButton:text(row.querySelector('button')),recoveryBlocked:row.querySelector('button')?.disabled===true})),
+            artifactResultPresent:!!r.querySelector('.offline-report')};"#,
+    _ => return None,
 }) }
 impl Record {
     pub(super) fn dom(&mut self, case: Case, step: Step, value: &Value) -> Result<Option<Step>, ()> {
         let only_ready = || value == &json!({"state":"ready"});
         let next = match step {
-            Step::Navigate if only_ready() => Step::ReadVersion,
+            Step::Navigate if only_ready() => if case == Case::RecoveryEmpty { Step::Prepare } else if case.signed() { Step::SignedMode } else { Step::ReadVersion },
+            Step::SignedMode if case.signed() && only_ready() => Step::ReadVersion,
             Step::ReadVersion if only_ready() => Step::VersionRead,
             Step::VersionRead if self.version.is_some() && *value == json!({"state":"ready",
                 "version":"Saved version 1.2.3 · build 7 · source version.properties.","reviewAvailable":true}) => Step::Prepare,
@@ -934,14 +1270,29 @@ impl Record {
                 self.acknowledged = true; if case == Case::VersionStale { Step::MutateVersion } else { Step::Start }
             },
             Step::Start if only_ready() => Step::Running,
-            Step::Cancel if only_ready() => Step::Running,
-            Step::Hold if case == Case::Finality && self.held.is_some() && self.reciprocal_blocked && !self.released
+            Step::Cancel if case == Case::SignedCancel => {
+                if value.as_object().is_none_or(|object| object.len() != 2) || value["state"] != "ready"
+                    || self.signed_boundary.is_none() || self.cancel_dom_stage.is_some() { return Err(()); }
+                let stage = serde_json::from_value::<wire::Stage>(value["stageAtClick"].clone()).map_err(|_| ())?;
+                if matches!(stage, wire::Stage::Accepted | wire::Stage::RecoveringAccount | wire::Stage::RecoveringProject) { return Err(()); }
+                self.cancel_dom_stage = Some(stage); Step::Running
+            },
+            Step::Cancel if case == Case::Cancel && only_ready() => Step::Running,
+            Step::Hold if case.holds_finality() && self.held.is_some() && self.reciprocal_blocked && !self.released
                 && *value == json!({"state":"ready","publicSuccessHidden":true,"readBlocked":true,"reviewBlocked":true,"refreshBlocked":true}) => {
                     self.held_dom = true; Step::ReleaseHold
                 },
             Step::Final => {
                 let snapshot = self.terminal.as_ref().ok_or(())?;
                 if !terminal_for(case, snapshot) { return Err(()); }
+                if case == Case::RecoveryEmpty {
+                    if *value != json!({"state":"ready","phase":"terminal",
+                        "outcome":["Operation outcome: complete. A complete inspection can still find pending state; it is not completed recovery."],
+                        "rows":[{"heading":"Account signing state · idle","sessionVisible":false,"recoveryButton":"Review ordinary account recovery","recoveryBlocked":true},
+                            {"heading":"Project build-input state · idle","sessionVisible":false,"recoveryButton":"Review ordinary project recovery","recoveryBlocked":true}],
+                        "artifactResultPresent":false}) { return Err(()); }
+                    self.recovery_actions_blocked = true; self.final_dom = true; return Ok(None);
+                }
                 let commands = &snapshot.terminal.activity.archive_activity().ok_or(())?.commands;
                 let words = |label: &str, command: &wire::CommandData| match command.outcome {
                     wire::CommandOutcome::Exited => format!("{label}: known exit {}.", command.exit_code.unwrap_or(i32::MIN)),
@@ -950,9 +1301,11 @@ impl Record {
                     wire::CommandOutcome::Unknown => format!("{label}: no usable original outcome."),
                 };
                 let archive = snapshot.terminal.result.as_ref().map(|result| result.archive.clone());
+                let mut lines = vec![words("Xcode version",&commands.xcode_version),words("iOS SDK selection",&commands.ios_sdk),
+                    words("Saved preparation",&commands.prepare),words("Archive",&commands.archive)];
+                if let Some(export) = &commands.export { lines.push(words("Local IPA export",export)); }
                 if *value != json!({"state":"ready","phase":"terminal","outcome":snapshot.terminal.outcome,
-                    "commands":[words("Xcode version",&commands.xcode_version),words("iOS SDK selection",&commands.ios_sdk),
-                        words("Saved preparation",&commands.prepare),words("Unsigned archive",&commands.archive)],
+                    "commands":lines,
                     "resultPresent":snapshot.terminal.result.is_some(),"archive":archive}) { return Err(()); }
                 self.final_dom = true; return Ok(None);
             },
@@ -964,23 +1317,40 @@ impl Record {
         let terminal = self.terminal()?;
         if !self.prepare_requested || !self.prepare_returned || !self.review_visible || !self.acknowledged
             || !self.start_requested || !self.start_returned || self.status_requested != self.status_returned
-            || self.cancel_requested != (case == Case::Cancel) || self.cancel_returned != self.cancel_requested
-            || self.released != (case == Case::Finality) || self.held_dom != self.released || self.reciprocal_blocked != self.released
+            || self.cancel_requested != matches!(case, Case::Cancel | Case::SignedCancel) || self.cancel_returned != self.cancel_requested
+            || self.released != case.holds_finality() || self.held_dom != self.released || self.reciprocal_blocked != self.released
             || self.held.is_some() != self.released || !terminal_for(case, terminal) { return None; }
-        if self.version_mutated != (case == Case::VersionStale) { return None; }
-        let activity = terminal.terminal.activity.archive_activity()?;
-        Some(json!({"protocol":wire::PROTOCOL,"savedVersionObservation":self.version,"context":self.context,
+        if self.version_mutated != (case == Case::VersionStale) || self.version_requested != (case != Case::RecoveryEmpty)
+            || self.version.is_some() != self.version_requested || self.signed_policy.is_some() != case.signed()
+            || self.recovery_actions_blocked != (case == Case::RecoveryEmpty)
+            || self.signed_boundary.is_some() != (case == Case::SignedCancel) || self.cancel_dom_stage.is_some() != (case == Case::SignedCancel) { return None; }
+        let cancel = if case == Case::Cancel {
+            Some(json!({"requestedOnce":true,"returned":true,"stageAtClick":"preparing",
+                "prepareOutcome":terminal.terminal.activity.archive_activity()?.commands.prepare,"activeCommandKillClaimed":false}))
+        } else if case == Case::SignedCancel {
+            let (operation, generation) = self.signed_boundary.as_ref()?;
+            if *operation != terminal.facts.operation_id || *generation != terminal.facts.owner_generation { return None; }
+            Some(json!({"requestedOnce":true,"returned":true,"stageAtClick":self.cancel_dom_stage?,
+                "trigger":"original-inputs-bound","boundary":{"stage":"inputs-bound","operationId":operation,
+                    "ownerGeneration":generation,"originalTypedFrame":true},"activeCommandKillClaimed":false}))
+        } else { None };
+        let account = case.signed() || case == Case::RecoveryEmpty;
+        let mut report = json!({"protocol":if case == Case::RecoveryEmpty { wire::RECOVERY_PROTOCOL } else if case.signed() { wire::SIGNED_PROTOCOL } else { wire::PROTOCOL },
+            "savedVersionObservation":self.version,"context":self.context,
             "prepareRequestedOnce":true,"prepareReturned":true,"reviewVisible":true,"acknowledged":true,
             "startRequestedOnce":true,"startReturned":true,"statusCallsReturned":self.status_returned,
             "staleVersionWriterReturnedAndClosed":self.version_mutated,
             "original":terminal,"finalResultVisible":self.final_dom,
             "prerequisiteOnly":case == Case::ToolchainPrerequisite,
-            "cancel":if case == Case::Cancel { Some(json!({"requestedOnce":true,"returned":true,
-                "stageAtClick":"preparing","prepareOutcome":activity.commands.prepare,
-                "activeCommandKillClaimed":false})) } else { None },
+            "cancel":cancel,
             "hold":self.held.as_ref().map(|snapshot| json!({"original":snapshot,"publicSuccessHidden":self.held_dom,
                 "conflictingUiBlocked":self.held_dom,"environmentDiagnosticsBlocked":self.reciprocal_blocked,
                 "originalReleasedOnce":self.released})),
-            "workMs":300000,"hardMs":310000,"observationMs":315000,"outerInvocationMs":325000}))
+            "workMs":if account { 120000 } else { 300000 },"hardMs":if account { 250000 } else { 310000 },
+            "observationMs":315000,"outerInvocationMs":325000});
+        if account { report["cleanupMs"] = json!(240000); }
+        if case == Case::RecoveryEmpty { report["recoveryActions"] = json!({"idleRowsVisible":true,"ordinaryButtonsDisabled":true,
+            "foreignMutationAttempted":false,"recoveryMutationClaimed":false}); }
+        Some(report)
     }
 }

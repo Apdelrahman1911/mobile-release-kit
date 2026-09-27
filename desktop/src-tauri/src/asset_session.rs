@@ -816,6 +816,8 @@ struct Inner {
     session_identity: Arc<()>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_session: Mutex<Option<installed_session_observation::Book>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    installed_macos_session: Mutex<Option<installed_macos_observation::SessionBook>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Weak<Qualification>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1689,6 +1691,8 @@ impl DocumentBinding {
         let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            installed_macos_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture: None,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3803,6 +3807,8 @@ impl DocumentBinding {
         let owner = slot.owner.clone();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         self.installed_record_original(&owner, Some(slot.operation))?;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        self.installed_macos_record_original(&owner, Some(slot.operation))?;
         let old_slot = state.slot.take().map(Box::new);
         if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
             restore_failed_install_retirement(state, &owner, retirement);
@@ -4442,6 +4448,8 @@ impl DocumentBinding {
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.installed_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        if self.installed_macos_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
         let previous = state.quit.replace(owner.clone());
         state.quit_pending = true; state.quit_accepted = false; state.quit_cleanup_end = None;
         let (start, enter) = oneshot::channel();
@@ -4655,6 +4663,22 @@ mod installed_macos_observation {
         document: Weak<Inner>, owner: Weak<OriginalWork>, generation: u32,
         edit: crate::edit_owner::InstalledMacDocumentWitness,
     }
+    /// Observer-only references to actual registered originals, not synthetic
+    /// receipts or custody owners. Slots are never removed or reused. Keeping
+    /// the original work book does not retain its retired private payloads.
+    pub(super) struct SessionBook { originals: Vec<(Arc<OriginalWork>, Option<Operation>)> }
+    pub(crate) struct SessionSnapshot {
+        pub(crate) status: Value, pub(crate) originals: usize, pub(crate) originals_settled: bool,
+        pub(crate) empty: bool,
+    }
+    fn session_original_settled(document: &Arc<Inner>, owner: &Arc<OriginalWork>) -> bool {
+        original_call(document, owner) && owner.ended.load(Ordering::SeqCst) && owner.resources_settled()
+            && owner.coordinator.try_lock().is_ok_and(|b| b.handle.is_none() && b.receipt == JoinReceipt::Returned)
+            && owner.child.try_lock().is_ok_and(|b| b.handle.is_none() && matches!(b.receipt, JoinReceipt::New | JoinReceipt::Returned))
+            && owner.source.try_lock().is_ok_and(|b| b.not_started() || b.settled())
+            && owner.gui.facts().is_some_and(|g| g.selected.is_none() && g.released && g.refusal.is_none()
+                && (g.not_created || g.created && g.response && g.destroyed && g.close_ack))
+    }
     // These observations neither reconcile/publish the document nor acquire a
     // source or GUI owner. The ordinary relay and coordinators own all joins.
     fn quiet(state: &DocumentState) -> bool {
@@ -4711,6 +4735,71 @@ mod installed_macos_observation {
         left.id == right.id && left.name == right.name && left.path == right.path
     }
     impl DocumentBinding {
+        pub(crate) fn admit_installed_macos_session(&self, token: crate::shell::installed_observation::ios::SessionAdmission) -> Result<(), BridgeError> {
+            let state = self.lock();
+            if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some()
+                || state.context.is_some() || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown
+                || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
+            let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            if observation.is_some() { return Err(BridgeError::invalid()); }
+            token.consume(&self.inner.session_identity)?;
+            self.inner.bridge.supervisor.admit_installed_session_once(&self.inner.session_identity)?;
+            *observation = Some(SessionBook { originals: Vec::new() }); Ok(())
+        }
+        pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
+            let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+            let Some(book) = book.as_mut() else { return Ok(()); };
+            // Project + ten bounded session originals + Quit. Never replace
+            // a missing/unknown predecessor with a fresh successful witness.
+            if book.originals.len() >= 12 || owner.id as usize != book.originals.len() + 1
+                || !original_call(&self.inner, owner)
+                || !book.originals.iter().all(|(old,_)| session_original_settled(&self.inner, old)) {
+                return Err(AssetError::new(Reason::CleanupUnknown));
+            }
+            book.originals.try_reserve(1).map_err(|_| AssetError::new(Reason::Capacity))?;
+            book.originals.push((owner.clone(), operation)); Ok(())
+        }
+        pub(crate) fn installed_macos_session_snapshot(&self) -> Option<SessionSnapshot> {
+            let state = self.inner.state.try_lock().ok()?;
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            if state.unknown || state.exhausted || state.lost_observed || !state.lifetime.original_bound()
+                || book.originals.len() != state.next_operation as usize { return None; }
+            Some(SessionSnapshot { status: serde_json::to_value(self.snapshot(&state)).ok()?, originals: book.originals.len(),
+                originals_settled: book.originals.iter().all(|(owner,_)| session_original_settled(&self.inner, owner)),
+                empty: quiet(&state) && session_data_empty(&state) })
+        }
+        pub(crate) fn installed_macos_file_original(&self, id: u32, accepted: bool) -> Option<InstalledNativeResponseWitness> {
+            let book = self.inner.installed_macos_session.try_lock().ok()?; let book = book.as_ref()?;
+            let (owner, operation) = book.originals.iter().find(|(owner,_)| owner.id == id)?;
+            if *operation != Some(Operation::ChooseFile) || !session_original_settled(&self.inner, owner) { return None; }
+            // File choose always joins the original token child, even when
+            // its genuine native Cancel never starts source capture. Do not
+            // reuse Project's no-child cancellation predicate for this lane.
+            if !owner.child.try_lock().is_ok_and(|b| b.handle.is_none() && b.receipt == JoinReceipt::Returned)
+                || !owner.source.try_lock().is_ok_and(|b| if accepted { b.not_started() || b.settled() } else { b.not_started() }) { return None; }
+            let witness = owner.gui.installed_native_response().ok()??;
+            if witness.operation_id != id || witness.response != if accepted { NativeResponse::Accept } else { NativeResponse::Decline }
+                || !witness.callback_returned || witness.selected.is_some() != accepted
+                || !owner.gui.facts().is_some_and(|g| g.dispatched && g.created && !g.constructing && !g.showing
+                    && !g.not_created && g.response && g.refusal.is_none() && g.accepted == accepted
+                    && !g.declined && g.accepted_at.is_some() == accepted && g.selected.is_none()
+                    && g.destroyed && g.close_queued && g.close_ack && g.release_queued && g.released) { return None; }
+            Some(witness)
+        }
+        fn macos_session_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
+            let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; };
+            let Some(book) = book.as_ref() else { return false; };
+            let Some(owner) = project.owner.upgrade() else { return false; };
+            same_document(&self.inner, &project.document) && self.macos_registered(project)
+                && book.originals.first().is_some_and(|(first,kind)| Arc::ptr_eq(first, &owner) && *kind == Some(Operation::ChooseProject))
+                && book.originals.len() == 12 && state.next_operation == 12
+                && book.originals.last().is_some_and(|(last,kind)| last.id == 12 && kind.is_none())
+                && state.slot.as_ref().is_some_and(|slot| slot.owner.id == 11 && slot.operation == Operation::Lock
+                    && slot.reason == Reason::UserCancelled && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id as usize == i + 1 && session_original_settled(&self.inner, owner))
+                && completed(&self.inner, &owner, NativeResponse::Accept, true, false)
+                    .is_some_and(|response| response.selected.as_deref() == Some(project.root.path.as_path()))
+        }
         pub(crate) async fn installed_macos_project_result(&self, id: u32, selection: &mut Option<ProjectSelectionData>) -> Result<Option<Project>, AssetError> {
             *selection = None;
             self.project_result_original(id, Some(selection)).await
@@ -4829,9 +4918,11 @@ mod installed_macos_observation {
                 || !completed(&self.inner, quit, NativeResponse::Accept, false, true).is_some_and(|response| response.selected.is_none()) { return false; }
             let original = match (project, picker, lost) {
                 (Some(project), None, false) => state.lifetime.original_bound() && !state.lost_observed
-                    && self.macos_selected(&state, project) && self.inner.bridge.edits.installed_macos_document_live(&project.edit)
-                    && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
-                        && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard),
+                    && self.inner.bridge.edits.installed_macos_document_live(&project.edit)
+                    && (self.macos_selected(&state, project)
+                        && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
+                            && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                        || self.macos_session_selected(&state, project)),
                 (Some(project), None, true) => self.macos_project_loss(&state, project),
                 (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
                 _ => false,
@@ -4852,6 +4943,7 @@ mod installed_macos_observation {
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
+    SessionSnapshot as InstalledMacSessionSnapshot,
     ProjectSelectionData as InstalledMacProjectSelectionData, SelectionCustody as InstalledMacSelectionCustody,
     selection_path_bounded as installed_macos_selection_path_bounded, selection_saved_data_checks as installed_macos_selection_saved_data_checks};
 

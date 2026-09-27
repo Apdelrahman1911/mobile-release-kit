@@ -522,6 +522,14 @@ impl Clocks {
         let hard = IOS_HARD.min(work + SETTLEMENT);
         Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    fn installed_ios_signed(admitted: Instant) -> Self {
+        // The same original signed observation selects all three clocks once
+        // at Start. Existing F+120/F+130 tightening still cannot renew them.
+        Self { admitted, work: admitted + IOS_WORK.min(Duration::from_secs(120)),
+            finality: admitted + IOS_SIGNED_HARD.min(Duration::from_secs(250)),
+            cleanup: admitted + IOS_SIGNED_CLEANUP.min(Duration::from_secs(240)), signed: true, recovery: false }
+    }
 }
 #[derive(Clone)]
 pub(crate) struct SavedCommandOwner { inner: Arc<Inner> }
@@ -1150,7 +1158,7 @@ impl SavedCommandOwner {
         material: Option<Arc<IOSSigningMaterial>>) -> Result<Status, BridgeError> {
         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
         if context.domain() != self.inner.domain { return Err(self.inner.domain.invalid_owner()); }
-        if context.signed_ios() && !IOS_SIGNED_NATIVE_QUALIFIED || context.recovery_ios() && !IOS_RECOVERY_NATIVE_QUALIFIED {
+        if !self.inner.ios_mode_qualified(&context, None) {
             return Err(prepare_refusal(self.inner.domain, Availability::RuntimeUnqualified));
         }
         if context.signed_ios() != material.is_some() || material.as_ref().is_some_and(|original|
@@ -1191,7 +1199,10 @@ impl SavedCommandOwner {
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if let Some(observation) = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
-            if self.inner.domain != SavedCommandDomain::IOSArchive { return Err(self.inner.domain.unavailable()); }
+            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.original.is_some()
+                || !matches!(&context, Context::IOSArchive(selected) if observation.control.permits_mode(selected.operation)) {
+                return Err(self.inner.domain.unavailable());
+            }
             observation.control.claim()?;
         }
         let id = nonce(self.inner.domain)?; let generation = nonce(self.inner.domain)?;
@@ -1220,6 +1231,12 @@ impl SavedCommandOwner {
         let clocks = if prepared.projection.context.signed_ios() || prepared.projection.context.recovery_ios() {
             Clocks::for_context(&prepared.projection.context, admitted_at)
         } else { self.inner.start_clocks(admitted_at) };
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        let clocks = if prepared.projection.context.signed_ios()
+            && self.inner.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
+                o.original.is_none() && o.control.permits_mode(ios_wire::Operation::IOSSignedExport))) {
+            Clocks::installed_ios_signed(admitted_at)
+        } else { clocks };
         let material_matches = match (&prepared.material, &material) {
             (None, None) => !prepared.projection.context.signed_ios(),
             (Some(original), Some(current)) => Arc::ptr_eq(original, current) && matches!(&prepared.projection.context,
@@ -1238,8 +1255,7 @@ impl SavedCommandOwner {
         r.recovery = None;
         let mut refused = if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
             else if !material_matches || !recovery_matches || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
-            else if prepared.projection.context.signed_ios() && !IOS_SIGNED_NATIVE_QUALIFIED
-                || prepared.projection.context.recovery_ios() && !IOS_RECOVERY_NATIVE_QUALIFIED { Some(Reason::RuntimeUnavailable) }
+            else if !self.inner.ios_mode_qualified(&prepared.projection.context, None) { Some(Reason::RuntimeUnavailable) }
             else { None };
         let availability = self.inner.availability(&r, gate);
         if matches!(availability, Availability::CleanupUnknown | Availability::Shutdown | Availability::DocumentLost)
@@ -1309,7 +1325,10 @@ impl SavedCommandOwner {
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if let Some(observation) = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_mut() {
-            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.original.is_some() { return Err(self.inner.domain.unavailable()); }
+            if self.inner.domain != SavedCommandDomain::IOSArchive || observation.original.is_some()
+                || !matches!(&owner.context, Context::IOSArchive(selected) if observation.control.permits_mode(selected.operation)) {
+                return Err(self.inner.domain.unavailable());
+            }
             observation.original = Some(owner.clone());
         }
         let (release, enter) = oneshot::channel();
@@ -1523,10 +1542,32 @@ impl Inner {
         self.domain == SavedCommandDomain::ProjectRecovery && cfg!(feature = "custom-protocol")
             && self.runtime.project_recovery_installed_profile_available()
     }
+    fn ios_mode_qualified(&self, context: &Context, original: Option<&Session>) -> bool {
+        if context.domain() != self.domain { return false; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        {
+            let Ok(slot) = self.ios_observation.lock() else { return false; };
+            if let Some(observation) = slot.as_ref() {
+                let Context::IOSArchive(selected) = context else { return false; };
+                let same_original = match (original, observation.original.as_ref()) {
+                    (None, None) => true,
+                    (Some(owner), Some(bound)) => std::ptr::eq(bound.as_ref(), owner),
+                    _ => false,
+                };
+                // A different observed mode never falls through to production
+                // qualification, including unsigned use of a signed Control.
+                return same_original && observation.control.permits_mode(selected.operation);
+            }
+        }
+        let _ = original;
+        (!context.signed_ios() || IOS_SIGNED_NATIVE_QUALIFIED)
+            && (!context.recovery_ios() || IOS_RECOVERY_NATIVE_QUALIFIED)
+    }
     fn start_clocks(&self, admitted: Instant) -> Clocks {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if self.domain == SavedCommandDomain::IOSArchive
-            && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o| o.control.permits())) {
+            && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
+                o.original.is_none() && o.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive))) {
             return Clocks::installed_ios(admitted);
         }
         Clocks::new(self.domain, admitted)
@@ -1538,7 +1579,9 @@ impl Inner {
     fn qualified(&self) -> bool {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if self.domain == SavedCommandDomain::IOSArchive && self.runtime.ios_archive_installed_profile_available()
-            && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o| o.control.permits())) { return true; }
+            && self.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
+                [ios_wire::Operation::IOSUnsignedArchive, ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]
+                    .into_iter().any(|operation| o.control.permits_mode(operation))))) { return true; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.domain == SavedCommandDomain::AndroidBuild
             && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)
@@ -1692,6 +1735,8 @@ impl Inner {
                 self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); return;
             }
         };
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        let mut signed_inputs_bound = false;
         let Some(a) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         match incoming {
             Incoming::Accepted(stage) if !a.accepted && !a.terminal => {
@@ -1701,6 +1746,11 @@ impl Inner {
             Incoming::Progress(stage) if a.accepted && !a.terminal
                 && a.projection.stage.is_some_and(|previous| stage.after(previous)) => {
                 a.projection.stage = Some(stage); self.bump(&mut r);
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+                {
+                    signed_inputs_bound = stage == Stage::IOSArchive(ios_wire::Stage::InputsBound)
+                        && owner.context.signed_ios() && original_session(&r, owner);
+                }
             }
             Incoming::Terminal(terminal) if a.accepted && !a.terminal => {
                 let stage = match &terminal { Terminal::AndroidBuild(t) => Some(Stage::AndroidBuild(t.activity.stage)),
@@ -1725,6 +1775,12 @@ impl Inner {
                 if !settled { owner.resource_unknown.store(true, Ordering::SeqCst); self.unknown_locked(&mut r, owner); }
             }
             _ => { owner.resource_unknown.store(true, Ordering::SeqCst); self.stop_locked(&mut r, owner, Reason::ProtocolError, now); self.unknown_locked(&mut r, owner); }
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        if signed_inputs_bound {
+            // A witness callback may fail the observation. Do not keep the
+            // registry (or any native/document borrow) across that callback.
+            drop(r); observe_installed_ios_signed_inputs(self, owner);
         }
         owner.wake.notify_waiters();
     }
@@ -2348,7 +2404,7 @@ fn spawn_android_original(inner: &Inner, owner: &Session, runtime: VerifiedRunti
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, native: Option<Arc<Mutex<IOSNativeBooks>>>) {
     if owner.domain != SavedCommandDomain::IOSArchive || inner.domain != owner.domain || !inner.qualified()
-        || owner.context.signed_ios() && !IOS_SIGNED_NATIVE_QUALIFIED || owner.context.recovery_ios() && !IOS_RECOVERY_NATIVE_QUALIFIED
+        || !inner.ios_mode_qualified(&owner.context, Some(owner))
         || Profile::current(owner.domain) != Some(owner.profile) { inner.stop(owner, Reason::ToolchainUnavailable); return; }
     if !owner.recovery_matches() { inner.stop(owner, Reason::StaleIntent); return; }
     let Some(native) = native else { inner.stop(owner, Reason::ToolchainUnavailable); return; };
@@ -2443,7 +2499,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if owner.domain == SavedCommandDomain::AndroidBuild && (!inner.qualified() || inner.toolchain.is_none()) {
         inner.stop(owner, Reason::ToolchainUnavailable); return;
     }
-    if owner.domain == SavedCommandDomain::IOSArchive && !inner.qualified() {
+    if owner.domain == SavedCommandDomain::IOSArchive
+        && (!inner.qualified() || !inner.ios_mode_qualified(&owner.context, Some(owner.as_ref()))) {
         inner.stop(owner, Reason::RuntimeUnavailable); return;
     }
     let mut book = owner.resources.lock().await;
@@ -2846,14 +2903,34 @@ impl SavedCommandOwner {
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+fn observe_installed_ios_signed_inputs(inner: &Inner, owner: &Session) {
+    use crate::shell::installed_observation::ios::Case;
+    let original = inner.ios_observation.lock().ok().map(|slot| slot.as_ref().map(|observation| {
+        (observation.control.clone(), observation.original.as_ref().is_some_and(|original| std::ptr::eq(original.as_ref(), owner)))
+    }));
+    match original {
+        Some(Some((control, true))) if control.case == Case::SignedCancel => {
+            // DATA from the accepted original typed InputsBound frame only.
+            // The existing observer/UI path issues ordinary exact-owner Cancel.
+            control.signed_cancel_boundary(&owner.id, &owner.generation);
+        },
+        Some(None) | Some(Some((_, true))) => {},
+        _ => inner.unknown(owner),
+    }
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_observation::ios::Snapshot> {
     use crate::shell::installed_observation::ios::{OriginalFacts, Snapshot};
-    let (owner, retired, core_settled, recorded_terminal) = {
+    let (owner, control, retired, core_settled, recorded_terminal) = {
         let observation = inner.ios_observation.try_lock().ok()?;
         let observation = observation.as_ref()?;
-        (observation.original.as_ref()?.clone(), observation.retired, observation.core_settled, observation.terminal.clone())
+        (observation.original.as_ref()?.clone(), observation.control.clone(), observation.retired, observation.core_settled, observation.terminal.clone())
     };
     if owner.domain != SavedCommandDomain::IOSArchive || inner.domain != SavedCommandDomain::IOSArchive { return None; }
+    let Context::IOSArchive(context) = &owner.context else { return None; };
+    if !control.permits_mode(context.operation) || owner.clocks.signed != context.signed()
+        || owner.clocks.recovery != context.recovery() { return None; }
     // Read only the original records. Contention is unavailable evidence, not
     // a guessed success, another inspection, or a reason to replace any owner.
     let book = owner.resources.try_lock().ok()?;
@@ -2868,6 +2945,11 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
     } }?;
     let native_settlement_joined = book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
         && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, .. })));
+    let (cleanup_ms, material_loan_retired, material_loan_present) = if context.account_lifecycle() {
+        let material = owner.material.try_lock().ok()?;
+        (Some(owner.clocks.cleanup.duration_since(owner.clocks.admitted).as_millis().try_into().ok()?),
+            Some(owner.material_retired.load(Ordering::SeqCst)), Some(material.is_some()))
+    } else { (None, None, None) };
     Some(Snapshot { facts: OriginalFacts {
         operation_id: owner.id.clone(), owner_generation: owner.generation.clone(),
         inspection_joined: book.inspection_started && book.inspection_joined && !book.inspection_failed
@@ -2878,7 +2960,7 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
         child_waited_success: startup.returned && !startup.failed && book.child.is_some() && !book.wait_failed
             && book.waited.as_ref().is_some_and(ExitStatus::success),
         stdin_closed: book.write_end.as_ref().is_some_and(|end| end.sent && end.closed && !end.failed),
-        stdout_eof_closed: book.out_end.as_ref().is_some_and(|end| (2..=ios_wire::MAX_FRAMES).contains(&end.frames)
+        stdout_eof_closed: book.out_end.as_ref().is_some_and(|end| (2..=context.frame_limit()).contains(&end.frames)
             && end.eof && end.closed && !end.failed && end.decoder_settled),
         stderr_eof_closed: book.err_end.as_ref().is_some_and(|end| end.frames == 0 && end.eof && end.closed && !end.failed),
         io_joined: book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
@@ -2901,22 +2983,23 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
             || registry.disabled || registry.exhausted || inner.poisoned.load(Ordering::SeqCst),
         work_ms: owner.clocks.work.duration_since(owner.clocks.admitted).as_millis().try_into().ok()?,
         hard_ms: owner.clocks.finality.duration_since(owner.clocks.admitted).as_millis().try_into().ok()?,
+        cleanup_ms, material_loan_retired, material_loan_present,
     }, terminal })
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
 async fn observe_installed_ios_final(inner: &Arc<Inner>, owner: &Arc<Session>, settled: bool) -> bool {
-    use crate::shell::installed_observation::ios::Case;
     if owner.domain != SavedCommandDomain::IOSArchive { return settled; }
     let original = inner.ios_observation.lock().ok().map(|slot| slot.as_ref().map(|observation| {
         (observation.control.clone(), observation.original.as_ref().is_some_and(|original| Arc::ptr_eq(original, owner)))
     }));
     let control = match original {
-        Some(Some((control, true))) if control.case == Case::Finality => control,
+        Some(Some((control, true))) if control.holds_finality() => control,
         Some(None) | Some(Some((_, true))) => return settled,
         _ => { inner.unknown(owner); return false; },
     };
-    let Some(end) = inner.endpoint(owner).map(|end| end.min(owner.clocks.work)) else {
+    let hold_limit = if owner.clocks.signed { owner.clocks.finality } else { owner.clocks.work };
+    let Some(end) = inner.endpoint(owner).map(|end| end.min(hold_limit)) else {
         control.unavailable_witness(); inner.unknown(owner); return false;
     };
     let prepared = settled && Instant::now() < end
@@ -2928,14 +3011,14 @@ async fn observe_installed_ios_final(inner: &Arc<Inner>, owner: &Arc<Session>, s
     let mut held = Box::pin(control.hold_observer(end));
     loop {
         let wake = owner.wake.notified();
-        let current = inner.endpoint(owner).map(|end| end.min(owner.clocks.work));
+        let current = inner.endpoint(owner).map(|end| end.min(hold_limit));
         if current.is_none_or(|end| Instant::now() >= end) {
             control.unavailable_witness(); inner.unknown(owner); return false;
         }
         tokio::select! {
             biased;
             result = &mut held => {
-                if !result || inner.endpoint(owner).is_none_or(|end| Instant::now() >= end.min(owner.clocks.work)) {
+                if !result || inner.endpoint(owner).is_none_or(|end| Instant::now() >= end.min(hold_limit)) {
                     control.unavailable_witness(); inner.unknown(owner); return false;
                 }
                 return settled;

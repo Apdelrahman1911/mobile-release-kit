@@ -756,7 +756,8 @@ impl RuntimeConfig {
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
-        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn admit_installed_session_once(&self, identity: &std::sync::Arc<()>) -> Result<(), BridgeError> {
         self.passive_installed_profile()?;
         self.installed_session.admit_once(identity)

@@ -228,9 +228,10 @@ _Static_assert(sizeof(MRKIdentityWire) == 56, "fixed original identity scalar AB
 enum { MRK_ID_ARMED = 1u, MRK_ID_CONFIG_ATTEMPTED = 2u, MRK_ID_PARENT_ENTERED = 4u,
     MRK_ID_PARENT_RETURNED = 8u, MRK_ID_CONFIG_COMPLETE = 16u,
     MRK_ID_PROMPT_ENTERED = 32u, MRK_ID_PROMPT_RETURNED = 64u,
-    MRK_ID_DIRECTORY_ENTERED = 128u, MRK_ID_DIRECTORY_RETURNED = 256u };
+    MRK_ID_DIRECTORY_ENTERED = 128u, MRK_ID_DIRECTORY_RETURNED = 256u,
+    MRK_ID_FILE_PANEL = 512u, MRK_ID_NAME_ENTERED = 1024u, MRK_ID_NAME_RETURNED = 2048u };
 enum { MRK_ID_OBJECTS = 1u, MRK_ID_TAGS, MRK_ID_PARENT_SET, MRK_ID_PARENT_GET, MRK_ID_COMPLETE,
-    MRK_ID_PROMPT_SET, MRK_ID_PROMPT_GET, MRK_ID_DIRECTORY_URL, MRK_ID_DIRECTORY_SET };
+    MRK_ID_PROMPT_SET, MRK_ID_PROMPT_GET, MRK_ID_DIRECTORY_URL, MRK_ID_DIRECTORY_SET, MRK_ID_NAME_SET, MRK_ID_NAME_GET };
 enum { MRK_ID_UNOBSERVED, MRK_ID_NIL, MRK_ID_MATCH, MRK_ID_DIFFERENT, MRK_ID_TYPE_INVALID };
 enum { MRK_PANEL_ID_UNOBSERVED, MRK_PANEL_ID_NIL, MRK_PANEL_ID_TYPE_INVALID, MRK_PANEL_ID_EMPTY,
     MRK_PANEL_ID_LIMIT, MRK_PANEL_ID_NUL, MRK_PANEL_ID_ENCODING, MRK_PANEL_ID_VALID,
@@ -475,12 +476,21 @@ static void mrk_panel_completion_selection(MRKInstalledPanel *s) {
 }
 static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s) {
     // Actual pre-presentation setter return + current ROOT browsing, not selection.
-    if (s->kind != 1 || !s->window || !s->observationDirectoryReturned
+    if ((s->kind != 1 && s->kind != 3) || !s->window || !s->observationDirectoryReturned
         || !mrk_target_path(s->observationTarget)) return NO;
     NSURL *url = [(NSOpenPanel *)s->window directoryURL];
     const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
-    return path && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
+    // Preserve the original Project proof. Only File panels need the parent/
+    // filename transformation and its additional Objective-C getters.
+    if (s->kind == 1) return path && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
         && strcmp(path, s->observationTarget) == 0;
+    NSString *target = [NSString stringWithUTF8String:s->observationTarget];
+    NSString *directory = [target stringByDeletingLastPathComponent];
+    const char *expected = [directory fileSystemRepresentation];
+    return path && expected && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
+        && strcmp(path, expected) == 0
+        && (s->observationIdentity.flags & (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)) == (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)
+        && [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];
 }
 int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity) {
     if (!pthread_main_np() || !opaque || !kind || !flags || !response || !path || capacity != 4097) return EINVAL;
@@ -513,7 +523,7 @@ enum {
     MRK_ACTION_DIRECTORY_UNBOUND, MRK_ACTION_DIRECTORY_RETURNED, MRK_ACTION_DIRECTORY_READY,
     MRK_ACTION_ALERT_BUTTONS, MRK_ACTION_ALERT, MRK_ACTION_BUTTON_COUNT, MRK_ACTION_BUTTON_INDEX,
     MRK_ACTION_BUTTON_WINDOW, MRK_ACTION_BUTTON_ENABLED, MRK_ACTION_BUTTON_HIDDEN,
-    MRK_ACTION_PROJECT_CANCEL, MRK_ACTION_PROJECT_OPEN, MRK_ACTION_QUIT_CANCEL, MRK_ACTION_QUIT_CONFIRM
+    MRK_ACTION_PROJECT_CANCEL, MRK_ACTION_PROJECT_OPEN, MRK_ACTION_QUIT_CANCEL, MRK_ACTION_QUIT_CONFIRM, MRK_ACTION_FILE_CANCEL
 };
 _Static_assert(EPERM == 1 && EIO == 5 && EINVAL == 22 && EAGAIN == 35 && EALREADY == 37, "Darwin action diagnostic errno ABI");
 static int mrk_observation_action_return(uint32_t *diagnostic, uint32_t domain, uint32_t site, int status) {
@@ -527,7 +537,7 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
     // Split only the existing short-circuit predicates, in their original order.
     if (!pthread_main_np()) MRK_ACTION_RETURN(EINVAL);
     site = MRK_ACTION_POINTER; if (!opaque) MRK_ACTION_RETURN(EINVAL);
-    site = MRK_ACTION_CODE; if (action != 1 && action != 4 && action != 5) MRK_ACTION_RETURN(EINVAL);
+    site = MRK_ACTION_CODE; if (action != 1 && action != 4 && action != 5 && action != 6) MRK_ACTION_RETURN(EINVAL);
     site = MRK_ACTION_ARGUMENT; if (directory != NULL) MRK_ACTION_RETURN(EINVAL);
     MRKInstalledPanel *s = opaque;
     site = MRK_ACTION_UNKNOWN; if (s->unknown) MRK_ACTION_RETURN(EIO);
@@ -541,13 +551,13 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
     site = MRK_ACTION_CLOSED; if (s->closed) MRK_ACTION_RETURN(EPERM);
     site = MRK_ACTION_ATTEMPTED; if (s->observationActionAttempted) MRK_ACTION_RETURN(EPERM);
     site = MRK_ACTION_KIND;
-    if ((action <= 3 && s->kind != 1) || (action >= 4 && s->kind != 2)) MRK_ACTION_RETURN(EPERM);
+    if ((action <= 3 && s->kind != 1) || ((action == 4 || action == 5) && s->kind != 2) || (action == 6 && s->kind != 3)) MRK_ACTION_RETURN(EPERM);
     @try {
         // EAGAIN is only pre-action readiness, never permission to repeat an
         // attempted action. The caller's original endpoint is not renewed.
         site = MRK_ACTION_ATTACHMENT; if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);
         NSButton *button = nil;
-        if (action >= 4) {
+        if (action == 4 || action == 5) {
             site = MRK_ACTION_ALERT_BUTTONS;
             NSArray<NSButton *> *buttons = [s->alert buttons];
             site = MRK_ACTION_ALERT; if (!s->alert) MRK_ACTION_RETURN(EPERM);
@@ -559,7 +569,7 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
             site = MRK_ACTION_BUTTON_HIDDEN; if ([button isHidden]) MRK_ACTION_RETURN(EAGAIN);
         }
         s->observationActionAttempted = YES;
-        if (action == 1) { site = MRK_ACTION_PROJECT_CANCEL; [(NSOpenPanel *)s->window cancel:nil]; }
+        if (action == 1 || action == 6) { site = action == 1 ? MRK_ACTION_PROJECT_CANCEL : MRK_ACTION_FILE_CANCEL; [(NSOpenPanel *)s->window cancel:nil]; }
         else { site = action == 4 ? MRK_ACTION_QUIT_CANCEL : MRK_ACTION_QUIT_CONFIRM; [button performClick:nil]; }
         s->observationActionReturned = YES;
         // No call of s->completion, endSheet:, close_once or selected-path
@@ -692,8 +702,9 @@ static uint32_t mrk_original_identifier(id value, uint8_t bytes[64]) {
 static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
     MRKIdentityWire *d = &s->observationIdentity;
     d->flags |= MRK_ID_CONFIG_ATTEMPTED; d->site = MRK_ID_OBJECTS;
+    if (s->kind == 3) d->flags |= MRK_ID_FILE_PANEL;
     d->error = MRK_OPEN_INELIGIBLE;
-    if (!s->parent || !s->window || s->kind != 1 || s->unknown || s->responded
+    if (!s->parent || !s->window || (s->kind != 1 && s->kind != 3) || s->unknown || s->responded
         || s->callbackActive || s->closeAttempted || s->closed) return NO;
     @try {
         d->site = MRK_ID_TAGS; d->error = MRK_OPEN_INPUT;
@@ -720,7 +731,8 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
         if (d->prompt != MRK_ID_MATCH) { d->error = MRK_OPEN_CHANGED; return NO; }
         d->site = MRK_ID_DIRECTORY_URL; d->error = MRK_OPEN_INPUT;
         if (!mrk_target_path(s->observationTarget) || s->observationDirectoryReturned) return NO;
-        NSString *directory = [NSString stringWithUTF8String:s->observationTarget];
+        NSString *target = [NSString stringWithUTF8String:s->observationTarget];
+        NSString *directory = s->kind == 3 ? [target stringByDeletingLastPathComponent] : target;
         NSURL *url = directory ? [NSURL fileURLWithPath:directory isDirectory:YES] : nil;
         if (!url) return NO;
         // The one actual initial-directory setter precedes beginSheet. No late
@@ -728,6 +740,16 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
         d->site = MRK_ID_DIRECTORY_SET; d->flags |= MRK_ID_DIRECTORY_ENTERED;
         [(NSOpenPanel *)s->window setDirectoryURL:url];
         d->flags |= MRK_ID_DIRECTORY_RETURNED; s->observationDirectoryReturned = YES;
+        if (s->kind == 3) {
+            // Genuine file panel only, before beginSheet. Prefilling is not a
+            // callback or selection: the exact singleton URL is checked later.
+            d->site = MRK_ID_NAME_SET; d->flags |= MRK_ID_NAME_ENTERED;
+            [(NSOpenPanel *)s->window setNameFieldStringValue:[target lastPathComponent]];
+            d->flags |= MRK_ID_NAME_RETURNED; d->site = MRK_ID_NAME_GET;
+            if (![[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]]) {
+                d->error = MRK_OPEN_CHANGED; return NO;
+            }
+        }
         // Only the parent identifier is set. No panel-identifier setter or
         // invented identifier return; that value is read at admitted preparation.
         d->flags |= MRK_ID_CONFIG_COMPLETE; d->site = MRK_ID_COMPLETE; d->error = MRK_OPEN_NONE;
@@ -738,7 +760,7 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
     }
 }
 static BOOL mrk_original_eligible(MRKInstalledPanel *s) {
-    return !s->unknown && s->started && s->kind == 1 && s->parent && s->window && s->completion
+    return !s->unknown && s->started && (s->kind == 1 || s->kind == 3) && s->parent && s->window && s->completion
         && !s->responded && !s->callbackActive && !s->closeAttempted && !s->closed
         && !s->observationActionAttempted && !s->observationActionReturned
         && (s->observationIdentity.flags & (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE)) == (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE);
@@ -898,10 +920,13 @@ typedef struct {
     AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
 } MRKPrompt;
-// One registered worker per original process. On exception/uncertain CF cleanup
-// the exact fixed ledger remains retained for process lifetime, never Drop/retry.
-static MRKPrompt mrk_prompt_original;
-static atomic_flag mrk_prompt_claimed = ATOMIC_FLAG_INIT;
+// At most eight different genuine panels, one registered worker at a time.
+// Every original ledger remains retained for process lifetime, never reused.
+// Unknown CF/control custody permanently forbids any successor, not just reuse.
+static MRKPrompt mrk_prompt_originals[8];
+static atomic_uint mrk_prompt_next = 0;
+static atomic_flag mrk_prompt_active = ATOMIC_FLAG_INIT;
+static atomic_bool mrk_prompt_unknown = false;
 static BOOL mrk_ax_fail(MRKPrompt *s, uint32_t error) {
     if (!s->result.error) s->result.error = error;
     return NO;
@@ -1213,8 +1238,17 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
     if (target_length < 2) { refused.error = MRK_OPEN_INPUT; *out = refused; return; }
     for (size_t i = target_length; i < target_capacity; ++i)
         if (target[i]) { refused.error = MRK_OPEN_INPUT; *out = refused; return; }
-    if (atomic_flag_test_and_set(&mrk_prompt_claimed)) { refused.error = MRK_OPEN_CUSTODY; *out = refused; return; }
-    MRKPrompt *s = &mrk_prompt_original; s->admit = admission; s->recheck = recheck; s->context = context;
+    if (atomic_load(&mrk_prompt_unknown) || atomic_flag_test_and_set(&mrk_prompt_active)) {
+        // Overlapping claims violate the same-original one-worker invariant;
+        // do not let a later clear by the first worker authorize a successor.
+        atomic_store(&mrk_prompt_unknown, true);
+        refused.error = MRK_OPEN_CUSTODY; *out = refused; return;
+    }
+    unsigned index = atomic_load(&mrk_prompt_next);
+    if (index >= 8 || !atomic_compare_exchange_strong(&mrk_prompt_next, &index, index + 1)) {
+        atomic_store(&mrk_prompt_unknown, true); refused.error = MRK_OPEN_CUSTODY; *out = refused; return;
+    }
+    MRKPrompt *s = &mrk_prompt_originals[index]; s->admit = admission; s->recheck = recheck; s->context = context;
     s->cleanupKnown = YES; s->result.site = MRK_OPEN_ENTRY;
     @try { mrk_ax_open(s, parent, panel, prompt); }
     @catch (NSException *e) { (void)e; mrk_ax_fail(s, MRK_OPEN_EXCEPTION); s->cleanupKnown = NO; }
@@ -1239,5 +1273,9 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
     if (s->cleanupKnown && s->result.released == s->result.owned) s->result.flags |= MRK_OPEN_KNOWN;
     s->admit = NULL; s->recheck = NULL; s->context = NULL; // No dangling worker-stack callback in the retained CF ledger.
     *out = s->result; // All ordinary CF releases returned, or exact originals stay registered above.
+    if (!(s->result.flags & MRK_OPEN_KNOWN)) atomic_store(&mrk_prompt_unknown, true);
+    // Rust still requires the actual worker/main-recheck joins and exact old
+    // panel completion before it may construct/dispatch a successor original.
+    atomic_flag_clear(&mrk_prompt_active);
 }
 #endif

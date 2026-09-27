@@ -103,7 +103,7 @@ pub fn publish_directory(from: BorrowedFd<'_>, source: &str, to: BorrowedFd<'_>,
     result(unsafe { mrk_publish(from.as_raw_fd(), source.as_ptr(), to.as_raw_fd(), destination.as_ptr()) })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind { Project, Quit, File }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelResponse { Accept, Decline, Other }
@@ -224,7 +224,7 @@ mod observation {
     use super::*;
     use std::{path::Path, os::unix::ffi::OsStrExt, panic::{catch_unwind, AssertUnwindSafe}, time::{Duration, Instant}};
 
-    pub enum PanelAction { ProjectCancel, QuitCancel, QuitConfirm }
+    pub enum PanelAction { ProjectCancel, QuitCancel, QuitConfirm, FileCancel }
     /// Closed labels copied from one original return, never a native query or
     /// action/finality permit. Missing/invalid DATA does not change that return.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,21 +234,21 @@ mod observation {
     }
     fn action_name(action: c_int) -> Option<&'static str> {
         match action { 1 => Some("project-cancel"), 2 => Some("project-directory"), 3 => Some("project-open"),
-            4 => Some("quit-cancel"), 5 => Some("quit-confirm"), _ => None }
+            4 => Some("quit-cancel"), 5 => Some("quit-confirm"), 6 => Some("file-cancel"), _ => None }
     }
     // Same numbered sites and Darwin errno values as the feature-gated shim.
     // Codes 2/3 remain historical diagnostic DATA only, never callable actions.
     // label, original native-return status (-1 = exception-only), action mask,
     // whether an EXISTING Objective-C query/action at this site can throw.
-    const ACTION_SITES: [(&str, c_int, u8, bool); 35] = [
-        ("main-thread", 22, 31, false), ("state-pointer", 22, 31, false),
-        ("action-code", 22, 31, false), ("directory-argument", 22, 31, false),
-        ("original-unknown", 5, 31, false), ("not-started", 1, 31, false),
-        ("window-absent", 1, 31, false), ("parent-absent", 1, 31, false),
-        ("completion-absent", 1, 31, false), ("responded", 1, 31, false),
-        ("callback-active", 1, 31, false), ("close-attempted", 1, 31, false),
-        ("closed", 1, 31, false), ("action-attempted", 1, 31, false),
-        ("panel-kind", 1, 31, false), ("attachment", 35, 31, true),
+    const ACTION_SITES: [(&str, c_int, u8, bool); 36] = [
+        ("main-thread", 22, 63, false), ("state-pointer", 22, 63, false),
+        ("action-code", 22, 63, false), ("directory-argument", 22, 63, false),
+        ("original-unknown", 5, 63, false), ("not-started", 1, 63, false),
+        ("window-absent", 1, 63, false), ("parent-absent", 1, 63, false),
+        ("completion-absent", 1, 63, false), ("responded", 1, 63, false),
+        ("callback-active", 1, 63, false), ("close-attempted", 1, 63, false),
+        ("closed", 1, 63, false), ("action-attempted", 1, 63, false),
+        ("panel-kind", 1, 63, false), ("attachment", 35, 63, true),
         ("directory-already-bound", 1, 2, false), ("directory-path", 22, 2, false),
         ("directory-text", 22, 2, true), ("directory-url", 22, 2, true),
         ("directory-set", 0, 2, true), ("directory-unbound", 1, 4, false),
@@ -257,7 +257,7 @@ mod observation {
         ("button-count", 1, 24, true), ("button-index", -1, 24, true),
         ("button-window", 1, 24, true), ("button-enabled", 35, 24, true),
         ("button-hidden", 35, 24, true), ("project-cancel", 0, 1, true),
-        ("project-open", 0, 4, true), ("quit-cancel", 0, 8, true), ("quit-confirm", 0, 16, true),
+        ("project-open", 0, 4, true), ("quit-cancel", 0, 8, true), ("quit-confirm", 0, 16, true), ("file-cancel", 0, 32, true),
     ];
     fn action_return_diagnostic(action: c_int, status: c_int, wire: u32) -> Option<PanelActionDiagnostic> {
         let action_label = action_name(action)?;
@@ -274,7 +274,7 @@ mod observation {
     }
     fn action_diagnostics_data_check() -> bool {
         // Inert decoder checks only. No Panel, exception, or native call exists.
-        for action in 1..=5 {
+        for action in 1..=6 {
             for (index, &(site, status, actions, exception)) in ACTION_SITES.iter().enumerate() {
                 let applies = actions & (1u8 << (action - 1)) != 0;
                 let wire = (index + 1) as u32;
@@ -292,7 +292,7 @@ mod observation {
         action_return_diagnostic(3, 5, 0x20021).is_some_and(|d| d.site == "project-open" && d.error == "io")
             && action_return_diagnostic(3, 0, 0x10021).is_some_and(|d| d.error == "none")
             && action_return_diagnostic(3, 35, 0x10018).is_some_and(|d| d.error == "would-block")
-            && [0, 6, -1].into_iter().all(|action| action_return_diagnostic(action, 5, 0x20021).is_none())
+            && [0, 7, -1].into_iter().all(|action| action_return_diagnostic(action, 5, 0x20021).is_none())
             && [0, 0x10000, 0x10024, u32::MAX].into_iter().all(|wire| action_return_diagnostic(3, 5, wire).is_none())
     }
     pub struct PanelObservation {
@@ -382,9 +382,9 @@ mod observation {
         binding: IdentityProofWire,
     }
     const IDENTITY_CLASSES: [Option<&str>; 5] = [None, Some("nil"), Some("match"), Some("different"), Some("type-invalid")];
-    const IDENTITY_SITES: [Option<&str>; 10] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
+    const IDENTITY_SITES: [Option<&str>; 12] = [None, Some("objects"), Some("parent-tag"), Some("parent-set"),
         Some("parent-get"), Some("complete"), Some("prompt-set"), Some("prompt-get"),
-        Some("initial-directory-url"), Some("initial-directory-set")];
+        Some("initial-directory-url"), Some("initial-directory-set"), Some("file-name-set"), Some("file-name-get")];
     const PANEL_ID_CLASSES: [Option<&str>; 10] = [None, Some("nil"), Some("type-invalid"), Some("empty"),
         Some("byte-limit"), Some("nul"), Some("encoding-invalid"), Some("valid"), Some("match"), Some("different")];
     const PROOF_SITES: [&str; 14] = ["objects", "attachment", "directory", "parent-identifier", "panel-identifier",
@@ -395,6 +395,7 @@ mod observation {
         pub attempted: bool, pub parent_setter_entered: bool, pub parent_setter_returned: bool,
         pub prompt_setter_entered: bool, pub prompt_setter_returned: bool,
         pub initial_directory_setter_entered: bool, pub initial_directory_setter_returned: bool,
+        pub file_panel: bool, pub file_name_setter_entered: bool, pub file_name_setter_returned: bool,
         pub parent: Option<&'static str>, pub prompt: Option<&'static str>,
         pub site: Option<&'static str>, pub error: Option<&'static str>,
     }
@@ -403,6 +404,7 @@ mod observation {
             self.attempted && self.parent_setter_entered && self.parent_setter_returned
                 && self.prompt_setter_entered && self.prompt_setter_returned && self.prompt == Some("match")
                 && self.initial_directory_setter_entered && self.initial_directory_setter_returned
+                && self.file_name_setter_entered == self.file_panel && self.file_name_setter_returned == self.file_panel
                 && self.parent.is_some() && self.site == Some("complete") && self.error == Some("none")
         }
     }
@@ -429,29 +431,42 @@ mod observation {
     #[derive(Clone, Copy)]
     pub struct IdentityBindingReturn { pub configuration: IdentityConfiguration, pub binding: IdentityBinding }
     fn identity_configuration(w: IdentityWire) -> Option<IdentityConfiguration> {
-        if w.flags & !511 != 0 || w.flags & 1 == 0 { return None; }
+        if w.flags & !4095 != 0 || w.flags & 1 == 0 { return None; }
         let parent = *IDENTITY_CLASSES.get(w.parent as usize)?;
         let prompt = *IDENTITY_CLASSES.get(w.prompt as usize)?;
         let c = IdentityConfiguration {
             attempted: w.flags & 2 != 0, parent_setter_entered: w.flags & 4 != 0, parent_setter_returned: w.flags & 8 != 0,
             prompt_setter_entered: w.flags & 32 != 0, prompt_setter_returned: w.flags & 64 != 0,
             initial_directory_setter_entered: w.flags & 128 != 0, initial_directory_setter_returned: w.flags & 256 != 0,
+            file_panel: w.flags & 512 != 0, file_name_setter_entered: w.flags & 1024 != 0, file_name_setter_returned: w.flags & 2048 != 0,
             parent, prompt, site: *IDENTITY_SITES.get(w.site as usize)?,
             error: (w.flags & 2 != 0).then_some(*OPEN_ERRORS.get(w.error as usize)?),
         };
         if !c.attempted {
             return (w.flags == 1 && w.site == 0 && w.error == 0 && parent.is_none() && prompt.is_none()).then_some(c);
         }
+        // File-only setter states do not change the original project ABI.
+        // The kind bit is set by the original native constructor, not callers.
+        let file_flags = w.flags & (512 | 1024 | 2048);
+        let base_flags = w.flags & 511;
+        let file_valid = match w.site {
+            10 => file_flags == (512 | 1024) && base_flags == 495 && w.error == 14,
+            11 => file_flags == (512 | 1024 | 2048) && base_flags == 495 && matches!(w.error, 13 | 14),
+            5 if c.file_panel => file_flags == (512 | 1024 | 2048),
+            _ => file_flags == if c.file_panel { 512 } else { 0 },
+        };
+        if !file_valid { return None; }
         let valid = match (w.site, w.error) {
-            (1, 3) | (2, 2 | 14) => w.flags == 3 && parent.is_none() && prompt.is_none(),
-            (3, 14) => w.flags == 7 && parent.is_none() && prompt.is_none(),
-            (4, 14) => w.flags == 15 && parent.is_none() && prompt.is_none(),
-            (6, 14) => w.flags == 47 && parent.is_some() && prompt.is_none(),
-            (7, 14) => w.flags == 111 && parent.is_some() && prompt.is_none(),
-            (7, 13) => w.flags == 111 && parent.is_some() && matches!(prompt, Some("nil" | "different" | "type-invalid")),
-            (8, 2 | 14) => w.flags == 111 && parent.is_some() && prompt == Some("match"),
-            (9, 14) => w.flags == 239 && parent.is_some() && prompt == Some("match"),
-            (5, 0) => w.flags == 511 && c.complete(),
+            (10 | 11, 13 | 14) if c.file_panel => parent.is_some() && prompt == Some("match"),
+            (1, 3) | (2, 2 | 14) => base_flags == 3 && parent.is_none() && prompt.is_none(),
+            (3, 14) => base_flags == 7 && parent.is_none() && prompt.is_none(),
+            (4, 14) => base_flags == 15 && parent.is_none() && prompt.is_none(),
+            (6, 14) => base_flags == 47 && parent.is_some() && prompt.is_none(),
+            (7, 14) => base_flags == 111 && parent.is_some() && prompt.is_none(),
+            (7, 13) => base_flags == 111 && parent.is_some() && matches!(prompt, Some("nil" | "different" | "type-invalid")),
+            (8, 2 | 14) => base_flags == 111 && parent.is_some() && prompt == Some("match"),
+            (9, 14) => base_flags == 239 && parent.is_some() && prompt == Some("match"),
+            (5, 0) => base_flags == 511 && c.complete(),
             _ => false,
         };
         valid.then_some(c)
@@ -500,16 +515,21 @@ mod observation {
     }
     fn identity_data_check() -> bool {
         // Inert scalar DATA only: no panel/owner/native call or return is made.
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<IdentityProofWire>() != 36 { return false; }
         let empty = IdentityWire { flags: 1, ..IdentityWire::default() };
         if !identity_configuration(empty).is_some_and(|c| !c.attempted && !c.complete() && c.parent.is_none())
             || identity_configuration(IdentityWire::default()).is_some() { return false; }
         for parent in 1..=4 {
             let configured = IdentityWire { flags: 511, parent, prompt: 2, site: 5, ..IdentityWire::default() };
-            if !identity_configuration(configured).is_some_and(IdentityConfiguration::complete) { return false; }
+            if !identity_configuration(configured).is_some_and(|c| c.complete() && !c.file_panel)
+                || !identity_configuration(IdentityWire { flags: 4095, ..configured }).is_some_and(|c|
+                    c.complete() && c.file_panel && c.file_name_setter_entered && c.file_name_setter_returned) { return false; }
         }
         for (flags, site) in [(3, 2), (7, 3), (15, 4)] {
             let partial = IdentityWire { flags, site, error: 14, ..IdentityWire::default() };
             if !identity_configuration(partial).is_some_and(|c| !c.complete())
+                || !identity_configuration(IdentityWire { flags: flags | 512, ..partial }).is_some_and(|c|
+                    c.file_panel && !c.complete() && !c.file_name_setter_entered && !c.file_name_setter_returned)
                 || identity_configuration(IdentityWire { parent: 2, ..partial }).is_some() { return false; }
         }
         for (flags, site, error) in [(111, 8, 2), (111, 8, 14), (239, 9, 14)] {
@@ -517,6 +537,19 @@ mod observation {
             if !identity_configuration(partial).is_some_and(|c| !c.complete()
                 && c.initial_directory_setter_entered == (site == 9) && !c.initial_directory_setter_returned)
                 || identity_configuration(IdentityWire { flags: flags | 256, ..partial }).is_some() { return false; }
+        }
+        // Exact entered/returned distinction for the actual File-only setter
+        // and getter. Neither a partial nor a wrong kind may become complete.
+        for (flags, site, error) in [(2031, 10, 14), (4079, 11, 14), (4079, 11, 13)] {
+            let partial = IdentityWire { flags, site, error, parent: 2, prompt: 2, ..IdentityWire::default() };
+            if !identity_configuration(partial).is_some_and(|c| c.file_panel && !c.complete()
+                && c.initial_directory_setter_returned && c.file_name_setter_entered
+                && c.file_name_setter_returned == (site == 11)) { return false; }
+            for changed in [IdentityWire { flags: flags & !512, ..partial }, IdentityWire { flags: flags | 16, ..partial },
+                IdentityWire { flags: flags ^ 2048, ..partial }, IdentityWire { prompt: 3, ..partial },
+                IdentityWire { error: 0, ..partial }, IdentityWire { site: 5, ..partial }] {
+                if identity_configuration(changed).is_some() { return false; }
+            }
         }
         let proof = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
@@ -544,6 +577,8 @@ mod observation {
         let configured = IdentityWire { flags: 511, parent: 2, prompt: 2, site: 5, binding: proof, ..IdentityWire::default() };
         let early = IdentityProofWire { flags: 1, checked: 1, matched: 0, site: 1, error: 3, ..IdentityProofWire::default() };
         identity_binding_return(0, configured).is_some_and(|r| r.binding.matched())
+            && identity_binding_return(0, IdentityWire { flags: 4095, ..configured })
+                .is_some_and(|r| r.configuration.file_panel && r.binding.matched())
             && identity_binding_return(14, configured).is_none()
             && identity_binding_return(0, IdentityWire { binding: IdentityProofWire::default(), ..configured }).is_none()
             && identity_binding_return(3, IdentityWire { binding: early, ..configured }).is_some_and(|r| !r.binding.matched())
@@ -1168,14 +1203,14 @@ mod observation {
         pub fn installed_action(&mut self, action: PanelAction, diagnostic: &mut Option<PanelActionDiagnostic>) -> io::Result<bool> {
             *diagnostic = None; // Never expose a previous action's diagnostic.
             let name = match &action { PanelAction::ProjectCancel => "project-cancel",
-                PanelAction::QuitCancel => "quit-cancel", PanelAction::QuitConfirm => "quit-confirm" };
+                PanelAction::QuitCancel => "quit-cancel", PanelAction::QuitConfirm => "quit-confirm", PanelAction::FileCancel => "file-cancel" };
             if let Err(error) = self.usable() {
                 *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
                     site: "original-usability", error: "other" });
                 return Err(error);
             }
             let code = match action {
-                PanelAction::ProjectCancel => 1, PanelAction::QuitCancel => 4, PanelAction::QuitConfirm => 5,
+                PanelAction::ProjectCancel => 1, PanelAction::QuitCancel => 4, PanelAction::QuitConfirm => 5, PanelAction::FileCancel => 6,
             };
             // SAFETY: same retained main-thread original; no late directory or
             // direct Open route. Diagnostic belongs to THIS original call only.
