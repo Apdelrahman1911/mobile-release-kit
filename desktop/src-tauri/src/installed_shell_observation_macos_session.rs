@@ -262,12 +262,12 @@ impl Record {
     pub(super) fn final_originals(&mut self, snapshot: &InstalledMacSessionSnapshot) -> bool {
         self.observe(snapshot) && self.locked && snapshot.empty && snapshot.originals_settled && snapshot.originals == 12
     }
-    pub(super) fn report(&self) -> Option<Value> {
+    pub(super) fn report(&self, normal_registered: bool) -> Option<Value> {
         let signed = self.case.signed();
         let expected = [0, 1, 1, if signed { 2 } else { 7 }, if signed { 4 } else { 3 },
             0, if signed { 2 } else { 0 }, if signed { 2 } else { 0 }, if signed { 2 } else { 3 }, 1];
         let expected_inputs = [0, 0, 1, expected[3], expected[4], 0, expected[6], expected[7], 0, 0];
-        if !self.case.inputs() || !self.locked || !self.all_settled || self.context_revision != Some(1)
+        if !normal_registered || !self.case.inputs() || !self.locked || !self.all_settled || self.context_revision != Some(1)
             || self.original_count != 12 || self.completed != self.rows.len()
             || self.requests != expected || self.returns != expected || self.inputs != expected_inputs { return None; }
         let rows = self.rows.iter().enumerate().map(|(i, row)| {
@@ -284,7 +284,8 @@ impl Record {
                 "assessment":row.assessment,"recordId":row.record.as_ref().map(|r| r.0.as_str()),
                 "keptRevision":row.record.as_ref().map(|r| r.1),"assignedContextRevision":row.assigned}))
         }).collect::<Option<Vec<_>>>()?;
-        Some(json!({"schemaVersion":1,"oneUseOriginalDocumentAdmission":true,"mode":"session",
+        Some(json!({"schemaVersion":2,"oneUseOriginalDocumentRegistration":normal_registered,
+            "selection":"ordinary-installed-macos-session","mode":"session",
             "context":{"platform":"ios","stage":"candidate","purpose":"signing"},"rows":rows,
             "originalOperations":12,"allOriginalsSettled":true,"memorySessionLocked":true,"originalProjectAndQuitSettled":true,
             "observationMs":if self.case.signed() { 315000 } else { 45000 },"outerInvocationMs":if self.case.signed() { 325000 } else { 60000 }}))
@@ -329,7 +330,7 @@ pub(super) fn data_checks() -> bool {
     }
     let status = json!({"schemaVersion":2,"statusRevision":1,"persistence":null,"records":[],"assignments":[],"operation":null});
     let mut record = Record::new(Case::SigningInputs);
-    if !record.observe_status(&status) || record.report().is_some() { return false; }
+    if !record.observe_status(&status) || record.report(true).is_some() { return false; }
     for (key, replacement) in [("schemaVersion", json!(1)), ("persistence", json!({})),
         ("operation", json!({"settlement":"unknown"})), ("operation", json!({"settlement":"late-known"}))] {
         let mut changed = status.clone(); changed[key] = replacement;
@@ -360,13 +361,16 @@ pub(super) fn data_checks() -> bool {
         row.assessment = Some(if i == 0 { p12.clone() } else { json!({"state":"configured","identity":"not-applicable","fieldScopes":["cms-signed-data-envelope"]}) });
         row.record = Some(((i + 1).to_string().repeat(32),1)); row.assigned = Some(1);
     }
-    let Some(report) = signed.report() else { return false; };
-    if report["rows"][0]["recordId"] != "1".repeat(32) || report["rows"][1]["recordId"] != "2".repeat(32) { return false; }
+    let Some(report) = signed.report(true) else { return false; };
+    if signed.report(false).is_some() || report["schemaVersion"] != 2
+        || report["oneUseOriginalDocumentRegistration"] != true || report["selection"] != "ordinary-installed-macos-session"
+        || report.get("oneUseOriginalDocumentAdmission").is_some()
+        || report["rows"][0]["recordId"] != "1".repeat(32) || report["rows"][1]["recordId"] != "2".repeat(32) { return false; }
     let mut pending = signed.clone(); pending.all_settled = false;
     let mut extra = signed.clone(); extra.requests[Command::Prepare.index()] += 1; extra.returns = extra.requests;
     let mut unassigned = signed.clone(); unassigned.rows[1].assigned = None;
     let mut wrong_revision = signed.clone(); wrong_revision.rows[0].record.as_mut().unwrap().1 = 2;
-    pending.report().is_none() && extra.report().is_none() && unassigned.report().is_none() && wrong_revision.report().is_none()
+    pending.report(true).is_none() && extra.report(true).is_none() && unassigned.report(true).is_none() && wrong_revision.report(true).is_none()
 }
 
 impl Observation {

@@ -107,8 +107,8 @@ fn panel_readiness(panel: &ObservedPanel, id: u32, kind: mrk_macos_installed_nat
     Ok(true)
 }
 
-const METHODS: [&str; 9] = ["capabilities", "catalog", "project.snapshot", "config.validate",
-    "config.suggest", "config.preview", "environment.requirements", "github.setup.propose", "release.version.observe"];
+const METHODS: [&str; 10] = ["capabilities", "catalog", "project.snapshot", "config.validate",
+    "config.suggest", "config.preview", "environment.requirements", "github.setup.propose", "release.version.observe", "credentials.assess"];
 const APP_ID: &str = "org.example.mrk.observed";
 const VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n";
 const SOURCE: &[u8] = b"plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
@@ -180,7 +180,7 @@ impl Case {
         Step::OpenProject => Some(if self == Self::FirstSave { 1 } else { 0 }),
         Step::QuitCancel => Some(2), Step::Quit => Some(if self == Self::FirstSave { 3 } else { 1 }), _ => None,
     } }
-    fn methods(self) -> usize { METHODS.len() + usize::from(self.inputs()) }
+    fn methods(self) -> usize { METHODS.len() }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
     fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) => 0 } }
 }
@@ -1047,7 +1047,6 @@ impl Observation {
             && (METHODS.len()..=64).contains(&methods.len()) && (1..=64).contains(&actions.len())
             && methods.iter().filter(available).count() == self.case.methods()
             && METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1)
-            && methods.iter().filter(available).filter(|m| m["method"] == "credentials.assess").count() == usize::from(self.case.inputs())
             && methods.iter().all(|m| m["available"].is_boolean())
             && actions.iter().all(|a| a["available"].as_bool() == Some(false));
         let Some(mut r) = self.record() else { return; };
@@ -2321,6 +2320,9 @@ impl Observation {
     fn finish(&self) -> Option<Value> {
         if !self.timely() { return None; }
         let r = self.record()?;
+        // The App has already returned. This is saved registration history,
+        // not a renewed live-owner permission or a fabricated successful grant.
+        let normal_registered = self.ios.as_ref().is_some_and(|control| control.normal_session_registered());
         let project_open = r.project_open();
         let accessibility = project_open.map(|p| p.0);
         let identity_binding = project_open.map(|p| p.1);
@@ -2350,7 +2352,7 @@ impl Observation {
                 && r.native_actions_returned == [false,true,false,true]
                 && (if case == ios::Case::SigningInputs { r.ios_record.is_none() }
                     else { r.ios_record.as_ref().is_some_and(|record| record.report(case).is_some()) })
-                && (!case.inputs() || r.session_record.as_ref().is_some_and(|record| record.report().is_some())
+                && (!case.inputs() || r.session_record.as_ref().is_some_and(|record| record.report(normal_registered).is_some())
                     && r.panel_history.len() == 1 + session::count(case).min(6)
                     && r.panel_history.iter().enumerate().all(|(i,p)| p.sample.id == (if i == 0 { self.case.selected_id() }
                         else { session::choose_id(case, i as u8 - 1).unwrap_or(0) }) && p.sample.succeeded()
@@ -2371,7 +2373,7 @@ impl Observation {
         }).collect::<Option<Vec<_>>>()?;
         let mut report = json!({"schemaVersion":1,"sourceCommit":option_env!("GITHUB_SHA"),"runId":option_env!("GITHUB_RUN_ID"),
             "runAttempt":option_env!("GITHUB_RUN_ATTEMPT"),"case":self.case.name(),"instrumentedEngineeringApp":true,
-            "shippingBinaryQualified":false,"distributionQualified":false,"methods":if self.case.inputs() { "ten-passive-with-session-assessment" } else { "nine-passive" },"actionsAvailable":false,
+            "shippingBinaryQualified":false,"distributionQualified":false,"methods":"ten-passive-with-session-assessment","actionsAvailable":false,
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.project_settled && completion_selection.is_some_and(|s| s.succeeded(self.case.selected_id())),
                 "originalWindow":r.original_window.map(OriginalWindowSample::value),
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
@@ -2387,7 +2389,9 @@ impl Observation {
             "scope":"programmatic genuine controls; no Store, release, distribution or physical-device evidence"});
         if let Case::Ios(case) = self.case {
             if case.operation().is_some() { report["iosArchive"] = r.ios_record.as_ref()?.report(case)?; }
-            if case.inputs() { report["signingInputs"] = r.session_record.as_ref()?.report()?; }
+            if case.inputs() {
+                report["signingInputs"] = r.session_record.as_ref()?.report(normal_registered)?;
+            }
         }
         self.timely().then_some(report)
     }
@@ -3093,6 +3097,7 @@ fn completion_ownership_data_check() -> bool {
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     crate::asset_session::assert_project_selection_gate_contract();
+    crate::runtime::assert_installed_session_selection_contract();
     // Compiled profile DATA only: this inert path is never resolved or opened.
     // The real builder must still establish every installed/native original.
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));

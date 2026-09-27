@@ -339,9 +339,12 @@ class AquaDataTests(unittest.TestCase):
         for required in (
                 "timeout-minutes: 1", '"$MRK_PYTHON" -I -S -B -',
                 'path = pathlib.Path("tests/desktop/test_macos_aqua_qualification.py").absolute()',
-                'suite = unittest.TestSuite([module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")])',
+                'module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")',
+                'module.IOSAquaDataTests("test_normal_macos_selection_is_original_bound_without_observer_grants")',
+                'module.CurrentIOSAquaDataTests("test_current_reports_are_closed_bounded_and_do_not_claim_successful_signing")',
+                'module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted")',
                 "unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)",
-                "result.testsRun != 1", "not result.wasSuccessful()",
+                "result.testsRun != 4", "not result.wasSuccessful()",
                 "result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses",
                 "raise SystemExit(1)"):
             self.assertIn(required, step)
@@ -2985,6 +2988,130 @@ def inert_ios_archive():
 
 
 class IOSAquaDataTests(unittest.TestCase):
+    def test_normal_macos_selection_is_original_bound_without_observer_grants(self):
+        source = PATH.parents[1] / "src-tauri/src"
+        runtime = (source / "runtime.rs").read_text()
+        supervisor = (source / "supervisor.rs").read_text()
+        document = (source / "asset_session.rs").read_text()
+        owner = (source / "saved_command_owner.rs").read_text()
+        control = (source / "installed_shell_observation_macos_ios.rs").read_text()
+        observer = (source / "installed_shell_observation_macos.rs").read_text()
+        producer = (source / "installed_shell_observation_macos_session.rs").read_text()
+
+        self.assertIn("INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = true;", runtime)
+        self.assertIn("const NATIVE_QUALIFIED: bool = false;", document)
+        passive = runtime.split("fn macos_installed_passive_method(", 1)[1].split("fn linux_installed_passive_method(", 1)[0]
+        self.assertNotIn("credentials.assess", passive)
+        for name in ("fn admit_once(", "pub(crate) fn admit_installed_session_once("):
+            if name not in runtime:  # Both disappear when normal Linux A is composed.
+                continue
+            cfg = runtime.split(name, 1)[0].rsplit("#[cfg(", 1)[1]
+            self.assertIn('target_os = "linux", target_arch = "x86_64", target_env = "gnu"', cfg)
+            self.assertNotIn('target_os = "macos"', cfg)
+        shared = runtime.split("pub(crate) fn assert_installed_session_selection_contract()", 1)[1].split("// The fixed selector", 1)[0]
+        for fact in ("let normal = session_inputs_qualified();", "assert_eq!(first.matches(Some(&original)), normal);",
+                     "assert_eq!(first.clone().matches(Some(&original)), normal);", "other.claim_supervisor()",
+                     "second_supervisor.claim_supervisor()", "drop(original); first.bind_document(&replacement);"):
+            self.assertIn(fact, shared)
+        shared_cfg = runtime.split("pub(crate) fn assert_installed_session_selection_contract()", 1)[0].rsplit("#[cfg(", 1)[1]
+        self.assertIn('all(target_os = "macos", target_arch = "aarch64")', shared_cfg)
+        early = observer.split("fn observer_data_checks()", 1)[1].split("fn observe(q:", 1)[0]
+        self.assertIn("crate::runtime::assert_installed_session_selection_contract();", early)
+        platform_gate = document.split("fn ordinary_asset_platform_gate()", 1)[1].split("fn session_kind_gate(", 1)[0]
+        project_contract = document.split("pub(crate) fn assert_project_selection_gate_contract()", 1)[1].split("\n}", 1)[0]
+        supported = 'cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),\n        all(target_os = "macos", target_arch = "aarch64")))'
+        self.assertIn("if !" + supported, platform_gate)
+        self.assertIn("let platform = if " + supported, project_contract)
+        self.assertIn("assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);", project_contract)
+        self.assertIn("crate::asset_session::assert_project_selection_gate_contract();", early)
+
+        normal = owner.split("fn ios_unsigned_installed_selected(", 1)[1].split("fn qualified(", 1)[0]
+        for term in ('self.domain == SavedCommandDomain::IOSArchive', 'feature = "desktop-shell"',
+                     'feature = "custom-protocol"', 'not(feature = "development-runtime")',
+                     'not(feature = "ubuntu-runtime-publisher")', 'not(feature = "windows-runtime-publisher")',
+                     'not(feature = "macos-installed-installer")', 'target_os = "macos", target_arch = "aarch64"',
+                     '&& self.runtime.ios_archive_installed_profile_available()'):
+            self.assertIn(term, normal)
+        for forbidden in ("ios_observation", "IOS_ARCHIVE_NATIVE_QUALIFIED"):
+            self.assertNotIn(forbidden, normal)
+        for name in ("IOS_SIGNED_NATIVE_QUALIFIED", "IOS_RECOVERY_NATIVE_QUALIFIED"):
+            self.assertIn(f"const {name}: bool = false;", owner)
+        qualified = owner.split("fn qualified(&self)", 1)[1].split("fn lock(&self)", 1)[0]
+        self.assertIn("if let Some(observation) = book.as_ref()", qualified)
+        self.assertIn("return self.runtime.ios_archive_installed_profile_available()", qualified)
+        self.assertIn("[ios_wire::Operation::IOSSignedExport, ios_wire::Operation::IOSLocalRecovery]", qualified)
+        self.assertIn("|| self.ios_unsigned_installed_selected()\n                            && observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive)", qualified)
+        self.assertIn("SavedCommandDomain::IOSArchive => self.ios_unsigned_installed_selected()", qualified)
+        mode = owner.split("fn ios_mode_qualified(", 1)[1].split("fn start_clocks(", 1)[0]
+        self.assertIn("(Some(owner), Some(bound)) => std::ptr::eq(bound.as_ref(), owner)", mode)
+        self.assertIn("return same_original && observation.control.permits_mode(selected.operation)", mode)
+        self.assertIn("selected.operation != ios_wire::Operation::IOSUnsignedArchive || self.ios_unsigned_installed_selected()", mode)
+
+        sample = document.split("pub(crate) fn observe_installed_macos_normal_selection(", 1)[1].split("pub(crate) fn register_installed_macos_session(", 1)[0]
+        self.assertIn("if observation.is_some()", sample)
+        self.assertIn("supervisor.assert_installed_session_available(&self.inner.session_identity)?", sample)
+        self.assertIn("self.inner.bridge.ios_archive.observe_installed_unsigned_selection()", sample)
+        owner_sample = owner.split("pub(crate) fn observe_installed_unsigned_selection(", 1)[1].split("pub(crate) fn admit_installed_ios_observation(", 1)[0]
+        for gate in ("r.revision != 0", "r.active.is_some()", "r.prepared.is_some()", "r.last.is_some()",
+                     "r.document_lost", "r.exhausted", "self.inner.poisoned.load", "!self.inner.ios_unsigned_installed_selected()", "if slot.is_some()"):
+            self.assertIn(gate, owner_sample)
+        wrapper = supervisor.split("pub(crate) fn assert_installed_session_available(", 1)[1].split("pub fn disabled(", 1)[0]
+        self.assertIn("!owners.is_empty() || self.inner.next.load(Ordering::SeqCst) != 1 || self.stopping() || self.disabled()", wrapper)
+        self.assertIn("self.inner.runtime.installed_session_available(identity)", wrapper)
+        self.assertNotIn("admit_installed_session_once", wrapper)
+        attach = control.split("pub(super) fn attach(", 1)[1].split("pub(super) fn normal_session_registered(", 1)[0]
+        self.assertLess(attach.index("Weak::ptr_eq(&bound_owner, &direct)"), attach.index("document.observe_installed_macos_normal_selection()?"))
+        self.assertLess(attach.index("document.observe_installed_macos_normal_selection()?"), attach.index("self.normal_selection_observed.set(())"))
+        self.assertLess(attach.index("self.normal_selection_observed.set(())"), attach.index("document.admit_installed_ios("))
+        self.assertLess(attach.index("document.admit_installed_ios("), attach.index("document.register_installed_macos_session("))
+        returned = "document.register_installed_macos_session(SessionRegistration { control: self.clone(), document: doc })?;"
+        self.assertLess(attach.index(returned), attach.index("self.normal_session_registration_returned.set(())"))
+        self.assertEqual(attach.count("self.normal_session_registration_returned.set(())"), 1)
+        history = control.split("pub(super) fn normal_session_registered(", 1)[1].split("pub(crate) fn permits(", 1)[0]
+        for fact in ("self.normal_selection_observed.get().is_some()", "self.session_registered.load(Ordering::SeqCst)",
+                     "self.normal_session_registration_returned.get().is_some()"):
+            self.assertIn(fact, history)
+        for forbidden in ("permits()", "Weak::upgrade", "admitted.store", "Arc::new"):
+            self.assertNotIn(forbidden, history)
+        live = control.split("pub(crate) fn permits(", 1)[1].split("pub(crate) fn claim(", 1)[0]
+        for fact in ("self.document.get().and_then(Weak::upgrade).is_some()", "self.owner.get().and_then(Weak::upgrade).is_some()",
+                     "self.original.get().and_then(Weak::upgrade)", "!self.failed.load(Ordering::SeqCst)"):
+            self.assertIn(fact, live)
+        self.assertNotIn("normal_session_registration_returned", live)
+        for term in ("Arc::ptr_eq(&bound, original)", "session_registered.compare_exchange(false, true",
+                     "registration.claim_original(&wrong)", "registration.claim_original(&document)",
+                     "let dead = Arc::downgrade(&document); drop(document); drop(owner);",
+                     "|| control.permits() || !control.normal_session_registered()"):
+            self.assertIn(term, control)
+        self.assertNotIn("SessionAdmission", control)
+
+        methods = M.re.search(r'const METHODS: \[&str; 10\] = \[(.*?)\];', observer, M.re.S)
+        self.assertIsNotNone(methods)
+        names = M.re.findall(r'"([a-z.]+)"', methods.group(1))
+        self.assertEqual(len(names), 10)
+        self.assertEqual(len(set(names)), 10)
+        self.assertEqual(names.count("credentials.assess"), 1)
+        self.assertIn("fn methods(self) -> usize { METHODS.len() }", observer)
+        self.assertIn('METHODS.iter().all(|name| methods.iter().filter(available).filter(|m| m["method"].as_str() == Some(*name)).count() == 1)', observer)
+        finish = observer.split("fn finish(&self) -> Option<Value>", 1)[1].split("\n}\n\nfn phase(", 1)[0]
+        self.assertIn("let normal_registered = self.ios.as_ref().is_some_and(|control| control.normal_session_registered());", finish)
+        self.assertEqual(finish.count(".normal_session_registered()"), 1)
+        self.assertEqual(finish.count(".report(normal_registered)"), 2)
+        self.assertIn("r.session_record.as_ref().is_some_and(|record| record.report(normal_registered).is_some())", finish)
+        self.assertIn('report["signingInputs"] = r.session_record.as_ref()?.report(normal_registered)?;', finish)
+        self.assertNotIn("record.report().is_some()", finish)
+        self.assertIn('"schemaVersion":2,"oneUseOriginalDocumentRegistration":normal_registered', producer)
+        self.assertIn('"selection":"ordinary-installed-macos-session"', producer)
+        self.assertIn("if !normal_registered ||", producer)
+        self.assertIn("signed.report(false).is_some()", producer)
+        for case in M.ALL_CASES:
+            value = M.expected_result(BINDING, case)
+            self.assertEqual(value["methods"], "ten-passive-with-session-assessment")
+        for case in ("first-save", "ios-unsigned-archive"):
+            old = M.expected_result(BINDING, case); old["methods"] = "nine-passive"
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(old), b"", BINDING, case)
+
     def test_literal_fixture_matches_native_and_has_no_packages_or_scripts(self):
         import plistlib
         import xml.etree.ElementTree as ET
@@ -3457,6 +3584,10 @@ class CurrentIOSAquaDataTests(unittest.TestCase):
         for case in M.IOS_SESSION_CASES:
             good = M.expected_result(BINDING, case)
             for mutation in (
+                lambda v: v.update(schemaVersion=1),
+                lambda v: v.update(oneUseOriginalDocumentRegistration=False),
+                lambda v: v.update(oneUseOriginalDocumentRegistration=1),
+                lambda v: v.update(selection="observation-grant"),
                 lambda v: v.update(originalOperations=11),
                 lambda v: v.update(memorySessionLocked=False),
                 lambda v: v.update(allOriginalsSettled=False),
@@ -3470,6 +3601,13 @@ class CurrentIOSAquaDataTests(unittest.TestCase):
                 bad = deepcopy(good); mutation(bad["signingInputs"])
                 with self.subTest(case=case), self.assertRaises(M.Refused):
                     M.parse_result(captured(bad), b"", BINDING, case)
+            historical = deepcopy(good)
+            receipt = historical["signingInputs"]
+            receipt["schemaVersion"] = 1
+            receipt["oneUseOriginalDocumentAdmission"] = receipt.pop("oneUseOriginalDocumentRegistration")
+            del receipt["selection"]
+            with self.subTest(case=case, historical=True), self.assertRaises(M.Refused):
+                M.parse_result(captured(historical), b"", BINDING, case)
         for case in M.IOS_SIGNED_CASES:
             good = M.expected_result(BINDING, case)
             # The two actual opaque IDs may vary together, not independently

@@ -622,7 +622,8 @@ def _expected_signing_inputs(case):
                      "openInputJoined": None if index == 6 else True,
                      "assessment": assessment, "recordId": ("d" if index == 0 else "e") * 32 if signed else None,
                      "keptRevision": 1 if signed else None, "assignedContextRevision": 1 if signed else None})
-    return {"schemaVersion": 1, "oneUseOriginalDocumentAdmission": True, "mode": "session",
+    return {"schemaVersion": 2, "oneUseOriginalDocumentRegistration": True,
+            "selection": "ordinary-installed-macos-session", "mode": "session",
             "context": {"platform": "ios", "stage": "candidate", "purpose": "signing"}, "rows": rows,
             "originalOperations": 12, "allOriginalsSettled": True, "memorySessionLocked": True,
             "originalProjectAndQuitSettled": True, "observationMs": 315000 if signed else 45000,
@@ -903,7 +904,7 @@ def expected_result(binding, case):
         if case in IOS_OPERATION_CASES:
             value["iosArchive"] = _expected_ios_report(case)
         if case in IOS_SESSION_CASES:
-            value.update(methods="ten-passive-with-session-assessment", signingInputs=_expected_signing_inputs(case))
+            value["signingInputs"] = _expected_signing_inputs(case)
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
         return value
@@ -932,7 +933,7 @@ def expected_result(binding, case):
             "nativeReason": native, "nativeFinality": "settled", "writerFrames": 3 if applied else 2,
             "stdoutFrames": 3, "originalsJoined": True})
     return {"schemaVersion": 1, **binding.public(), "case": case, "instrumentedEngineeringApp": True,
-        "shippingBinaryQualified": False, "distributionQualified": False, "methods": "nine-passive", "actionsAvailable": False,
+        "shippingBinaryQualified": False, "distributionQualified": False, "methods": "ten-passive-with-session-assessment", "actionsAvailable": False,
         "native": {"projectCancelSettled": first, "selectedPathMatched": case != "picker-loss",
             "originalWindow": {"mechanism": "passive-original-window-callback-v1", "accessorReturned": True,
                 "nativeReturned": True, "result": "ok", "admitted": True,
@@ -1013,7 +1014,7 @@ RESULT_LOCATION_KEYS |= frozenset((
     "invocationClosed snapshotClosed filesClosed namespaceClosed"
 ).split())
 RESULT_LOCATION_KEYS |= frozenset((
-    "signingInputs oneUseOriginalDocumentAdmission mode rows role nativeResponse exactNativeSelection "
+    "signingInputs oneUseOriginalDocumentRegistration mode rows role nativeResponse exactNativeSelection "
     "originalWorkerAndNativeSettled openIdentityMatched openInputJoined assessment identity fieldScopes "
     "recordId keptRevision assignedContextRevision originalOperations allOriginalsSettled memorySessionLocked "
     "originalProjectAndQuitSettled signing teamId distributionCertificateSha256 assignments recordRevision "

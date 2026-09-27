@@ -244,9 +244,14 @@ jobs:
           module = importlib.util.module_from_spec(spec)
           sys.modules[spec.name] = module
           spec.loader.exec_module(module)
-          suite = unittest.TestSuite([module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import")])
+          suite = unittest.TestSuite([
+              module.AquaDataTests("test_current_owner_pins_match_checkout_and_refuse_stale_before_import"),
+              module.IOSAquaDataTests("test_normal_macos_selection_is_original_bound_without_observer_grants"),
+              module.CurrentIOSAquaDataTests("test_current_reports_are_closed_bounded_and_do_not_claim_successful_signing"),
+              module.CurrentIOSAquaDataTests("test_file_originals_and_retained_signing_records_cannot_be_substituted"),
+          ])
           result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
-          if (result.testsRun != 1 or not result.wasSuccessful()
+          if (result.testsRun != 4 or not result.wasSuccessful()
                   or any((result.failures, result.errors, result.skipped, result.expectedFailures, result.unexpectedSuccesses))):
               raise SystemExit(1)
           PY_OWNER_PINS

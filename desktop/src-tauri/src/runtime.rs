@@ -147,9 +147,9 @@ enum PassiveInstalledSelection {
 // profile, one Supervisor claim and original document binding remain mandatory;
 // the selection bit alone cannot authorize collection or an assessment borrower.
 pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = true;
-// Independently CLOSED Mac signing-input profile; unsigned/project evidence
-// cannot activate selected P12/profile collection or the assessment borrower.
-pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = false;
+// Ordinary fixed Mac selection. This does not replace installed-runtime,
+// original-document, four-kind input or native custody qualification.
+pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = true;
 fn session_inputs_qualified() -> bool {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) { INSTALLED_IOS_SESSION_INPUTS_QUALIFIED }
     else { INSTALLED_SESSION_INPUTS_QUALIFIED }
@@ -195,29 +195,19 @@ impl InstalledSessionSelection {
         document.as_ref().and_then(std::sync::Weak::upgrade)
             .is_some_and(|original| identity.is_none_or(|identity| std::sync::Arc::ptr_eq(&original, identity)))
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
-        feature = "macos-installed-observation", target_os = "macos", target_arch = "aarch64",
-        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-    fn admit_once(&self, identity: &std::sync::Arc<()>) -> Result<(), BridgeError> {
-        if !self.supervisor || session_inputs_qualified() { return Err(unavailable()); }
-        let document = self.original.document.lock().map_err(|_| unavailable())?;
-        if !document.as_ref().and_then(std::sync::Weak::upgrade)
-            .is_some_and(|original| std::sync::Arc::ptr_eq(&original, identity)) { return Err(unavailable()); }
-        self.original.enabled.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst).map_err(|_| unavailable())?;
-        Ok(())
-    }
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) fn assert_installed_session_selection_contract() {
     use std::sync::{Arc, atomic::Ordering};
     // Pure shared-selection bookkeeping only. No installed runtime is opened.
     let mut first = InstalledSessionSelection::new();
     let mut other = first.clone();
+    let normal = session_inputs_qualified();
     let original = Arc::new(()); let replacement = Arc::new(());
-    assert!(session_inputs_qualified()); // Linux's normal constructor, not an observer grant.
-    assert_eq!(first.original.enabled.load(Ordering::SeqCst), session_inputs_qualified());
+    assert!(normal); // Both ordinary constructors, never an observer grant.
+    assert_eq!(first.original.enabled.load(Ordering::SeqCst), normal);
     assert!(!first.matches(None) && !other.matches(None));
     first.bind_document(&original); // An unclaimed copy cannot bind a document.
     assert!(first.original.document.lock().unwrap().is_none());
@@ -226,8 +216,8 @@ pub(crate) fn assert_installed_session_selection_contract() {
     other.claim_supervisor();
     other.bind_document(&replacement); first.bind_document(&original);
     first.bind_document(&replacement);
-    assert_eq!(first.matches(Some(&original)), session_inputs_qualified());
-    assert_eq!(first.clone().matches(Some(&original)), session_inputs_qualified());
+    assert_eq!(first.matches(Some(&original)), normal);
+    assert_eq!(first.clone().matches(Some(&original)), normal);
     assert!(!first.matches(Some(&replacement)) && !other.matches(None));
     first.original.enabled.store(false, Ordering::SeqCst);
     assert!(!first.matches(Some(&original)) && !other.matches(Some(&replacement)));
@@ -763,13 +753,6 @@ impl RuntimeConfig {
     }
     pub(crate) fn installed_session_available(&self, identity: &std::sync::Arc<()>) -> bool {
         self.installed_session_profile(Some(identity))
-    }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
-        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
-        target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))]
-    pub(crate) fn admit_installed_session_once(&self, identity: &std::sync::Arc<()>) -> Result<(), BridgeError> {
-        self.passive_installed_profile()?;
-        self.installed_session.admit_once(identity)
     }
     fn installed_method_available(&self, name: &str) -> bool {
         installed_passive_method(name) || name == "credentials.assess" && self.installed_session_profile(None)
