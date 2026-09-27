@@ -3617,7 +3617,10 @@ class CurrentIOSAquaDataTests(unittest.TestCase):
                     M.ios_fixture_data(case, True)
                 for output in (True, False):
                     _, directories = M.ios_fixture_data(case, True, output_created=output)
-                    self.assertEqual(".mobile-release" in directories, output)
+                    # Output may be named by the root roster, but is independently
+                    # verified rather than included in the source-directory snapshot.
+                    self.assertEqual(".mobile-release" in directories["."][1], output)
+                    self.assertNotIn(".mobile-release", directories)
 
 
 if __name__ == "__main__":
