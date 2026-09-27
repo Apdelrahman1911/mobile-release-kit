@@ -14540,6 +14540,15 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
                                       "index": None, "error": None, "native": None, "detail": None}
         return frame
 
+    @classmethod
+    def entry_frame_data(cls, entry=None, *, position=0, role="project-draft"):
+        frame = cls.capture_frame_data(); frame["role"] = role
+        frame["captureFailure"].update(operation="directory-entry", check="expected-child", index=position,
+                                       error="Unsafe", native=None, detail=None)
+        frame["captureFailure"]["entry"] = deepcopy(entry if entry is not None else {
+            "class": "known-cwd-log", "expected": None, "log": "debug-log", "kind": "file", "attributes": 0x22})
+        return frame
+
     def test_capture_failure_accepts_only_exact_legacy_or_new_envelope(self):
         legacy = self.frame_data()
         self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
@@ -14750,6 +14759,119 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         for forbidden in ("native.", "clock.", "GetLastError", "GetTickCount", "std::thread", "clone("):
             self.assertNotIn(forbidden, predicate)
         self.assertEqual(len(helper.WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS), 24)
+
+    def test_unexpected_entry_closed_cases_preserve_original_failure_and_legacy(self):
+        cases = []
+        for expected, position in helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS.items():
+            kind = "directory" if expected in ("project", "app", "release") else "file"
+            cases.append((position, {"class": "expected-name-case-alias", "expected": expected, "log": None,
+                                     "kind": kind, "attributes": 0x10 if kind == "directory" else 0x20}))
+        for log in helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS:
+            for kind, attributes in (("file", 0x22), ("directory", 2**32 - 1)):
+                cases.append((0, {"class": "known-cwd-log", "expected": None, "log": log, "kind": kind, "attributes": attributes}))
+        for category, kind, attributes in (("other-regular", "file", 0), ("other-directory", "directory", 0x10),
+                                           ("other", "file", 0x10), ("other", "directory", 0)):
+            cases.append((3, {"class": category, "expected": None, "log": None, "kind": kind, "attributes": attributes}))
+        for role in self.OWNERS:
+            for position, entry in cases:
+                frame = self.entry_frame_data(entry, position=position, role=role); raw = self.frame(frame)
+                with self.subTest(role=role, entry=entry):
+                    self.assertLessEqual(len(raw), 4096)
+                    self.assertEqual(helper.windows_normal_ui_observer_frame(raw), frame)
+                    self.assertEqual(frame["captureFailure"]["error"], "Unsafe")
+                    self.assertEqual(frame["projection"]["reason"], 1)
+                    del frame["captureFailure"]["entry"]
+                    self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+        # Historical seven-field failures stay readable without inventing details.
+        for frame in (self.frame_data(), self.capture_frame_data(), self.capture_frame_data(gate=True)):
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+
+    def test_unexpected_entry_refuses_foreign_fields_and_provenance(self):
+        for key, value in (("index", None), ("index", True), ("index", -1), ("index", 4), ("index", 16),
+                           ("operation", "directory-roster"), ("operation", "journal-read"), ("check", "entry-kind"),
+                           ("error", "Bounds"), ("error", "Unavailable"), ("error", "Unknown"),
+                           ("kind", "not-attempted"), ("detail", "input.PathText"),
+                           ("native", self.capture_frame_data()["captureFailure"]["native"]),
+                           ("entry", None), ("entry", {}), ("entry", True), ("path", "private")):
+            frame = self.entry_frame_data(); frame["captureFailure"][key] = value
+            with self.subTest(fault=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for key, value in (("attributes", True), ("attributes", False), ("attributes", -1), ("attributes", 2**32),
+                           ("attributes", "32"), ("attributes", 32.0), ("attributes", 0x10),
+                           ("kind", "pipe"), ("kind", True), ("kind", "directory"),
+                           ("class", "permitted-log"), ("class", "other"), ("expected", "result"),
+                           ("log", None), ("log", "debug.log"), ("log", 1), ("name", "private"), ("content", "private")):
+            frame = self.entry_frame_data(); frame["captureFailure"]["entry"][key] = value
+            with self.subTest(entry=(key, value)), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(frame))
+        for entry, position in (
+            ({"class": "expected-name-case-alias", "expected": "result", "log": None, "kind": "file", "attributes": 0}, 1),
+            ({"class": "expected-name-case-alias", "expected": "unlisted", "log": None, "kind": "file", "attributes": 0}, 0),
+            ({"class": "expected-name-case-alias", "expected": "result", "log": "debug-log", "kind": "file", "attributes": 0}, 0),
+            ({"class": "other-regular", "expected": None, "log": None, "kind": "directory", "attributes": 0x10}, 0),
+            ({"class": "other-directory", "expected": None, "log": None, "kind": "file", "attributes": 0}, 0),
+            ({"class": "other", "expected": "project", "log": None, "kind": "file", "attributes": 0x10}, 0),
+        ):
+            with self.subTest(cross_fields=entry), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(self.entry_frame_data(entry, position=position)))
+        raw = self.frame(self.entry_frame_data())
+        for key in (b'"entry":', b'"attributes":', b'"class":'):
+            with self.subTest(duplicate=key), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(raw.replace(key, key + b'null,' + key, 1))
+
+    def test_unexpected_entry_collector_never_upgrades_failure_or_reads_offender(self):
+        for role in self.OWNERS:
+            parts = list(self.original_log(role)); frame = self.entry_frame_data(role=role)
+            parts[0] = parts[0].replace(self.frame(self.frame_data(role))[1:-1], self.frame(frame)[1:-1])
+            parts[4].update(bytes=len(parts[0]), sha256=hashlib.sha256(parts[0]).hexdigest())
+            with patch.object(helper, "run", side_effect=AssertionError("no process/native")), \
+                    patch.object(helper, "windows_installed_bytes", side_effect=AssertionError("no filesystem read")):
+                data = self.joined(parts)
+            self.assertEqual(data["joinState"], "verified"); self.assertEqual(data["captureFailure"], frame["captureFailure"])
+            self.assertTrue(data["originalSelectedFailure"]); self.assertEqual(data["projection"]["reason"], 1)
+            self.assertFalse(data["nativeQualified"]); self.assertFalse(data["combinedPassed"])
+            self.assertEqual(data["guiCasesExecuted"], 0); self.assertEqual(data["verifiedMethods"], 0)
+            self.assertEqual(self.joined(parts, closed=False)["joinState"], "unavailable")
+
+    def test_unexpected_entry_source_uses_only_same_mismatch_and_closed_copy_data(self):
+        root = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
+        ui, diagnostic = ((root / name).read_text() for name in ("ordinary_owner_ui.rs", "observer_diagnostic.rs"))
+        poststate = ui.split("fn output_poststate(", 1)[1].split("// Qualification-only, same-thread DATA.", 1)[0]
+        lookup = "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)"
+        self.assertEqual(poststate.count(lookup), 1)
+        seam = poststate.split("let (_, _, expected, kind) =", 1)[1].split("output_result!(OutputEntryBinding", 1)[0]
+        for required in (lookup + ".map_err(|error| {", "if let Some(trace) = read_trace { trace.unexpected_entry(role, &entry,",
+                         "children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str())",
+                         "error\n                    }))?;"):
+            self.assertIn(required, seam)
+        for forbidden in ("native.", "clock.", "GetLastError", "std::fs", "std::env", "return Ok", "continue;"):
+            self.assertNotIn(forbidden, seam)
+        for name, expected in (("ObserverEntryClass", helper.WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES),
+                               ("ObserverExpectedName", tuple(helper.WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS)),
+                               ("ObserverKnownLog", helper.WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS)):
+            body = diagnostic.split("capture_labels!(" + name + " {", 1)[1].split("});", 1)[0]
+            self.assertEqual(tuple(__import__("re").findall(r'=> "([a-z-]+)"', body)), expected)
+        classifier = diagnostic.split("impl ObserverCaptureEntry {", 1)[1].split("pub(crate) struct ObserverCaptureFailure", 1)[0]
+        for required in ("kind: entry.kind, attributes: entry.attributes", "if !value.consistent() { return value; }",
+                         "name.eq_ignore_ascii_case(&entry.name)", "ObserverExpectedName::of(role, name)",
+                         "ObserverKnownLog::of(&entry.name)", "Some(name.position()) == position"):
+            self.assertIn(required, classifier)
+        fields = diagnostic.split("pub(crate) struct ObserverCaptureEntry {", 1)[1].split("}\n", 1)[0]
+        for forbidden in ("String", "Vec<", "Path", "file_id", "name:"):
+            self.assertNotIn(forbidden, fields)
+        first = diagnostic.split("pub(crate) fn unexpected_entry<", 1)[1].split("    pub(crate) fn gate(", 1)[0]
+        self.assertIn("if self.first.get().is_none()", first)
+        self.assertIn("check: ObserverCaptureCheck::ExpectedChild", first)
+        self.assertIn("error: Some(Error::Unsafe), native: None, detail: None", first)
+        for body in (classifier, first):
+            for forbidden in ("unsafe", "native.", "std::fs", "std::env", "Instant::", "GetTickCount", "GetLastError", "open_child", "read_next"):
+                self.assertNotIn(forbidden, body)
+        selected = ui.split("fn observer_capture_failure_contract()", 1)[1].split("    #[test]", 1)[0]
+        self.assertEqual(selected.count("ObserverCaptureTrace::unexpected_entry_contract()?"), 1)
+        self.assertIn('attributes: u32::MAX', selected)
+        self.assertIn('"bounded original entry DATA"', selected)
+        self.assertIn("assert_eq!(trace.first(), Some(first))", diagnostic)
+        self.assertIn("assert!(trace.first().unwrap().entry.is_none())", diagnostic)
 
 class WindowsNormalUiGuiTests(unittest.TestCase):
     """Synthetic compiler/PE/wire DATA only; never a native or GUI receipt."""
@@ -15316,11 +15438,11 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
                      "assert_eq!(values, baseline); assert_eq!(directory, initial_directory)", "for role in [UiRole::Prerequisite]",
                      "other_role_app", "installed_shell_observation-0123456789abcdeF.exe", "profile.as_path()"):
             self.assertIn(case, cases)
-        # Baseline d8577ec7: scratch routing may not alter the profile owner,
-        # inventory/diagnostic pass, or original process/settlement/retirement path.
+        # Scratch routing leaves Profile and original owner/retirement untouched.
+        # The diagnostic successor adds only same-mismatch entry DATA in poststate.
         for start, end, expected in (
             ("struct ProfilePath {", "fn input(", "c44857c7988b2c5e58a5859e1e82f5109ae4c10cf410fec859797789b6adc6d5"),
-            ("fn output_poststate(", "// Qualification-only, same-thread DATA.", "66158707aa835ff2818b081ab602931de298c3c1eb1ee05d3faa7738bf4c6368"),
+            ("fn output_poststate(", "// Qualification-only, same-thread DATA.", "f5e105defe95bee54912f613b7850cfcc828be9d093293b76dbbbcfda2fa0bc6"),
             ("fn run_prerequisite_traced(", "// Inert regressions.", "3c470aa11c189c5e15de5245187b6391eeae111b13a4e5223404ed731fc07130"),
         ):
             self.assertEqual(hashlib.sha256(span(start, end).encode()).hexdigest(), expected)

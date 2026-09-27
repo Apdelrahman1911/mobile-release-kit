@@ -14511,9 +14511,46 @@ def windows_normal_ui_observer_capture_native(value: object) -> dict:
     return dict(value)
 
 
+WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES = (
+    "expected-name-case-alias", "known-cwd-log", "other-regular", "other-directory", "other",
+)
+WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS = {
+    "result": 0, "journal": 0, "project": 0, "app": 1, "release": 1,
+    "gradle": 2, "version": 1, "keep": 1, "config": 3,
+}
+WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS = ("debug-log", "chrome-debug-log", "msedge-debug-log")
+
+
+def windows_normal_ui_observer_capture_entry(value: object, position: int) -> dict:
+    """Closed DATA from the original mismatch, never an allowed child/producer."""
+    closed_object(value, {"class", "expected", "log", "kind", "attributes"},
+                  "Windows observer unexpected-entry fields differ")
+    require(integer_between(position, 0, 3)
+            and type(value["class"]) is str and value["class"] in WINDOWS_NORMAL_UI_OBSERVER_ENTRY_CLASSES
+            and type(value["kind"]) is str and value["kind"] in ("file", "directory")
+            and integer_between(value["attributes"], 0, 2**32 - 1), "Windows observer unexpected-entry scalar differs")
+    consistent = bool(value["attributes"] & 0x10) == (value["kind"] == "directory")
+    category, expected, log = value["class"], value["expected"], value["log"]
+    if category == "other":
+        require(not consistent and expected is log is None, "Windows observer unexpected-entry fallback differs")
+    else:
+        require(consistent, "Windows observer unexpected-entry kind/attributes differ")
+        if category == "expected-name-case-alias":
+            require(type(expected) is str and expected in WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS
+                    and WINDOWS_NORMAL_UI_OBSERVER_EXPECTED_POSITIONS[expected] == position and log is None,
+                    "Windows observer expected-name case alias differs")
+        elif category == "known-cwd-log":
+            require(expected is None and type(log) is str and log in WINDOWS_NORMAL_UI_OBSERVER_KNOWN_LOGS,
+                    "Windows observer known log name differs")
+        else:
+            require(expected is log is None and value["kind"] == ("file" if category == "other-regular" else "directory"),
+                    "Windows observer unexpected-entry category differs")
+    return dict(value)
+
+
 def windows_normal_ui_observer_capture_failure(value: object) -> dict:
-    closed_object(value, {"kind", "operation", "check", "index", "error", "native", "detail"},
-                  "Windows observer reader failure fields differ")
+    keys = {"kind", "operation", "check", "index", "error", "native", "detail"}
+    require(type(value) is dict and set(value) in (keys, keys | {"entry"}), "Windows observer reader failure fields differ")
     require(type(value["operation"]) is str and value["operation"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_OPERATIONS
             and type(value["check"]) is str and value["check"] in WINDOWS_NORMAL_UI_OBSERVER_CAPTURE_CHECKS
             and (value["index"] is None or integer_between(value["index"], 0, 16)), "Windows observer reader predicate differs")
@@ -14538,6 +14575,12 @@ def windows_normal_ui_observer_capture_failure(value: object) -> dict:
                     and (check != "admission" or value["error"] == "Unsafe"), "Windows observer reader detail differs")
         else:
             require(value["native"] is value["detail"] is None, "Windows observer predicate carries a foreign native return")
+    if "entry" in value:
+        require((value["kind"], value["operation"], value["check"], value["error"])
+                == ("returned-error", "directory-entry", "expected-child", "Unsafe")
+                and integer_between(value["index"], 0, 3) and value["native"] is value["detail"] is None,
+                "Windows observer unexpected-entry provenance differs")
+        windows_normal_ui_observer_capture_entry(value["entry"], value["index"])
     return dict(value)
 
 def windows_normal_ui_observer_startup(value: object) -> tuple[int, bool]:

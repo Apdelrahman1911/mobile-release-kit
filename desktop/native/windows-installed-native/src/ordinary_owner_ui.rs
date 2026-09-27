@@ -1110,7 +1110,13 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                         && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= 6)))?;
                     if entry.name == "." { output_result!(OutputDotIdentity, O::DirectoryEntry, Some(position), DotIdentity, need(entry.file_id == entries[index].1.identity.file_id))?; continue; }
                     if entry.name == ".." { output_result!(OutputParentIdentity, O::DirectoryEntry, Some(position), ParentIdentity, need(entry.file_id == entries[parent].1.identity.file_id))?; continue; }
-                    let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, O::DirectoryEntry, Some(position), ExpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe))?;
+                    let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, O::DirectoryEntry, Some(position), ExpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe).map_err(|error| {
+                        // Only DATA from this original failed exact lookup. The
+                        // same Unsafe is returned; no offender is opened/read.
+                        if let Some(trace) = read_trace { trace.unexpected_entry(role, &entry,
+                            children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str())); }
+                        error
+                    }))?;
                     output_result!(OutputEntryBinding, O::DirectoryEntry, Some(position), HelperReturn, need(
                         predicate!(O::DirectoryEntry, Some(position), FileId, entry.file_id == expected.id)
                         && predicate!(O::DirectoryEntry, Some(position), EntryKind, entry.kind == *kind)
@@ -3677,6 +3683,7 @@ mod contract_tests {
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
         use crate::ui_observer_diagnostic_data::ChildFinality;
         ObserverCaptureTrace::reader_contract()?;
+        ObserverCaptureTrace::unexpected_entry_contract()?;
         // Actual shared scalar decisions, not a child, clock or native fixture.
         for mask in 0..128u8 {
             let facts = ChildFinality { returned: mask & 1 != 0, created: mask & 2 != 0, signaled: mask & 4 != 0,
@@ -3763,6 +3770,7 @@ mod contract_tests {
             assert!(length <= 4096); let text = std::str::from_utf8(&bytes[..length]).expect("closed ASCII");
             assert!(text.contains("\"captureFailure\":{\"kind\":\"returned-error\",\"operation\":\"journal-open\""));
             assert!(text.contains("\"reason\":1")); assert!(text.contains("\"api\":\"NtCreateFile\""));
+            assert!(!text.contains("\"entry\":")); // Legacy failure bytes have no new null field.
             for private in ["HANDLE", "password", "accountSid", "path", "fileName", "journalBody"] { assert!(!text.contains(private)); }
         }
         let mut short = [0u8; 8]; assert!(capture.reader.write_json(&mut std::io::Cursor::new(&mut short[..])).is_err());
@@ -3798,6 +3806,21 @@ mod contract_tests {
                 assert_eq!(observer_capture_frame(UiRole::ProjectDraft, &capture, &mut bytes).is_some(), admitted);
                 assert_eq!(original, Err(Error::Unsafe));
             }
+        }
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+            capture.reader = ObserverCaptureTrace::default();
+            let entry = DirectoryEntry { name: "debug.log".to_owned(), file_id: [0x37; 16],
+                kind: FileKind::Directory, attributes: u32::MAX };
+            let original = capture.reader.scope(O::DirectoryEntry, Some(0), || {
+                capture.reader.unexpected_entry(role, &entry, std::iter::empty());
+                capture.reader.result::<()>(C::ExpectedChild, Err(Error::Unsafe))
+            });
+            assert_eq!(original, Err(Error::Unsafe));
+            let length = observer_capture_frame(role, &capture, &mut bytes).expect("bounded original entry DATA");
+            assert!(length <= 4096); let text = std::str::from_utf8(&bytes[..length]).unwrap();
+            assert!(text.contains("\"entry\":{\"class\":\"known-cwd-log\",\"expected\":null,\"log\":\"debug-log\",\"kind\":\"directory\",\"attributes\":4294967295}"));
+            assert!(text.contains("\"check\":\"expected-child\",\"index\":0,\"error\":\"Unsafe\""));
+            for private in ["debug.log", "file_id", "name\"", "path\"", "content\""] { assert!(!text.contains(private)); }
         }
         assert_eq!(ObserverCaptureOperation::ALL.len(), 52); assert_eq!(ObserverCaptureCheck::ALL.len(), 90);
         Ok(())

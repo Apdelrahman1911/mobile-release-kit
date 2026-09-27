@@ -253,16 +253,98 @@ impl ObserverCaptureNative {
         write!(output, "{{\"api\":\"{api}\",\"selector\":\"{selector}\",\"kind\":\"{kind}\",\"value\":{value},\"status\":\"{status}\",\"code\":{code}}}")
     }
 }
+capture_labels!(ObserverEntryClass {
+    ExpectedNameCaseAlias => "expected-name-case-alias",
+    KnownCwdLog => "known-cwd-log",
+    OtherRegular => "other-regular",
+    OtherDirectory => "other-directory",
+    Other => "other",
+});
+capture_labels!(ObserverExpectedName {
+    Result => "result", Journal => "journal", Project => "project", App => "app", Release => "release",
+    Gradle => "gradle", Version => "version", Keep => "keep", Config => "config",
+});
+impl ObserverExpectedName {
+    fn of(role: UiRole, name: &str) -> Option<Self> {
+        if name == role.name("result.private.json") { return Some(Self::Result); }
+        if name == role.name(data::SUFFIX) { return Some(Self::Journal); }
+        match name {
+            "project" => Some(Self::Project), "app" => Some(Self::App), "release" => Some(Self::Release),
+            "build.gradle.kts" => Some(Self::Gradle), "version.properties" => Some(Self::Version),
+            "keep.txt" => Some(Self::Keep), "mobile-release.json" => Some(Self::Config), _ => None,
+        }
+    }
+    fn position(self) -> u8 { match self {
+        Self::Result | Self::Journal | Self::Project => 0,
+        Self::App | Self::Release | Self::Version | Self::Keep => 1,
+        Self::Gradle => 2, Self::Config => 3,
+    } }
+}
+capture_labels!(ObserverKnownLog {
+    Debug => "debug-log", ChromeDebug => "chrome-debug-log", MsedgeDebug => "msedge-debug-log",
+});
+impl ObserverKnownLog {
+    fn of(name: &str) -> Option<Self> {
+        [("debug.log", Self::Debug), ("chrome_debug.log", Self::ChromeDebug), ("msedge_debug.log", Self::MsedgeDebug)]
+            .into_iter().find(|(fixed, _)| name.eq_ignore_ascii_case(fixed)).map(|(_, label)| label)
+    }
+}
+// Same decoded entry only. No arbitrary name, path, file ID or content survives
+// classification. A known log NAME does not identify its producer or make it safe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObserverCaptureEntry {
+    class: ObserverEntryClass, expected: Option<ObserverExpectedName>, log: Option<ObserverKnownLog>,
+    kind: FileKind, attributes: u32,
+}
+impl ObserverCaptureEntry {
+    fn of<'a>(role: UiRole, entry: &DirectoryEntry, mut expected: impl Iterator<Item = &'a str>) -> Self {
+        let mut value = Self { class: ObserverEntryClass::Other, expected: None, log: None,
+            kind: entry.kind, attributes: entry.attributes };
+        if !value.consistent() { return value; } // DATA fallback, never a new decoder admission.
+        value.expected = expected.find(|name| *name != entry.name.as_str() && name.eq_ignore_ascii_case(&entry.name))
+            .and_then(|name| ObserverExpectedName::of(role, name));
+        if value.expected.is_some() { value.class = ObserverEntryClass::ExpectedNameCaseAlias; }
+        else if let Some(log) = ObserverKnownLog::of(&entry.name) {
+            value.class = ObserverEntryClass::KnownCwdLog; value.log = Some(log);
+        } else { value.class = match entry.kind { FileKind::File => ObserverEntryClass::OtherRegular,
+            FileKind::Directory => ObserverEntryClass::OtherDirectory }; }
+        value
+    }
+    fn consistent(self) -> bool { (self.attributes & FS::FILE_ATTRIBUTE_DIRECTORY != 0) == (self.kind == FileKind::Directory) }
+    fn valid(self, position: Option<u8>) -> bool {
+        if !self.consistent() { return self.class == ObserverEntryClass::Other && self.expected.is_none() && self.log.is_none(); }
+        match self.class {
+            ObserverEntryClass::ExpectedNameCaseAlias => self.expected.is_some_and(|name| Some(name.position()) == position) && self.log.is_none(),
+            ObserverEntryClass::KnownCwdLog => self.expected.is_none() && self.log.is_some(),
+            ObserverEntryClass::OtherRegular => self.kind == FileKind::File && self.expected.is_none() && self.log.is_none(),
+            ObserverEntryClass::OtherDirectory => self.kind == FileKind::Directory && self.expected.is_none() && self.log.is_none(),
+            ObserverEntryClass::Other => false,
+        }
+    }
+    fn write_json(self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        write!(output, "{{\"class\":\"{}\",\"expected\":", self.class.label())?;
+        match self.expected { Some(name) => write!(output, "\"{}\"", name.label())?, None => output.write_all(b"null")? }
+        output.write_all(b",\"log\":")?;
+        match self.log { Some(log) => write!(output, "\"{}\"", log.label())?, None => output.write_all(b"null")? }
+        write!(output, ",\"kind\":\"{}\",\"attributes\":{}}}",
+            match self.kind { FileKind::File => "file", FileKind::Directory => "directory" }, self.attributes)
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ObserverCaptureFailure {
     pub(crate) operation: ObserverCaptureOperation, pub(crate) check: ObserverCaptureCheck,
     pub(crate) index: Option<u8>, pub(crate) error: Option<Error>,
     pub(crate) native: Option<ObserverCaptureNative>, pub(crate) detail: Option<PrerequisiteDetail>,
+    pub(crate) entry: Option<ObserverCaptureEntry>,
 }
 impl ObserverCaptureFailure {
     fn valid(self) -> bool {
         use ObserverCaptureCheck as C;
         if !capture_position_valid(self.operation, self.index) || self.error == Some(Error::Unknown) { return false; }
+        if let Some(entry) = self.entry {
+            return self.operation == ObserverCaptureOperation::DirectoryEntry && self.check == C::ExpectedChild
+                && self.error == Some(Error::Unsafe) && self.native.is_none() && self.detail.is_none() && entry.valid(self.index);
+        }
         if self.error.is_none() {
             return self.operation == ObserverCaptureOperation::Eligibility && self.index.is_none()
                 && self.native.is_none() && self.detail.is_none()
@@ -290,6 +372,7 @@ impl ObserverCaptureFailure {
         match self.native { Some(native) => native.write_json(output)?, None => output.write_all(b"null")? }
         output.write_all(b",\"detail\":")?;
         match self.detail { Some(detail) => { let (prefix, label) = detail.labels(); write!(output, "\"{prefix}{label}\"")?; }, None => output.write_all(b"null")? }
+        if let Some(entry) = self.entry { output.write_all(b",\"entry\":")?; entry.write_json(output)?; }
         output.write_all(b"}")
     }
 }
@@ -309,7 +392,13 @@ impl ObserverCaptureTrace {
     }
     fn remember(&self, check: ObserverCaptureCheck, error: Option<Error>, native: Option<ObserverCaptureNative>, detail: Option<PrerequisiteDetail>) {
         if self.first.get().is_none() { self.first.set(Some(ObserverCaptureFailure {
-            operation: self.operation.get(), check, index: self.index.get(), error, native, detail })); }
+            operation: self.operation.get(), check, index: self.index.get(), error, native, detail, entry: None })); }
+    }
+    pub(crate) fn unexpected_entry<'a>(&self, role: UiRole, entry: &DirectoryEntry, expected: impl Iterator<Item = &'a str>) {
+        if self.first.get().is_none() { self.first.set(Some(ObserverCaptureFailure {
+            operation: self.operation.get(), check: ObserverCaptureCheck::ExpectedChild, index: self.index.get(),
+            error: Some(Error::Unsafe), native: None, detail: None, entry: Some(ObserverCaptureEntry::of(role, entry, expected)),
+        })); }
     }
     pub(crate) fn gate(&self, check: ObserverCaptureCheck, admitted: bool) -> bool {
         if !admitted { self.remember(check, None, None, None); } admitted
@@ -363,6 +452,100 @@ fn read_streams(trace: Option<&ObserverCaptureTrace>, raw: &[u8]) -> Result<()> 
 
 #[cfg(test)]
 impl ObserverCaptureTrace {
+    pub(crate) fn unexpected_entry_contract() -> Result<()> {
+        use ObserverCaptureCheck as C; use ObserverCaptureOperation as O; use ObserverEntryClass as Class;
+        fn entry(name: &str, kind: FileKind, attributes: u32) -> DirectoryEntry {
+            DirectoryEntry { name: name.to_owned(), file_id: [0x37; 16], kind, attributes }
+        }
+        fn observe(role: UiRole, position: u8, entry: &DirectoryEntry, names: &[(u8, String)]) -> (Result<()>, ObserverCaptureTrace) {
+            let trace = ObserverCaptureTrace::default(); let calls = Cell::new(0);
+            let original = trace.scope(O::DirectoryEntry, Some(position), || {
+                calls.set(calls.get() + 1);
+                let original = names.iter().find(|(p, name)| *p == position && *name == entry.name).map(|_| ()).ok_or(Error::Unsafe)
+                    .map_err(|error| { trace.unexpected_entry(role, entry,
+                        names.iter().filter(|(p, _)| *p == position).map(|(_, name)| name.as_str())); error });
+                trace.result(C::ExpectedChild, original)
+            });
+            assert_eq!(calls.get(), 1); (original, trace)
+        }
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+            use ObserverExpectedName as N;
+            let names = [(N::Result, role.name("result.private.json")), (N::Journal, role.name(data::SUFFIX)),
+                (N::Project, "project".to_owned()), (N::App, "app".to_owned()), (N::Release, "release".to_owned()),
+                (N::Gradle, "build.gradle.kts".to_owned()), (N::Version, "version.properties".to_owned()),
+                (N::Keep, "keep.txt".to_owned()), (N::Config, "mobile-release.json".to_owned())];
+            let expected: Vec<_> = names.iter().map(|(label, name)| (label.position(), name.clone())).collect();
+            for (label, name) in &names {
+                let exact = entry(name, FileKind::File, FS::FILE_ATTRIBUTE_ARCHIVE);
+                let (original, trace) = observe(role, label.position(), &exact, &expected);
+                assert_eq!(original, Ok(())); assert!(trace.first().is_none());
+                let alias = entry(&name.to_ascii_uppercase(), FileKind::File, FS::FILE_ATTRIBUTE_ARCHIVE);
+                let (original, trace) = observe(role, label.position(), &alias, &expected);
+                assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap();
+                let captured = first.entry.unwrap();
+                assert!(first.valid()); assert_eq!(captured.class, Class::ExpectedNameCaseAlias);
+                assert_eq!(captured.expected, Some(*label)); assert_eq!(captured.log, None);
+                assert_eq!((captured.kind, captured.attributes), (alias.kind, alias.attributes));
+            }
+            // A case alias in a different parent, or an absent optional result,
+            // remains other DATA. Neither becomes an expected-name witness.
+            let absent: Vec<_> = expected.iter().filter(|(_, name)| *name != role.name("result.private.json")).cloned().collect();
+            for (position, value, names) in [
+                (1, entry("PROJECT", FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY), &expected),
+                (0, entry(&role.name("result.private.json").to_ascii_uppercase(), FileKind::File, 0), &absent),
+            ] {
+                let (original, trace) = observe(role, position, &value, names);
+                assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
+                assert!(first.entry.unwrap().expected.is_none());
+            }
+        }
+        let role = UiRole::ProjectDraft; let expected = [(0, "project".to_owned())];
+        for (name, log) in [("debug.log", ObserverKnownLog::Debug), ("chrome_debug.log", ObserverKnownLog::ChromeDebug),
+            ("msedge_debug.log", ObserverKnownLog::MsedgeDebug)] {
+            for name in [name.to_owned(), name.to_ascii_uppercase()] {
+                for (kind, attributes) in [(FileKind::File, FS::FILE_ATTRIBUTE_ARCHIVE | FS::FILE_ATTRIBUTE_HIDDEN),
+                    (FileKind::Directory, u32::MAX)] {
+                    let value = entry(&name, kind, attributes); let (original, trace) = observe(role, 0, &value, &expected);
+                    assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
+                    let captured = first.entry.unwrap(); assert_eq!((captured.class, captured.log), (Class::KnownCwdLog, Some(log)));
+                    assert_eq!((captured.kind, captured.attributes), (kind, attributes));
+                    let mut raw = Vec::new(); trace.write_json(&mut raw).map_err(|_| Error::State)?;
+                    assert!(!String::from_utf8(raw).unwrap().contains(name.as_str()));
+                    trace.unexpected_entry(role, &entry("later-private-name", FileKind::File, 0), std::iter::empty());
+                    let _ = trace.scope(O::JournalOpen, Some(16), || trace.result::<()>(C::HelperReturn, Err(Error::Unavailable)));
+                    assert_eq!(trace.first(), Some(first));
+                }
+            }
+        }
+        for (kind, attributes, class) in [(FileKind::File, 0, Class::OtherRegular),
+            (FileKind::Directory, FS::FILE_ATTRIBUTE_DIRECTORY, Class::OtherDirectory),
+            (FileKind::File, FS::FILE_ATTRIBUTE_DIRECTORY, Class::Other), (FileKind::Directory, 0, Class::Other)] {
+            let value = entry("private-unlisted-name", kind, attributes); let (original, trace) = observe(role, 0, &value, &expected);
+            assert_eq!(original, Err(Error::Unsafe)); let first = trace.first().unwrap(); assert!(first.valid());
+            let captured = first.entry.unwrap(); assert_eq!(captured.class, class);
+            assert_eq!((captured.expected, captured.log), (None, None));
+            let mut raw = Vec::new(); trace.write_json(&mut raw).map_err(|_| Error::State)?;
+            assert!(!String::from_utf8(raw).unwrap().contains(value.name.as_str()));
+            for invalid in 0..8 {
+                let mut changed = first;
+                match invalid {
+                    0 => changed.operation = O::JournalRead, 1 => changed.check = C::EntryKind,
+                    2 => changed.index = Some(4), 3 => changed.error = Some(Error::Bounds), 4 => changed.error = None,
+                    5 => changed.detail = Some(PrerequisiteDetail::Input(InputCheck::PathText)),
+                    6 => changed.native = Some(ObserverCaptureNative::NtStreams(-1)),
+                    _ => changed.entry.as_mut().unwrap().expected = Some(ObserverExpectedName::Config),
+                }
+                assert!(!changed.valid());
+            }
+        }
+        let trace = Self::default();
+        let _ = trace.scope(O::DirectoryEntry, Some(0), || trace.result::<()>(C::EntryUnique, Err(Error::Unsafe)));
+        let first = trace.first();
+        trace.unexpected_entry(role, &entry("debug.log", FileKind::File, 0), std::iter::empty());
+        assert_eq!(trace.first(), first); assert!(trace.first().unwrap().entry.is_none());
+        assert_eq!((ObserverEntryClass::ALL.len(), ObserverExpectedName::ALL.len(), ObserverKnownLog::ALL.len()), (5, 9, 3));
+        Ok(())
+    }
     pub(crate) fn reader_contract() -> Result<()> {
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
         // DATA predicates only: no JournalFile/native owner, clock or I/O.
