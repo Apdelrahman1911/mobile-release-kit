@@ -53,7 +53,7 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c3e70165ffc6f11403438944d6e565041033127b3e1230eaa30726320c0dc890'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a1d94bb223ba42cc884839ad4048863dc888825925490bde4b90b138258f0550'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-source-admission
       - name: Select the fixed frontend compiler
         if: (github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-installed-github-readonly' || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')
@@ -624,7 +624,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c3e70165ffc6f11403438944d6e565041033127b3e1230eaa30726320c0dc890'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a1d94bb223ba42cc884839ad4048863dc888825925490bde4b90b138258f0550'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain the compiler artifact or typed private-transport summary
         id: upload
@@ -746,7 +746,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ steps.compile.outputs.shell_transport == 'actions-artifact-v1' && steps.upload.outputs.artifact-id || '' }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ steps.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c3e70165ffc6f11403438944d6e565041033127b3e1230eaa30726320c0dc890'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a1d94bb223ba42cc884839ad4048863dc888825925490bde4b90b138258f0550'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

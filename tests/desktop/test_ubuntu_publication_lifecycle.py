@@ -2545,8 +2545,8 @@ class GitHubPeerNamespaceWitnessContracts(unittest.TestCase):
 def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
-        "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
-        "methods": "thirteen-passive", "passiveActions": False,
+        "schemaVersion": 4, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+        "methods": "14-input-assess", "passiveActions": False,
         "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
         "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
         "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
@@ -3649,8 +3649,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
         raw = L.canonical(expected)
-        self.assertEqual(len(raw), 2043)  # The one receipt includes its trailing newline.
-        self.assertEqual(hashlib.sha256(raw).hexdigest(), "bb1e915f24abab3a6ba30e188af070abf7ad99bc735733f3fb28d045d6773b53")
+        self.assertEqual(len(raw), 2042)  # The one receipt includes its trailing newline.
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "4abcdf39143d07b5ed4a4bd474e983fcdd12a3f24a3e61a1a6bc0ac0bc2bf57a")
         self.assertTrue(raw.endswith(b"\n"))
         self.assertLessEqual(len(raw), 2048)
         self.assertEqual(L.shell_project_receipt(raw), expected)
@@ -3689,6 +3689,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
         prior_u = deepcopy(expected)
+        prior_u["schemaVersion"] = 3
         prior_u["methods"] = "twelve-passive"
         prior_u["quit"]["operation"] = 6
         prior_u["save"]["createReleaseDirectory"] = False
@@ -3709,10 +3710,15 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(L.canonical(legacy_v2)), 2029)
         legacy_r = {**prior_u, "methods": "eleven-passive", "quit": {**prior_u["quit"], "operation": 3}}
         self.assertEqual(hashlib.sha256(L.canonical(legacy_r)).hexdigest(), "aae33b86cb288492032b903bc845929b08e904173264762971e65b3903f05af8")
+        predecessor = {**expected, "schemaVersion": 3, "methods": "thirteen-passive"}
+        self.assertEqual(hashlib.sha256(L.canonical(predecessor)).hexdigest(), "bb1e915f24abab3a6ba30e188af070abf7ad99bc735733f3fb28d045d6773b53")
+        prior_twelve = {**expected, "schemaVersion": 3, "methods": "twelve-passive", "quit": {**expected["quit"], "operation": 6}}
+        stale_thirteen = {**expected, "methods": "13-input-assess"}
         save_only = {key: child for key, child in expected.items() if key not in {"guidance", "savedReads"}}
         guidance_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "savedReads"}}
         saved_reads_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "guidance"}}
         for changed in (b"", b"{}", L.canonical(prior_u), L.canonical(legacy), L.canonical(legacy_v2), L.canonical(legacy_r), L.canonical({**expected, "methods": "six-passive"}),
+                        L.canonical(predecessor), L.canonical(prior_twelve), L.canonical(stale_thirteen),
                         L.canonical(save_only), L.canonical(guidance_only), L.canonical(saved_reads_only),
                         L.canonical({key: child for key, child in expected.items() if key != "save"}),
                         L.canonical({**expected, "save": {}}), L.canonical({**expected, "save": []}),

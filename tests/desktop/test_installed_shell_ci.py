@@ -2183,9 +2183,9 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         observed = closed_project_draft_data(lifecycle)
         result = S.shell_project_draft_observation(observed, lifecycle)
         self.assertEqual(result, observed["projectDraft"])
-        self.assertEqual(result["native"]["schemaVersion"], 3)
+        self.assertEqual(result["native"]["schemaVersion"], 4)
         self.assertEqual(result["native"]["fixture"], "android-saved-readonly-v1")
-        self.assertEqual(result["native"]["methods"], "thirteen-passive")
+        self.assertEqual(result["native"]["methods"], "14-input-assess")
         self.assertEqual(result["native"]["quit"]["operation"], 7)
         self.assertFalse(result["native"]["passiveActions"])
         self.assertEqual(result["native"]["snapshot"]["sourceFiles"], 2)
@@ -2215,8 +2215,8 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         })
         encoded = lifecycle.canonical(result["native"])
         self.assertTrue(encoded.endswith(b"\n"))
-        self.assertEqual(len(encoded), 2043)
-        self.assertEqual(hashlib.sha256(encoded).hexdigest(), "bb1e915f24abab3a6ba30e188af070abf7ad99bc735733f3fb28d045d6773b53")
+        self.assertEqual(len(encoded), 2042)
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), "4abcdf39143d07b5ed4a4bd474e983fcdd12a3f24a3e61a1a6bc0ac0bc2bf57a")
         self.assertLessEqual(len(encoded), 2048)
         self.assertTrue(result["fixture"]["savedOutputsMatched"])
         self.assertTrue(result["fixture"]["hintUnchanged"])
@@ -2279,7 +2279,10 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         expected = lifecycle.SHELL_PROJECT_RECEIPT
         variants = {
             "legacy-v2": {**expected, "schemaVersion": 2},
-            "prior-R-v3": {**expected, "methods": "eleven-passive", "quit": {**expected["quit"], "operation": 3}},
+            "prior-R-v3": {**expected, "schemaVersion": 3, "methods": "eleven-passive", "quit": {**expected["quit"], "operation": 3}},
+            "predecessor-thirteen": {**expected, "schemaVersion": 3, "methods": "thirteen-passive"},
+            "predecessor-twelve": {**expected, "schemaVersion": 3, "methods": "twelve-passive", "quit": {**expected["quit"], "operation": 6}},
+            "stale-thirteen-assessment": {**expected, "methods": "13-input-assess"},
             "save-only": {key: child for key, child in expected.items() if key not in {"guidance", "savedReads"}},
             "guidance-only": {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "savedReads"}},
             "saved-reads-only": {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "guidance"}},
@@ -2872,11 +2875,11 @@ class InstalledVersionSaveReceiptContracts(unittest.TestCase):
 
 
 class InstalledSessionReceiptContracts(unittest.TestCase):
-    def test_original_four_and_separate_ios_receipts_remain_distinct_from_ordinary_twelve_methods(self):
+    def test_original_four_and_separate_ios_receipts_keep_legacy_id_with_fourteen_normal_methods(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         observed = closed_project_draft_data(lifecycle)
         result = S.shell_project_draft_observation(observed, lifecycle)
-        self.assertEqual(result["native"]["methods"], "thirteen-passive")
+        self.assertEqual(result["native"]["methods"], "14-input-assess")
         for name in lifecycle.SHELL_SESSION_CASES:
             receipt = observed["sessionInputs"][name]["native"]
             self.assertEqual(receipt["case"], name)
