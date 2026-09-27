@@ -205,8 +205,13 @@ def _finish(result: dict[str, Any]) -> GitHubSetupResult:
     return cast(GitHubSetupResult, result)
 
 
-def propose_github_setup(draft: object, tooling_repository: object, tooling_sha: object,
-                         supplied_snapshot: object) -> GitHubSetupResult:
+def _propose_with_templates(draft: object, tooling_repository: object, tooling_sha: object,
+                            supplied_snapshot: object) -> tuple[GitHubSetupResult, dict[str, bytes] | None]:
+    """One admitted resource supplies both the proposal and private recognition.
+
+    The public passive API never exposes templates or filesystem authority.
+    The native editor freezes these bytes rather than rereading for Prepare.
+    """
     repository, sha, selected = _admit(draft, tooling_repository, tooling_sha, supplied_snapshot)
     # This deliberately reuses the existing redacted policy/requirements result,
     # not api.validate_draft's raw ConfigurationError rendering.
@@ -216,14 +221,15 @@ def propose_github_setup(draft: object, tooling_repository: object, tooling_sha:
         "facts": _facts(supplied_snapshot), "assurance": assurance("schema-policy"),
     }
     if not validation["valid"]:
-        return _finish(result)
+        return _finish(result), None
     raw, resource = _resource()
+    templates = {identity: resource["workflows"][identity].encode("utf-8") for identity, _ in WORKFLOWS}
     workflows: list[dict[str, Any]] = []
     total = 0
     try:
         _require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", _text(__version__, 32)) is not None)
         for identity, path in WORKFLOWS:
-            content = render_workflow_caller(resource["workflows"][identity].encode("utf-8"), repository, sha)
+            content = render_workflow_caller(templates[identity], repository, sha)
             _require(0 < len(content) <= MAX_WORKFLOW_BYTES)
             total += len(content)
             _require(total <= MAX_WORKFLOWS_BYTES)
@@ -252,4 +258,9 @@ def propose_github_setup(draft: object, tooling_repository: object, tooling_sha:
                      "environments": [{"stage": stage, "name": ENVIRONMENT_NAMES[stage]} for stage in STAGES],
                      "guidanceIds": list(GUIDANCE_IDS)},
     })
-    return _finish(result)
+    return _finish(result), templates
+
+
+def propose_github_setup(draft: object, tooling_repository: object, tooling_sha: object,
+                         supplied_snapshot: object) -> GitHubSetupResult:
+    return _propose_with_templates(draft, tooling_repository, tooling_sha, supplied_snapshot)[0]

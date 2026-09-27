@@ -15,9 +15,9 @@ use crate::{environment_diagnostics_protocol::{self as wire, Availability, Capab
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::installed_runtime::{CloseOutcome, EnvironmentDiagnosticsRuntimeSlots};
 
-// Separate native/document and interpreter/core/neutral-cwd qualifications.
-// Host name, development-runtime, metadata inspection and a renderer checkbox
-// confer neither. No environment-variable or other-owner fixture bypass exists.
+// Evidence limits, not ordinary selection switches. The original owner/live
+// document and fixed compiled runtime select the normal route below; neither
+// metadata nor observation registration proves native/runtime qualification.
 const NATIVE_QUALIFIED: bool = false;
 const RUNTIME_QUALIFIED: bool = false;
 const WORK: Duration = Duration::from_secs(6);
@@ -43,6 +43,9 @@ struct InstalledObservation { control: Arc<crate::shell::installed_observation::
 struct Inner {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     observation: Mutex<Option<InstalledObservation>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation_identity: Arc<()>,
+    original_owner: bool, original_document: Mutex<Option<std::sync::Weak<()>>>,
     runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify,
     poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -59,6 +62,9 @@ struct Active {
 }
 struct Session {
     id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
+    // Immutable admission route, never new-work permission. Losing the live
+    // document must not erase this original's runtime settlement obligation.
+    installed_expected: bool,
     registration: u32, project: PathBuf, draft: Mutex<Option<Value>>, request: AsyncMutex<Option<Vec<u8>>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
     output_bytes: AtomicUsize, resource_unknown: AtomicBool,
@@ -148,9 +154,13 @@ fn refused(reason: Availability) -> BridgeError {
 impl EnvironmentDiagnosticsOwner {
     pub(crate) fn new(runtime: RuntimeConfig) -> Self {
         let (changes, _) = watch::channel(0);
+        let original_owner = runtime.claim_original_diagnostics_owner();
         Self { inner: Arc::new(Inner {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             observation: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation_identity: Arc::new(()),
+            original_owner, original_document: Mutex::new(None),
             runtime, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
@@ -158,6 +168,22 @@ impl EnvironmentDiagnosticsOwner {
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
             fixture: Mutex::new(None),
         }) }
+    }
+    pub(crate) fn bind_original_document(&self, identity: &Arc<()>) {
+        if !self.inner.original_owner { return; }
+        let Ok(mut original) = self.inner.original_document.lock() else { return; };
+        // Some(dead Weak) is consumed permanently; no clone or replacement
+        // document may renew it after loss or an unavailable first binding.
+        if original.is_none() { *original = Some(Arc::downgrade(identity)); }
+    }
+    pub(crate) fn original_document_matches(&self, identity: &Arc<()>) -> bool {
+        self.inner.original_document_matches(Some(identity))
+    }
+    pub(crate) fn normal_selected(&self, identity: &Arc<()>) -> bool {
+        let r = self.inner.lock();
+        !r.disabled && !r.exhausted && !r.stopping && !r.document_lost && r.active.is_none()
+            && !self.inner.poisoned.load(Ordering::SeqCst)
+            && self.inner.original_document_matches(Some(identity)) && self.inner.installed_selected()
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.inner.lock().stopping }
@@ -191,14 +217,15 @@ impl EnvironmentDiagnosticsOwner {
         let context = input.context();
         let projection = Projection { run_id: ticket.id.clone(), owner_generation: ticket.generation.clone(), context: context.clone(),
             phase: Phase::Starting, outcome: None, finality: Finality::Pending, reason: Reason::None, result: None };
-        let owner = Arc::new(Session { id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks,
+        let installed_expected = self.inner.installed_selected();
+        let owner = Arc::new(Session { id: ticket.id, generation: ticket.generation, context, profile, clocks: ticket.clocks, installed_expected,
             registration, project, draft: Mutex::new(Some(input.draft)), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(),
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
             resources: AsyncMutex::new(Resources { frames: Some(receiver),
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-                installed: self.inner.installed_selected().then(|| Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()))),
+                installed: installed_expected.then(|| Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -363,11 +390,15 @@ fn set_failure_outcome(p: &mut Projection) {
     });
 }
 impl Inner {
+    fn original_document_matches(&self, identity: Option<&Arc<()>>) -> bool {
+        self.original_owner && self.original_document.lock().is_ok_and(|document|
+            document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|original|
+                identity.is_none_or(|identity| Arc::ptr_eq(&original, identity))))
+    }
     fn installed_selected(&self) -> bool {
-        let qualified = NATIVE_QUALIFIED && RUNTIME_QUALIFIED;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        let qualified = qualified || self.observation.lock().is_ok_and(|o| o.is_some());
-        qualified && self.runtime.environment_diagnostics_installed_profile_available()
+        // Registry may already be held. This memory-only selector never locks
+        // it again or consults an observer, token, prior success or caller flag.
+        self.original_document_matches(None) && self.runtime.environment_diagnostics_installed_profile_available()
     }
     fn qualified(&self) -> bool {
         if self.installed_selected() { return true; }
@@ -683,10 +714,10 @@ fn installed_closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_
     direct_returned && original_session(r, owner) && (!claimed || r.active.as_ref().is_some_and(|a|
         a.accepted && a.terminal && a.projection.result.as_ref().is_some_and(|t| t.lifetime.settled())))
 }
-fn installed_final(book: &Resources, inner: &Inner) -> bool {
+fn installed_final(book: &Resources, owner: &Session) -> bool {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
-        if !inner.installed_selected() {
+        if !owner.installed_expected {
             return book.installed.is_none() && !book.installed_started && !book.installed_joined && !book.installed_failed
                 && book.installed_settlement.is_none() && book.installed_return.is_none();
         }
@@ -695,7 +726,7 @@ fn installed_final(book: &Resources, inner: &Inner) -> bool {
             && book.installed.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled()))
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-    { !inner.installed_selected() && !book.installed_started && !book.installed_joined && !book.installed_failed }
+    { !owner.installed_expected && !book.installed_started && !book.installed_joined && !book.installed_failed }
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn installed_claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
@@ -747,7 +778,7 @@ async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
         let Some(native) = book.installed.clone() else {
-            if inner.installed_selected() { inner.unknown(owner); }
+            if owner.installed_expected { inner.unknown(owner); }
             return;
         };
         if !book.installed_started {
@@ -764,7 +795,7 @@ async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<
                 installed_closure_ready(&r, owner, startup.attempted,
                     installed_consumers_returned(book, &startup, slots.no_child_effect()))
             })();
-            if !inner.installed_selected() || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
+            if !owner.installed_expected || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let hold = inner.observation.lock().ok().and_then(|o| o.as_ref().map(|o| o.control.clone()))
                 .filter(|c| c.case == crate::shell::installed_observation::commands::Case::ToolsSettlement);
@@ -795,7 +826,7 @@ async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<
             else { book.installed_return = Some(result); book.installed_joined = joined; book.installed_failed = !joined; }
             if joined { book.installed_settlement.take(); } else { installed_worker_lost(book); }
         }
-        if !installed_final(book, inner) { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); }
+        if !installed_final(book, owner) { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); }
     }
 }
 fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
@@ -1124,7 +1155,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
         } else { true };
-        manager_joined && startup_settled && io_joined && io && protocol && installed_final(&book, &inner)
+        manager_joined && startup_settled && io_joined && io && protocol && installed_final(&book, &owner)
             && owner.driver_joined.load(Ordering::SeqCst)
             && !owner.resource_unknown.load(Ordering::SeqCst)
     };
@@ -1151,11 +1182,14 @@ mod tests {
         inert_active_at(Instant::now())
     }
     fn inert_active_at(admitted: Instant) -> (EnvironmentDiagnosticsOwner, Arc<Session>) {
+        inert_active_for_route(admitted, false)
+    }
+    fn inert_active_for_route(admitted: Instant, installed_expected: bool) -> (EnvironmentDiagnosticsOwner, Arc<Session>) {
         let owner = EnvironmentDiagnosticsOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened")));
         let projection = projection(); let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
         let (frames, receiver) = mpsc::channel(2);
         let session = Arc::new(Session { id: projection.run_id.clone(), generation: projection.owner_generation.clone(), context: projection.context.clone(),
-            profile: Profile::LinuxX64, clocks: Clocks::new(admitted), registration: 1, project: PathBuf::from("/unopened-project"),
+            profile: Profile::LinuxX64, clocks: Clocks::new(admitted), installed_expected, registration: 1, project: PathBuf::from("/unopened-project"),
             draft: Mutex::new(None), request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0),
             resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
             watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
@@ -1302,9 +1336,9 @@ mod tests {
         assert!(!installed_consumers_returned(&book, &startup, true));
         // Unselected dev/headless path remains separate; a stray installed slot
         // can never satisfy native finality without its original settlement.
-        assert!(installed_final(&book, &application.inner));
+        assert!(installed_final(&book, &owner));
         book.installed = Some(Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new())));
-        assert!(!installed_final(&book, &application.inner) && !book.installed_started);
+        assert!(!installed_final(&book, &owner) && !book.installed_started);
     }
     #[test]
     fn startup_and_hidden_failure_never_renew_finality_clock() {
@@ -1337,6 +1371,107 @@ mod tests {
         assert!(owner.ticket().is_err()); // No Tokio runtime or qualification.
         owner.document_lost();
         assert_eq!(owner.status(Availability::Available).unwrap().capability.reason, Availability::DocumentLost);
+    }
+    #[test]
+    fn normal_diagnostics_requires_the_first_owner_and_unrenewable_original_document() {
+        assert!(!NATIVE_QUALIFIED && !RUNTIME_QUALIFIED);
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-original-diagnostics"));
+        let selected = runtime.environment_diagnostics_installed_profile_available();
+        let owner = EnvironmentDiagnosticsOwner::new(runtime.clone()); let clone = owner.clone();
+        let second = EnvironmentDiagnosticsOwner::new(runtime.clone());
+        let document = Arc::new(()); let foreign = Arc::new(());
+        assert!(!owner.normal_selected(&document));
+        owner.bind_original_document(&document); clone.bind_original_document(&foreign); second.bind_original_document(&document);
+        assert!(clone.original_document_matches(&document)); assert!(!owner.original_document_matches(&foreign));
+        assert!(!second.original_document_matches(&document) && !second.normal_selected(&document));
+        assert_eq!(owner.normal_selected(&document), selected);
+        {
+            let _r = owner.inner.lock();
+            // Calling the real inner selector under Registry must not relock
+            // Registry or depend on an observer. This performs no native IO.
+            assert_eq!(owner.inner.installed_selected(), selected);
+        }
+        drop(document);
+        assert!(!owner.inner.installed_selected()); owner.bind_original_document(&foreign);
+        assert!(!clone.original_document_matches(&foreign) && !clone.normal_selected(&foreign));
+        let replacement = EnvironmentDiagnosticsOwner::new(runtime);
+        replacement.bind_original_document(&foreign);
+        assert!(!replacement.original_document_matches(&foreign));
+    }
+    #[test]
+    fn a_live_diagnostics_identity_does_not_override_busy_loss_shutdown_or_unknown() {
+        let (owner, original) = inert_active(); let document = Arc::new(());
+        owner.bind_original_document(&document); assert!(owner.original_document_matches(&document));
+        assert!(!owner.normal_selected(&document));
+        assert_eq!(owner.inner.availability(&owner.inner.lock(), Availability::Available), Availability::Busy);
+        owner.document_lost();
+        assert_eq!(owner.inner.availability(&owner.inner.lock(), Availability::Available), Availability::DocumentLost);
+        let first_stop = owner.inner.lock().active.as_ref().unwrap().first_stop;
+        owner.request_shutdown();
+        assert!(!owner.normal_selected(&document));
+        assert_eq!(owner.inner.availability(&owner.inner.lock(), Availability::Available), Availability::Shutdown);
+        let mut r = owner.inner.lock(); owner.inner.unknown_locked(&mut r, &original);
+        assert_eq!(owner.inner.availability(&r, Availability::Available), Availability::CleanupUnknown);
+        let active = r.active.as_ref().unwrap();
+        assert_eq!(active.first_stop, first_stop); assert_eq!(active.projection.reason, Reason::DocumentLost);
+        assert!(active.unknown && active.projection.finality == Finality::Unknown);
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[tokio::test]
+    async fn lost_document_still_joins_the_original_empty_installed_closer() {
+        // Actual empty slots and their actual one-use closer task only. No
+        // selected runtime, descriptor, process or native qualification is
+        // invented by this in-memory admission-route regression.
+        for cancelled_first in [false, true] {
+            let (application, owner) = inert_active_for_route(Instant::now(), true);
+            let document = Arc::new(()); application.bind_original_document(&document);
+            let native = Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()));
+            let mut book = owner.resources.lock().await; book.installed = Some(native.clone());
+            book.write_end = Some(WriteEnd { sent: false, closed: false, failed: false });
+            book.out_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false });
+            book.err_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false });
+            if cancelled_first {
+                let mut r = application.inner.lock();
+                application.inner.stop_locked(&mut r, &owner, Reason::Cancelled, owner.clocks.admitted);
+            }
+            application.document_lost(); drop(document);
+            let first_stop = application.inner.lock().active.as_ref().unwrap().first_stop;
+            assert!(!application.inner.installed_selected() && !installed_final(&book, &owner));
+            settle_installed(&mut book, &application.inner, &owner).await;
+            assert!(installed_final(&book, &owner) && book.installed_started && book.installed_joined);
+            assert!(book.installed_settlement.is_none() && !book.installed_failed);
+            assert!(Arc::ptr_eq(book.installed.as_ref().unwrap(), &native) && native.lock().unwrap().settled());
+            assert!(!owner.resource_unknown.load(Ordering::SeqCst));
+            let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+            assert_eq!(active.first_stop, first_stop);
+            assert_eq!(active.projection.reason, if cancelled_first { Reason::Cancelled } else { Reason::DocumentLost });
+            // Closer return alone does not fabricate all other lifecycle joins
+            // or retire the still-owned session.
+            assert!(!active.unknown && active.projection.finality == Finality::Pending);
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[tokio::test]
+    async fn installed_route_history_cannot_settle_missing_unexpected_or_pending_slots() {
+        for mode in ["missing", "unexpected", "borrower-pending", "unknown-close"] {
+            let (application, owner) = inert_active_for_route(Instant::now(), mode != "unexpected");
+            let mut book = owner.resources.lock().await;
+            if mode != "missing" { book.installed = Some(Arc::new(Mutex::new(EnvironmentDiagnosticsRuntimeSlots::new()))); }
+            book.write_end = Some(WriteEnd { sent: false, closed: false, failed: false });
+            book.out_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false });
+            book.err_end = Some(ReadEnd { frames: 0, eof: false, closed: false, failed: false });
+            if mode == "borrower-pending" { book.inspection_started = true; }
+            if mode == "unknown-close" {
+                // Negative DATA cannot turn an unstarted original into settled.
+                book.installed_started = true; book.installed_joined = true;
+                book.installed_return = Some(Ok(CloseOutcome::Unknown));
+            }
+            assert!(!installed_final(&book, &owner));
+            settle_installed(&mut book, &application.inner, &owner).await;
+            assert!(!installed_final(&book, &owner) && book.installed_settlement.is_none());
+            assert!(book.installed.as_ref().is_none_or(|native| !native.lock().unwrap().settled()));
+            let r = application.inner.lock(); assert!(r.disabled && r.active.as_ref().unwrap().unknown);
+        }
     }
     #[test]
     fn blocked_startup_and_lost_terminal_reach_same_original_h_and_retain_slot() {
@@ -1417,14 +1552,16 @@ mod tests {
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl EnvironmentDiagnosticsOwner {
-    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::ToolsAdmission) -> Result<(), BridgeError> {
+    pub(crate) fn installed_tools_identity(&self) -> std::sync::Weak<()> { Arc::downgrade(&self.inner.observation_identity) }
+    pub(crate) fn admit_installed_observation(&self, document: &Arc<()>, token: crate::shell::installed_observation::commands::ToolsAdmission) -> Result<(), BridgeError> {
         let r = self.inner.lock();
         if r.revision != 0 || r.active.is_some() || r.last.is_some() || r.disabled || r.stopping || r.document_lost
             || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
-            || !self.inner.runtime.environment_diagnostics_installed_profile_available() { return Err(unavailable()); }
+            || !token.document_matches(document) || !self.inner.original_document_matches(Some(document))
+            || !self.inner.installed_selected() { return Err(unavailable()); }
         let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if slot.is_some() { return Err(unavailable()); }
-        *slot = Some(InstalledObservation { control: token.consume()?, original: None, retired: false }); Ok(())
+        *slot = Some(InstalledObservation { control: token.consume(&self.inner.observation_identity)?, original: None, retired: false }); Ok(())
     }
     pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::Snapshot> {
         let (owner, retired) = {

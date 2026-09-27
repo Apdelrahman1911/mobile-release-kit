@@ -1205,6 +1205,88 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn('"reusedSupplierOnly": True', workflow)
         self.assertIn('"first-save", "noop-stale", "picker-loss", "save-loss"', workflow)
 
+    def test_ordinary_workflow_binds_reviewed_current_payload_before_normal_release(self):
+        root = Path(__file__).absolute().parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        anchors = {
+            "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": "2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e",
+            "MRK_BUNDLED_RUNTIME_SOURCE_SHA256": "35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c",
+            "MRK_BUNDLED_PROTOCOL_SHA256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+        }
+        for variable, expected in anchors.items():
+            self.assertEqual(TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M),
+                             [expected], variable)
+            self.assertIn('"$' + variable + '" =~ ^[0-9a-f]{64}$', workflow)
+            self.assertIn('"$' + variable + '" == ' + expected, workflow)
+        self.assertEqual(TOOL.CURRENT_PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
+        self.assertNotEqual(TOOL.PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
+        for field, variable in (("runtimeManifestSha256", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+                                ("runtimeSourceInputsSha256", "MRK_BUNDLED_RUNTIME_SOURCE_SHA256"),
+                                ("protocolSha256", "MRK_BUNDLED_PROTOCOL_SHA256")):
+            self.assertIn('"' + field + '": os.environ["' + variable + '"]', workflow)
+        self.assertIn('"reusedSupplierOnly": True', workflow)
+        self.assertIn('"reusedRun": "35602474108/1", "reusedArtifactId": "10639324707"', workflow)
+        self.assertEqual(workflow.count('actions/artifacts/10639324707/zip'), 1)
+        command = "desktop/tools/stage_macos_installed.py current-runtime"
+        self.assertEqual(workflow.count(command), 1)
+        stage = workflow.index(command)
+        self.assertLess(stage, workflow.index("npm ci --ignore-scripts"))
+        self.assertLess(stage, workflow.index("cargo build --locked --release"))
+        block = workflow.split("      - name: Reuse accepted Mac supplier and prepare only the current ordinary payload\n", 1)[1].split("      - name: ", 1)[0]
+        for fragment in ("timeout-minutes: 3", "set -o noclobber", "umask 077",
+                         '--archive "$MRK_MACOS_WORK/accepted-native-evidence.zip"',
+                         '--work "$MRK_MACOS_WORK/current-runtime-preparation"',
+                         '--expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256"',
+                         '--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"',
+                         '--output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"'):
+            self.assertEqual(block.count(fragment), 1, fragment)
+        for subcommand in ("runtime ", "describe-runtime", "describe-current-runtime"):
+            self.assertNotIn("desktop/tools/stage_macos_installed.py " + subcommand, workflow)
+        command = "desktop/tools/stage_macos_installed.py input"
+        self.assertEqual(workflow.count(command), 1)
+        inputs = workflow.split(command, 1)[1].split('inventory=$', 1)[0]
+        self.assertEqual(inputs.count("--current-runtime"), 1)
+        self.assertIn('--runtime "$MRK_MACOS_WORK/runtime"', inputs)
+        self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', inputs)
+        self.assertIn('--output "$MRK_MACOS_WORK/input"', inputs)
+
+    def test_ordinary_current_route_preserves_separate_installer_and_aqua_obligations(self):
+        root = Path(__file__).absolute().parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        normal = "cargo build --locked --release --no-default-features --features desktop-shell,custom-protocol"
+        self.assertEqual(workflow.count(normal), 1)
+        self.assertIn('--binary "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/mobile-release-kit-desktop"', workflow)
+        for forbidden in ("macos-installed-observation", "development-runtime", "macos_aqua_qualification.py", "--scope "):
+            self.assertNotIn(forbidden, workflow)
+        self.assertIn("refs/heads/verify/desktop-macos-installed", workflow)
+        self.assertIn("$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF", workflow)
+        self.assertIn('"fixedFixtureCases": 7', workflow)
+        self.assertIn('"aclPrimitiveCases": 6', workflow)
+        self.assertIn('"selectedRegressionGroups": [2, 1, 2]', workflow)
+        self.assertIn('"actualAquaSaveGate": "pending"', workflow)
+        self.assertIn("Engineering installation only. Actual installed runtime, Aqua project/Quit, and Save gates remain unverified.", workflow)
+        fixture = workflow.index('sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg"')
+        fixture_readback = workflow.index("desktop/tools/stage_macos_installed.py observe-installer-fixture")
+        ordinary = workflow.index('sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg"')
+        ordinary_readback = workflow.index("desktop/tools/stage_macos_installed.py observe-installation")
+        fixture_build = workflow.index(
+            "cargo build --locked --release --no-default-features --features macos-installed-installer-fixture ")
+        ordinary_build = workflow.index(
+            "cargo build --locked --release --no-default-features --features macos-installed-installer ")
+        self.assertLess(fixture_build, fixture)
+        self.assertLess(fixture, fixture_readback)
+        self.assertLess(fixture_readback, ordinary_build)
+        self.assertLess(ordinary_build, ordinary)
+        self.assertLess(ordinary, ordinary_readback)
+        self.assertEqual(workflow.count("sudo -- /usr/sbin/installer -pkg "), 2)
+        for stem in ("installer-fixture", "installer"):
+            self.assertIn('--installer-status "$MRK_MACOS_WORK/' + stem + '-output.status"', workflow)
+        for path in ("runtime-result.json", "input-result.json", "installer-fixture-observation.json", "installation-observation.json"):
+            self.assertIn("$" + "{{ steps.work.outputs.root }}/" + path, workflow)
+        guide = (root / "desktop/packaging/macos-installed.md").read_text(encoding="utf-8")
+        self.assertIn("ordinary4 remains a separate later obligation", guide)
+        self.assertIn("No normal P2/project-picker qualification bit is enabled", guide)
+
 
 if __name__ == "__main__":
     unittest.main()

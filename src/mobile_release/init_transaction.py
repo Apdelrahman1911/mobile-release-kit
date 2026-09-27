@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .errors import ValidationError
-from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS
+from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS, canonical_workflow_reference
 
 PREPARING = ".mobile-release-init-prepare"
 READY = ".mobile-release-init"
@@ -390,6 +390,7 @@ class InitWorkspace:
         self._workflow_header: bytes | None = None
         self._workflow_plan: bytes | None = None
         self._workflow_controls: dict[str, dict[str, Any]] = {}
+        self._workflow_updates: frozenset[str] = frozenset()
         self._workflow_complete = False
         self._creation = {"state": "NEW"}
         self._install_started = False
@@ -440,6 +441,11 @@ class InitWorkspace:
     def _saved_text_profile(self) -> bool:
         return self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
 
+    @property
+    def _original_facts_required(self) -> bool:
+        return self._saved_text_profile or (self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS
+                                            and bool(self._workflow_updates))
+
     def _saved_text_targets(self):
         from .init_workspace_custody import MetadataTargets, VersionTargets
         if self._typed_profile is TypedEditProfile.METADATA_TEXT:
@@ -461,13 +467,13 @@ class InitWorkspace:
         raise ValueError("no saved-text journal domain")
 
     def _expect_unchanged(self, condition: bool, message: str) -> None:
-        """Only an actual comparison mismatch is a metadata stale conflict.
+        """Only an actual comparison mismatch is an original-facts stale conflict.
 
         Do not catch/relabel generic ValidationError or IO failures. Legacy
         domains retain their exact existing comparison exception behavior.
         """
-        if not condition and self._saved_text_profile:
-            raise InitConflict("saved text: " + message)
+        if not condition and self._original_facts_required:
+            raise InitConflict(("saved text: " if self._saved_text_profile else "workflow: ") + message)
         _require(condition, message)
 
     def _original_target_check(self, item: ObservedFile, message: str) -> None:
@@ -478,12 +484,12 @@ class InitWorkspace:
         """
         self._last_read_facts = None
         self._expect_unchanged(self._current(item.path) == item.before, message)
-        if self._saved_text_profile:
-            _require(self._rooted_revision is not None, "original metadata revision is required")
+        if self._original_facts_required:
+            _require(self._rooted_revision is not None, "original edit revision is required")
             original = dict(self._rooted_revision._raw)
-            _require(item.path in original, "original metadata raw observation is required")
+            _require(item.path in original, "original raw observation is required")
             self._expect_unchanged(self._last_read_facts == original[item.path],
-                                   "original metadata target facts changed")
+                                   "original target facts changed")
 
     def _metadata_dependencies_check(self) -> None:
         """Recheck original read-only bytes/facts, never reparse or retarget.
@@ -735,10 +741,10 @@ class InitWorkspace:
                     if self._guard is not None:
                         from .build_inputs import _directory
                         facts = tuple(sorted(_directory(value).items())) if value is not None else None
-                        if self._saved_text_profile and self._rooted_revision is not None:
+                        if self._original_facts_required and self._rooted_revision is not None:
                             original = dict(self._rooted_revision._parent_facts).get(relative)
                             if original is not None:
-                                self._expect_unchanged(facts == original, "original metadata ancestor facts changed")
+                                self._expect_unchanged(facts == original, "original ancestor facts changed")
                         self._parent_facts[relative] = facts
                     _require(relative in self.parents, "destination ancestor is outside the original inventory")
                     self._expect_unchanged(identity == self.parents[relative],
@@ -783,14 +789,14 @@ class InitWorkspace:
 
     def _current(self, path: str, *, directory: bool = False) -> dict[str, Any] | None:
         with self._parent(path) as parent:
-            if directory and self._saved_text_profile and self._rooted_revision is not None:
+            if directory and self._original_facts_required and self._rooted_revision is not None:
                 from .build_inputs import _directory
                 expected = dict(self._rooted_revision._parent_facts).get(path)
                 if expected is not None:
                     current = _stat(parent, path.split("/")[-1]) if parent is not None else None
                     self._expect_unchanged(current is not None and stat.S_ISDIR(current.st_mode)
                                            and tuple(sorted(_directory(current).items())) == expected,
-                                           "original metadata target parent facts changed")
+                                           "original target parent facts changed")
             return self._binding(parent, path.split("/")[-1], directory=directory) if parent is not None else None
 
     def _namespace_check(self, *, changing: str | None = None) -> None:
@@ -855,7 +861,7 @@ class InitWorkspace:
                     self.rename(destination_fd, destination, source_fd, source)
                     self._fsync(source_fd)
                     self._fsync(destination_fd)
-                if self._saved_text_profile and isinstance(error, InitConflict):
+                if self._original_facts_required and isinstance(error, InitConflict):
                     raise
                 raise ValidationError("init transaction: source changed during move; captured user object preserved, reconcile before recovery") from error
         if failure is not None:
@@ -975,8 +981,15 @@ class InitWorkspace:
         if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
             _require(tuple(e["path"] for e in plan["files"]) == self._typed_profile.paths
                      and tuple(e["path"] for e in plan["directories"]) == self._typed_profile.directories
-                     and all((e["before"] is None) != (e["after"] is None) for e in plan["files"]),
-                     "workflow recovery cannot replace or adopt another inventory")
+                     and all(e["path"] in self._captured
+                             and e["before"] == self._captured[e["path"]].before
+                             and (e["after"] is None or 0 < e["after"]["size"] <= limit)
+                             and (e["before"] is None or e["after"] is None
+                                  or e["after"]["mode"] == e["before"]["mode"])
+                             for e, limit in zip(plan["files"], self._typed_profile.payload_limits))
+                     and frozenset(e["path"] for e in plan["files"]
+                                   if e["before"] is not None and e["after"] is not None) == self._workflow_updates,
+                     "workflow recovery differs from the original validated inventory")
         elif self._saved_text_profile:
             targets = self._saved_text_targets()
             target_limit = targets.observation_limits[2]
@@ -1090,8 +1103,8 @@ class InitWorkspace:
             before, after = entry["before"], entry["after"]
             if after is None:
                 self._expect_unchanged(current == before, "preserved input changed")
-                if self._saved_text_profile:
-                    self._original_target_check(self._captured[entry["path"]], "preserved metadata input changed")
+                if self._original_facts_required:
+                    self._original_target_check(self._captured[entry["path"]], "preserved original input changed")
                 continue
             staged, backup = self._binding(fd, f"new-{i}"), self._binding(fd, f"old-{i}")
             old = current == before and staged == after and backup is None
@@ -1191,8 +1204,8 @@ class InitWorkspace:
                     _require(parent is not None, "file parent is missing")
                     leaf = entry["path"].split("/")[-1]
                     self._expect_unchanged(self._binding(parent, leaf) == entry["before"], "destination changed before installation")
-                    if self._saved_text_profile:
-                        self._original_target_check(self._captured[entry["path"]], "metadata destination changed before installation")
+                    if self._original_facts_required:
+                        self._original_target_check(self._captured[entry["path"]], "original destination changed before installation")
                     if entry["before"]:
                         self._move(parent, leaf, fd, f"old-{i}", entry["before"])
                     self._move(fd, f"new-{i}", parent, leaf, entry["after"])
@@ -1284,7 +1297,7 @@ class InitWorkspace:
                                         ROLLED_BACK=workflow_entries["rollback.pending"])
                 workflow_entries.update({f"new-{i}": (False, entry["after"])
                                          for i, entry in enumerate(original["files"]) if entry["after"]})
-                if self._saved_text_profile:
+                if self._saved_text_profile or self._workflow_updates:
                     workflow_entries.update({f"old-{i}": (False, entry["before"])
                                              for i, entry in enumerate(original["files"])
                                              if entry["before"] is not None and entry["after"] is not None})
@@ -1466,9 +1479,38 @@ class InitWorkspace:
         """Configuration-only facade; legacy CLI keeps its public API."""
         return self._apply_typed(changes, TypedEditProfile.CONFIGURATION)
 
-    def apply_workflows_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
-        """Four fixed generated callers: create absent or preserve, never replace."""
-        return self._apply_typed(changes, TypedEditProfile.GITHUB_WORKFLOWS)
+    def apply_workflows_typed(self, changes: list[tuple[ObservedFile, bytes | None]], *,
+                              resource_sha256: str | None = None) -> InitApplyOutcome:
+        """Four fixed callers; replacements require original canonical proof."""
+        return self._apply_typed(changes, TypedEditProfile.GITHUB_WORKFLOWS,
+                                 workflow_resource_sha256=resource_sha256)
+
+    def _admit_workflow_updates(self, changes: list[tuple[ObservedFile, bytes | None]],
+                                resource_sha256: str | None) -> None:
+        updates = [(identity, item, payload) for (identity, _), (item, payload) in zip(WORKFLOWS, changes)
+                   if item.before is not None and payload is not None]
+        if not updates:
+            return  # Keep the existing create/preserve-only facade unchanged.
+        _require(type(resource_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", resource_sha256) is not None,
+                 "canonical workflow updates require the prepared resource identity")
+        from .api import _github_setup
+        from .init_workspace_custody import RootedRevision
+        _require(type(self._rooted_revision) is RootedRevision
+                 and self._rooted_revision.profile is TypedEditProfile.GITHUB_WORKFLOWS
+                 and self._scope.lease._revision is self._rooted_revision,
+                 "workflow updates require their original rechecked revision")
+        raw, resource = _github_setup._resource()
+        _require(hashlib.sha256(raw).hexdigest() == resource_sha256,
+                 "bundled workflow resource changed since preparation")
+        for identity, item, payload in updates:
+            template = resource["workflows"][identity].encode("utf-8")
+            _require(item.data != payload
+                     and canonical_workflow_reference(template, item.data) is not None
+                     and canonical_workflow_reference(template, payload) is not None,
+                     "workflow update is not an exact current canonical caller")
+        # Derivative finite paths only. Original captured bytes, rooted facts
+        # and later original controls remain the authority for the transaction.
+        self._workflow_updates = frozenset(item.path for _, item, _ in updates)
 
     def apply_metadata_text_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
         """Only original config-bound public text targets; never dependencies."""
@@ -1479,7 +1521,7 @@ class InitWorkspace:
         return self._apply_typed(changes, TypedEditProfile.RELEASE_VERSION)
 
     def _apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]],
-                     profile: TypedEditProfile) -> InitApplyOutcome:
+                     profile: TypedEditProfile, *, workflow_resource_sha256: str | None = None) -> InitApplyOutcome:
         if self._scope is None or self._guard is None or self._typed_claimed:
             raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         self._typed_claimed = True
@@ -1511,8 +1553,9 @@ class InitWorkspace:
                          "desktop changes do not match the original revision")
                 if profile is TypedEditProfile.GITHUB_WORKFLOWS:
                     _require((item.before is not None and payload is None)
-                             or (item.before is None and item.data is None and type(payload) is bytes and 0 < len(payload)),
-                             "workflow changes cannot replace existing files or omit absent callers")
+                             or (type(payload) is bytes and 0 < len(payload)
+                                 and (item.before is not None or item.data is None)),
+                             "workflow changes cannot omit absent callers")
                 elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
                     _require((item.before is not None and payload is None)
                              or type(payload) is bytes and 0 < len(payload),
@@ -1520,6 +1563,7 @@ class InitWorkspace:
             if profile is TypedEditProfile.GITHUB_WORKFLOWS:
                 _require(set(self._captured) == set(paths) and tuple(sorted(self.parents)) == profile.directories,
                          "workflow capture is not the exact fixed domain")
+                self._admit_workflow_updates(changes, workflow_resource_sha256)
             elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
                 _require(set(self._captured) == set(targets.observation_paths)
                          and set(self.parents) == {"release", *targets.directories},

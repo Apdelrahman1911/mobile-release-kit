@@ -1,8 +1,10 @@
-"""Inert tests for the closed workflow transaction profile.
+"""Focused tests for the closed workflow transaction profile.
 
 No real root lease, file transaction, process, signal handler or native API is
-acquired. Filesystem entry points are traps; the few observations below are
-explicit in-memory stat/read results. These checks cannot qualify native writes.
+acquired by WorkflowTransactionProfileTests. Its filesystem entry points are
+traps; observations are in-memory. The separately selected
+WorkflowUpdateFilesystemTests uses genuine Linux custody/transactions and must
+run only inside the independently admitted task-owned native execution boundary.
 """
 from __future__ import annotations
 
@@ -20,7 +22,9 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mobile_release import init_transaction as tx
+from mobile_release.api import _github_setup as setup
 from mobile_release.errors import ValidationError
+from mobile_release.workflow_payloads import render_workflow_caller
 
 PROFILE = tx.TypedEditProfile.GITHUB_WORKFLOWS
 ROOT = {"device": 9, "inode": 10, "mode": stat.S_IFDIR | 0o750, "uid": 1001, "gid": 1002}
@@ -118,7 +122,7 @@ def workspace(profile=PROFILE):
     return owner
 
 
-def journal_fixture():
+def journal_fixture(*, update=False):
     owner = workspace()
     header = {"schemaVersion": 1, "transactionId": "a" * 32, "root": dict(owner.root_identity)}
     directories = [{"path": path, "before": None,
@@ -126,6 +130,14 @@ def journal_fixture():
                    for i, path in enumerate(PROFILE.directories)]
     files = [{"path": path, "before": None, "after": binding(f"generated-{i}\n".encode(), 30 + i)}
              for i, path in enumerate(PROFILE.paths)]
+    original = b"original canonical fixture\n"
+    if update:
+        files[0]["before"] = binding(original, 60)
+        for entry in directories:
+            entry["before"], entry["after"] = entry["after"], None
+        owner._workflow_updates = frozenset({PROFILE.paths[0]})
+    owner._captured = {entry["path"]: tx.ObservedFile(entry["path"], entry["before"],
+                                                    original if entry["before"] else None) for entry in files}
     plan = {**header, "directories": directories, "files": files}
     contents = {"header.json": tx._json(header), "plan.json": tx._json(plan),
                 "commit.pending": owner._marker(plan, "COMMITTED"),
@@ -343,6 +355,97 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
                 owner._preparing_inventory(400)
             owner._locations.assert_not_called()
 
+    def test_updates_require_exact_resource_template_and_rechecked_revision_before_staging(self):
+        templates = {identity: f"uses: __MOBILE_RELEASE_KIT_REPOSITORY__/{identity}@__MOBILE_RELEASE_KIT_SHA__\n"
+                     for identity, _ in tx.WORKFLOWS}
+        raw = b"explicit inert admitted resource"
+        digest = hashlib.sha256(raw).hexdigest()
+        old = [render_workflow_caller(templates[identity].encode(), "old/toolkit", "a" * 40) for identity, _ in tx.WORKFLOWS]
+        new = [render_workflow_caller(templates[identity].encode(), "new/toolkit", "b" * 40) for identity, _ in tx.WORKFLOWS]
+        with inert_custody() as custody, patch.object(os, "fstat", return_value=stat_value()), \
+                patch.object(custody.uuid, "uuid4", return_value=SimpleNamespace(hex="b" * 32)):
+            for case in ("valid", "missing-digest", "different-resource", "no-revision", "custom-original", "custom-new", "same"):
+                owner = workspace()
+                originals = tuple(tx.ObservedFile(path, binding(data, 30 + i), data)
+                                  for i, (path, data) in enumerate(zip(PROFILE.paths, old)))
+                owner._captured = {item.path: item for item in originals}
+                owner.parents = {path: dict(device=9, inode=20 + i, mode=0o755) for i, path in enumerate(PROFILE.directories)}
+                lease = custody.InitRootLease(Path("/inert-not-opened"), cancellation=InertGuard(), profile=PROFILE, registered_identity=dict(ROOT))
+                lease._acquired = True; lease._active = SimpleNamespace(workspace=owner)
+                owner._rooted_revision = lease.bind_revision(owner, originals)
+                owner._scope = SimpleNamespace(lease=lease)
+                changes = [(item, payload) for item, payload in zip(originals, new)]
+                if case == "no-revision": owner._rooted_revision = None
+                if case == "custom-original":
+                    changed = tx.ObservedFile(originals[0].path, originals[0].before, old[0] + b"# customized\n")
+                    changes[0] = (changed, new[0])
+                if case == "custom-new": changes[0] = (originals[0], new[0] + b"# not canonical\n")
+                if case == "same": changes[0] = (originals[0], old[0])
+                selected = None if case == "missing-digest" else "f" * 64 if case == "different-resource" else digest
+                with patch.object(setup, "_resource", return_value=(raw, {"workflows": templates})), self.subTest(case=case):
+                    if case == "valid":
+                        owner._admit_workflow_updates(changes, selected)
+                        self.assertEqual(owner._workflow_updates, frozenset(PROFILE.paths))
+                    else:
+                        with self.assertRaises(ValidationError):
+                            owner._admit_workflow_updates(changes, selected)
+                        self.assertFalse(owner._workflow_updates)
+                    self.assertEqual(owner._creation["state"], "NEW")
+
+    def test_update_original_raw_facts_and_parents_cannot_be_replaced_by_matching_digests(self):
+        with inert_custody():
+            owner = workspace(); owner._workflow_updates = frozenset({PROFILE.paths[0]})
+            item = tx.ObservedFile(PROFILE.paths[0], binding(b"same", 30), b"same")
+            original = (("ctime_ns", 100), ("uid", 1001))
+            owner._rooted_revision = SimpleNamespace(_raw=((item.path, original),),
+                _parent_facts=((".github", tuple(sorted(directory(stat_value(inode=20)).items()))),))
+            def current(_path):
+                owner._last_read_facts = (("ctime_ns", 101), ("uid", 1001))
+                return item.before
+            owner._current = current
+            with self.assertRaises(tx.InitConflict):
+                owner._original_target_check(item, "changed original")
+            owner.parents = {".github": dict(device=9, inode=20, mode=0o750), ".github/workflows": None}
+            owner._alias = lambda *_args: None
+            with patch.object(tx, "_stat", return_value=stat_value(inode=20, uid=1003)), self.assertRaises(tx.InitConflict):
+                with owner._parent(item.path):
+                    self.fail("changed original parent owner was adopted")
+            problem = OSError("inert read failure")
+            owner._current = Mock(side_effect=problem)
+            with self.assertRaises(OSError) as caught:
+                owner._original_target_check(item, "io is not a comparison")
+            self.assertIs(caught.exception, problem)
+
+    def test_update_cleanup_admits_only_the_original_validated_backup_slot(self):
+        with no_io():
+            for case in ("valid", "wrong-backup", "unplanned-backup", "changed-plan", "unvalidated-update"):
+                owner, plan, values = journal_fixture(update=True)
+                original = owner._captured[PROFILE.paths[0]]
+                values["COMMITTED"] = values.pop("commit.pending")
+                values["old-0"] = (original.before, original.data)
+                owner._private = lambda _state: nullcontext(400)
+                owner._list = lambda _fd: list(values)
+                owner._fsync = lambda _fd: None
+                owner._private_check = lambda *_args: None
+                owner._binding = lambda _fd, name, **_kwargs: values[name][0] if name in values else None
+                if case == "wrong-backup": values["old-0"] = ({**original.before, "inode": 999}, original.data)
+                if case == "unplanned-backup": values["old-1"] = values["old-0"]
+                if case == "changed-plan":
+                    before, content = values["plan.json"]; values["plan.json"] = ({**before, "inode": 999}, content)
+                if case == "unvalidated-update": owner._workflow_updates = frozenset()
+                def unlink(name, **_kwargs):
+                    if name != tx.CLEANUP: values.pop(name)
+                owner._unlink = Mock(side_effect=unlink)
+                with patch.object(tx, "_stat", return_value=SimpleNamespace(st_mode=stat.S_IFREG | 0o644)), self.subTest(case=case):
+                    if case == "valid":
+                        owner._cleanup()
+                        self.assertFalse(values); self.assertTrue(owner._journal_clean)
+                        self.assertEqual(owner._unlink.call_args_list[0].args, ("old-0",))
+                    else:
+                        with self.assertRaises(ValidationError): owner._cleanup()
+                        owner._unlink.assert_not_called()
+                        self.assertFalse(owner._journal_clean)
+
     def test_cleanup_rejects_replaced_proof_before_any_destructive_operation(self):
         with no_io():
             owner, _plan, values = journal_fixture()
@@ -415,6 +518,93 @@ class WorkflowTransactionProfileTests(unittest.TestCase):
                                     self.assertIn(changed_name, values)
                                 self.assertFalse(owner._journal_clean)
                                 self.assertNotIn(changed_name, [call.args[0] for call in owner._unlink.call_args_list])
+
+
+class WorkflowUpdateFilesystemTests(unittest.TestCase):
+    """Actual Linux filesystem cases, separately admitted from the inert class."""
+
+    def _run_update(self, fail_after_first):
+        import tempfile
+        from mobile_release.cancellation import CleanupScope, DefaultCancellation
+        from mobile_release.init_workspace_custody import InitRootLease
+
+        self.assertTrue(sys.platform.startswith("linux"), "workflow mutation profile is Linux-only")
+        resource_raw, resource = setup._resource()
+        old = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "old/toolkit", "a" * 40)
+                    for identity, _ in tx.WORKFLOWS)
+        new = tuple(render_workflow_caller(resource["workflows"][identity].encode(), "new/toolkit", "b" * 40)
+                    for identity, _ in tx.WORKFLOWS)
+        with tempfile.TemporaryDirectory(prefix="mrk-workflow-update-") as directory_name:
+            root = Path(directory_name); callers = root / ".github" / "workflows"; callers.mkdir(parents=True)
+            initial = (old[0], None, new[2], old[3]); modes = (0o640, None, 0o644, 0o604)
+            for path, data, mode in zip(PROFILE.paths, initial, modes):
+                if data is not None:
+                    target = root / path; target.write_bytes(data); target.chmod(mode)
+            sentinel = callers / "unrelated.yml"; sentinel.write_bytes(b"# unrelated user workflow\n")
+            original_stats = {path: (root / path).stat() for path, data in zip(PROFILE.paths, initial) if data is not None}
+            sentinel_before = sentinel.stat()
+            registered = root.stat()
+            guard = DefaultCancellation(ValidationError, "workflow update fixture cleanup failed")
+            lease = InitRootLease(root, cancellation=guard, profile=PROFILE,
+                                  registered_identity={"device": registered.st_dev, "inode": registered.st_ino,
+                                                       "mode": registered.st_mode, "uid": registered.st_uid, "gid": registered.st_gid})
+            cleanup = CleanupScope(guard, lease.close, owns_cancellation=True, first_primary=True)
+            failure = OSError("once-only fixture failure after first replacement")
+            first_installed = injected = False
+            original_move = tx.InitWorkspace._move
+            def move(owner, source_fd, source, destination_fd, destination, expected, **kwargs):
+                nonlocal first_installed, injected
+                if fail_after_first and first_installed and not injected and owner._installing and source == "new-1":
+                    injected = True
+                    raise failure
+                result = original_move(owner, source_fd, source, destination_fd, destination, expected, **kwargs)
+                if owner._installing and source == "new-0": first_installed = True
+                return result
+            try:
+                with cleanup:
+                    guard.install(); guard.activate(); lease.acquire()
+                    with lease.workspace_scope() as owner:
+                        originals = tuple(owner.observe(path, limit=limit) for path, limit in zip(PROFILE.paths, PROFILE.observation_limits))
+                        revision = lease.bind_revision(owner, originals)
+                    with patch.object(tx.InitWorkspace, "_move", move):
+                        try:
+                            with lease.workspace_scope(revision) as owner:
+                                outcome = owner.apply_workflows_typed(
+                                    [(item, None if i == 2 else new[i]) for i, item in enumerate(originals)],
+                                    resource_sha256=hashlib.sha256(resource_raw).hexdigest())
+                        except tx.InitOperationFailure as error:
+                            if not fail_after_first: raise
+                            self.assertIs(owner._primary, failure)
+                            outcome = error.outcome
+            finally:
+                cleanup.__exit__(*sys.exc_info())
+            self.assertTrue(lease.closed); self.assertFalse(guard.lifetime_ledger.fatal)
+            self.assertEqual(guard.handler_state, "RESTORED")
+            self.assertTrue(first_installed); self.assertEqual(injected, fail_after_first)
+            self.assertEqual((outcome.effect, outcome.journal, outcome.resources, outcome.reason),
+                             ("rolled_back", "clean", "settled", "filesystem_error") if fail_after_first else
+                             ("committed", "clean", "settled", "none"))
+            self.assertTrue(all(not (root / state).exists() for state in tx.ALL_STATE_NAMES))
+            for i, path in enumerate(PROFILE.paths):
+                target = root / path
+                if fail_after_first and initial[i] is None:
+                    self.assertFalse(target.exists()); continue
+                self.assertEqual(target.read_bytes(), initial[i] if fail_after_first else new[i])
+                if path in original_stats:
+                    self.assertEqual(stat.S_IMODE(target.stat().st_mode), modes[i])
+                    self.assertEqual(target.stat().st_ino == original_stats[path].st_ino, fail_after_first or i == 2)
+            def facts(value):
+                return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                        value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            self.assertEqual(facts((root / PROFILE.paths[2]).stat()), facts(original_stats[PROFILE.paths[2]]))
+            self.assertEqual(sentinel.read_bytes(), b"# unrelated user workflow\n")
+            self.assertEqual(facts(sentinel.stat()), facts(sentinel_before))
+
+    def test_mixed_update_create_preserve_commits_and_cleans_original_backups(self):
+        self._run_update(False)
+
+    def test_failure_after_first_real_replacement_restores_originals_and_primary(self):
+        self._run_update(True)
 
 
 if __name__ == "__main__":

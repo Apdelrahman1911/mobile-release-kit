@@ -121,13 +121,27 @@ fn observations_valid(observed: &[ObservedFile]) -> bool {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Action { Create, Preserve }
+pub enum Action { Create, Preserve, Update }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Generated { pub content: String, pub byte_length: u32, pub sha256: String }
+impl Generated {
+    fn valid(&self) -> bool {
+        self.byte_length > 0 && self.byte_length <= GENERATED_LIMIT
+            && self.content.len() == self.byte_length as usize && hex(&self.sha256, 64)
+            && digest(self.content.as_bytes()) == self.sha256
+    }
+}
+fn present_previous<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Generated>, D::Error> {
+    Generated::deserialize(value).map(Some) // An explicitly supplied null is not omission.
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileView { pub id: WorkflowId, pub path: String, pub action: Action, pub observed: Observation, pub generated: Generated }
+pub struct FileView {
+    pub id: WorkflowId, pub path: String, pub action: Action, pub observed: Observation, pub generated: Generated,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_previous")]
+    pub previous: Option<Generated>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TemplateSet { pub core_version: String, pub resource_version: u32, pub resource_sha256: String }
@@ -149,22 +163,25 @@ impl PreparedView {
             || self.tooling.schema_reference != format!("https://raw.githubusercontent.com/{}/{}/schemas/project.schema.json", self.tooling.repository, self.tooling.sha)
             || self.tooling.state != "format-only" { return false; }
         let mut generated_total = 0u32;
+        let mut previous_total = 0u32;
         for (row, id) in self.files.iter().zip(IDS) {
             let generated = &row.generated;
-            if row.id != id || row.path != id.path() || !row.observed.valid()
-                || generated.byte_length == 0 || generated.byte_length > GENERATED_LIMIT
-                || generated.content.len() != generated.byte_length as usize || !hex(&generated.sha256, 64)
-                || digest(generated.content.as_bytes()) != generated.sha256 { return false; }
+            if row.id != id || row.path != id.path() || !row.observed.valid() || !generated.valid() { return false; }
             generated_total += generated.byte_length;
-            match (&row.action, &row.observed) {
-                (Action::Create, Observation::Absent {}) => {},
-                (Action::Preserve, Observation::Present { byte_length, sha256 })
+            match (&row.action, &row.observed, &row.previous) {
+                (Action::Create, Observation::Absent {}, None) => {},
+                (Action::Preserve, Observation::Present { byte_length, sha256 }, None)
                     if *byte_length == generated.byte_length && *sha256 == generated.sha256 => {},
+                (Action::Update, Observation::Present { byte_length, sha256 }, Some(previous))
+                    if previous.valid() && *byte_length == previous.byte_length && *sha256 == previous.sha256
+                        && previous.content != generated.content && previous.sha256 != generated.sha256 => {
+                            previous_total += previous.byte_length;
+                        },
                 _ => return false,
             }
         }
         let directories: Vec<&str> = self.create_directories.iter().map(String::as_str).collect();
-        generated_total <= 64 * 1024
+        generated_total <= 64 * 1024 && previous_total <= 64 * 1024
             && matches!(directories.as_slice(), [] | [".github/workflows"] | [".github", ".github/workflows"])
             && (directories.is_empty() || self.files.iter().all(|f| f.action == Action::Create))
     }
@@ -430,6 +447,45 @@ mod tests {
         }
         let mut bad = present; bad["unrelated"] = json!(true);
         assert!(serde_json::from_value::<ObservedFile>(bad).is_err(), "literal mutation observed-file-present-extra-unrelated");
+    }
+    #[test]
+    fn canonical_update_view_requires_complete_matching_previous_content() {
+        let mut updated = view(true);
+        let content = "name: previous é\n";
+        let previous = json!({"content":content,"byteLength":content.len(),"sha256":digest(content.as_bytes())});
+        updated["files"][0]["action"] = json!("update");
+        updated["files"][0]["previous"] = previous.clone();
+        updated["files"][0]["observed"] = json!({"state":"present","byteLength":content.len(),"sha256":previous["sha256"]});
+        assert!(decode(&prepared(updated.clone()),SESSION).is_ok());
+        let decoded: PreparedView = serde_json::from_value(updated.clone()).unwrap();
+        assert!(serde_json::to_value(decoded).unwrap() == updated);
+        for case in ["missing", "null", "create", "preserve", "observation", "hash", "length", "extra", "same", "oversize"] {
+            let mut bad = updated.clone();
+            let file = &mut bad["files"][0];
+            match case {
+                "missing" => { file.as_object_mut().unwrap().remove("previous"); },
+                "null" => file["previous"] = Value::Null,
+                "create" | "preserve" => file["action"] = json!(case),
+                "observation" => file["observed"]["sha256"] = json!("f".repeat(64)),
+                "hash" => file["previous"]["sha256"] = json!("f".repeat(64)),
+                "length" => file["previous"]["byteLength"] = json!(true),
+                "extra" => file["previous"]["unrelated"] = json!(true),
+                "same" => {
+                    file["previous"] = file["generated"].clone();
+                    file["observed"]["byteLength"] = file["generated"]["byteLength"].clone();
+                    file["observed"]["sha256"] = file["generated"]["sha256"].clone();
+                },
+                "oversize" => file["previous"]["content"] = json!("x".repeat(16 * 1024 + 1)),
+                _ => unreachable!(),
+            }
+            assert!(decode(&prepared(bad),SESSION).is_err(), "update mutation {case}");
+        }
+        for preserve in [false,true] {
+            for previous in [Value::Null,previous.clone()] {
+                let mut bad = view(preserve); bad["files"][0]["previous"] = previous;
+                assert!(decode(&prepared(bad),SESSION).is_err(), "previous is update-only");
+            }
+        }
     }
     #[test]
     fn missing_directories_and_template_tooling_display_are_closed_data() {

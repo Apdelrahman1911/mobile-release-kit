@@ -1778,7 +1778,7 @@ fn terminal_projection_admissible(projection: &EditProjection, plan_token: Optio
             EditDomain::Configuration => None, // Preserve the existing configuration outcome contract.
             EditDomain::GitHubWorkflows => {
                 let Some(prepared) = projection.workflow.as_ref().and_then(|w| w.prepared.as_ref()) else { return false; };
-                Some(prepared.view.files.iter().any(|f| f.action == workflow_wire::Action::Create))
+                Some(prepared.view.files.iter().any(|f| f.action != workflow_wire::Action::Preserve))
             },
             EditDomain::MetadataText => {
                 let Some(prepared) = projection.metadata_text.as_ref().and_then(|m| m.prepared.as_ref()) else { return false; };
@@ -3221,7 +3221,7 @@ mod workflow_domain_tests {
         let files = roster.into_iter().map(|(id,path)| FileView { id,path:path.into(),
             action:if preserve { Action::Preserve } else { Action::Create },
             observed:if preserve { Observation::Present { byte_length:content.len() as u32,sha256:hash.clone() } } else { Observation::Absent {} },
-            generated:Generated { content:content.into(),byte_length:content.len() as u32,sha256:hash.clone() } }).collect();
+            generated:Generated { content:content.into(),byte_length:content.len() as u32,sha256:hash.clone() },previous:None }).collect();
         let observed = roster.into_iter().map(|(id,_)| if preserve {
             ObservedFile::Present { id,byte_length:content.len() as u32,sha256:hash.clone() }
         } else { ObservedFile::Absent { id } }).collect();
@@ -3300,6 +3300,24 @@ mod workflow_domain_tests {
         assert!(terminal_projection_admissible(&preserves,Some(PLAN),&unchanged));
         assert!(!terminal_projection_admissible(&preserves,Some(PLAN),&installed));
         assert!(!terminal_projection_admissible(&preserves,Some(PLAN),&rollback));
+        for all_updates in [false,true] {
+            let mut updates = projection(true); updates.apply_submitted = true;
+            for (index, file) in updates.workflow.as_mut().unwrap().prepared.as_mut().unwrap().view.files.iter_mut().enumerate() {
+                if all_updates || index == 0 {
+                    file.action = workflow_wire::Action::Update;
+                    file.previous = Some(file.generated.clone());
+                    file.generated.content = "name: updated\n".into();
+                    file.generated.byte_length = file.generated.content.len() as u32;
+                    file.generated.sha256 = format!("{:x}",Sha256::digest(file.generated.content.as_bytes()));
+                }
+            }
+            assert!(terminal_projection_admissible(&updates,Some(PLAN),&installed));
+            assert!(terminal_projection_admissible(&updates,Some(PLAN),&rollback));
+            assert!(!terminal_projection_admissible(&updates,Some(PLAN),&unchanged));
+            assert!(!terminal_projection_admissible(&updates,Some(REVISION),&installed));
+            updates.apply_submitted = false;
+            assert!(!terminal_projection_admissible(&updates,Some(PLAN),&installed));
+        }
         assert!(!terminal_projection_admissible(&creates,Some(REVISION),&installed));
         creates.apply_submitted = false;
         assert!(!terminal_projection_admissible(&creates,Some(PLAN),&installed));

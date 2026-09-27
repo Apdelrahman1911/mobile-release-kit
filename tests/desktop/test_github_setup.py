@@ -222,7 +222,12 @@ class GitHubSetupTests(unittest.TestCase):
         for item in propose()["workflows"]:
             raw = (SOURCE / "templates/workflows" / f"mobile-{item['id']}.yml").read_bytes()
             self.assertEqual(item["content"].encode(), render_workflow_caller(raw, "Example/mobile-release-kit", "A" * 40))
-            self.assertIn("${{ github.sha }}", item["content"])
+            expected_source = ("${{ inputs.desktop_source_sha || github.sha }}"
+                               if item["id"] == "preflight" else "${{ github.sha }}")
+            self.assertEqual(
+                [line for line in item["content"].splitlines() if line.lstrip().startswith("source_sha:")],
+                [f"      source_sha: {expected_source}"],
+            )
             self.assertEqual(item["content"].count("a" * 40), 2)
             self.assertNotIn("secrets: inherit", item["content"])
             if item["id"] != "preflight":

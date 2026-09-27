@@ -5,7 +5,7 @@ import { sameJson } from './catalog.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { GITHUB_WORKFLOWS, githubSetupRequestFits } from './githubSetupProtocol.ts';
 import type { ApiError, CoreEditOutcome, JsonValue } from './types.ts';
-import type { GitHubWorkflowEditProjection, GitHubWorkflowEditStatus, WorkflowConflict, WorkflowObservation, WorkflowPreparedView } from './githubWorkflowEditTypes.ts';
+import type { GitHubWorkflowEditProjection, GitHubWorkflowEditStatus, WorkflowConflict, WorkflowContent, WorkflowObservation, WorkflowPreparedView } from './githubWorkflowEditTypes.ts';
 
 const encoder = new TextEncoder();
 const phases = ['opening', 'editing', 'preparing', 'reviewing', 'applying', 'finalizing', 'final', 'unknown'] as const;
@@ -104,6 +104,11 @@ function observation(value: unknown): value is WorkflowObservation {
     keys(value, ['state', 'byteLength', 'sha256']) && value.state === 'present' && length(value.byteLength, 1048576) && digest(value.sha256);
 }
 
+function workflowContent(value: unknown): value is WorkflowContent {
+  return keys(value, ['content', 'byteLength', 'sha256']) && text(value.content, 16384, false) &&
+    length(value.byteLength, 16384) && value.byteLength === encoder.encode(value.content).byteLength && digest(value.sha256);
+}
+
 function preparedView(value: unknown): value is WorkflowPreparedView {
   if (!boundedJson(value, 262144, 8000, 16) || !keys(value, ['schemaVersion', 'files', 'createDirectories', 'templateSet', 'tooling']) || value.schemaVersion !== 1 ||
       !Array.isArray(value.files) || value.files.length !== 4 || !Array.isArray(value.createDirectories)) return false;
@@ -118,16 +123,25 @@ function preparedView(value: unknown): value is WorkflowPreparedView {
   if (!(directories.length === 0 || directories.length === 1 && directories[0] === '.github/workflows' ||
       directories.length === 2 && directories[0] === '.github' && directories[1] === '.github/workflows')) return false;
   let bytes = 0;
+  let previousBytes = 0;
   return value.files.every((file, index) => {
-    if (!keys(file, ['id', 'path', 'action', 'observed', 'generated']) || file.id !== GITHUB_WORKFLOWS[index]?.id || file.path !== GITHUB_WORKFLOWS[index]?.path ||
-        !oneOf(file.action, ['create', 'preserve']) || !observation(file.observed) ||
-        !keys(file.generated, ['content', 'byteLength', 'sha256']) || !text(file.generated.content, 16384, false) ||
-        !length(file.generated.byteLength, 16384) || file.generated.byteLength !== encoder.encode(file.generated.content).byteLength || !digest(file.generated.sha256)) return false;
-    if (file.action === 'create' ? file.observed.state !== 'absent' : file.observed.state !== 'present' ||
-        file.observed.byteLength !== file.generated.byteLength || file.observed.sha256 !== file.generated.sha256) return false;
+    if (!record(file) || !keys(file, file.action === 'update' ? ['id', 'path', 'action', 'observed', 'generated', 'previous'] :
+      ['id', 'path', 'action', 'observed', 'generated']) || file.id !== GITHUB_WORKFLOWS[index]?.id || file.path !== GITHUB_WORKFLOWS[index]?.path ||
+        !oneOf(file.action, ['create', 'preserve', 'update']) || !observation(file.observed) || !workflowContent(file.generated)) return false;
+    if (file.action === 'create') {
+      if (file.observed.state !== 'absent') return false;
+    } else {
+      const previous = file.action === 'update' ? file.previous : file.generated;
+      if (!workflowContent(previous) || file.observed.state !== 'present' ||
+          file.observed.byteLength !== previous.byteLength || file.observed.sha256 !== previous.sha256) return false;
+      if (file.action === 'update') {
+        if (previous.content === file.generated.content || previous.sha256 === file.generated.sha256) return false;
+        previousBytes += previous.byteLength;
+      }
+    }
     if (directories.length > 0 && file.action !== 'create') return false;
     bytes += file.generated.byteLength;
-    return bytes <= 65536;
+    return bytes <= 65536 && previousBytes <= 65536;
   });
 }
 

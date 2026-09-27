@@ -2619,6 +2619,77 @@ class InstalledWorkflowApplyReceiptContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lifecycle.shell_workflow_receipt(malformed)
 
+    def test_canonical_update_preview_is_closed_without_apply_and_old_pin_conflict_receipts_are_rejected(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        current = lifecycle.SHELL_WORKFLOW_RECEIPT
+        self.assertEqual(current["requests"], {"open": 4, "prepare": 4, "apply": 2, "close": 1, "configuration": [0, 0, 0, 0]})
+        self.assertEqual(current["reviews"], {"fullText": True, "canonicalUpdates": 4, "updateClosedWithoutApply": True, "configBlocked": 4})
+        self.assertEqual(current["outcomes"][1], ["not_started", "not_created", "settled", "cancelled"])
+        self.assertEqual(current["nativeReasons"], ["none", "discarded", "none", "shutdown"])
+        self.assertEqual(current["originals"]["writerFrames"], [3, 2, 3, 2])
+        self.assertEqual(current["originals"]["stdoutFrames"], [3, 3, 3, 3])
+        self.assertEqual(current["confirmation"], {"opened": [2, 0, 1, 0], "keepReviewing": True, "acknowledged": 2})
+        # Exact historical changed-pin conflict receipt, not a new native result.
+        # A canonical update now has a retained plan and explicit UI Close; a
+        # genuine customized-newline conflict remains a separate hosted case.
+        historical = deepcopy(current)
+        historical["requests"]["close"] = 0
+        historical["reviews"] = {"fullText": True, "conflictNoToken": True,
+                                  "conflictReason": "existing_workflow_differs", "configBlocked": 4}
+        historical["outcomes"][1][-1] = "none"
+        historical["nativeReasons"][1] = "none"
+        historical["originals"]["stdoutFrames"][1] = 2
+        with self.assertRaises(ValueError):
+            lifecycle.shell_workflow_receipt(lifecycle.canonical(historical))
+        for target in ("case", "combined", "both"):
+            changed = closed_project_draft_data(lifecycle)
+            if target in ("case", "both"):
+                changed["cases"]["workflow-apply"]["workflowApply"] = deepcopy(historical)
+            if target in ("combined", "both"):
+                changed["workflowApply"]["native"] = deepcopy(historical)
+            with self.subTest(target=target), self.assertRaises((S.D.Refused, ValueError)):
+                S.shell_project_draft_observation(changed, lifecycle)
+
+    def test_update_preview_uses_native_before_after_text_and_the_existing_ui_close_route(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        review = source.split("fn workflow_review_sample(", 1)[1].split("fn workflow_original_final(", 1)[0]
+        self.assertIn("workflow::Action::Update", review)
+        self.assertIn("let previous = file.previous.as_ref()?;", review)
+        self.assertIn("previous.content != original", review)
+        self.assertIn("previous.byte_length as usize != size", review)
+        self.assertIn("previous.sha256 != original_digest", review)
+        self.assertIn("content.replace(WORKFLOW_UPDATE_SHA, TOOLKIT_SHA) != original", review)
+        self.assertIn("section(file.previous.as_ref()?.content.as_str(), '-')", review)
+        self.assertIn("Full before / after text", review)
+        self.assertIn("original and proposed diff", review)
+        self.assertNotIn("workflow_conflict_sample", source)
+        hook = source.split("pub(super) fn workflow_close_request(&self)", 1)[1].split("pub(super) fn workflow_status(", 1)[0]
+        self.assertIn("r.workflow.requests != [2, 2, 1, 0]", hook)
+        self.assertIn("s.review_visible && s.live_review()", hook)
+        self.assertIn("s.confirmation_opened == 0", hook)
+        self.assertIn("!s.apply_requested && !s.apply_returned && !s.close_requested", hook)
+        self.assertIn("r.workflow.sessions[1].close_requested = true", hook)
+        state = source.split("fn workflow_dom(", 1)[1].split("pub(super) fn path_request(", 1)[0]
+        self.assertIn("WorkflowStep::Start(index) => WorkflowStep::OpenText(index)", state)
+        self.assertIn("else if index == 1 { WorkflowStep::Close }", state)
+        self.assertIn("WorkflowStep::Close => WorkflowStep::ReadResult(1)", state)
+        script = source.split("fn workflow_script(", 1)[1].split("fn script(", 1)[0]
+        close = script.split('WorkflowStep::Close => r#"', 1)[1].split('WorkflowStep::ReadResult(index)', 1)[0]
+        self.assertIn("Close workflow review / keep draft", close)
+        self.assertIn("rows[0].click()", close)
+        self.assertNotIn("controller.", close)
+        self.assertIn("e.textContent.length>4096", script)
+        self.assertIn("e.textContent.length>6038", script)
+        self.assertIn("content:diffText(pre.querySelector('code'))", script)
+        ui = (SOURCE / "desktop/src/components/GitHubWorkflowApply.tsx").read_text()
+        for literal in ("Create absent or update canonical callers only", "Updates retain original permissions.",
+                        "Full before / after text", "Update canonical caller",
+                        "I reviewed all four paths and complete before/after text. This only creates, updates or preserves local callers; it does not save configuration, contact GitHub or execute a release."):
+            self.assertIn(literal, source)
+            self.assertIn(literal, ui)
+        # Source correspondence only. Real native preview/discard, update Apply
+        # and rollback remain distinct evidence obligations.
+
     def test_each_workflow_receipt_leaf_requires_exact_types_on_both_projections(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         expected = closed_project_draft_data(lifecycle)

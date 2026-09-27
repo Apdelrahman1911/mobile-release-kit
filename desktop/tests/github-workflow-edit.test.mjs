@@ -33,6 +33,11 @@ function view(actions = ['create', 'create', 'create', 'create']) {
       // Not real YAML and not a claim of valid core rendering or actual hashing.
       const content = `inert display row ${index}\n`;
       const generated = { content, byteLength: Buffer.byteLength(content), sha256: String(index + 1).repeat(64) };
+      if (actions[index] === 'update') {
+        const old = `inert previous row ${index}\n`;
+        const previous = { content: old, byteLength: Buffer.byteLength(old), sha256: String(index + 5).repeat(64) };
+        return { id, path, action: 'update', observed: { state: 'present', byteLength: previous.byteLength, sha256: previous.sha256 }, generated, previous };
+      }
       return { id, path, action: actions[index], observed: actions[index] === 'create' ? { state: 'absent' } : { state: 'present', byteLength: generated.byteLength, sha256: generated.sha256 }, generated };
     }),
     createDirectories: actions.every((action) => action === 'create') ? ['.github', '.github/workflows'] : [],
@@ -180,6 +185,49 @@ test('success needs original revision, submitted Apply and clean native/core fin
   assert.equal(workflowProjectionProgress(installed, { ...installed, nativeReason: 'cancelled' }), false);
   assert.equal(workflowDisplayDiff(installed.prepared.view.files[0]), `--- /dev/null\n+++ ${GITHUB_WORKFLOWS[0].path}\n@@ -0,0 +1,1 @@\n+inert display row 0\n`);
   assert.match(workflowDisplayDiff(unchanged.prepared.view.files[0]), /\n inert display row 0\n$/);
+});
+
+test('canonical update DTOs require complete old/new correspondence and render all lines', () => {
+  const plan = view(['update', 'create', 'preserve', 'update']);
+  const valid = status(3, owner('reviewing', { plan }));
+  assert.ok(parseGitHubWorkflowEditStatus(valid));
+  const old = plan.files[0];
+  assert.equal(workflowDisplayDiff(old), `--- ${old.path}\n+++ ${old.path}\n@@ -1,1 +1,1 @@\n-inert previous row 0\n+inert display row 0\n`);
+  assert.equal(workflowDisplayDiff({ ...old, previous: { ...old.previous, content: 'first\nlast' }, generated: { ...old.generated, content: 'new\n' } }),
+    `--- ${old.path}\n+++ ${old.path}\n@@ -1,2 +1,1 @@\n-first\n-last\n\\ No newline at end of file\n+new\n`);
+  for (const mutate of [
+    (v) => { delete v.files[0].previous; }, (v) => { v.files[0].previous = null; },
+    (v) => { v.files[0].previous.byteLength += 1; }, (v) => { v.files[0].previous.sha256 = 'f'.repeat(64); },
+    (v) => { v.files[0].previous.private = 'unexpected'; }, (v) => { v.files[0].previous.content = 'x'.repeat(16385); },
+    (v) => { v.files[0].previous = v.files[0].generated; }, (v) => { v.files[0].action = 'preserve'; },
+    (v) => { v.files[1].previous = null; }, (v) => { v.files[2].previous = old.previous; },
+  ]) {
+    const bad = structuredClone(plan); mutate(bad);
+    assert.equal(parseGitHubWorkflowEditStatus(status(3, owner('reviewing', { plan: bad }))), null);
+  }
+  for (const actions of [['update', 'update', 'update', 'update'], ['update', 'preserve', 'preserve', 'preserve']]) {
+    const updated = owner('final', { plan: view(actions) });
+    assert.ok(parseGitHubWorkflowEditStatus(status(3, null, updated)));
+    assert.equal(normalWorkflowResult(updated), 'installed');
+    assert.equal(parseGitHubWorkflowEditStatus(status(3, null, { ...updated,
+      coreOutcome: { effect: 'unchanged', journal: 'not_created', resources: 'settled', reason: 'none' } })), null);
+  }
+});
+
+test('update consent keeps one original plan and never resends or adopts changed before text', async () => {
+  const h = await connected(); const plan = view(['update', 'preserve', 'preserve', 'update']);
+  const binding = reviewing(h, plan);
+  assert.equal(h.count('apply'), 0);
+  assert.equal(h.controller.apply(binding), true);
+  assert.equal(h.controller.apply(binding), false);
+  h.publish(owner('applying', { plan })); h.publish(owner('final', { plan }));
+  assert.equal(h.count('apply'), 1); assert.equal(confirmedWorkflowResult(h.state), 'installed');
+  assert.equal(isDirty(h.selected()), true);
+  const stale = await connected(); reviewing(stale, plan);
+  const changed = owner('reviewing', { plan }); changed.prepared.view.files[0].previous.content = 'changed original';
+  stale.publish(changed);
+  assert.equal(stale.state.integrityFailed, true); assert.equal(stale.count('apply'), 0);
+  h.controller.dispose(); stale.controller.dispose();
 });
 
 test('bridge uses only five exact workflow commands/event; denied or malformed calls never fall back to preview', async () => {

@@ -50,6 +50,9 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
     // Clones share one Android owner claim. Neither a second constructor nor
     // an observer can reset it after an unavailable or dead first original.
     android_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // Diagnostics owns a separate family; it cannot spend or renew Android's
+    // claim. Every clone keeps the same spent first-owner tombstone.
+    diagnostics_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     passive_installed: PassiveInstalledSelection,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
@@ -923,6 +926,7 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 impl RuntimeConfig {
     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
         android_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        diagnostics_owner_claimed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
         windows_passive: if cfg!(all(feature = "desktop-shell", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -956,6 +960,9 @@ impl RuntimeConfig {
     } }
     pub(crate) fn claim_original_android_owner(&self) -> bool {
         !self.android_owner_claimed.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn claim_original_diagnostics_owner(&self) -> bool {
+        !self.diagnostics_owner_claimed.swap(true, std::sync::atomic::Ordering::SeqCst)
     }
     // Fixed compile DATA only, not passive/session qualification or runtime
     // custody. AndroidNativeBooks still owns the actual original inspection.
@@ -1382,8 +1389,8 @@ impl RuntimeConfig {
             Err(BridgeError::unavailable("Packaged configuration editing is disabled until its runtime custody and native owner are qualified."))
         }
     }
-    // Selection availability is shared by the original owner's admission and
-    // inspection; it does not open its separate native/runtime qualification.
+    // Fixed ordinary selection is shared by the original owner's admission and
+    // inspection. It is not observer permission or evidence of native finality.
     pub(crate) fn environment_diagnostics_installed_profile_available(&self) -> bool {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         { self.environment_diagnostics_installed_profile().is_ok() }
@@ -1392,7 +1399,8 @@ impl RuntimeConfig {
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn environment_diagnostics_installed_profile(&self) -> Result<EnvironmentDiagnosticsInstalledProfile, BridgeError> {
-        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
         if PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
             return Ok(EnvironmentDiagnosticsInstalledProfile { _private: () });
         }
@@ -2079,16 +2087,36 @@ mod tests {
         // shared exact tuple's missing/different vectors are tested below.
         assert_eq!(clone.android_build_installed_runtime_available(), expected);
     }
+    #[test]
+    fn diagnostics_owner_claim_is_separate_shared_and_never_reopens() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-diagnostics-selection-data"));
+        let clone = runtime.clone();
+        assert!(runtime.claim_original_diagnostics_owner());
+        assert!(!clone.claim_original_diagnostics_owner() && !runtime.claim_original_diagnostics_owner());
+        assert!(clone.claim_original_android_owner()); // Separate domain, not another diagnostics grant.
+        drop(runtime);
+        assert!(!clone.clone().claim_original_diagnostics_owner());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let expected = false;
+        assert_eq!(clone.environment_diagnostics_installed_profile_available(), expected);
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn installed_tools_and_offline_profiles_are_fixed_selection_data_only() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-command-data-only"));
-        let expected = cfg!(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+        let offline_expected = cfg!(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))
+            && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+        let tools_expected = cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
             && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
         let tools = runtime.environment_diagnostics_installed_profile(); let offline = runtime.offline_preflight_installed_profile();
-        assert_eq!(runtime.environment_diagnostics_installed_profile_available(), expected);
-        assert_eq!(runtime.offline_preflight_installed_profile_available(), expected);
-        assert_eq!((tools.is_ok(), offline.is_ok()), (expected, expected));
+        assert_eq!(runtime.environment_diagnostics_installed_profile_available(), tools_expected);
+        assert_eq!(runtime.offline_preflight_installed_profile_available(), offline_expected);
+        assert_eq!((tools.is_ok(), offline.is_ok()), (tools_expected, offline_expected));
         // No native inspection here, even for an exactly bound installed build.
         let root = PathBuf::from("/var/lib/mobile-release-kit/versions")
             .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);

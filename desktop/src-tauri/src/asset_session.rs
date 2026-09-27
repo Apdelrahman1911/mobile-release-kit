@@ -1752,6 +1752,7 @@ impl DocumentBinding {
         // DesktopBridge constructor. A later document cannot rebind its lease.
         document.inner.bridge.supervisor.bind_original_session_document(&document.inner.session_identity);
         document.inner.bridge.android_build.bind_original_document(&document.inner.session_identity);
+        document.inner.bridge.diagnostics.bind_original_document(&document.inner.session_identity);
         document
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1809,11 +1810,24 @@ impl DocumentBinding {
         offline: crate::shell::installed_observation::commands::OfflineAdmission) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
-            || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some() {
+            || state.quit.is_some() || state.exhausted || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !tools.document_matches(&self.inner.session_identity) {
             return Err(BridgeError::invalid());
         }
-        self.inner.bridge.diagnostics.admit_installed_observation(tools)?;
+        self.inner.bridge.diagnostics.admit_installed_observation(&self.inner.session_identity, tools)?;
         self.inner.bridge.preflight.admit_installed_observation(offline)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_tools_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.diagnostics.installed_tools_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_tools_normal_selected(&self) -> bool {
+        let state = self.lock();
+        state.next_operation == 0 && state.next_context == 0 && !state.session && state.slot.is_none() && state.context.is_none()
+            && state.quit.is_none() && !state.exhausted && !state.lost_observed && !state.stopping && !state.unknown
+            && self.live_session_owner_reason().is_none()
+            && self.inner.bridge.diagnostics.normal_selected(&self.inner.session_identity)
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn installed_android_identities(&self) -> (Weak<()>, Weak<()>) {
@@ -1972,7 +1986,8 @@ impl DocumentBinding {
             || self.inner.bridge.preflight.disabled() || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.ios_archive.disabled())) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
             || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping())) { return Availability::Shutdown; }
-        if !state.lifetime.original_bound() || state.lost_observed { return Availability::DocumentLost; }
+        if !state.lifetime.original_bound() || state.lost_observed
+            || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()

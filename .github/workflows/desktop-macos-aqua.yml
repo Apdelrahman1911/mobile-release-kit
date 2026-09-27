@@ -22,8 +22,8 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       # Exact independently accepted current-payload DATA; not native qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 6b6376420b79bc9a60f6b549700e0e539f1e204d97e1bd07aea8032e3616e7ee
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 81fb5b6babb560b27a7a42c69883de2bd65763d1faec4d215df057396dc76169
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
@@ -39,8 +39,8 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
           # Supplier reuse does not qualify a historical core as current source.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 6b6376420b79bc9a60f6b549700e0e539f1e204d97e1bd07aea8032e3616e7ee ]]
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 81fb5b6babb560b27a7a42c69883de2bd65763d1faec4d215df057396dc76169 ]]
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e ]]
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
       - name: Check out exact reviewed source without retained credentials

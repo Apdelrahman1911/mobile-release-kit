@@ -281,6 +281,17 @@ export function workflowNoOp(view: WorkflowPreparedView): boolean { return view.
 // Full display-only diff: prefix the already prepared text, never regenerate
 // payloads, parse YAML, compute file digests or manufacture before-file content.
 export function workflowDisplayDiff(file: WorkflowPreparedFile): string {
+  if (file.action === 'update') {
+    const section = (content: string, prefix: string) => {
+      const newline = content.endsWith('\n');
+      const lines = (newline ? content.slice(0, -1) : content).split('\n');
+      return { count: lines.length, text: lines.map((line) => `${prefix}${line}`).join('\n') + '\n' +
+        (newline ? '' : '\\ No newline at end of file\n') };
+    };
+    const before = section(file.previous.content, '-');
+    const after = section(file.generated.content, '+');
+    return `--- ${file.path}\n+++ ${file.path}\n@@ -1,${before.count} +1,${after.count} @@\n${before.text}${after.text}`;
+  }
   const content = file.generated.content;
   const newline = content.endsWith('\n');
   const lines = (newline ? content.slice(0, -1) : content).split('\n');
@@ -291,12 +302,12 @@ export function workflowDisplayDiff(file: WorkflowPreparedFile): string {
 
 export const workflowApplyHelp: HelpContent = {
   label: 'Review and apply local workflow callers', requiredness: 'optional',
-  requiredWhen: 'Only to install these four local caller files, with the distinct qualified native workflow capability. No browser preview, configuration-save qualification or remote GitHub permission can enable it.',
+  requiredWhen: 'Only to create or update these four local caller files, with the distinct qualified native workflow capability. No browser preview, configuration-save qualification or remote GitHub permission can enable it.',
   what: 'Freshly observe four fixed workflow destinations, generate once from the current draft and toolkit pin, review their complete text, then explicitly confirm the whole native plan.',
-  why: 'Create only absent files or preserve exact existing bytes. One differing, unsafe or changed file refuses the entire bundle instead of overwriting user edits or treating a reported digest as authority.',
-  where: 'Select the native-registered project, enter the toolkit repository/full commit above, then choose Review local workflow files. Passive comparison assertions are ignored by native review.',
-  format: 'Exactly mobile-preflight.yml, mobile-candidate.yml, mobile-external-testing.yml and mobile-production-submit.yml under .github/workflows. Only absent .github/workflows ancestors may also be created. New files request 0644 subject to inherited umask; new directories use 0755. Preserved files/directories are not rewritten or chmodded. The native absolute review lifetime is at most 15 minutes and cannot be renewed.',
-  failure: 'Conflicts have no Apply token. Changing selection, draft/baseline, pin, service/runtime or document retires a pre-Apply review. After submission, check only that original owner; cancellation may be too late. Recovery-required or unknown status retains evidence and blocks further edits. No force, overwrite, journal reset or automatic retry is offered. This never saves configuration, provisions secrets, commits, contacts GitHub, dispatches a workflow or establishes release readiness.',
+  why: 'Create absent files, preserve identical callers, or update only exact renderings of the current bundled template. A customized or older-template caller refuses the entire bundle without exposing or overwriting it. Template recognition does not prove authorship, compatibility or a trusted remote commit.',
+  where: 'Select the registered project and copy the toolkit OWNER/REPO from its GitHub URL and full 40-character commit from its commit page. Choose Review local workflow files and inspect the complete removed/added text. Passive comparison assertions are ignored.',
+  format: 'Exactly mobile-preflight.yml, mobile-candidate.yml, mobile-external-testing.yml and mobile-production-submit.yml under .github/workflows. Only absent workflow ancestors may also be created. New files request 0644 subject to inherited umask; new directories use 0755. Updates retain original permissions; exact-preserved files/directories are not rewritten or chmodded. The native absolute review lifetime is at most 15 minutes and cannot be renewed.',
+  failure: 'Custom or older-template conflicts have no Apply token; keep their originals and resolve them separately. Changing selection, draft/baseline, pin, service/runtime or document retires a pre-Apply review. After submission, observe the original owner; cancellation may be too late. Recovery-required or unknown status retains evidence and blocks edits. No force, arbitrary overwrite, journal reset or automatic retry is offered. This changes local files only: no configuration save, credential setup, commit, GitHub contact, workflow dispatch or release.',
 };
 export interface WorkflowNotice { title: string; detail: string; tone: Tone; code?: string }
 const coreCopy: Record<CoreEditReason, string> = {
@@ -341,7 +352,7 @@ export function workflowProjectionNotice(owner: GitHubWorkflowEditProjection): W
     if (core?.effect === 'committed') return { title: 'Workflows committed; installation did not finish normally', tone: 'danger', code, detail: `Do not Apply again. The original commit is retained, but interruption or cleanup needs attention. ${reason}` };
     if (core?.effect === 'rolled_back' && core.journal === 'clean' && core.resources === 'settled') return { title: 'Not installed; original transaction changes rolled back', tone: 'warning', code, detail: `The native owner confirmed clean rollback of this operation’s own effects, not unrelated state. Your configuration draft is unchanged. ${reason}` };
     if (owner.conflict) return { title: 'Local workflow bundle refused', tone: 'warning', code: owner.conflict.reason,
-      detail: 'At least one existing caller differs. No Apply token was issued and this operation performed no installation. Existing YAML is not exposed or overwritten. Resolve differences separately, then explicitly request a fresh review after settlement.' };
+      detail: 'At least one existing caller differs from both the proposal and the current canonical template shape. Custom or older callers are preserved, not exposed or merged. No Apply token was issued. Resolve differences separately, then request a fresh review after settlement.' };
     return { title: 'Workflow review ended; configuration draft kept', tone: 'warning', code, detail: `${core?.effect === 'not_started' ? 'This operation did not start installation. ' : 'No successful installation is confirmed. '}${reason}` };
   }
   if (owner.conflict) return { title: 'Existing callers differ; settling the refused review…', tone: 'warning', code: owner.conflict.reason, detail: 'There is no Apply token or partial-bundle option. Wait for original native settlement; no success or completed cleanup is claimed yet.' };

@@ -77,7 +77,7 @@ fn claim_once(case: Case, admitted: u8, claimed: &AtomicU8, domain: Domain) -> b
 
 // Non-cloneable setup tokens; only this module can construct them. They carry
 // neither paths nor results, and the actual document consumes them before IPC.
-pub(crate) struct ToolsAdmission { control: Arc<Control> }
+pub(crate) struct ToolsAdmission { control: Arc<Control>, document: Weak<()>, owner: Weak<()> }
 pub(crate) struct OfflineAdmission { control: Arc<Control> }
 // Constructed only for this actual document/Android owner at setup. Neither a
 // cloned owner wrapper nor a peer-domain token creates a second admission.
@@ -95,7 +95,17 @@ impl AndroidAdmission {
         self.control.consume(Domain::Android)?; Ok(self.control)
     }
 }
-impl ToolsAdmission { pub(crate) fn consume(self) -> Result<Arc<Control>, BridgeError> { self.control.consume(Domain::Tools)?; Ok(self.control) } }
+impl ToolsAdmission {
+    pub(crate) fn document_matches(&self, original: &Arc<()>) -> bool {
+        self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
+    }
+    pub(crate) fn consume(self, original: &Arc<()>) -> Result<Arc<Control>, BridgeError> {
+        if self.document.upgrade().is_none() || !self.owner.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original)) {
+            return Err(BridgeError::invalid());
+        }
+        self.control.consume(Domain::Tools)?; Ok(self.control)
+    }
+}
 impl OfflineAdmission { pub(crate) fn consume(self) -> Result<Arc<Control>, BridgeError> { self.control.consume(Domain::Offline)?; Ok(self.control) } }
 
 #[derive(Clone, Serialize)]
@@ -496,6 +506,7 @@ struct Record {
     held_observed: bool, terminal_visible: bool, final_snapshot: Option<Snapshot>,
     android_fixture: Option<AndroidFixture>, android_final_snapshot: Option<AndroidSnapshot>,
     android_selected_before_observation: bool,
+    tools_selected_before_observation: bool,
     android_version_requested: bool, android_version_observed: bool, android_busy_observed: bool,
     android_requests: [u8;3], android_replies: [u8;3],
 }
@@ -505,17 +516,26 @@ impl Control {
     }
     pub(super) fn attach(self: &Arc<Self>, q: &Arc<Observation>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
         if self.case.android() { return self.attach_android(q,document); }
+        // Observe the ordinary owner before attachment/fixture acquisition.
+        // This history never grants routing; registration rechecks the same
+        // original under Registry before spending the Tools token's bit.
+        let selected_before_observation = document.installed_tools_normal_selected();
+        if self.case.tools() && !selected_before_observation { return Err(BridgeError::invalid()); }
+        let (document_identity, owner_identity) = document.installed_tools_identities();
         {
             let shell = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
             let mut r = self.record().ok_or_else(BridgeError::cleanup_unknown)?;
-            if q.case != ShellCase::Commands(self.case) || !shell.attached || shell.started || r.issued { return Err(BridgeError::invalid()); }
+            if q.case != ShellCase::Commands(self.case) || !shell.attached || shell.started || r.issued
+                || document_identity.upgrade().is_none() || owner_identity.upgrade().is_none() { return Err(BridgeError::invalid()); }
             let mut original = self.original.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if original.is_some() { return Err(BridgeError::invalid()); }
             let fixture = Fixture::capture(q.project_path().ok_or_else(BridgeError::invalid)?, self.case).map_err(|_| BridgeError::invalid())?;
+            r.tools_selected_before_observation = selected_before_observation;
             r.content = Some(fixture.content()); r.saved = Some(fixture.saved.clone()); r.fixture = Some(fixture); r.issued = true;
             *original = Some(Arc::downgrade(q));
         }
-        document.admit_installed_commands(ToolsAdmission { control: self.clone() }, OfflineAdmission { control: self.clone() })
+        document.admit_installed_commands(ToolsAdmission { control: self.clone(), document: document_identity, owner: owner_identity },
+            OfflineAdmission { control: self.clone() })
     }
     pub(super) fn snapshot(&self, project_id: &str, result: &Result<Value, BridgeError>) {
         let Ok(q) = self.original() else { self.fail(); return; };
@@ -791,6 +811,7 @@ impl Control {
         let Some(r) = self.record() else { return false; };
         let Ok(h) = self.hold.lock() else { self.fail(); return false; };
         !self.failed.load(Ordering::SeqCst) && self.admitted.load(Ordering::SeqCst) == 3
+            && (!self.case.tools() || r.tools_selected_before_observation)
             && self.claimed.load(Ordering::SeqCst) == (if self.case.tools() { Domain::Tools } else { Domain::Offline }).bit()
             && r.requests == self.expected_requests() && r.replies == r.requests && r.initial && r.ready && r.start
             && r.consent == !self.case.tools() && r.cancel == self.case.cancel() && r.reciprocal == self.case.reciprocal()
@@ -1329,6 +1350,45 @@ fn android_terminal_dom(p: &Value, value: &Value) -> bool {
 }
 
 
+fn assert_tools_identity_contracts() {
+    let document = Arc::new(()); let foreign = Arc::new(());
+    for case in [Case::ToolsObserved, Case::ToolsCancel, Case::ToolsSettlement] {
+        let control = Control::new(case);
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: Arc::downgrade(&document) };
+        assert!(token.document_matches(&document) && !token.document_matches(&foreign));
+        assert!(token.consume(&foreign).is_err()); assert_eq!(control.admitted.load(Ordering::SeqCst), 0);
+        let stale = Arc::new(());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&stale), owner: Arc::downgrade(&document) };
+        drop(stale); assert!(token.consume(&document).is_err()); assert_eq!(control.admitted.load(Ordering::SeqCst), 0);
+        let stale = Arc::new(());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: Arc::downgrade(&stale) };
+        drop(stale); assert!(token.consume(&document).is_err()); assert_eq!(control.admitted.load(Ordering::SeqCst), 0);
+
+        // Genuine inert owner constructors, but no runtime IO or live native
+        // Observation. Tokens cannot supply a missing original/compiled route.
+        let runtime = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/unopened-diagnostics-runtime"));
+        let owner = crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone());
+        let second = crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime);
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: owner.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&document, token).is_err());
+        assert!(!owner.normal_selected(&document));
+        owner.bind_original_document(&document); second.bind_original_document(&document);
+        let selected = owner.normal_selected(&document);
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: owner.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&foreign, token).is_err());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: second.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&document, token).is_err());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: second.installed_tools_identity() };
+        assert!(second.admit_installed_observation(&document, token).is_err());
+        assert_eq!(owner.normal_selected(&document), selected); assert!(!second.normal_selected(&document));
+        owner.request_shutdown();
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: owner.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&document, token).is_err());
+        assert!(!owner.normal_selected(&document) && owner.installed_observation_snapshot().is_none());
+        assert_eq!(control.admitted.load(Ordering::SeqCst), 0); assert!(!control.complete());
+    }
+}
+
 fn assert_android_contracts() {
     let original=Arc::new(());let foreign=Arc::new(());
     // Inert projection DATA, not a live Observation, owner or retirement permit.
@@ -1505,5 +1565,6 @@ pub(super) fn assert_contracts() {
     assert_eq!(names.len(),21); let mut unique=names.clone(); unique.sort();unique.dedup();assert_eq!(unique.len(),21);
     assert!(FILES.iter().all(|(_,n,hash)| *n < 2048 && hash.len()==64));
     for case in Case::ALL.into_iter().filter(|case|!case.android()) { let (size,hash)=config_descriptor(case); assert!(size<2048 && hash.len()==64); }
+    assert_tools_identity_contracts();
     assert_android_contracts();
 }
