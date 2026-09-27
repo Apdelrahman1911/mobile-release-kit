@@ -297,7 +297,8 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
 fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runtime() {
     let owner = application(SavedCommandDomain::ProjectRecovery);
     assert!(!owner.inner.qualified());
-    assert!(!owner.inner.recovery_installed_selected());
+    assert_eq!(owner.inner.recovery_installed_selected(), cfg!(feature = "custom-protocol")
+        && owner.inner.runtime.project_recovery_installed_profile_available());
     let foreign = wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
         "savedConfig":{"bytes":123,"sha256":"d".repeat(64)}})).unwrap();
     assert!(owner.prepare_offline(foreign, 1, project(), wire::Availability::Available).is_err());
@@ -445,6 +446,117 @@ fn recovery_start_consumes_observation_and_refuses_a_different_arc_or_lost_conte
         assert!(a.context_invalidated && r.recovery.is_none());
         assert_eq!(a.first_stop, first); assert_eq!(a.projection.reason, Reason::CommandFailed); }
     drop(held);
+}
+
+#[test]
+fn android_normal_selection_requires_first_owner_and_original_live_document_without_observation() {
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-android-normal-selection"));
+    let toolchain = AndroidToolchainProfile::compiled();
+    let selected = runtime.android_build_installed_runtime_available()
+        && toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled);
+    let peer = SavedCommandOwner::offline_preflight(runtime.clone());
+    let first = SavedCommandOwner::android_build(runtime.clone(), toolchain.clone());
+    let second = SavedCommandOwner::android_build(runtime.clone(), toolchain.clone());
+    let document = Arc::new(()); let replacement = Arc::new(());
+    assert!(!ANDROID_NATIVE_QUALIFIED && !ANDROID_RUNTIME_QUALIFIED && !ANDROID_TOOLCHAIN_QUALIFIED);
+    assert!(!first.inner.qualified()); // Even complete compile DATA needs its real binding.
+    second.bind_original_android_document(&replacement);
+    first.bind_original_android_document(&document);
+    first.bind_original_android_document(&replacement);
+    assert!(first.android_original_document_matches(&document));
+    assert!(!first.android_original_document_matches(&replacement));
+    assert_eq!(first.inner.qualified(), selected);
+    assert_eq!(first.android_normal_selected(&document), selected);
+    assert_eq!(first.clone().android_normal_selected(&document), selected);
+    assert!(!first.android_normal_selected(&replacement));
+    assert!(!second.android_original_document_matches(&replacement) && !second.inner.qualified());
+    { let r = first.inner.lock(); assert!(r.active.is_none() && r.prepared.is_none() && r.last.is_none()); }
+    drop(document);
+    first.bind_original_android_document(&replacement);
+    assert!(!first.inner.qualified() && !first.android_original_document_matches(&replacement));
+    drop(first);
+    let later = SavedCommandOwner::android_build(runtime, toolchain);
+    later.bind_original_android_document(&replacement);
+    assert!(!later.inner.android_original_owner && !later.inner.qualified());
+    peer.bind_original_android_document(&replacement);
+    assert!(!peer.android_original_document_matches(&replacement));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn android_actual_document_gate_preserves_original_until_duplicate_main_latches_loss() {
+    let (bridge, document) = bound_document_model();
+    let original = document.android_build_status().unwrap().availability;
+    assert_ne!(original, android_wire::Availability::DocumentLost);
+    let other = crate::asset_session::DocumentBinding::new(bridge.clone());
+    // Initial Finished is pending: construction reports Busy, not original loss.
+    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::Busy);
+    assert_eq!(document.clone().android_build_status().unwrap().availability, original);
+    // A second completed main lifetime is real loss, not harmless construction.
+    other.hook_installed();
+    other.observe(|lifetime| lifetime.started(true));
+    other.observe(|lifetime| lifetime.finished(true));
+    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
+    assert_eq!(document.clone().android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
+    drop(document);
+    assert_eq!(other.android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
+    let later = crate::asset_session::DocumentBinding::new(bridge);
+    later.hook_installed();
+    later.observe(|lifetime| lifetime.started(true));
+    later.observe(|lifetime| lifetime.finished(true));
+    assert_eq!(later.android_build_status().unwrap().availability, android_wire::Availability::DocumentLost);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn android_unselected_stale_and_stopped_intents_refuse_before_any_native_book() {
+    for scenario in ["missing-toolchain", "second-owner", "stale-document", "shutdown", "disabled", "lost", "stale-registration"] {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/unopened-android-refusal"));
+        let toolchain = if scenario == "missing-toolchain" { None } else { AndroidToolchainProfile::compiled() };
+        let first = SavedCommandOwner::android_build(runtime.clone(), toolchain.clone());
+        let owner = if scenario == "second-owner" { SavedCommandOwner::android_build(runtime, toolchain) } else { first };
+        let mut document = Some(Arc::new(()));
+        owner.bind_original_android_document(document.as_ref().unwrap());
+        match scenario {
+            "stale-document" => { drop(document.take()); },
+            "shutdown" => owner.request_shutdown(),
+            "disabled" => owner.inner.lock().disabled = true,
+            "lost" => owner.document_lost(),
+            _ => {},
+        }
+        if scenario != "stale-registration" {
+            if let Some(document) = &document { assert!(!owner.android_normal_selected(document)); }
+            else { assert!(!owner.inner.android_installed_selected(None)); }
+            // A bad selection cannot hide behind the later executor check.
+            assert!(owner.prepare(context(SavedCommandDomain::AndroidBuild), 1, project(), Availability::Available).is_err());
+        }
+        let reason = match scenario {
+            "shutdown" => Reason::Shutdown,
+            "disabled" => Reason::CleanupUnknown,
+            "lost" => Reason::DocumentLost,
+            "stale-registration" => Reason::StaleIntent,
+            "missing-toolchain" if owner.inner.android_runtime_selected(None) => Reason::ToolchainUnavailable,
+            _ => Reason::RuntimeUnavailable,
+        };
+        // Comparison DATA only, as in the existing one-use consent vectors.
+        // No positive runtime/toolchain/observer permission is manufactured.
+        { let mut r = owner.inner.lock();
+            assert!(r.active.is_none() && r.prepared.is_none());
+            r.prepared = Some(Prepared { projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
+                registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None }); }
+        let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
+        let registration = if scenario == "stale-registration" { 2 } else { 1 };
+        let status = owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((registration, project())),
+            android_wire::Availability::Available).unwrap().release();
+        assert!(!status.operation.as_ref().unwrap().intent_usable);
+        { let r = owner.inner.lock();
+            assert!(r.active.is_none() && r.prepared.is_none()); // No Session/AndroidNativeBooks was admitted.
+            let last = r.last.as_ref().unwrap();
+            assert_eq!(last.reason, reason, "{scenario}");
+            assert!(last.result.is_none()); }
+        assert!(owner.start_android(android_wire::start(&request).unwrap(), Instant::now(), Some((registration, project())),
+            android_wire::Availability::Available).is_err());
+    }
 }
 
 #[test]

@@ -8,7 +8,7 @@ import { Script } from 'node:vm';
 import guideResource from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
 import { createNativeApi } from '../src/bridge.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
-import { METADATA_TEXT_IDS, metadataCacheBytes, metadataConfiguredChoices, metadataConfigReason, metadataLineEndings,
+import { METADATA_TEXT_IDS, metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataLineEndings,
   metadataNoOp, metadataProjectDirty, metadataTextDirty, metadataTextSavedFresh } from '../src/metadataText.ts';
 import { MetadataTextEditController, currentMetadataApplyBinding, metadataOwnerReason, metadataPreparedMatches, metadataRetainsDraft } from '../src/metadataTextEditController.ts';
 import { metadataProjectionProgress, metadataTextError, metadataTextRequestFits, normalMetadataTextResult,
@@ -109,7 +109,7 @@ function owner(h, phase = 'opening', options = {}) {
 }
 function harness({ config = BASE, nativeStatus = status(), subscribeGate = null } = {}) {
   let workspace = addProject(initialWorkspace, 'a', config); let registry = clone(nativeStatus); let listener; let clock = 100;
-  let otherReason = null; const calls = []; const reads = [];
+  let otherReason = null; let operationReason = null; const calls = []; const reads = [];
   const selected = () => workspace.projects[workspace.selectedId] ?? null;
   const request = (kind, args) => { const pending = deferred(); calls.push({ kind, args: clone(args), ...pending }); return pending.promise; };
   const api = { mode: 'native',
@@ -119,7 +119,7 @@ function harness({ config = BASE, nativeStatus = status(), subscribeGate = null 
     openMetadataTextEdit: (input) => request('open', input), prepareMetadataTextEdit: (input) => request('prepare', input),
     applyMetadataTextEdit: (sessionId, planToken) => request('apply', { sessionId, planToken }), closeMetadataTextEdit: (sessionId) => request('close', { sessionId }),
   };
-  const controller = new MetadataTextEditController({ selectedProject: selected, otherEditReason: () => otherReason, now: () => clock });
+  const controller = new MetadataTextEditController({ selectedProject: selected, otherEditReason: () => otherReason, otherOperationReason: () => operationReason, now: () => clock });
   const info = { runtime: { state: 'available', mode: 'development', reason: null }, capabilities: { methods: [
     { method: 'metadata.text.observe', available: true, reason: '' }, { method: 'metadata.text.validate', available: true, reason: '' },
   ] } };
@@ -129,7 +129,7 @@ function harness({ config = BASE, nativeStatus = status(), subscribeGate = null 
     count: (kind) => calls.filter((call) => call.kind === kind).length, last: (kind) => calls.filter((call) => call.kind === kind).at(-1),
     dispatch: (action) => { workspace = workspaceReducer(workspace, action); controller.syncProject(); },
     add: (id, data = BASE) => { workspace = addProject(workspace, id, data); controller.syncProject(); },
-    blockOther: (value) => { otherReason = value; }, advance: (amount) => { clock += amount; },
+    blockOther: (value) => { otherReason = value; }, blockOperation: (value) => { operationReason = value; }, advance: (amount) => { clock += amount; },
     deferStatus: () => { const value = deferred(); reads.push(value); return value; },
     emit: (value) => { registry = clone(value); assert.ok(listener); listener(clone(value)); },
     publish: (projection, options = {}) => {
@@ -373,4 +373,259 @@ test('expiry, contradictory plan payloads and cross-domain blocks never restore 
   forged.active.prepared.view.files[0].after = { text: 'Another reviewed title', ...digest('Another reviewed title') };
   forged.active.prepared.view.files[0].lineEndingsChanged = true;
   other.emit(forged); assert.equal(other.state.edit.integrityFailed, true); assert.equal(other.controller.apply(apply), false);
+});
+
+function adoptObservedConfiguration(h, data) {
+  const projectId = h.selected().project.id; const requestId = h.selected().observationGeneration + 1;
+  h.dispatch({ type: 'snapshot-start', projectId, requestId });
+  h.dispatch({ type: 'snapshot-done', projectId, requestId, snapshot: snapshot(data), observedAt: requestId });
+  h.dispatch({ type: 'reset', projectId });
+}
+async function retainedPair({ values = texts(), targetValues = values, edits = { 'title.txt': 'Recovered title 😀\n' }, nextConfig, validateSource = false, nativeStatus } = {}) {
+  const h = await connected({ nativeStatus }); const first = await load(h, observation('android', 'en-US', values));
+  const sourceKey = first.context.key;
+  for (const [id, text] of Object.entries(edits)) assert.equal(h.controller.editField(sourceKey, id, text), true);
+  if (validateSource) await validate(h);
+  const source = h.state.entries[sourceKey];
+  const config = nextConfig ?? { ...clone(BASE), metadata: { ...clone(BASE.metadata), androidLocales: ['en-US', 'fr-FR', 'de-DE'] } };
+  adoptObservedConfiguration(h, config);
+  const current = h.state.choices.find((choice) => choice.platform === 'android' && choice.locale === 'en-US');
+  assert.ok(current); assert.equal(h.state.selectedKey, sourceKey); assert.equal(h.controller.selectContext(current.key), true);
+  const target = await load(h, observation('android', 'en-US', targetValues, config));
+  return { h, sourceKey, targetKey: target.context.key, source, target, config };
+}
+
+test('retained draft preview adopts only edited fields in one local revision and preserves both baselines', async () => {
+  const targetValues = [texts()[0], 'Externally improved summary.\r\n', '\ufeffNew full description.\r\n'];
+  const { h, sourceKey, targetKey, source } = await retainedPair({ targetValues, validateSource: true });
+  await validate(h); const target = h.controller.selectedEntry();
+  const entries = h.state.entries; const workspace = h.workspace; const edit = h.state.edit; const calls = h.calls.length;
+  let updates = 0; const unsubscribe = h.controller.subscribe(() => { updates += 1; });
+  const review = h.controller.reviewRetainedDraft(sourceKey);
+  assert.ok(review); assert.equal(h.controller.retainedDraftReviewReason(review), null);
+  assert.equal(h.state.entries, entries); assert.equal(updates, 0); assert.equal(h.calls.length, calls);
+  assert.ok(Object.isFrozen(review) && Object.isFrozen(review.binding.source) && Object.isFrozen(review.changes[0]));
+  assert.deepEqual(review.changes, [{ id: 'title.txt', path: 'release/store/android/en-US/title.txt', before: texts()[0], after: 'Recovered title 😀\n' }]);
+  assert.equal(review.target.key, targetKey); assert.equal(review.source.key, sourceKey);
+  assert.throws(() => { review.changes[0].after = 'Unreviewed'; }, TypeError);
+  const altered = clone(review); altered.changes[0].after = 'Unreviewed';
+  assert.equal(h.controller.adoptRetainedDraft(altered), false); assert.equal(h.state.entries, entries);
+  assert.equal(h.controller.adoptRetainedDraft(review), true); assert.equal(updates, 1);
+  const current = h.controller.selectedEntry();
+  assert.equal(current.revision, target.revision + 1); assert.equal(current.baselineGeneration, target.baselineGeneration);
+  assert.equal(current.observationGeneration, target.observationGeneration); assert.equal(current.baseline, target.baseline);
+  assert.equal(current.observation, target.observation); assert.equal(current.fields[0].text, 'Recovered title 😀\n');
+  assert.equal(current.fields[1], target.fields[1]); assert.equal(current.fields[2], target.fields[2]);
+  assert.equal(current.validation, null); assert.equal(current.validationRequest, null); assert.equal(current.validationError, null);
+  assert.equal(current.lastSave, target.lastSave); assert.equal(h.state.entries[sourceKey], source);
+  assert.ok(source.validation); assert.equal(h.workspace, workspace); assert.equal(h.state.edit, edit); assert.equal(h.calls.length, calls);
+  const after = h.state.entries; assert.equal(h.controller.adoptRetainedDraft(review), false); assert.equal(h.state.entries, after);
+  assert.equal(updates, 1); unsubscribe();
+});
+
+test('retained draft conflicts refuse the whole adoption rather than partially reusing fields', async () => {
+  for (const conflicting of [0, 1]) {
+    const values = ['Original title', 'Original summary', 'Original full text'];
+    const targetValues = [...values]; targetValues[conflicting] = 'External change';
+    const { h, sourceKey } = await retainedPair({ values, targetValues, edits: { 'title.txt': 'Local title', 'short_description.txt': 'Local summary' } });
+    const entries = h.state.entries; const calls = h.calls.length;
+    assert.match(h.controller.retainedDraftReason(sourceKey), new RegExp(METADATA_TEXT_IDS.android[conflicting].replaceAll('.', '\\.')));
+    assert.equal(h.controller.reviewRetainedDraft(sourceKey), null); assert.equal(h.state.entries, entries); assert.equal(h.calls.length, calls);
+    const compared = metadataCompareRetainedDraft(h.state.entries[sourceKey], h.controller.selectedEntry());
+    assert.equal(compared.changes, null); assert.match(compared.reason, /No fields were reused/);
+  }
+});
+
+test('retained draft comparisons distinguish absent from empty and preserve raw Unicode BOM and line endings', async () => {
+  const replacement = '\ufeffNew 😀\r\nB\rC\n';
+  for (const [before, current, allowed] of [[null, null, true], [null, '', false], ['', null, false], ['', '', true]]) {
+    const { h, sourceKey, source } = await retainedPair({ values: [before, 'short', 'full'], targetValues: [current, 'new short', 'new full'], edits: { 'title.txt': replacement } });
+    const target = h.controller.selectedEntry(); const review = h.controller.reviewRetainedDraft(sourceKey);
+    assert.equal(review !== null, allowed);
+    if (allowed) {
+      assert.equal(review.changes[0].before, current); assert.equal(review.changes[0].after, replacement);
+      assert.equal(h.controller.adoptRetainedDraft(review), true);
+      assert.equal(h.controller.selectedEntry().fields[0].text, replacement);
+      assert.equal(h.controller.selectedEntry().baseline.originals[0].text, current);
+      assert.equal(h.controller.selectedEntry().baseline, target.baseline);
+      assert.equal(h.state.entries[sourceKey], source); assert.equal(h.count('open'), 0);
+    } else assert.match(h.controller.retainedDraftReason(sourceKey), /original comparison/);
+  }
+  const original = '\ufeffOld 😀\r\nB\rC\n';
+  const same = await retainedPair({ values: [original, 'short', 'full'], edits: { 'title.txt': replacement } });
+  const review = same.h.controller.reviewRetainedDraft(same.sourceKey);
+  assert.equal(review.changes[0].before, original); assert.equal(same.h.controller.adoptRetainedDraft(review), true);
+  const normalized = await retainedPair({ values: [original, 'short', 'full'], targetValues: [original.replace(/\r\n?/g, '\n'), 'short', 'full'], edits: { 'title.txt': replacement } });
+  assert.equal(normalized.h.controller.reviewRetainedDraft(normalized.sourceKey), null);
+});
+
+test('retained draft comparisons refuse different identities incomplete rosters paths and oversized fields', async () => {
+  const { source, target } = await retainedPair();
+  const variants = [
+    (s) => { s.context.projectId = 'other'; }, (s) => { s.context.metadataRoot = 'release/other'; },
+    (s) => { s.context.platform = 'ios'; }, (s) => { s.context.locale = 'fr-FR'; },
+    (s, t) => { s.context.configBaselineGeneration = t.context.configBaselineGeneration; },
+    (s, t) => { s.context.configBaselineGeneration = t.context.configBaselineGeneration + 1; },
+    (s, t) => { s.context.key = t.context.key; }, (s) => { s.baseline = null; }, (s) => { s.fields = null; },
+    (s) => { s.fields.pop(); }, (s) => { s.baseline.originals[0].id = 'short_description.txt'; },
+    (s) => { s.baseline.originals[0].path = 'release/store/android/en-US/other.txt'; },
+    (s) => { s.fields[0].text = 'A'.repeat(32769); }, (s) => { s.fields[0].text = '\ud800'; },
+    (_s, t) => { t.fields[0].text = 'Existing local target'; },
+  ];
+  for (const change of variants) {
+    const s = clone(source); const t = clone(target); change(s, t);
+    const compared = metadataCompareRetainedDraft(s, t); assert.notEqual(compared.reason, null); assert.equal(compared.changes, null);
+  }
+  const clean = clone(source); clean.fields[0].text = clean.baseline.originals[0].text;
+  assert.match(metadataCompareRetainedDraft(clean, target).reason, /no unsaved/);
+});
+
+test('retained draft controller never changes project root platform or locale to find a target', async () => {
+  for (const change of [
+    async ({ h }) => { const next = h.state.choices.find((choice) => choice.locale === 'fr-FR'); h.controller.selectContext(next.key); await load(h); },
+    async ({ h }) => { const next = h.state.choices.find((choice) => choice.platform === 'ios'); h.controller.selectContext(next.key); await load(h); },
+    async ({ h, config }) => { h.add('b', config); await load(h); },
+    async ({ h, config }) => { const changed = clone(config); changed.metadata.root = 'release/other'; adoptObservedConfiguration(h, changed); h.controller.selectContext(h.state.choices[0].key); await load(h); },
+  ]) {
+    const pair = await retainedPair(); await change(pair); const { h, sourceKey, source } = pair;
+    const key = h.state.selectedKey; const entries = h.state.entries; const calls = h.calls.length;
+    assert.match(h.controller.retainedDraftReason(sourceKey), /same project, metadata root, platform and locale/);
+    assert.equal(h.controller.reviewRetainedDraft(sourceKey), null); assert.equal(h.state.selectedKey, key);
+    assert.equal(h.state.entries, entries); assert.equal(h.state.entries[sourceKey], source); assert.equal(h.calls.length, calls);
+  }
+});
+
+test('retained draft target must be clean successfully observed and free of load or edit errors', async () => {
+  const cases = [
+    async ({ h, targetKey }) => { h.controller.editField(targetKey, 'title.txt', 'Existing unsaved title'); },
+    async ({ h }) => { h.controller.selectContext(h.state.choices.find((choice) => choice.locale === 'fr-FR').key); },
+    async ({ h, config }) => { await load(h, observation('android', 'en-US', ['External title', 'short', 'full'], config)); },
+    async ({ h }) => { const pending = h.controller.load(); h.last('observe').reject({ code: 'metadata_text_sensitive' }); assert.equal(await pending, false); },
+    async ({ h, targetKey }) => { assert.equal(h.controller.editField(targetKey, 'title.txt', 'A'.repeat(32769)), false); },
+    async ({ h }) => { const pending = h.controller.validate(); h.last('validate').reject({ code: 'MetadataTextResponseInvalid' }); assert.equal(await pending, false); },
+    async ({ h }) => { h.dispatch({ type: 'edit', projectId: 'a', path: 'metadata.root', value: 'release/unsaved' }); },
+    async ({ h, config }) => { h.dispatch({ type: 'snapshot-start', projectId: 'a', requestId: 90 }); const changed = clone(config); changed.metadata.root = 'release/observed'; h.dispatch({ type: 'snapshot-done', projectId: 'a', requestId: 90, snapshot: snapshot(changed), observedAt: 90 }); },
+  ];
+  for (const change of cases) {
+    const pair = await retainedPair(); const review = pair.h.controller.reviewRetainedDraft(pair.sourceKey); assert.ok(review);
+    await change(pair); const { h, sourceKey } = pair; const entries = h.state.entries; const calls = h.calls.length;
+    assert.notEqual(h.controller.retainedDraftReason(sourceKey), null); assert.equal(h.controller.reviewRetainedDraft(sourceKey), null);
+    assert.equal(h.controller.adoptRetainedDraft(review), false); assert.equal(h.state.entries, entries); assert.equal(h.calls.length, calls);
+  }
+});
+
+test('retained draft pending and retired passive requests block adoption without issuing replacement work', async () => {
+  for (const kind of ['observe', 'validate', 'retired-source-validation']) {
+    const { h, sourceKey, targetKey } = await retainedPair(); const review = h.controller.reviewRetainedDraft(sourceKey);
+    if (kind === 'retired-source-validation') h.controller.selectContext(sourceKey);
+    const pending = kind === 'observe' ? h.controller.load() : h.controller.validate();
+    const call = h.last(kind === 'observe' ? 'observe' : 'validate');
+    if (kind === 'retired-source-validation') h.controller.selectContext(targetKey);
+    const entries = h.state.entries; const calls = h.calls.length;
+    assert.match(h.controller.retainedDraftReason(sourceKey), /still pending/); assert.equal(h.controller.adoptRetainedDraft(review), false);
+    assert.equal(h.state.entries, entries); assert.equal(h.calls.length, calls);
+    call.resolve(kind === 'observe' ? observation('android', 'en-US', texts(), h.selected().baseline) : validation('android', call.args.fields));
+    assert.equal(await pending, kind !== 'retired-source-validation');
+    assert.equal(h.controller.adoptRetainedDraft(review), false); assert.ok(h.controller.reviewRetainedDraft(sourceKey));
+  }
+});
+
+test('retained draft stale confirmations refuse revision selection configuration service and observation ABA changes', async () => {
+  const changes = [
+    async ({ h, sourceKey, source }) => { h.controller.editField(sourceKey, 'title.txt', 'Another draft'); h.controller.editField(sourceKey, 'title.txt', source.fields[0].text); },
+    async ({ h, targetKey }) => { h.controller.editField(targetKey, 'title.txt', 'Temporary target'); assert.equal(h.controller.discard(h.controller.discardBinding(targetKey), 'reset'), true); },
+    async ({ h, targetKey }) => { h.controller.selectContext(h.state.choices.find((choice) => choice.locale === 'fr-FR').key); h.controller.selectContext(targetKey); },
+    async ({ h, targetKey }) => { h.add('b'); h.dispatch({ type: 'switch', projectId: 'a' }); h.controller.selectContext(targetKey); },
+    async ({ h }) => { h.controller.setSelectionPending(true); h.controller.setSelectionPending(false); },
+    async ({ h }) => { h.controller.beginConnection(); h.controller.setConnection(h.api, h.info); h.controller.setHelp(guideResource); },
+    async ({ h, config }) => { h.dispatch({ type: 'edit', projectId: 'a', path: 'metadata.androidLocales', value: ['en-US'] }); h.dispatch({ type: 'edit', projectId: 'a', path: 'metadata.androidLocales', value: config.metadata.androidLocales }); },
+    async ({ h, config }) => { h.dispatch({ type: 'snapshot-start', projectId: 'a', requestId: 90 }); h.dispatch({ type: 'snapshot-done', projectId: 'a', requestId: 90, snapshot: snapshot(config), observedAt: 90 }); },
+    async ({ h }) => { await load(h); },
+    async ({ h, targetKey }) => { assert.equal(h.controller.discard(h.controller.discardBinding(targetKey), 'forget'), true); await load(h); },
+    async ({ h, sourceKey }) => { assert.equal(h.controller.discard(h.controller.discardBinding(sourceKey), 'forget'), true); },
+    async ({ h }) => { h.emit(status(h.frame.statusRevision + 1)); },
+  ];
+  for (const change of changes) {
+    const pair = await retainedPair(); const review = pair.h.controller.reviewRetainedDraft(pair.sourceKey); assert.ok(review);
+    await change(pair); const { h } = pair; const entries = h.state.entries; const calls = h.calls.length;
+    assert.notEqual(h.controller.retainedDraftReviewReason(review), null);
+    assert.equal(h.controller.adoptRetainedDraft(review), false); assert.equal(h.state.entries, entries); assert.equal(h.calls.length, calls);
+  }
+  const disposed = await retainedPair(); const review = disposed.h.controller.reviewRetainedDraft(disposed.sourceKey);
+  disposed.h.controller.dispose(); assert.equal(disposed.h.controller.adoptRetainedDraft(review), false);
+});
+
+test('retained draft original active Unknown recovery and other-domain owners remain blocking', async () => {
+  for (const kind of ['active', 'unknown', 'recovery', 'other-edit', 'other-operation', 'integrity']) {
+    const { h, sourceKey, targetKey } = await retainedPair(); const review = h.controller.reviewRetainedDraft(sourceKey);
+    if (kind === 'other-edit') h.blockOther('Original configuration edit is unsettled');
+    else if (kind === 'other-operation') h.blockOperation('Original native read is unsettled');
+    else if (kind === 'integrity') { const invalid = clone(h.frame); invalid.domain = 'github_workflows'; h.emit(invalid); }
+    else {
+      h.controller.editField(targetKey, 'title.txt', 'Original owner edit');
+      await validate(h); assert.equal(h.controller.start(), true);
+      if (kind !== 'active') {
+        h.publish(owner(h, 'editing')); h.publish(owner(h, 'reviewing'));
+        assert.equal(h.controller.apply(currentMetadataApplyBinding(h.state)), true);
+        h.publish(owner(h, kind === 'unknown' ? 'unknown' : 'final', {
+          coreOutcome: { effect: 'committed', journal: kind === 'recovery' ? 'recovery_required' : 'clean', resources: 'settled', reason: kind === 'recovery' ? 'filesystem_error' : 'none' },
+          nativeReason: kind === 'unknown' ? 'cleanup_unknown' : 'none',
+        }), { reason: kind === 'unknown' ? 'cleanup_unknown' : 'available' });
+      }
+    }
+    const entries = h.state.entries; const calls = h.calls.length;
+    assert.notEqual(h.controller.retainedDraftReason(sourceKey), null); assert.equal(h.controller.reviewRetainedDraft(sourceKey), null);
+    assert.equal(h.controller.adoptRetainedDraft(review), false); assert.equal(h.state.entries, entries); assert.equal(h.calls.length, calls);
+    if (kind === 'unknown') assert.equal(h.state.edit.nativeBlocked, true);
+    if (kind === 'recovery') assert.equal(h.state.edit.recoveryProjects.includes('a'), true);
+  }
+});
+
+test('retained draft aggregate cache overflow preserves every bundle and exhausted counters are not reused', async () => {
+  const config = clone(BASE); config.ios.enabled = false;
+  const locales = Array.from({ length: 28 }, (_, index) => `a${String.fromCharCode(97 + index % 26)}${index >= 26 ? 'a' : ''}`);
+  config.metadata.androidLocales = ['en-US', ...locales];
+  const full = 'A'.repeat(32768);
+  const pair = await retainedPair({ values: ['a', 'b', 'c'], edits: Object.fromEntries(METADATA_TEXT_IDS.android.map((id) => [id, full])), nextConfig: config });
+  const { h, sourceKey, targetKey } = pair;
+  for (const choice of h.state.choices.filter((row) => row.key !== targetKey)) { h.controller.selectContext(choice.key); await load(h, observation('android', choice.locale, Array(3).fill(full), config)); }
+  h.controller.selectContext(targetKey); const review = h.controller.reviewRetainedDraft(sourceKey); assert.ok(review);
+  const entries = h.state.entries; const calls = h.calls.length;
+  assert.equal(Object.keys(entries).length, 30); assert.ok(metadataCacheBytes(entries) <= 8388608);
+  assert.equal(h.controller.adoptRetainedDraft(review), false); assert.equal(h.state.cacheError.code, 'MetadataTextCacheFull');
+  assert.equal(h.state.entries, entries); assert.equal(h.calls.length, calls); assert.equal(h.state.entries[targetKey].revision, pair.target.revision);
+  // Inert counter-boundary fixtures only; reaching these values by billions of
+  // UI actions is unnecessary. No native status or settlement is fabricated.
+  for (const exhaust of [
+    ({ h }) => { h.controller.state = { ...h.state, serviceGeneration: 0xffffffff }; },
+    ({ h }) => { h.controller.nextRequest = 0xffffffff; },
+    ({ h, sourceKey }) => { h.controller.state = { ...h.state, entries: { ...h.state.entries, [sourceKey]: { ...h.state.entries[sourceKey], revision: 0xffffffff } } }; },
+    ({ h, targetKey }) => { h.controller.state = { ...h.state, entries: { ...h.state.entries, [targetKey]: { ...h.state.entries[targetKey], revision: 0xfffffffe } } }; },
+  ]) {
+    const current = await retainedPair(); const old = current.h.controller.reviewRetainedDraft(current.sourceKey); exhaust(current);
+    const before = current.h.state.entries;
+    assert.match(current.h.controller.retainedDraftReason(current.sourceKey), /counter is exhausted/);
+    assert.equal(current.h.controller.adoptRetainedDraft(old), false); assert.equal(current.h.state.entries, before);
+  }
+});
+
+test('retained draft still requires fresh validation and a separate native save bound to the new baseline', async () => {
+  const { h, sourceKey, source, target } = await retainedPair();
+  const review = h.controller.reviewRetainedDraft(sourceKey); assert.equal(h.controller.adoptRetainedDraft(review), true);
+  assert.equal(h.count('validate'), 0); assert.equal(h.count('open'), 0); assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
+  assert.match(h.controller.startReason(), /Validate this exact text revision/); assert.equal(h.controller.start(), false);
+  await validate(h); assert.equal(h.controller.start(), true);
+  assert.deepEqual(h.last('open').args, { projectId: target.context.projectId, platform: target.context.platform, locale: target.context.locale });
+  h.publish(owner(h, 'editing')); h.publish(owner(h, 'reviewing'));
+  assert.deepEqual(h.last('prepare').args.expectedBaseline, target.baseline.assertion);
+  assert.notEqual(h.last('prepare').args.expectedBaseline.config.sha256, source.baseline.assertion.config.sha256);
+  assert.equal(h.last('prepare').args.draftRevision, target.revision + 1);
+  assert.equal(h.last('prepare').args.fields[0].text, review.changes[0].after); assert.equal(h.count('apply'), 0);
+  assert.equal(h.controller.apply(currentMetadataApplyBinding(h.state)), true); h.publish(owner(h, 'final'));
+  assert.equal(metadataTextSavedFresh(h.controller.selectedEntry()), true); assert.equal(h.state.entries[sourceKey], source);
+  assert.match(h.controller.retainedDraftReason(sourceKey), /successfully observed target/);
+  const unavailable = await retainedPair({ nativeStatus: status(0, null, null, 'runtime_unqualified') });
+  const local = unavailable.h.controller.reviewRetainedDraft(unavailable.sourceKey); assert.ok(local);
+  assert.equal(unavailable.h.controller.adoptRetainedDraft(local), true); await validate(unavailable.h);
+  assert.equal(unavailable.h.controller.start(), false); assert.equal(unavailable.h.count('open'), 0);
 });

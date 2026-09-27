@@ -108,7 +108,7 @@ fn bound_ready(bytes: &[u8], name: &str, installed: Option<&Value>) -> bool {
     match installed {
         None => ready(bytes, name),
         Some(expected) => bytes.len() <= 1024 && expected["case"] == name
-            && expected["scope"] == "github-installed-tls-peer-v1"
+            && matches!(expected["scope"].as_str(), Some("github-installed-tls-peer-v1" | "github-preflight-installed-peer-v1"))
             && protocol::strict_json(bytes).ok().as_ref() == Some(expected),
     }
 }
@@ -699,7 +699,7 @@ pub(crate) mod installed {
         }
         Ok(())
     }
-    fn fixed_input(path: &Path, size: u64, hash: &str, mode: u32, end: Instant) -> Check<()> {
+    pub(in crate::supervisor) fn fixed_input(path: &Path, size: u64, hash: &str, mode: u32, end: Instant) -> Check<()> {
         protected_parents(path)?;
         let before=fs::symlink_metadata(path).map_err(|_|"installed_peer_input")?;
         require(before.is_file() && before.uid()==0 && before.gid()==0 && before.nlink()==1
@@ -844,6 +844,34 @@ pub(crate) mod installed {
             observed.insert(kind, pair?);
         }
         namespace_labels(expected, &observed)
+    }
+
+    // Admission shared by the two closed observers. It owns no child, timer,
+    // receipt or action selection. Read-only parser/profile/limits stay exact.
+    pub(in crate::supervisor) fn domain_environment(root: &Path, end: Instant) -> Check<BTreeMap<String, String>> {
+        let uname=rustix::system::uname();
+        require(uname.sysname().to_bytes()==b"Linux" && uname.machine().to_bytes()==b"x86_64"
+            && uname.release().to_bytes()==b"6.17.0-1022-azure","installed_peer_domain")?;
+        let uid=rustix::process::getuid().as_raw();let gid=rustix::process::getgid().as_raw();
+        require(uid!=0 && gid!=0 && rustix::process::geteuid().as_raw()==uid && rustix::process::getegid().as_raw()==gid,
+            "installed_peer_identity")?;
+        require(root.parent()==Some(Path::new("/var/lib")),"installed_peer_domain")?;
+        let name=root.file_name().and_then(|v|v.to_str()).ok_or("installed_peer_domain")?;
+        require(proc_bytes("/proc/self/cgroup",4096)?==format!("0::/system.slice/{name}.service\n").as_bytes(),"installed_peer_domain")?;
+        let status=String::from_utf8(proc_bytes("/proc/self/status",16384)?).map_err(|_|"installed_peer_domain")?;
+        for (key,wanted) in [("NoNewPrivs","1"),("CapInh","0000000000000000"),("CapPrm","0000000000000000"),
+            ("CapEff","0000000000000000"),("CapBnd","0000000000000000"),("CapAmb","0000000000000000"),("Groups","")] {
+            let rows=status.lines().filter_map(|s|s.split_once(':')).filter(|(k,_)|*k==key).map(|(_,v)|v.trim()).collect::<Vec<_>>();
+            require(rows==[wanted],"installed_peer_domain")?;
+        }
+        let source=option_env!("GITHUB_SHA").ok_or("installed_peer_namespace_witness")?;
+        let receipt=root_start_receipt(&root.join("public/unit-start.json"),end)?;
+        let service=format!("{name}.service");
+        let witness=peer_namespace_witness(&receipt,source,&service,&format!("/system.slice/{service}"),uid,gid)?;
+        let mut environment=original_namespace_labels(&witness,end)?;
+        environment.insert("MRK_TLS_ORIGINAL_UID".into(),uid.to_string());
+        environment.insert("MRK_TLS_ORIGINAL_GID".into(),gid.to_string());
+        Ok(environment)
     }
 
     #[derive(Clone,Debug,PartialEq,Eq)]
@@ -1049,33 +1077,14 @@ pub(crate) mod installed {
         pub(crate) fn prepare(&mut self, root:PathBuf, end:Instant)->Check<()> {
             require(self.root.is_none() && !self.materials_checked && self.original.endpoint.is_none(),"installed_peer_repeated_setup")?;
             self.root=Some(root.clone()); // Failed setup is never retried under a replacement context.
-            let uname=rustix::system::uname();
-            require(uname.sysname().to_bytes()==b"Linux" && uname.machine().to_bytes()==b"x86_64"
-                && uname.release().to_bytes()==b"6.17.0-1022-azure","installed_peer_domain")?;
-            let uid=rustix::process::getuid().as_raw();let gid=rustix::process::getgid().as_raw();
-            require(uid!=0 && gid!=0 && rustix::process::geteuid().as_raw()==uid && rustix::process::getegid().as_raw()==gid,
-                "installed_peer_identity")?;
-            require(root.parent()==Some(Path::new("/var/lib")),"installed_peer_domain")?;
+            let mut environment=domain_environment(&root,end)?;
             let name=root.file_name().and_then(|v|v.to_str()).ok_or("installed_peer_domain")?;
-            require(proc_bytes("/proc/self/cgroup",4096)?==format!("0::/system.slice/{name}.service\n").as_bytes(),"installed_peer_domain")?;
-            let status=String::from_utf8(proc_bytes("/proc/self/status",16384)?).map_err(|_|"installed_peer_domain")?;
-            for (key,wanted) in [("NoNewPrivs","1"),("CapInh","0000000000000000"),("CapPrm","0000000000000000"),
-                ("CapEff","0000000000000000"),("CapBnd","0000000000000000"),("CapAmb","0000000000000000"),("Groups","")] {
-                let rows=status.lines().filter_map(|s|s.split_once(':')).filter(|(k,_)|*k==key).map(|(_,v)|v.trim()).collect::<Vec<_>>();
-                require(rows==[wanted],"installed_peer_domain")?;
-            }
-            let mut environment=BTreeMap::from([
+            environment.extend(BTreeMap::from([
                 ("MRK_DESKTOP_HOSTED_CHECKS".into(),"github-readonly-installed-tls-v1".into()),
                 ("GITHUB_ACTIONS".into(),"true".into()),("RUNNER_ENVIRONMENT".into(),"github-hosted".into()),
-                ("MRK_TLS_ORIGINAL_UID".into(),uid.to_string()),("MRK_TLS_ORIGINAL_GID".into(),gid.to_string()),
                 ("MRK_TLS_PEER_SHA256".into(),PEER_SHA.into()),("MRK_TLS_INSTALLED_CASE".into(),self.case.name().into()),
                 ("MRK_TLS_RUNTIME_MANIFEST_SHA256".into(),self.case.manifest().into()),
-            ]);
-            let source = option_env!("GITHUB_SHA").ok_or("installed_peer_namespace_witness")?;
-            let receipt = root_start_receipt(&root.join("public/unit-start.json"), end)?;
-            let service = format!("{name}.service");
-            let witness = peer_namespace_witness(&receipt, source, &service, &format!("/system.slice/{service}"), uid, gid)?;
-            environment.extend(original_namespace_labels(&witness, end)?);
+            ]));
             self.inputs(&root,end)?;
             if self.case.ambient() {
                 for key in ["http_proxy","https_proxy","all_proxy","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY"] {

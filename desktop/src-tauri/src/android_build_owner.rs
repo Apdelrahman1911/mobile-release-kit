@@ -18,11 +18,20 @@ impl AndroidBuildOwner {
     pub(crate) fn new(runtime: RuntimeConfig, toolchain: Option<crate::android_toolchain::AndroidToolchainProfile>) -> Self {
         Self { saved: SavedCommandOwner::android_build(runtime, toolchain) }
     }
+    pub(crate) fn bind_original_document(&self, identity: &std::sync::Arc<()>) {
+        self.saved.bind_original_android_document(identity);
+    }
+    pub(crate) fn original_document_matches(&self, identity: &std::sync::Arc<()>) -> bool {
+        self.saved.android_original_document_matches(identity)
+    }
+    pub(crate) fn normal_selected(&self, identity: &std::sync::Arc<()>) -> bool {
+        self.saved.android_normal_selected(identity)
+    }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn installed_android_identity(&self) -> std::sync::Weak<()> { self.saved.installed_android_identity() }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
-        self.saved.admit_installed_android_observation(token)
+    pub(crate) fn admit_installed_observation(&self, document: &std::sync::Arc<()>, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+        self.saved.admit_installed_android_observation(document, token)
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn installed_observation_snapshot(&self) -> Option<crate::shell::installed_observation::commands::AndroidSnapshot> {

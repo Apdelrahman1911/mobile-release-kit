@@ -22,10 +22,13 @@ PACKAGES.update({"glibc-doc": "all", "locales": "all"})
 REQUIRED = {"libc-bin", "libc-dev-bin", "libc6", "libc6-dev"}
 FIELDS = ("package", "architecture", "version", "sourcePackage", "sourceVersion", "status")
 MAX_DATA = 2 << 20
-ROUTES = {("refs/heads/verify/desktop-ubuntu-publication", "publisher-helpers", None),
+ROUTES = {("refs/heads/verify/desktop-project-recovery", "compile", "compile"),
+          ("refs/heads/verify/desktop-project-recovery", "recovery-negative", "observe"),
+          ("refs/heads/verify/desktop-ubuntu-publication", "publisher-helpers", None),
           ("refs/heads/verify/desktop-shell-host-metadata", "compile", "host-metadata-only"),
           ("refs/heads/verify/desktop-installed-shell", "compile", "compile"),
           ("refs/heads/verify/desktop-installed-github-readonly", "compile", "compile"),
+          ("refs/heads/verify/desktop-installed-github-preflight", "compile", "compile"),
           ("refs/heads/verify/desktop-installed-github-normal-boundaries", "compile", "compile")}
 
 

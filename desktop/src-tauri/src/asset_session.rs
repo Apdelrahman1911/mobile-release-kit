@@ -830,6 +830,10 @@ pub(crate) struct DocumentBinding { inner: Arc<Inner> }
 /// create this gate; the original Supervisor calls it after durable READY.
 pub(crate) struct GitHubPreflightGoGate { inner: Weak<Inner> }
 impl GitHubPreflightGoGate {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn same_original_document(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.inner, &other.inner) && self.inner.strong_count() != 0
+    }
     pub(crate) fn claim(&self, id: &str, digest: &str, request: &crate::github_preflight_protocol::Request,
         claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
         use crate::{github_preflight_protocol as p, github_preflight_session as s};
@@ -1709,6 +1713,7 @@ impl DocumentBinding {
         // One memory-only binding to the Supervisor created in the ordinary
         // DesktopBridge constructor. A later document cannot rebind its lease.
         document.inner.bridge.supervisor.bind_original_session_document(&document.inner.session_identity);
+        document.inner.bridge.android_build.bind_original_document(&document.inner.session_identity);
         document
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1777,12 +1782,32 @@ impl DocumentBinding {
         (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.android_build.installed_android_identity())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_android_normal_selected(&self) -> bool {
+        let state = self.lock();
+        state.next_operation == 0 && state.next_context == 0 && !state.session && state.slot.is_none() && state.context.is_none()
+            && state.quit.is_none() && !state.exhausted && !state.lost_observed && !state.stopping && !state.unknown
+            && self.live_session_owner_reason().is_none()
+            && self.inner.bridge.android_build.normal_selected(&self.inner.session_identity)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn admit_installed_android(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
+            || state.quit.is_some() || state.exhausted || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
+            || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
+        self.inner.bridge.android_build.admit_installed_observation(&self.inner.session_identity, token)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_recovery_identities(&self) -> (Weak<()>, Weak<()>) {
+        (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.project_recovery.installed_recovery_identity())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_recovery(&self, token: crate::shell::installed_observation::recovery::Admission) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
             || state.quit.is_some() || state.lost_observed || state.stopping || state.unknown || self.live_session_owner_reason().is_some()
             || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
-        self.inner.bridge.android_build.admit_installed_observation(token)
+        self.inner.bridge.project_recovery.admit_installed_observation(token)
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
     pub(crate) fn installed_ios_identities(&self) -> (Weak<()>, Weak<()>) {
@@ -1984,6 +2009,7 @@ impl DocumentBinding {
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
             || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.ios_archive.stopping()) { return Availability::Shutdown; }
         if let Some(reason) = android_build_document_gate(state, crate::android_build_protocol::Profile::current()) { return reason; }
+        if !self.inner.bridge.android_build.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
@@ -2535,6 +2561,8 @@ impl DocumentBinding {
         let project_binding = github_preflight_project_binding(&root)?;
         let gate = GitHubPreflightGoGate { inner: Arc::downgrade(&self.inner) };
         let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let marker = marker.map(|fresh| supervisor.installed_preflight_prepare_marker(&gate, fresh)).transpose()?;
         match command {
             p::Command::Prepare(args) => state.github.preflight_prepare(args, generation, root, &project_binding,
                 marker.ok_or_else(BridgeError::invalid)?, gate, supervisor, now),

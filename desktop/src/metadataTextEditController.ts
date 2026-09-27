@@ -4,9 +4,9 @@ import { sameJson } from './catalog.ts';
 import { methodReason } from './certainty.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { METADATA_TEXT_CACHE_BUNDLES, METADATA_TEXT_CACHE_BYTES, METADATA_TEXT_FIELD_BYTES,
-  metadataCacheBytes, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
+  metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
 import type { MetadataConfiguredContext, MetadataDisplayBinding, MetadataDraftBaseline, MetadataFieldId, MetadataTextBaseline, MetadataTextDraft,
-  MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
+  MetadataRetainedDraftChange, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
 import { metadataProjectionProgress, metadataStatusProgress, metadataTextError, metadataTextRequestFits,
   normalMetadataTextResult, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { ProjectSession } from './drafts.ts';
@@ -23,6 +23,25 @@ export interface MetadataReviewBinding extends MetadataDisplayBinding {
 }
 export interface MetadataApplyBinding { sessionId: string; planToken: string; draftRevision: number; baselineGeneration: number }
 export interface MetadataDiscardBinding { key: string; revision: number; baselineGeneration: number; observationGeneration: number }
+export interface MetadataRetainedDraftReview {
+  binding: {
+    source: MetadataDiscardBinding;
+    target: MetadataDiscardBinding;
+    projectId: string;
+    configRevision: number;
+    configBaselineGeneration: number;
+    configObservationGeneration: number;
+    serviceGeneration: number;
+    selectionGeneration: number;
+    requestSequence: number;
+    windowGeneration: string;
+    statusRevision: number;
+  };
+  projectName: string;
+  source: MetadataConfiguredContext;
+  target: MetadataConfiguredContext;
+  changes: MetadataRetainedDraftChange[];
+}
 export interface MetadataAttempt {
   binding: MetadataReviewBinding;
   sessionId: string | null;
@@ -364,6 +383,75 @@ export class MetadataTextEditController {
       fields: metadataDraftFields(baseline), stale: action === 'latest' ? false : entry.stale, editError: null,
       validation: null, validationRequest: null, validationError: null, loadRequest: null, loadError: null });
     this.process(); return accepted;
+  }
+
+  private retainedDraftReview(sourceKey: string): { reason: string; review: null } | { reason: null; review: MetadataRetainedDraftReview } {
+    const refuse = (reason: string) => ({ reason, review: null });
+    if (this.disposed) return refuse('This text editor is no longer active.');
+    const live = this.liveContextReason(); if (live) return refuse(live);
+    const project = this.context.selectedProject(); const source = this.state.entries[sourceKey]; const target = this.selectedEntry();
+    if (!project || !source || !target || this.state.projectId !== project.project.id ||
+        !this.state.choices.some((choice) => same(choice, target.context)) ||
+        !metadataConfiguredChoices(project).some((choice) => same(choice, target.context)))
+      return refuse('Select and load the matching locale from the current saved configuration. The retained bundle stays in its original context.');
+    if (this.state.mode !== 'native' || this.state.observeReason || !this.state.help)
+      return refuse('Reload the compatible text observation service and public-text guide before reviewing a retained draft.');
+    const other = this.context.otherOperationReason?.() ?? this.context.otherEditReason(project.project.id);
+    if (other) return refuse(other);
+    const owned = metadataOwnerReason(this.state, project.project.id);
+    if (owned) return refuse(owned);
+    if (metadataRetainsDraft(this.state, project.project.id))
+      return refuse('Keep the original text draft until its metadata owner is settled.');
+    const edit = this.state.edit; const status = edit.status;
+    if (edit.mode !== 'native' || !edit.listening || !edit.initialized || !status || edit.readPending)
+      return refuse('Wait for the original native metadata status before reviewing a retained draft.');
+    if (status.capability.reason === 'shutdown' || status.capability.reason === 'other_edit_active')
+      return refuse(availabilityCopy[status.capability.reason]);
+    const busy = this.passiveBusyReason(); if (busy) return refuse(busy);
+    if (source.loadRequest || source.validationRequest || target.loadRequest || target.validationRequest)
+      return refuse('An original public-text observation or validation is still pending.');
+    if (!target.baseline || !target.fields || !target.observation || target.stale || target.observationPredatesSave ||
+        target.loadError || target.editError || target.validationError ||
+        !same(target.baseline.assertion, target.observation.baseline) ||
+        !same(target.baseline.originals, metadataObservedBaseline(target.observation).originals))
+      return refuse('Load and explicitly reconcile the current locale first. Reusing text requires a clean, successfully observed target.');
+    if (![project.revision, project.baselineGeneration, project.observationGeneration, this.state.serviceGeneration, this.state.selectionGeneration,
+        this.nextRequest, status.statusRevision, source.revision, source.baselineGeneration, source.observationGeneration, source.context.configBaselineGeneration,
+        target.revision, target.baselineGeneration, target.observationGeneration, target.context.configBaselineGeneration].every((counter) => isU32(counter) && counter < U32_MAX) ||
+        target.revision >= U32_MAX - 1)
+      return refuse('A metadata binding counter is exhausted. No revision or generation will be reused.');
+    const compared = metadataCompareRetainedDraft(source, target);
+    if (compared.reason !== null) return refuse(compared.reason);
+    const sourceBinding = this.discardBinding(sourceKey); const targetBinding = this.discardBinding(target.context.key);
+    if (!sourceBinding || !targetBinding) return refuse('One of the original text bundles is no longer available.');
+    return { reason: null, review: {
+      binding: { source: sourceBinding, target: targetBinding, projectId: project.project.id, configRevision: project.revision,
+        configBaselineGeneration: project.baselineGeneration, configObservationGeneration: project.observationGeneration,
+        serviceGeneration: this.state.serviceGeneration, selectionGeneration: this.state.selectionGeneration, requestSequence: this.nextRequest,
+        windowGeneration: status.windowGeneration, statusRevision: status.statusRevision },
+      projectName: project.project.name, source: { ...source.context }, target: { ...target.context }, changes: compared.changes,
+    } };
+  }
+  retainedDraftReason(sourceKey: string): string | null { return this.retainedDraftReview(sourceKey).reason; }
+  reviewRetainedDraft(sourceKey: string): MetadataRetainedDraftReview | null {
+    const review = this.retainedDraftReview(sourceKey).review;
+    return review ? freeze(review) : null;
+  }
+  retainedDraftReviewReason(review: MetadataRetainedDraftReview): string | null {
+    const current = this.retainedDraftReview(review.binding.source.key);
+    return current.reason ?? (same(current.review, review) ? null : 'The text, settings, selection or service changed while this preview was open. Cancel and review the current bundles again.');
+  }
+  adoptRetainedDraft(review: MetadataRetainedDraftReview): boolean {
+    if (this.retainedDraftReviewReason(review) !== null) return false;
+    const target = this.state.entries[review.binding.target.key];
+    if (!target?.fields) return false;
+    // One local revision only. Preserve both baselines, the source bundle and
+    // the target's untouched fields. No observation, validation or owner call.
+    return this.put({ ...target, revision: target.revision + 1,
+      fields: target.fields.map((field) => {
+        const change = review.changes.find((row) => row.id === field.id);
+        return change ? { id: field.id, text: change.after } : field;
+      }), editError: null, validation: null, validationRequest: null, validationError: null });
   }
 
   async connect(api: DesktopApi): Promise<void> {

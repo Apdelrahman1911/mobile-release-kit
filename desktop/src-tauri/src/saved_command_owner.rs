@@ -538,15 +538,21 @@ struct InstalledIOSObservation {
     control: Arc<crate::shell::installed_observation::ios::Control>, original: Option<Arc<Session>>,
     retired: bool, core_settled: bool, terminal: Option<ios_wire::Terminal>,
 }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "saved_command_recovery_observation.rs"]
+mod recovery_observation;
 struct Inner {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     observation: Mutex<Option<InstalledObservation>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     observation_identity: Arc<()>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    recovery_observation: Mutex<Option<recovery_observation::Observation>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
     ios_observation: Mutex<Option<InstalledIOSObservation>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
     ios_observation_identity: Arc<()>,
+    android_original_owner: bool, android_document: Mutex<Option<std::sync::Weak<()>>>,
     domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
@@ -1006,6 +1012,21 @@ impl SavedCommandOwner {
     pub(crate) fn android_build(runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>) -> Self {
         Self::new_selected(runtime, SavedCommandDomain::AndroidBuild, toolchain)
     }
+    pub(crate) fn bind_original_android_document(&self, identity: &Arc<()>) {
+        if self.inner.domain != SavedCommandDomain::AndroidBuild || !self.inner.android_original_owner { return; }
+        let Ok(mut original) = self.inner.android_document.lock() else { return; };
+        // A dead Weak is still a tombstone. No second document can rebind the
+        // original owner, including through a cloned facade or RuntimeConfig.
+        if original.is_none() { *original = Some(Arc::downgrade(identity)); }
+    }
+    pub(crate) fn android_original_document_matches(&self, identity: &Arc<()>) -> bool {
+        self.inner.android_original_document_matches(Some(identity))
+    }
+    pub(crate) fn android_normal_selected(&self, identity: &Arc<()>) -> bool {
+        let r = self.inner.lock();
+        !r.disabled && !r.exhausted && !r.stopping && !r.document_lost && !self.inner.poisoned.load(Ordering::SeqCst)
+            && self.inner.android_installed_selected(Some(identity))
+    }
     fn require_domain(&self, domain: SavedCommandDomain) -> Result<(), BridgeError> {
         if self.inner.domain == domain { Ok(()) } else { Err(self.inner.domain.invalid_owner()) }
     }
@@ -1115,16 +1136,20 @@ impl SavedCommandOwner {
 impl SavedCommandOwner {
     fn new(runtime: RuntimeConfig, domain: SavedCommandDomain) -> Self { Self::new_selected(runtime, domain, None) }
     fn new_selected(runtime: RuntimeConfig, domain: SavedCommandDomain, toolchain: Option<AndroidToolchainProfile>) -> Self {
+        let android_original_owner = domain == SavedCommandDomain::AndroidBuild && runtime.claim_original_android_owner();
         let (changes, _) = watch::channel(0);
         Self { inner: Arc::new(Inner {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             observation: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             observation_identity: Arc::new(()),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            recovery_observation: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
             ios_observation: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
             ios_observation_identity: Arc::new(()),
+            android_original_owner, android_document: Mutex::new(None),
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             prepared: None, active: None, last: None, recovery_review: None, recovery: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
@@ -1195,6 +1220,8 @@ impl SavedCommandOwner {
             }
             if !selected.valid() { return Err(self.inner.domain.invalid_owner()); }
         }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        recovery_observation::prepare(&self.inner, &r, &context)?;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if let Some(observation) = self.inner.ios_observation.lock().map_err(|_| BridgeError::cleanup_unknown())?.as_ref() {
             if self.inner.domain != SavedCommandDomain::IOSArchive || observation.original.is_some()
@@ -1329,6 +1356,8 @@ impl SavedCommandOwner {
             }
             observation.original = Some(owner.clone());
         }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        recovery_observation::bind(&self.inner, &owner)?;
         let (release, enter) = oneshot::channel();
         // Every new roster slot precedes publication/spawn. No hosted-fixture
         // alternate bootstrap, other-owner permission or caller-owned runner.
@@ -1470,6 +1499,8 @@ impl SavedCommandOwner {
                 if owner.domain == SavedCommandDomain::ProjectRecovery {
                     r.recovery_review = recovery_review_after_finality(&active, &owner, Instant::now());
                 }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                recovery_observation::retire(&self.inner, &active, &owner, r.recovery_review.is_some());
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
                 if let Ok(mut observation) = self.inner.ios_observation.lock() {
                     if let Some(observation) = observation.as_mut().filter(|o| o.original.as_ref().is_some_and(|s| Arc::ptr_eq(s, &owner))) {
@@ -1584,7 +1615,23 @@ impl Inner {
             target_os = "macos", target_arch = "aarch64"))
             && self.runtime.ios_archive_installed_profile_available()
     }
+    fn android_original_document_matches(&self, identity: Option<&Arc<()>>) -> bool {
+        self.domain == SavedCommandDomain::AndroidBuild && self.android_original_owner
+            && self.android_document.lock().is_ok_and(|document| document.as_ref().and_then(std::sync::Weak::upgrade)
+                .is_some_and(|original| identity.is_none_or(|identity| Arc::ptr_eq(&original, identity))))
+    }
+    fn android_runtime_selected(&self, identity: Option<&Arc<()>>) -> bool {
+        self.android_original_document_matches(identity) && self.runtime.android_build_installed_runtime_available()
+    }
+    fn android_installed_selected(&self, identity: Option<&Arc<()>>) -> bool {
+        // The caller already owns Registry. Never relock it or consult an
+        // observation here; neither observer registration nor history grants.
+        self.android_runtime_selected(identity)
+            && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)
+    }
     fn qualified(&self) -> bool {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if recovery_observation::qualified(self) { return true; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         if self.domain == SavedCommandDomain::IOSArchive {
             let Ok(book) = self.ios_observation.lock() else { return false; };
@@ -1599,17 +1646,13 @@ impl Inner {
                             && observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive));
             }
         }
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        if self.domain == SavedCommandDomain::AndroidBuild
-            && self.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled)
-            && self.observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o| o.control.permits_android())) { return true; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         if self.domain == SavedCommandDomain::OfflinePreflight && self.fixture.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
             .is_some_and(|permit| permit.permits(self)) { return true; }
         match self.domain {
             SavedCommandDomain::OfflinePreflight => self.offline_installed_selected(),
-            SavedCommandDomain::AndroidBuild => ANDROID_NATIVE_QUALIFIED && ANDROID_RUNTIME_QUALIFIED && ANDROID_TOOLCHAIN_QUALIFIED && self.toolchain.is_some(),
+            SavedCommandDomain::AndroidBuild => self.android_installed_selected(None),
             SavedCommandDomain::ProjectRecovery => RECOVERY_NATIVE_QUALIFIED && RECOVERY_RUNTIME_QUALIFIED && self.recovery_installed_selected(),
             SavedCommandDomain::IOSArchive => self.ios_unsigned_installed_selected(),
         }
@@ -1650,7 +1693,7 @@ impl Inner {
         else if !self.qualified() {
             match self.domain {
                 SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive => Availability::RuntimeUnqualified,
-                SavedCommandDomain::AndroidBuild if !ANDROID_NATIVE_QUALIFIED || !ANDROID_RUNTIME_QUALIFIED => Availability::RuntimeUnqualified,
+                SavedCommandDomain::AndroidBuild if !self.android_runtime_selected(None) => Availability::RuntimeUnqualified,
                 SavedCommandDomain::AndroidBuild => Availability::ToolchainUnqualified,
                 SavedCommandDomain::ProjectRecovery => Availability::RuntimeUnqualified,
             }
@@ -2323,10 +2366,18 @@ async fn settle_recovery_installed(book: &mut Resources, inner: &Arc<Inner>, own
                     recovery_consumers_returned(book, &startup, slots.no_child_effect()))
             })();
             if !book.recovery_selected || !returned { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold = recovery_observation::settlement_hold(inner, owner, book);
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let hold_end = {
+                let r = inner.lock(); owner.clocks.settlement(r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, owner)).and_then(|a| a.first_stop))
+            };
             let (release, enter) = oneshot::channel();
             book.recovery_started = true;
             book.recovery_settlement = Some(tokio::task::spawn_blocking(move || {
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(control) = hold { let _ = control.hold_settlement(hold_end); }
                 match native.lock() {
                     Ok(mut slots) => slots.settle_originals(),
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
@@ -3068,11 +3119,11 @@ mod tests;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl SavedCommandOwner {
     pub(crate) fn installed_android_identity(&self) -> std::sync::Weak<()> { Arc::downgrade(&self.inner.observation_identity) }
-    pub(crate) fn admit_installed_android_observation(&self, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
+    pub(crate) fn admit_installed_android_observation(&self, document: &Arc<()>, token: crate::shell::installed_observation::commands::AndroidAdmission) -> Result<(), BridgeError> {
         let r = self.inner.lock();
         if self.inner.domain != SavedCommandDomain::AndroidBuild || r.revision != 0 || r.active.is_some() || r.prepared.is_some() || r.last.is_some()
             || r.disabled || r.stopping || r.document_lost || r.exhausted || self.inner.poisoned.load(Ordering::SeqCst)
-            || !self.inner.toolchain.as_ref().is_some_and(AndroidToolchainProfile::installed_candidate_matches_compiled) {
+            || !token.document_matches(document) || !self.inner.android_installed_selected(Some(document)) {
             return Err(self.inner.domain.unavailable());
         }
         let mut slot = self.inner.observation.lock().map_err(|_| BridgeError::cleanup_unknown())?;

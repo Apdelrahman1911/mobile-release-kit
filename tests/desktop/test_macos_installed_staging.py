@@ -585,7 +585,10 @@ class MacInstalledData(unittest.TestCase):
             paths.append(aqua)  # A validates both; I does not pretend it includes A.
         for path in paths:
             workflow = path.read_text(encoding="utf-8")
-            names = [("Standard Installer only is privileged; never execute the app or Python as root", "installer")]
+            installer_name = ("Application installation uses only standard privileged Installer; app and Python stay nonroot"
+                              if path.name == "desktop-macos-aqua.yml"
+                              else "Standard Installer only is privileged; never execute the app or Python as root")
+            names = [(installer_name, "installer")]
             if path.name == "desktop-macos-installed.yml":
                 names.insert(0, ("Standard Installer runs the one fixed fixture, never root libtest or a scenario selector", "installer-fixture"))
             for name, stem in names:

@@ -3037,7 +3037,8 @@ def android_receipt_data(lifecycle, case):
         "toolsClosed": True, "namespaceClosed": True, "stopObserved": "cancelled" if cancelled else "none"}
     fixture = {"sourceControlsAccounted": True, "savedVersionChanged": refused, "gradleBoundary": "" if refused else "active\n",
                "generatedScopesNotExported": ["project/.mobile-release", "project/app/build", "project/build"]}
-    return {"schema": "installed-android-build-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+    return {"schema": "installed-android-build-v2", "case": case, "qualificationOnly": True, "builder": "normal",
+        "normalSelection": {"selectedBeforeObservation": True, "observerGranted": False},
         "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
         "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
         "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
@@ -4333,24 +4334,44 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     and ast.unparse(node.iter) == "shell_cases(value)")
         transaction = next(node for node in loop.body if isinstance(node, ast.Try))
         branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
+        self.assertEqual(len(branch.orelse), 14)
         self.assertEqual(ast.unparse(branch.orelse[0]),
-                         "result = command('shell-' + case, shell_argv(value, case), maximum=60, env=environment, shell_log=(value, case, log_binding))")
+                         "result = command('shell-' + case, shell_argv(value, case), maximum=SHELL_RECOVERY_NEGATIVE_SECONDS if case == SHELL_RECOVERY_PARTIAL else 60, env=environment, shell_log=(value, case, log_binding))")
         self.assertEqual(ast.unparse(branch.orelse[1]),
                          "failure_labels = read(_ROOT / 'public/shell-settled-failure-failure.labels', SHELL_FAILURE_LABEL_LIMIT) if case == 'settled-failure' else None")
         self.assertEqual(ast.unparse(branch.orelse[2]),
                          "cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, github_expected if shell_github(value) else expected, failure_labels=failure_labels)")
-        metadata = next(node for node in branch.orelse[3:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
+        self.assertEqual(ast.unparse(branch.orelse[3]),
+                         "if case in SHELL_RECOVERY_CASES:\n"
+                         "    after = canonical(_shell_recovery_inventory(value, namespace, case, 'after'))\n"
+                         "    _retain('shell-' + case + '-after.json', after)\n"
+                         "    shell_recovery_fixture(value, case, *(read(_ROOT / 'public' / ('shell-' + case + '-' + stage + '.json'), SHELL_RECOVERY_INVENTORY_LIMIT) for stage in ('initial', 'generated', 'before')), after)\n"
+                         "    need(cases[case]['projectRecovery']['sourceCommit'] == value['sourceSha'], 'Recovery native source differs')")
+        self.assertEqual(ast.unparse(branch.orelse[4]),
+                         "if shell_github_preflight(value):\n    _shell_github_preflight_after(value, case, cases[case])")
+        metadata = next(node for node in branch.orelse[5:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
         self.assertEqual(len(metadata.body), 3)
         self.assertEqual([ast.unparse(node) for node in metadata.body[:3]], [
             "metadata_after = canonical(_shell_metadata_inventory(value, namespace, saved=True))",
             "_retain('shell-metadata-save-after.json', metadata_after)",
             "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
         final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
-        self.assertEqual(len(final.body), 7)  # GitHub return, common21 families, selected Android loop and inert placeholders.
+        self.assertEqual(len(final.body), 8)  # Recovery return, GitHub return, common21 families, selected Android and inert placeholders.
         self.assertIsInstance(final.body[1], ast.If)
-        self.assertEqual(ast.unparse(final.body[1].test), "shell_github(value)")
+        self.assertEqual(ast.unparse(final.body[1].test), "shell_recovery(value)")
+        self.assertEqual(len(final.body[1].body), 3)
+        self.assertEqual(ast.unparse(final.body[1].body[0]),
+                         "need(not shell_recovery_negative(value), 'Failed recovery experiment cannot enter success finality')")
+        self.assertEqual(ast.unparse(final.body[1].body[1].iter), "shell_cases(value)")
+        self.assertEqual(ast.unparse(final.body[1].body[1].body[0]),
+                         "need(canonical(_shell_recovery_inventory(value, namespace, case, 'after')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_RECOVERY_INVENTORY_LIMIT), 'A later Recovery case changed an earlier original fixture')")
         self.assertIsInstance(final.body[1].body[-1], ast.Return)
-        recheck = final.body[2].value
+        self.assertIsInstance(final.body[2], ast.If)
+        self.assertEqual(ast.unparse(final.body[2].test), "shell_github(value)")
+        self.assertEqual(ast.unparse(final.body[2].body[0]),
+                         "if shell_github_preflight(value):\n    _shell_github_preflight_journals_final(value)")
+        self.assertIsInstance(final.body[2].body[-1], ast.Return)
+        recheck = final.body[3].value
         self.assertEqual(ast.unparse(recheck.func), "need")
         self.assertEqual([ast.unparse(node) for node in recheck.args[0].values], [
             "canonical(_shell_project_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-positive-project-after.json', 8192)",
@@ -4359,17 +4380,17 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             "canonical(_shell_workflow_inventory(value, namespace, installed=True)) == read(_ROOT / 'public/shell-workflow-apply-after.json', 8192)",
             "canonical(_shell_metadata_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-metadata-save-after.json', 8192)",
             "canonical(_shell_version_inventory(value, namespace, saved=True)) == read(_ROOT / 'public/shell-version-save-after.json', 8192)"])
-        session_loop = final.body[3]
+        session_loop = final.body[4]
         self.assertEqual(ast.unparse(session_loop.iter), "SHELL_SESSION_CASES")
         self.assertEqual(ast.unparse(session_loop.body[0].value.args[0]),
             "canonical(_shell_session_inventory(value, namespace, case, changed=case == 'session-refusals')) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_SESSION_INVENTORY_LIMIT)")
-        tools_loop = final.body[4]
+        tools_loop = final.body[5]
         self.assertEqual(ast.unparse(tools_loop.iter), "SHELL_TOOLS_OFFLINE_CASES")
         self.assertEqual(ast.unparse(tools_loop.body[0].value.args[0]),
             "canonical(_shell_tools_offline_inventory(value, namespace, case, after=True)) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_TOOLS_OFFLINE_INVENTORY_LIMIT)")
-        self.assertEqual(ast.unparse(final.body[5].iter), "shell_android_cases(value)")
-        self.assertEqual(ast.unparse(final.body[6].test), "shell_ordinary(value)")
-        self.assertEqual(ast.unparse(final.body[6].body[-1]),
+        self.assertEqual(ast.unparse(final.body[6].iter), "shell_android_cases(value)")
+        self.assertEqual(ast.unparse(final.body[7].test), "shell_ordinary(value)")
+        self.assertEqual(ast.unparse(final.body[7].body[-1]),
                          "_retain('shell-ordinary21-placeholders-after.json', after)")
         shell = next(node for node in unit.body if isinstance(node, ast.If) and ast.unparse(node.test) == "'shell' in value")
         loop_index = shell.body.index(loop)
@@ -5700,6 +5721,7 @@ class AndroidBuildLifecycleContracts(unittest.TestCase):
             paths = [(("original", key), not value) for key, value in original["original"].items() if type(value) is bool]
             paths += [(("coreLifetime", key), not value) for key, value in original["coreLifetime"].items() if type(value) is bool]
             paths += [(("limits", key), True) for key in original["limits"]]
+            paths += [(("normalSelection", key), not value) for key, value in original["normalSelection"].items()]
             paths += [(("original", "domain"), "offline"), (("original", "domain"), "tools"),
                 (("original", "generation"), "c" * 32), (("nativeIntegrity",), False), (("toolsLedgerSettled",), False),
                 (("coreLifetime", "profileCalls"), 1), (("coreLifetime", "profileCalls"), False),
@@ -5717,6 +5739,22 @@ class AndroidBuildLifecycleContracts(unittest.TestCase):
             changed = deepcopy(original); changed["requests"]["offlineStart"] = 1
             with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
             with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(original)[:-1], case)
+
+    def test_android_selection_history_is_required_not_relabelled_or_live_authority(self):
+        for case in L.SHELL_ANDROID_CASES:
+            original = android_receipt_data(L, case)
+            for history in (None, {}, {"selectedBeforeObservation": True}, {"observerGranted": False},
+                            {"selectedBeforeObservation": 1, "observerGranted": False},
+                            {"selectedBeforeObservation": True, "observerGranted": 0},
+                            {"selectedBeforeObservation": True, "observerGranted": False, "liveEligible": True}):
+                with self.subTest(case=case, history=history):
+                    changed = deepcopy(original); changed["normalSelection"] = history
+                    with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            for schema in ("installed-android-build-v1", "installed-android-build-v2"):
+                changed = deepcopy(original); changed["schema"] = schema; del changed["normalSelection"]
+                with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
+            changed = deepcopy(original); changed["schema"] = "installed-android-build-v1"
+            with self.assertRaises(ValueError): L.shell_android_receipt(L.canonical(changed), case)
 
     def test_local_aab_summary_is_typed_and_never_release_or_signer_authority(self):
         for path, value in [
@@ -5818,17 +5856,28 @@ class AndroidBuildLifecycleContracts(unittest.TestCase):
             self.assertIn(case, observer)
         self.assertNotIn("Duration::", predicate)
 
-    def test_android_qualification_uses_write_once_binding_without_record_lock(self):
+    def test_android_ordinary_selection_precedes_observer_and_history_never_grants(self):
         observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()
+        owner = (SOURCE / "desktop/src-tauri/src/saved_command_owner.rs").read_text()
+        runtime = (SOURCE / "desktop/src-tauri/src/runtime.rs").read_text()
         self.assertIn("android_document: OnceLock<Weak<()>>", observer)
         self.assertIn("android_document: OnceLock::new()", observer)
-        eligibility = observer.split("pub(crate) fn permits_android(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
-        self.assertNotIn("self.record()", eligibility)
-        self.assertNotIn("record.lock()", eligibility)
-        self.assertIn("self.android_document.get().and_then(Weak::upgrade).is_some()", eligibility)
+        self.assertNotIn("permits_android", observer + owner)
+        eligibility = owner.split("fn android_installed_selected(&self, identity: Option<&Arc<()>>) -> bool {", 1)[1].split("\n    }", 1)[0]
+        for forbidden in ("self.observation", "self.record", "self.registry", "self.lock()"):
+            self.assertNotIn(forbidden, eligibility)
+        self.assertIn("self.android_runtime_selected(identity)", eligibility)
+        self.assertIn("AndroidToolchainProfile::installed_candidate_matches_compiled", eligibility)
+        compiled = runtime.split("pub(crate) fn android_build_installed_runtime_available(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR)", compiled)
+        for forbidden in ("passive_installed_profile()", "installed_session", "resolve", "VerifiedRuntime"):
+            self.assertNotIn(forbidden, compiled)
         attach = observer.split("fn attach_android(", 1)[1].split("pub(super) fn android_version_request", 1)[0]
+        self.assertLess(attach.index("document.installed_android_normal_selected()"), attach.index("AndroidFixture::capture"))
+        self.assertLess(attach.index("if !selected_before_observation"), attach.index("self.record()"))
         self.assertIn("original.is_some() || self.android_document.get().is_some()", attach)
         self.assertEqual(observer.count("self.android_document.set("), 1)
+        self.assertEqual(observer.count("r.android_selected_before_observation = selected_before_observation;"), 1)
         self.assertLess(attach.index("self.android_document.set(document_identity.clone())"),
                         attach.index("AndroidFixture::capture"))
         self.assertLess(attach.index("*original=Some(Arc::downgrade(q));"),
@@ -5836,7 +5885,11 @@ class AndroidBuildLifecycleContracts(unittest.TestCase):
         self.assertNotIn("r.android_document", observer)
         finality = observer.split("fn android_complete(&self) -> bool {", 1)[1].split("\n    }", 1)[0]
         self.assertIn("self.android_document.get().is_some()", finality)
+        self.assertIn("r.android_selected_before_observation", finality)
         self.assertNotIn("Weak::upgrade", finality)
+        self.assertNotIn("normal_selected", finality)
+        admission = owner.split("pub(crate) fn admit_installed_android_observation(", 1)[1].split("pub(crate) fn installed_android_snapshot", 1)[0]
+        self.assertLess(admission.index("!self.inner.android_installed_selected(Some(document))"), admission.index("*slot = Some(InstalledObservation"))
 
     def test_source_preserves_original_native_domain_clock_and_no_grant_boundaries(self):
         observer = (SOURCE / "desktop/src-tauri/src/installed_tools_observation.rs").read_text()

@@ -1,9 +1,18 @@
 # Desktop GitHub nonpublishing preflight
 
-This is a separate, gated action family, not an extension of the read-only
-connection’s five-GET schedule. The current source keeps
-`GITHUB_PREFLIGHT_NATIVE_QUALIFIED = false`: UI and inert tests do not qualify a
-native runtime, journal, network exchange, GitHub API or hosted workflow.
+This is a separate action family, not an extension of the read-only
+connection’s five-GET schedule. The current source candidate selects only the
+exact installed Linux x86_64 GNU payload in the normal Desktop shell, together
+with this action’s publisher-bound immutable tooling commit and canonical
+caller digest. Missing bindings refuse before inspection; read-only selection
+does not grant or replace this action profile. The original action-specific
+runtime custody, session, consent and finality checks still apply.
+
+`GITHUB_PREFLIGHT_NATIVE_QUALIFIED` remains `false`: this narrow source selector
+and inert tests are not native runtime, journal, network, GitHub API or hosted
+workflow qualification. Native/service evidence and independent implementation
+acceptance remain required before delivery. macOS, Windows and the separate
+GitHub release action profile remain unavailable; no global gate is enabled.
 
 ## UI journey
 

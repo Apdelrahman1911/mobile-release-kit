@@ -37,6 +37,18 @@ macro_rules! installed_command_result {
         if let Some(q) = &$state.observation { q.commands_result(installed_observation::commands::Command::$kind, $value); }
     };
 }
+macro_rules! installed_recovery_request {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.recovery_request(installed_observation::recovery::Command::$kind, $value); }
+    };
+}
+macro_rules! installed_recovery_result {
+    ($state:expr, $kind:ident, $value:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = &$state.observation { q.recovery_result(installed_observation::recovery::Command::$kind, $value); }
+    };
+}
 // The fixed installed Mac observer sees the same real command body/result.
 // These taps do not synthesize a request or admit an ordinary shipping build.
 macro_rules! installed_ios_request {
@@ -282,7 +294,9 @@ async fn prepare_project_recovery(webview: Webview, request: tauri::ipc::Request
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     let args = crate::project_recovery_protocol::prepare(&value)?;
+    installed_recovery_request!(state, Prepare, &value);
     let result = state.document.prepare_project_recovery(args);
+    installed_recovery_result!(state, Prepare, &result);
     result
 }
 #[tauri::command]
@@ -291,7 +305,9 @@ async fn start_project_recovery(webview: Webview, request: tauri::ipc::Request<'
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     let args = crate::project_recovery_protocol::start(&value)?;
+    installed_recovery_request!(state, Start, &value);
     let result = state.document.start_project_recovery(args);
+    installed_recovery_result!(state, Start, &result);
     result
 }
 #[tauri::command]
@@ -300,7 +316,10 @@ async fn project_recovery_status(webview: Webview, request: tauri::ipc::Request<
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     crate::project_recovery_protocol::status_request(&value)?;
-    state.document.project_recovery_status()
+    installed_recovery_request!(state, Status, &value);
+    let result = state.document.project_recovery_status();
+    installed_recovery_result!(state, Status, &result);
+    result
 }
 #[tauri::command]
 async fn cancel_project_recovery(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_recovery_protocol::Status, BridgeError> {
@@ -308,7 +327,9 @@ async fn cancel_project_recovery(webview: Webview, request: tauri::ipc::Request<
     edit_window(&webview).map_err(|_| crate::project_recovery_protocol::invalid())?;
     let value = project_recovery_request_body(request.body())?;
     let args = crate::project_recovery_protocol::cancel(&value)?;
+    installed_recovery_request!(state, Cancel, &value);
     let result = state.document.cancel_project_recovery(args);
+    installed_recovery_result!(state, Cancel, &result);
     result
 }
 #[tauri::command]
@@ -897,49 +918,70 @@ async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Req
 async fn github_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_status", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_status", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_status", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_prepare", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_prepare", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_prepare", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_dispatch(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_dispatch", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_dispatch", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_dispatch", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_track(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_track", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_track", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_track", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_reconcile", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_reconcile", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_reconcile", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_pending", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_pending", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_pending", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_preflight_session::refused(crate::github_preflight_protocol::Reason::InvalidInput)); }
-    state.document.github_preflight_command("github_preflight_cancel", request_body(&request)?)
+    let result = state.document.github_preflight_command("github_preflight_cancel", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.preflight_result("github_preflight_cancel", &result); }
+    result
 }
 
 
@@ -1315,6 +1357,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
             let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
             let status = document.github_preflight_status();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.preflight_status(&status); }
             if github_preflight_revision != Some(status.revision) {
                 github_preflight_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_preflight_protocol::EVENT, &status);

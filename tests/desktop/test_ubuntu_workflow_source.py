@@ -12,6 +12,24 @@ WORKFLOW = SOURCE / ".github/workflows/desktop-ubuntu-publication.yml"
 DRIVER = SOURCE / "desktop/tools/ci_ubuntu_publication.py"
 PROVISIONER = "desktop/tools/prepare_hosted_ubuntu_data.py"
 
+NATIVE_GATE = "steps.route.outputs.native == 'true'"
+COMPLETED_NATIVE_GATE = NATIVE_GATE + " && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'"
+
+
+def workflow_jobs(text):
+    # Extract only job-level SOURCE blocks; do not execute or load the workflow.
+    parts = text.split("\njobs:\n")
+    if len(parts) != 2:
+        raise AssertionError("Expected one jobs block")
+    sections = re.split(r"^  ([a-z][a-z0-9_-]*):\n", parts[1], flags=re.MULTILINE)
+    names = sections[1::2]
+    if sections[0] or not names or len(names) != len(set(names)):
+        raise AssertionError("Missing or duplicate job-level source headings")
+    headings = re.findall(r"^  ([^ \t#][^\n]*)$", parts[1], flags=re.MULTILINE)
+    if headings != [name + ":" for name in names]:
+        raise AssertionError("Unknown or inline job-level source heading")
+    return dict(zip(names, sections[2::2]))
+
 
 class HostedWorkflowSource(unittest.TestCase):
     def test_fixed_jdk_preparation_is_conditional_paired_and_retains_original_failure_data(self):
@@ -20,13 +38,12 @@ class HostedWorkflowSource(unittest.TestCase):
         heading = "Prepare the fixed JDK17 pair only on this disposable shell runner"
         selected = [section for section in sections if section.splitlines()[0] == heading]
         self.assertEqual(len(selected), 1); step = selected[0]
-        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'\n", step)
+        self.assertIn("        if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell'\n", step)
         self.assertIn("        timeout-minutes: 8\n", step)
         self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]', step)
         self.assertIn('refs/heads/verify/desktop-installed-shell:compile) ;;', step)
-        self.assertIn('refs/heads/verify/desktop-shell-host-metadata:host-metadata-only) [[ "$GITHUB_RUN_ATTEMPT" == 1 ]] ;;', step)
-        self.assertIn('("refs/heads/verify/desktop-shell-host-metadata", "host-metadata-only")', step)
-        self.assertIn('case != "host-metadata-only" or env.get("GITHUB_RUN_ATTEMPT") == "1"', step)
+        self.assertNotIn('refs/heads/verify/desktop-shell-host-metadata', step)
+        self.assertIn('need((ref, case) == ("refs/heads/verify/desktop-installed-shell", "compile"))', step)
         self.assertIn('root="$RUNNER_TEMP/mrk-desktop-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"', step)
         self.assertIn('mkdir -m 700 -- "$root"', step)
         self.assertIn("          umask 077\n", step)
@@ -59,7 +76,7 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertLess(workflow.index(heading), workflow.index("Prepare a fresh bounded compiler owner"))
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 3)
+                         [hashlib.sha256(lifecycle).hexdigest()] * 5)
 
     def test_workflow_fits_its_actual_original_source_record_bound(self):
         module = ast.parse(DRIVER.read_text())
@@ -79,10 +96,14 @@ class HostedWorkflowSource(unittest.TestCase):
 
     def test_same_job_compiler_and_native_share_the_fixed_source_bound_data_script(self):
         workflow = WORKFLOW.read_text()
+        jobs = workflow_jobs(workflow)
+        self.assertEqual(list(jobs), ["compile", "recovery-negative"])
+        job = jobs["compile"]
         heading = "      - name: Prepare only fixed disposable Ubuntu DATA modes\n"
-        parts = workflow.split(heading)
+        parts = job.split(heading)
         self.assertEqual(len(parts), 2)
         expected = (
+            "        if: steps.route.outputs.native == 'true'\n"
             "        timeout-minutes: 1\n"
             "        shell: bash\n"
             "        run: |\n"
@@ -92,8 +113,6 @@ class HostedWorkflowSource(unittest.TestCase):
             + PROVISIONER + " </dev/null\n"
         )
         self.assertEqual(parts[1].split("      - name:", 1)[0], expected)
-        job = workflow.split("\njobs:\n", 1)[1]
-        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9_-]*):$", job, re.MULTILINE), ["compile"])
         self.assertNotIn("needs: compile", job)
         self.assertNotIn("needs.compile", job)
         self.assertLess(job.index("Prepare shared Ubuntu shell inputs"), job.index(heading))
@@ -107,6 +126,18 @@ class HostedWorkflowSource(unittest.TestCase):
             self.assertEqual(len(found), 1, name)
             return found[0]
 
+        selector = step("Require one exact disposable preparation route")
+        native_refs = ("desktop-project-recovery", "desktop-installed-shell", "desktop-installed-github-readonly",
+                       "desktop-installed-github-normal-boundaries", "desktop-installed-github-preflight")
+        closed_cases = "|".join("refs/heads/verify/" + name + ":compile" for name in native_refs)
+        route_cases = selector.split('case "$GITHUB_REF:$MRK_INSTALLED_SHELL_CASE" in\n', 1)[1].split("          esac\n", 1)[0]
+        self.assertEqual(route_cases, "            " + closed_cases + ") ;;\n"
+                         '            refs/heads/verify/desktop-shell-host-metadata:host-metadata-only) [[ "$GITHUB_RUN_ATTEMPT" == 1 ]] ;;\n'
+                         "            *) exit 70 ;;\n")
+        self.assertIn('          if [[ "$MRK_INSTALLED_SHELL_CASE" == compile ]]; then\n'
+                      "            printf 'native=true\\n' >> \"$GITHUB_OUTPUT\"\n          fi\n", selector)
+        self.assertEqual(selector.count("native=true"), 1)
+
         compiler = step("Compile the normal shell and separate observer once without executing either")
         upload = step("Retain the compiler artifact or typed private-transport summary")
         route = step("Require the fixed disposable native route")
@@ -119,10 +150,7 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertIn("        id: compile\n", compiler)
         self.assertIn("        id: upload\n", upload)
         self.assertIn("        id: prepare_native\n", native_owner)
-        gate = ("        if: (github.ref == 'refs/heads/verify/desktop-installed-shell'"
-                " || github.ref == 'refs/heads/verify/desktop-installed-github-readonly'"
-                " || github.ref == 'refs/heads/verify/desktop-installed-github-normal-boundaries')"
-                " && steps.compile.outcome == 'success' && steps.upload.outcome == 'success'")
+        gate = "        if: " + COMPLETED_NATIVE_GATE
         for section in (route, native_owner, download, consumer):
             self.assertIn(gate, section)
         bindings = (
@@ -143,6 +171,25 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertIn("          path: ${{ steps.prepare_native.outputs.root }}/work/admitted-shell\n", download)
         for field in ("root", "preparation_sha256", "deadline"):
             self.assertIn("${{ steps.prepare_native.outputs." + field + " }}", consumer)
+        # A separate fresh negative VM reuses the same original compiler;
+        # it must not become an extra compiler or a general native job.
+        negative = jobs["recovery-negative"]
+        self.assertIn("    needs: compile\n", negative)
+        self.assertIn("    runs-on: ubuntu-24.04\n", negative)
+        self.assertIn("    if: always() && github.ref == 'refs/heads/verify/desktop-project-recovery'"
+                      " && needs.compile.outputs.compiled_success == 'success'"
+                      " && needs.compile.outputs.shell_artifact_id != ''"
+                      " && needs.compile.outputs.shell_roster_sha256 != ''\n", negative)
+        self.assertIn("      MRK_INSTALLED_SHELL_CASE: observe\n", negative)
+        self.assertIn("      MRK_INSTALLED_SHELL_SCOPE: project-recovery-unknown1-v1\n", negative)
+        self.assertIn("      MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1\n", negative)
+        for output in ("shell_artifact_id", "shell_roster_sha256", "shell_producer_attempt"):
+            self.assertIn("${{ needs.compile.outputs." + output + " }}", negative)
+        for forbidden in ("        id: compile\n", "        id: prepare\n", "Select the fixed frontend compiler",
+                          "Prepare the fixed JDK17 pair", "steps.compile.outputs.", "steps.upload.outputs."):
+            self.assertNotIn(forbidden, negative)
+        self.assertLess(negative.index("Admit the fixed installed scope and source"),
+                        negative.index("Prepare shared Ubuntu shell inputs"))
         checkout = step("Check out exact reviewed source without credentials")
         self.assertIn("          ref: ${{ github.sha }}\n", checkout)
         self.assertIn("          persist-credentials: false\n", checkout)
@@ -229,8 +276,8 @@ class JvmNamespaceWorkflowSource(unittest.TestCase):
                           "GITHUB_JOB": "compile", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
                           "MRK_UBUNTU_PUBLICATION_VERIFY": "1"})
         self.assertIn('("refs/heads/verify/desktop-installed-shell", "compile")', program)
-        self.assertIn('("refs/heads/verify/desktop-shell-host-metadata", "host-metadata-only")', program)
-        self.assertIn('case != "host-metadata-only" or env.get("GITHUB_RUN_ATTEMPT") == "1"', program)
+        self.assertNotIn('refs/heads/verify/desktop-shell-host-metadata', program)
+        self.assertIn('need((ref, case) == ("refs/heads/verify/desktop-installed-shell", "compile"))', program)
         for token in ('sys.argv == ["-"]', "sys.flags.isolated", "sys.flags.no_site", "sys.dont_write_bytecode",
                       'sys.platform == "linux"', "sys.version_info[:2] == (3, 12)", 'os.uname().machine == "x86_64"',
                       'os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0', 'os.getcwd() == "/"',
@@ -408,25 +455,28 @@ class InstalledGitHubWorkflowSourceContracts(unittest.TestCase):
     def test_github_is_one_shared_lane_not_a_jdk_producer_or_normal_destination_action(self):
         workflow = WORKFLOW.read_text()
         ref = "refs/heads/verify/desktop-installed-github-readonly"
-        self.assertIn("branches: [verify/desktop-installed-shell, verify/desktop-installed-github-readonly,", workflow)
-        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9_-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["compile"])
-        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        self.assertIn("branches: [verify/desktop-project-recovery, verify/desktop-installed-shell, verify/desktop-installed-github-readonly,", workflow)
+        jobs = workflow_jobs(workflow)
+        self.assertEqual(list(jobs), ["compile", "recovery-negative"])
+        sections = re.split(r"^      - name: ", jobs["compile"], flags=re.MULTILINE)[1:]
         compile_steps = [step for step in sections if "\n        id: compile\n" in step]
         self.assertEqual(len(compile_steps), 1)
         self.assertIn("without executing either\n", compile_steps[0])
-        self.assertIn(ref, compile_steps[0])
+        self.assertIn(ref + ":compile", jobs["compile"])
+        self.assertIn("        if: " + NATIVE_GATE + "\n", compile_steps[0])
         consumers = [step for step in sections if step.startswith(
             "Observe only the fixed installed shell route with original finality\n")]
-        self.assertEqual(len(consumers), 1); self.assertIn(ref, consumers[0])
+        self.assertEqual(len(consumers), 1)
+        self.assertIn("        if: " + COMPLETED_NATIVE_GATE + "\n", consumers[0])
         jdk = next(step for step in sections if step.startswith("Prepare the fixed JDK17 pair"))
-        self.assertIn("        if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'\n", jdk)
+        self.assertIn("        if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell'\n", jdk)
         self.assertNotIn(ref, jdk)
         for forbidden in ("workflow_dispatch:", "github-normal-negative", "ubuntu-runtime-publisher",
                           "build_conventional_runtime.py", "shell-github-observer", "continue-on-error:"):
             self.assertNotIn(forbidden, workflow)
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 3)
+                         [hashlib.sha256(lifecycle).hexdigest()] * 5)
         text = lifecycle.decode()
         self.assertIn('unit = root_path(value).name + ".service"', text)
         self.assertIn('group = "/system.slice/" + unit', text)
@@ -437,34 +487,36 @@ class InstalledGitHubWorkflowSourceContracts(unittest.TestCase):
 class InstalledGitHubNormalBoundaryWorkflowSourceContracts(unittest.TestCase):
     def test_pair_ref_reuses_single_compiler_consumer_and_keeps_nft_host_gate_closed(self):
         workflow = WORKFLOW.read_text()
+        jobs = workflow_jobs(workflow)
         ref = "refs/heads/verify/desktop-installed-github-normal-boundaries"
         self.assertIn("verify/desktop-installed-github-normal-boundaries,", workflow)
-        self.assertIn(ref + ":compile) ;;", workflow)
-        sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
+        self.assertIn(ref + ":compile", jobs["compile"])
+        sections = re.split(r"^      - name: ", jobs["compile"], flags=re.MULTILINE)[1:]
         for identity in ("compile", "prepare", "prepare_native"):
             steps = [step for step in sections if "\n        id: " + identity + "\n" in step]
             self.assertEqual(len(steps), 1)
-            self.assertIn(ref, steps[0])
+            gate = COMPLETED_NATIVE_GATE if identity == "prepare_native" else NATIVE_GATE
+            self.assertIn("        if: " + gate + "\n", steps[0])
         consumers = [step for step in sections if step.startswith(
             "Observe only the fixed installed shell route with original finality\n")]
         self.assertEqual(len(consumers), 1)
-        self.assertIn(ref, consumers[0])
+        self.assertIn("        if: " + COMPLETED_NATIVE_GATE + "\n", consumers[0])
         jdk = next(step for step in sections if step.startswith("Prepare the fixed JDK17 pair"))
         self.assertNotIn(ref, jdk)
         self.assertIn("SOURCE host tuple gate is closed until reviewed", workflow)
-        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9_-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["compile"])
+        self.assertEqual(list(jobs), ["compile", "recovery-negative"])
         for forbidden in ("workflow_dispatch:", "continue-on-error:", "nft --check", "iptables ", "modprobe ",
                           " install nftables", "github-normal-negative"):
             self.assertNotIn(forbidden, workflow)
         lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
         self.assertIn(b"SHELL_GITHUB_BOUNDARY_HOST_PROFILE = None\n", lifecycle)
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
-                         [hashlib.sha256(lifecycle).hexdigest()] * 3)
+                         [hashlib.sha256(lifecycle).hexdigest()] * 5)
 
 
 class Ordinary21WorkflowSourceContracts(unittest.TestCase):
     def test_scope_is_explicit_before_every_acquisition_and_tools_remain_selected(self):
-        workflow = WORKFLOW.read_text()
+        workflow = workflow_jobs(WORKFLOW.read_text())["compile"]
         heading = "Admit the fixed installed scope and source before acquisition or preparation"
         sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
         gate = next(section for section in sections if section.splitlines()[0] == heading)
@@ -475,13 +527,13 @@ class Ordinary21WorkflowSourceContracts(unittest.TestCase):
             self.assertLess(workflow.index(heading), workflow.index(later))
         self.assertLess(workflow.index("Check out exact reviewed source without credentials"), workflow.index(heading))
         job_environment = workflow.split("    env:\n", 1)[1].split("    steps:\n", 1)[0]
-        self.assertIn("MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || '' }}", job_environment)
+        self.assertIn("MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || github.ref == 'refs/heads/verify/desktop-project-recovery' && 'project-recovery-native3-v1' || '' }}", job_environment)
         self.assertIn("MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1", job_environment)
         tools = next(section for section in sections if section.startswith("Prepare the fixed JDK17 pair"))
-        self.assertIn("if: github.ref == 'refs/heads/verify/desktop-installed-shell' || github.ref == 'refs/heads/verify/desktop-shell-host-metadata'", tools)
+        self.assertIn("if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell'", tools)
 
     def test_native_route_preparation_and_consumer_bind_the_same_original_compiler_scope_output(self):
-        workflow = WORKFLOW.read_text()
+        workflow = workflow_jobs(WORKFLOW.read_text())["compile"]
         sections = re.split(r"^      - name: ", workflow, flags=re.MULTILINE)[1:]
         for heading in ("Require the fixed disposable native route", "Prepare a fresh bounded native owner",
                         "Observe only the fixed installed shell route with original finality"):
@@ -494,7 +546,7 @@ class Ordinary21WorkflowSourceContracts(unittest.TestCase):
         self.assertIn("if local_pin or int(producer) > int(consumer)", gate)
         driver = DRIVER.read_text()
         compiler = driver.split("def verify_installed_shell_compile():", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn('output.write("shell_scope=" + (ordinary["profile"] if ordinary is not None else "") + "\\n")', compiler)
+        self.assertIn('output.write("shell_scope=" + (os.environ["MRK_INSTALLED_SHELL_SCOPE"] if ordinary is not None else "") + "\\n")', compiler)
         self.assertEqual(compiler.count("shell_compile_argv("), 1)
 
     def test_source_admission_contains_only_read_only_source_policy_not_an_owner_or_preparer(self):

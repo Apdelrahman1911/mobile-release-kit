@@ -109,16 +109,27 @@ class LifecycleSourcePinTests(unittest.TestCase):
         branches = re.findall(r"^    branches: \[([^\n]*)\]$", workflow, re.MULTILINE)
         self.assertEqual(len(branches), 1)
         profiles = {
-            "verify/desktop-ubuntu-publication": ("  publisher-helpers:", 1),
-            "verify/desktop-installed-shell, verify/desktop-installed-github-readonly, verify/desktop-installed-github-normal-boundaries, verify/desktop-shell-host-metadata": ("  compile:", 3),
+            "verify/desktop-ubuntu-publication": {"publisher-helpers": 1},
+            ("verify/desktop-project-recovery, verify/desktop-installed-shell, verify/desktop-installed-github-readonly, "
+             "verify/desktop-installed-github-normal-boundaries, verify/desktop-installed-github-preflight, "
+             "verify/desktop-shell-host-metadata"): {"compile": 3, "recovery-negative": 2},
         }
         self.assertIn(branches[0], profiles, "Unknown or mixed publication route")
-        job_header, pin_count = profiles[branches[0]]
+        expected_jobs = profiles[branches[0]]
         jobs = workflow.split("\njobs:\n")
         self.assertEqual(len(jobs), 2)
-        self.assertEqual(re.findall(r"^  \S.*$", jobs[1], re.MULTILINE), [job_header])
-        pins = re.findall(r"^[ \t]+MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:[ \t]*(.*)$", workflow, re.MULTILINE)
-        self.assertEqual(pins, ["'" + hashlib.sha256(ENTRY.read_bytes()).hexdigest() + "'"] * pin_count)
+        sections = re.split(r"^  ([a-z][a-z0-9_-]*):\n", jobs[1], flags=re.MULTILINE)
+        self.assertEqual(sections[0], "")
+        self.assertEqual(sections[1::2], list(expected_jobs))
+        self.assertEqual(re.findall(r"^  [^ \t#][^\n]*$", jobs[1], re.MULTILINE),
+                         ["  " + name + ":" for name in expected_jobs])
+        pin = "'" + hashlib.sha256(ENTRY.read_bytes()).hexdigest() + "'"
+        for name, body in zip(sections[1::2], sections[2::2]):
+            with self.subTest(job=name):
+                pins = re.findall(r"^[ \t]+MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:[ \t]*(.*)$", body, re.MULTILINE)
+                self.assertEqual(pins, [pin] * expected_jobs[name])
+        all_pins = re.findall(r"^[ \t]+MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256:[ \t]*(.*)$", workflow, re.MULTILINE)
+        self.assertEqual(all_pins, [pin] * sum(expected_jobs.values()))
 
 
 if __name__ == "__main__":

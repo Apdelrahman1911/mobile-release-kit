@@ -40,6 +40,16 @@ impl ProjectRecoveryOwner {
     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }
     pub(crate) fn request_shutdown(&self) { self.saved.request_shutdown(); }
     pub(crate) async fn shutdown(&self) -> Result<(), BridgeError> { self.saved.shutdown().await }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_recovery_identity(&self) -> std::sync::Weak<()> { self.saved.installed_recovery_identity() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn admit_installed_observation(&self, token: crate::shell::installed_observation::recovery::Admission) -> Result<(), BridgeError> {
+        self.saved.admit_installed_recovery_observation(token)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_observation_snapshot(&self, action: crate::project_recovery_protocol::Action) -> Option<crate::shell::installed_observation::recovery::Snapshot> {
+        self.saved.installed_recovery_snapshot(action)
+    }
     // Tests borrow this exact original owner. Inner/Session/handle fields remain
     // private in saved_command_owner; this creates no synthetic receipt/permit.
     #[cfg(test)]

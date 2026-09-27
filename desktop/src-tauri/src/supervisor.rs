@@ -45,6 +45,12 @@ mod hosted_tests;
 #[path = "github_tls_peer_owner.rs"]
 pub(crate) mod github_tls_peer_owner;
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "github_preflight_native_observation.rs"]
+pub(crate) mod github_preflight_native_observation;
+
 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitHubDocumentFixturePermit, GitHubFixtureRuntime};
 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -646,6 +652,12 @@ impl PassiveQuery {
 }
 
 impl Supervisor {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_preflight_prepare_marker(&self, gate: &crate::asset_session::GitHubPreflightGoGate,
+        fresh: String) -> Result<String, BridgeError> {
+        let witness = lock(&self.inner.native_test.github_preflight).clone();
+        match witness { Some(witness) => witness.prepare_marker(self, gate, fresh).map_err(|_| BridgeError::protocol()), None => Ok(fresh) }
+    }
     pub fn new(mut runtime: RuntimeConfig) -> Self {
         runtime.claim_original_supervisor();
         Self { inner: Arc::new(Inner {
@@ -793,6 +805,12 @@ impl Supervisor {
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if matches!(owner.profile, Profile::GitHubReadOnly) {
                 if let Some(witness) = lock(&self.inner.native_test.github).as_ref() { witness.register(&owner); }
+            }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if matches!(owner.profile, Profile::GitHubReadOnly | Profile::GitHubPreflight) {
+                if let Some(witness) = lock(&self.inner.native_test.github_preflight).as_ref() { witness.register(&owner); }
             }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
                 target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
@@ -1098,6 +1116,20 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
     if !matches!(ready, Ok(Ok(()))) {
         owner.fail(BridgeError::protocol()); return WriteEnd { complete: false };
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(owner.profile, Profile::GitHubPreflight) {
+        let witness = lock(&inner.native_test.github_preflight).clone();
+        if let Some(witness) = witness {
+            witness.ready(&owner);
+            if let Some(release) = witness.hold_ready(&owner) {
+                // Scheduling only, inside this original writer. No document,
+                // registry or witness mutex remains borrowed across this wait.
+                if release.await.is_err() { witness.fail(); owner.fail(BridgeError::cleanup_unknown()); }
+            }
+        }
+    }
     // No registry/owner lock is held entering the document. The final actual
     // project/session check follows helper startup and durable intent READY.
     let go = match owner.profile {
@@ -1113,6 +1145,12 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
         },
         _ => Err(BridgeError::cleanup_unknown()),
     };
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(owner.profile, Profile::GitHubPreflight) {
+        if let Some(witness) = lock(&inner.native_test.github_preflight).as_ref() { witness.claim_returned(&owner, &go); }
+    }
     let bytes = match go {
         Ok(bytes) => bytes,
         Err(error) => { owner.fail(error); return WriteEnd { complete: false }; },
@@ -1125,6 +1163,12 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
     if result.is_err() {
         let error = BridgeError::new("io_error", "The original preflight GO channel failed; dispatch may have applied.");
         owner.fail(error.clone()); let _ = faults.try_send(error); return WriteEnd { complete: false };
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(owner.profile, Profile::GitHubPreflight) {
+        if let Some(witness) = lock(&inner.native_test.github_preflight).as_ref() { witness.go_written(&owner); }
     }
     // The original private buffer and ChildStdin drop here. Only this actual
     // task return plus original child/IO/native/management finality can settle.
@@ -1598,12 +1642,35 @@ async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<
                 Ok(Some(slots)) => slots, _ => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
             };
             let (release, enter) = oneshot::channel();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let delayed = lock(&inner.native_test.github_preflight).clone()
+                .filter(|witness| witness.reserve_settlement(owner, resources));
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let entering = delayed.as_ref().map(|witness| (witness.clone(), owner.clone()));
             resources.native_started = true;
             resources.native_settlement = Some(tokio::task::spawn_blocking(move || {
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some((witness, owner)) = entering { witness.settlement_entered(&owner); }
                 if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
                 closing.settle_originals()
             }));
-            let _ = release.send(()); // The original close handle is registered before its first effect.
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let release = match delayed {
+                Some(witness) => { witness.retain_settlement_sender(owner, release); None }, None => Some(release),
+            };
+            #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            let release = Some(release);
+            if let Some(release) = release { let _ = release.send(()); } // Original registered before first effect.
         }
         if resources.native_return.is_none() {
             let result = join_slot(&mut resources.native_settlement).await;
@@ -2110,6 +2177,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if matches!(profile, Profile::GitHubReadOnly) {
         if let Some(witness) = lock(&inner.native_test.github).as_ref() { witness.observe_settled_io(&owner, &resources); }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux",
+        target_arch = "x86_64", target_env = "gnu", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    if matches!(profile, Profile::GitHubReadOnly | Profile::GitHubPreflight) {
+        if let Some(witness) = lock(&inner.native_test.github_preflight).as_ref() { witness.observe_settled_io(&owner, &resources); }
+    }
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {
@@ -2184,6 +2256,11 @@ mod installed_native_fixture {
     pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
         GitHub(crate::runtime::GitHubReadOnlyObservationProfile),
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightConnect,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflight,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightPending,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightRevocation,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightCollision,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionObserve,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionLoss,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionDeadline,
@@ -2205,10 +2282,14 @@ mod installed_native_fixture {
         pub session: Mutex<shell_shutdown_observation::SessionQueryBook>,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
         pub github: Mutex<Option<Arc<github_tls_peer_owner::installed::ProductWitness>>>,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+        pub github_preflight: Mutex<Option<Arc<github_preflight_native_observation::ProductWitness>>>,
     }
     impl Hooks {
         fn case(&self) -> Case { *lock(&self.case) }
         pub(super) fn child_case(&self, _owner: &Arc<Owner>) -> Option<Case> {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if let Some(case)=lock(&self.github_preflight).as_ref().and_then(|witness|witness.original_case(_owner)) { return Some(case); }
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             if matches!(_owner.profile, Profile::GitHubReadOnly) {
                 return lock(&self.github).as_ref().and_then(|witness| witness.original_profile(_owner)).map(Case::GitHub);
@@ -2276,13 +2357,27 @@ mod installed_native_fixture {
     pub(super) fn snapshot_value(snapshot: &ChildObservation) -> Value { serde_json::json!(&snapshot.maps) }
     #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
     pub(super) fn snapshot_clear(snapshot: &ChildObservation) -> bool { snapshot.environment_clear && snapshot.maps.len() == 6 }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn preflight_snapshot_clear(snapshot: &ChildObservation, case: Case) -> bool {
+        match case {
+            Case::GitHubPreflightPending | Case::GitHubPreflightRevocation | Case::GitHubPreflightCollision =>
+                snapshot.environment_clear && pending_mapping_roles(&snapshot.maps),
+            Case::GitHubPreflightConnect | Case::GitHubPreflight => snapshot_clear(snapshot),
+            _ => false,
+        }
+    }
     impl Case {
         pub(super) fn after_io(self) -> bool {
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
-            if matches!(self, Self::GitHub(_)) { return true; }
+            if matches!(self, Self::GitHub(_) | Self::GitHubPreflightConnect | Self::GitHubPreflight) { return true; }
             false
         }
         fn version(self) -> &'static str {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if matches!(self, Self::GitHubPreflightConnect | Self::GitHubPreflight | Self::GitHubPreflightPending
+                | Self::GitHubPreflightRevocation | Self::GitHubPreflightCollision) {
+                return crate::runtime::GitHubPreflightObservationProfile::VERSION;
+            }
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             if let Self::GitHub(profile) = self {
                 use crate::runtime::GitHubReadOnlyObservationProfile as P;
@@ -3216,6 +3311,54 @@ mod installed_native_fixture {
         for case in [Case::None,Case::Observe,Case::Deadline,Case::Shutdown,Case::Emfile,Case::Overlap,
             Case::SessionObserve,Case::SessionLoss,Case::SessionDeadline] {assert!(!case.after_io());}
     }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn assert_preflight_observation_roles() {
+        let version=crate::runtime::GitHubPreflightObservationProfile::VERSION;
+        for case in [Case::GitHubPreflightConnect,Case::GitHubPreflight,Case::GitHubPreflightPending,
+            Case::GitHubPreflightRevocation,Case::GitHubPreflightCollision] {
+            assert_eq!(case.after_io(),matches!(case,Case::GitHubPreflightConnect|Case::GitHubPreflight));
+            assert_eq!(case.version(),version);
+            for (suffix,expected) in [("/python/bin/python3",MapRole::Python),
+                ("/python/lib/libssl.so.3",MapRole::Ssl),("/python/lib/libcrypto.so.3",MapRole::Crypto)] {
+                assert_eq!(role_for_case(&format!("{version}{suffix}"),case),Some(expected));
+                assert_eq!(role_for_case(&format!("{VERSION}{suffix}"),case),None);
+                assert_eq!(role_for_case(&format!("{version}{suffix}.changed"),case),None);
+            }
+            for (name,role) in [("ld-linux-x86-64.so.2",MapRole::Loader),("libc.so.6",MapRole::Libc),("libm.so.6",MapRole::Libm)] {
+                assert_eq!(role_for_case(&format!("/usr/lib/x86_64-linux-gnu/{name}"),case),Some(role));
+            }
+        }
+        let row=|role:MapRole| Mapping {role:role.name().into(),path:format!("inert-{}",role.name()),device_major:8,device_minor:1,inode:1};
+        let base=BTreeMap::from([MapRole::Python,MapRole::Loader,MapRole::Libc,MapRole::Libm]
+            .map(|role|(role.name(),(row(role),true))));
+        for optional in [vec![],vec![MapRole::Ssl],vec![MapRole::Crypto],vec![MapRole::Ssl,MapRole::Crypto]] {
+            let mut found=base.clone();
+            for role in &optional { found.insert(role.name(),(row(*role),true)); }
+            let maps=complete_pending_mappings(found.clone()).unwrap();
+            let snapshot=ChildObservation {maps,environment_clear:true};
+            assert_eq!(snapshot.maps.len(),4+optional.len());
+            assert!(preflight_snapshot_clear(&snapshot,Case::GitHubPreflightPending));
+            assert!(preflight_snapshot_clear(&snapshot,Case::GitHubPreflightRevocation));
+            assert!(preflight_snapshot_clear(&snapshot,Case::GitHubPreflightCollision));
+            assert_eq!(preflight_snapshot_clear(&snapshot,Case::GitHubPreflight),optional.len()==2);
+            assert!(!preflight_snapshot_clear(&snapshot,Case::Observe));
+            assert_eq!(snapshot_clear(&snapshot),optional.len()==2);
+            assert_eq!(complete_mappings(found.clone()).is_some(),optional.len()==2);
+            for role in [MapRole::Python,MapRole::Loader,MapRole::Libc,MapRole::Libm] {
+                let mut missing=found.clone();missing.remove(role.name());
+                assert!(complete_pending_mappings(missing).is_none());
+            }
+            for role in found.keys() {
+                let mut no_code=found.clone();no_code.get_mut(role).unwrap().1=false;
+                assert!(complete_pending_mappings(no_code).is_none());
+            }
+        }
+        let mut maps=complete_pending_mappings(base).unwrap();
+        maps.push(maps[0].clone());
+        assert!(!pending_mapping_roles(&maps));
+        maps.pop();maps[0].role="unknown-executable".into();
+        assert!(!pending_mapping_roles(&maps));
+    }
     #[derive(Clone, Copy)]
     struct MapMetadata { regular: bool, uid: u32, gid: u32, links: u64, mode: u32, inode: u64, major: u64, minor: u64 }
     fn check_map_metadata(st: MapMetadata, inode: u64, major: u64, minor: u64) -> Result<(), MapMetadataRefusal> {
@@ -3237,6 +3380,21 @@ mod installed_native_fixture {
     }
     fn complete_mappings(found: BTreeMap<&'static str, (Mapping, bool)>) -> Option<Vec<Mapping>> {
         if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None }
+    }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    fn pending_mapping_roles(maps: &[Mapping]) -> bool {
+        // Pending only reads the original journal. It need not import TLS;
+        // absence of TLS code is not itself a network-containment argument.
+        let roles=maps.iter().map(|row|row.role.as_str()).collect::<std::collections::BTreeSet<_>>();
+        (4..=6).contains(&maps.len()) && roles.len()==maps.len()
+            && [MapRole::Python,MapRole::Loader,MapRole::Libc,MapRole::Libm].iter().all(|role|roles.contains(role.name()))
+            && roles.iter().all(|name|MapRole::ALL.iter().any(|role|role.name()==*name))
+    }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    fn complete_pending_mappings(found: BTreeMap<&'static str, (Mapping, bool)>) -> Option<Vec<Mapping>> {
+        if !found.iter().all(|(role,(row,code))|*code&&*role==row.role.as_str()) { return None; }
+        let maps=found.into_values().map(|(row,_)|row).collect::<Vec<_>>();
+        pending_mapping_roles(&maps).then_some(maps)
     }
     fn mappings(raw: &[u8], historical: Option<HistoricalPayloadSnapshot>) -> Result<Option<Vec<Mapping>>, MapRefusal> {
         mappings_for_case(raw, historical, Case::Observe)
@@ -3278,6 +3436,10 @@ mod installed_native_fixture {
                 .map_err(|reason| MapRefusal::Metadata(role, reason))?;
             let row = Mapping { role: role.name().into(), path: path.into(), device_major: major, device_minor: minor, inode };
             insert_mapping(&mut found, role, row, executable)?;
+        }
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+        if matches!(case,Case::GitHubPreflightPending|Case::GitHubPreflightRevocation|Case::GitHubPreflightCollision) {
+            return Ok(complete_pending_mappings(found));
         }
         Ok(complete_mappings(found))
     }
@@ -3964,6 +4126,9 @@ mod installed_native_fixture {
                         witness.observe_boundary(id,_key,profile,end,&stop).map_err(|_|ObservationFailure::HoldRefused)?;
                     },
                     #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+                    Case::GitHubPreflightConnect | Case::GitHubPreflight | Case::GitHubPreflightPending
+                        | Case::GitHubPreflightRevocation | Case::GitHubPreflightCollision => {},
+                    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
                     Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
                         // Same original child/IO checkpoint, no new owner or clock.
                         shell_shutdown_observation::hold_session_query(inner, _key, end, &stop, case).map_err(|_| ObservationFailure::HoldRefused)?;
@@ -4031,7 +4196,7 @@ mod tests {
     // Default cases are pure bookkeeping. Ignored native cases require their
     // separate hosted/installed prerequisites; selection is not qualification.
     use super::*;
-    fn inert_owner() -> Owner {
+    pub(super) fn inert_owner() -> Owner {
         let (stop, receiver) = watch::channel(false);
         drop(receiver);
         Owner {

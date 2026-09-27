@@ -7,11 +7,16 @@ PATH = '/usr/bin/python3.12'
 
 METADATA_REF = 'refs/heads/verify/desktop-shell-host-metadata'
 SHELL_REF = 'refs/heads/verify/desktop-installed-shell'
-ROUTES = ((METADATA_REF, 'host-metadata-only', 'compile'),
+ROUTES = (('refs/heads/verify/desktop-project-recovery', 'compile', 'compile'),
+          ('refs/heads/verify/desktop-project-recovery', 'observe', 'compile'),
+          ('refs/heads/verify/desktop-project-recovery', 'observe', 'recovery-negative'),
+          (METADATA_REF, 'host-metadata-only', 'compile'),
           (SHELL_REF, 'compile', 'compile'),
           (SHELL_REF, 'observe', 'compile'),
           ('refs/heads/verify/desktop-installed-github-readonly', 'compile', 'compile'),
           ('refs/heads/verify/desktop-installed-github-readonly', 'observe', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-preflight', 'compile', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-preflight', 'observe', 'compile'),
           ('refs/heads/verify/desktop-installed-github-normal-boundaries', 'compile', 'compile'),
           ('refs/heads/verify/desktop-installed-github-normal-boundaries', 'observe', 'compile'))
 

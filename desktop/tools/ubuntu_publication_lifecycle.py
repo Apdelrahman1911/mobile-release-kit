@@ -55,6 +55,126 @@ SHELL_ORDINARY_PROFILE = "ordinary21-v1"
 SHELL_ORDINARY_CASES = ("normal", "positive", "quit-outstanding", "project-paths", "workflow-apply", *SHELL_SESSION_CASES, "metadata-save",
                       *SHELL_TOOLS_OFFLINE_CASES, "settled-failure", "version-save")
 SHELL_CASES = (*SHELL_ORDINARY_CASES, *SHELL_ANDROID_CASES)
+SHELL_RECOVERY_REF = "refs/heads/verify/desktop-project-recovery"
+SHELL_RECOVERY_PROFILE = "project-recovery-native3-v1"
+SHELL_RECOVERY_NEGATIVE_PROFILE = "project-recovery-unknown1-v1"
+SHELL_RECOVERY_COMPILE_PROFILE = "project-recovery-q4-build-v1"
+SHELL_RECOVERY_CASES = ("project-recovery-pending", "project-recovery-cancel", "project-recovery-cleanup-only")
+SHELL_RECOVERY_PARTIAL = "project-recovery-partial"
+SHELL_RECOVERY_ALL_CASES = (*SHELL_RECOVERY_CASES, SHELL_RECOVERY_PARTIAL)
+SHELL_RECOVERY_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_RECOVERY="
+SHELL_RECOVERY_REPORT_LIMIT = 8192
+SHELL_RECOVERY_INVENTORY_LIMIT = 128 << 10
+SHELL_RECOVERY_LOADER_BEFORE = "project-recovery-negative-loader-before.json"
+SHELL_RECOVERY_INTERVAL = "project-recovery-negative-interval.json"
+SHELL_RECOVERY_NEGATIVE_SECONDS = 30
+SHELL_RECOVERY_BYTES = {
+    "android-original": b"synthetic original Android input\n",
+    "ios-original": b"synthetic original iOS input\n",
+    "android-foreign": b"synthetic foreign Android input; preserve\n",
+    "ios-foreign": b"synthetic foreign iOS input; preserve\n",
+    "later-edit": b"synthetic legitimate edit after original cleanup\n",
+    "unrelated": b"unrelated synthetic file; preserve\n",
+    "ignore": b".mobile-release/\n",
+}
+# Executed once only by the already admitted original command owner, using the
+# accepted installed interpreter/core. No subprocess, invented journal, guard
+# override or copied-owner recovery. The two observation seams are restored
+# across the full original scope unwind. A child0 attests expected *failed*
+# materialization generation, never successful core cleanup.
+SHELL_RECOVERY_PRODUCER = r'''import errno, json, os, sys, threading
+from pathlib import Path, PurePosixPath
+def need(ok):
+    if not ok: raise RuntimeError("fixed recovery fixture refused")
+need(len(sys.argv)==4 and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
+core, raw_root, case=sys.argv[1:]
+need(case in ("project-recovery-pending","project-recovery-cancel","project-recovery-cleanup-only","project-recovery-partial"))
+root=Path(raw_root)
+need(root.is_absolute() and root.name=="project" and root.parent.name==case and Path(core).is_absolute())
+need(threading.current_thread() is threading.main_thread() and threading.active_count()==1)
+sys.path.insert(0, core)
+from mobile_release import build_inputs as inputs
+from mobile_release.owned_process import ProcessCleanupError
+need(inputs.__file__.startswith(core+"/") and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+original_init=inputs._FD.__init__
+original_retire=inputs._retire_terminal
+slots=[]
+retirement_calls=[]
+def observed_init(self, guard):
+    original_init(self, guard)
+    need(len(slots)<2048)
+    slots.append(self)
+def retirement_stop(project, terminal, binding):
+    need(case=="project-recovery-cleanup-only" and not retirement_calls)
+    need(project is invocation._original_project and terminal["quiescence"]=="original")
+    retirement_calls.append(True)
+    raise OSError(errno.EIO,"fixed synthetic metadata retirement interruption")
+def foreign(original, name, content):
+    slot=inputs._FD(original.cancellation)
+    with inputs._fd_cleanup(slot):
+        fd=slot.open(root/name, os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+        need(os.write(fd,content)==len(content))
+        os.fsync(fd)
+invocation=original=None
+caught=None
+inputs._FD.__init__=observed_init
+if case=="project-recovery-cleanup-only": inputs._retire_terminal=retirement_stop
+try:
+    try:
+        with inputs.invocation_custody(root,mode="build") as invocation:
+            with invocation.project(signing_lease=None):
+                with invocation.materialization(signing_lease=None) as original:
+                    original.replace_all((
+                        inputs.TargetReplacement("android-services",PurePosixPath("google-services.json"),b"synthetic temporary Android input\n"),
+                        inputs.TargetReplacement("ios-services",PurePosixPath("GoogleService-Info.plist"),b"synthetic temporary iOS input\n"),
+                    ))
+                    if case=="project-recovery-partial":
+                        foreign(original,"google-services.json",b"synthetic foreign Android input; preserve\n")
+                    if case!="project-recovery-cleanup-only":
+                        foreign(original,"GoogleService-Info.plist",b"synthetic foreign iOS input; preserve\n")
+    except BaseException as error:
+        caught=error
+finally:
+    inputs._FD.__init__=original_init
+    inputs._retire_terminal=original_retire
+# NO core operation or filesystem access below: inspect the original retained
+# objects and emit bounded closed DATA to the original stdout only.
+need(type(caught) is ProcessCleanupError and invocation is not None and original is not None)
+guard=invocation.cancellation
+ledger=guard._ledger
+project=invocation._original_project
+attempted=[slot for slot in slots if slot.open_state!="NEW"]
+never_opened=[slot for slot in slots if slot.open_state=="NEW"]
+need(0<len(attempted)<=2048 and len(attempted)+len(never_opened)==len(slots))
+need(all(slot.guard is guard and slot.open_state in ("OPEN","NO_EFFECT") and slot.close_state=="CLOSED" and slot.number is None for slot in attempted))
+need(all(slot.guard is guard and slot.number is None and slot.close_state in ("NOT_ATTEMPTED","CLOSED") for slot in never_opened))
+need(guard._restoration=="RESTORED" and ledger._fatal and ledger._command is None and ledger._profile is None
+     and ledger._commands==ledger._profile_calls==0 and ledger._command_dispatched is False and ledger._profile_dispatched is False)
+need(invocation.claimed and not invocation.active and not invocation.reserved and not invocation.frames
+     and invocation.child is None and invocation.project_owner is None and invocation.store_namespace is None
+     and invocation.reservation_state=="RELEASED" and invocation.lock_result is None and inputs._ENV_OWNER is None and not inputs._ENV_TAINTED)
+need(project is not None and project.claimed and original.claimed and original.quiescence=="original" and not original.failed)
+need(inputs._FD.__init__ is original_init and inputs._retire_terminal is original_retire)
+need(len(retirement_calls)==int(case=="project-recovery-cleanup-only"))
+primary=ledger._primary
+if case=="project-recovery-cleanup-only":
+    need(type(primary) is OSError and primary.errno==errno.EIO and primary.args==(errno.EIO,"fixed synthetic metadata retirement interruption"))
+else:
+    need(type(primary) is inputs.BuildInputError and primary.args==("build inputs: intervening target must be preserved",))
+restored={row["role"]:row["restored"] for row in original.records}
+expected={"android-services":case!="project-recovery-partial","ios-services":case=="project-recovery-cleanup-only"}
+need(restored==expected and all(type(x) is bool for x in restored.values()))
+report={"schemaVersion":1,"scope":"real-core-project-recovery-fixture-v1","case":case,
+    "materializationOutcome":"expected-cleanup-failure","coreFatal":True,"commands":0,"profileCalls":0,
+    "attemptedDescriptors":len(attempted),"neverOpenedDescriptors":len(never_opened),
+    "attemptedDescriptorsClosed":True,"handlersRestored":True,"invocationReleased":True,
+    "originalQuiescenceRecorded":True,"retirementInterceptions":len(retirement_calls),"observersRestored":True,
+    "restored":restored,"followupCoreOrFilesystemOperation":False}
+raw=json.dumps(report,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")+b"\n"
+need(len(raw)<=2048)
+sys.stdout.buffer.write(raw)
+sys.stdout.buffer.flush()
+'''
 SHELL_PUBLIC_FILE_LIMIT = 190  # Exact25-case root roster:188, exported:190; non-shell remains128.
 SHELL_FIXTURE_NAMESPACE_LIMIT = 2048
 SHELL_FAILURE_LABEL_LIMIT = 512
@@ -256,6 +376,7 @@ SHELL_FAILURE_STEPS = (
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataRefresh\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=MetadataReadReadback\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=ToolsOffline\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProjectRecovery\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionOpen\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionReadOpen\n",
     b"MRK_INSTALLED_SHELL_FAILURE_STEP=VersionName\n",
@@ -2221,6 +2342,7 @@ _END = 0.0
 _COMMANDS, _FILES = [], []
 _TOTAL = 0
 _FAILED = False
+_RECOVERY_NEGATIVE = None
 _PHASE = "entry"
 _ANDROID_PUBLICATION = None
 _ANDROID_PUBLISHED = None
@@ -2701,6 +2823,25 @@ SHELL_GITHUB_REF = "refs/heads/verify/desktop-installed-github-readonly"
 SHELL_GITHUB_BOUNDARY_PROFILE = "github-readonly-installed-normal-boundaries-v1"
 SHELL_GITHUB_BOUNDARY_REF = "refs/heads/verify/desktop-installed-github-normal-boundaries"
 SHELL_GITHUB_BOUNDARY_CASES = ("github-dns-deadline", "github-connect-deadline")
+SHELL_GITHUB_PREFLIGHT_PROFILE = "github-preflight-installed-tls-v1"
+SHELL_GITHUB_PREFLIGHT_REF = "refs/heads/verify/desktop-installed-github-preflight"
+SHELL_GITHUB_PREFLIGHT_CASES = (
+    "github-preflight-success", "github-preflight-response-loss", "github-preflight-pre-go-revocation",
+    "github-preflight-journal-collision", "github-preflight-finality-refusal",
+)
+SHELL_GITHUB_PREFLIGHT_TOOLING_SHA = "304abf6b802cde7dac236a2217488f67b33a3ce4"
+SHELL_GITHUB_PREFLIGHT_CALLER = (1498, "71bd9034967f4a2212a7f4475074ded0f1211d1f52d532a26a9e2f890df98b0d")
+SHELL_GITHUB_PREFLIGHT_TEMPLATE = (1469, "ba77f4383cd3f901f1743ad24e8c5a68aa59fd6901a44a05121d6a61fc543579")
+# Corrected native5 SOURCE; actual integration/command/native evidence remain separate.
+SHELL_GITHUB_PREFLIGHT_PEER_PIN = (30744, "2557debc5420820cf9568ca12e667b0c886d01d1a61dd588def1794183aecf82")
+SHELL_GITHUB_PREFLIGHT_NOT_PROVEN = (
+    "real-github-api-dispatch", "real-github-job-names", "macos-github-preflight", "windows-github-preflight",
+    "kernel-close-error-injection",
+)
+SHELL_GITHUB_PREFLIGHT_MARKER = b"MRK_INSTALLED_SHELL_GITHUB_PREFLIGHT="
+SHELL_GITHUB_PREFLIGHT_JOURNAL_LIMIT = 8192
+_SHELL_GITHUB_PREFLIGHT_HOMES = {}
+_SHELL_GITHUB_PREFLIGHT_COMPLETED = {}
 SHELL_GITHUB_CASES = (
     "github-connect-refresh", "github-real-ca-refusal", "github-wrong-name", "github-expired",
     "github-ragged", "github-length", "github-chunk", "github-header-limit", "github-body-limit",
@@ -2759,8 +2900,204 @@ def shell_github_selection(profile=SHELL_GITHUB_PROFILE):
     return selection
 
 
-def shell_github(value):
+def shell_github_preflight_peer_pins():
+    pin = SHELL_GITHUB_PREFLIGHT_PEER_PIN
+    need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int and 0 < pin[0] <= JSON_LIMIT
+         and type(pin[1]) is str and re.fullmatch(r"[0-9a-f]{64}", pin[1]) is not None,
+         "GitHub preflight peer SOURCE has not been independently frozen")
+    return {"github_preflight_peer.py": pin, "mobile-preflight.yml": SHELL_GITHUB_PREFLIGHT_CALLER,
+            **{name: SHELL_GITHUB_PEER_PINS[name] for name in
+               ("github_tls_peer.py", "github_tls/api-valid.pem", "github_tls/server-key.pem")}}
+
+
+def shell_github_preflight_selection():
+    pins = shell_github_preflight_peer_pins()
+    return {"profile": SHELL_GITHUB_PREFLIGHT_PROFILE, "cases": list(SHELL_GITHUB_PREFLIGHT_CASES),
+            "payloads": deepcopy(SHELL_GITHUB_PAYLOADS),
+            "peerSources": [{"path": "desktop/src-tauri/tests/fixtures/" + path, "size": pin[0], "sha256": pin[1]}
+                            for path, pin in sorted(pins.items()) if path != "mobile-preflight.yml"],
+            "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
+            "toolingSha": SHELL_GITHUB_PREFLIGHT_TOOLING_SHA,
+            "caller": {"path": "mobile-preflight.yml", "size": SHELL_GITHUB_PREFLIGHT_CALLER[0],
+                       "sha256": SHELL_GITHUB_PREFLIGHT_CALLER[1],
+                       "template": {"path": "templates/workflows/mobile-preflight.yml",
+                                    "size": SHELL_GITHUB_PREFLIGHT_TEMPLATE[0], "sha256": SHELL_GITHUB_PREFLIGHT_TEMPLATE[1]}},
+            "normalDestinationAction": False}
+
+
+def shell_github_preflight(value):
+    return type(value.get("shell")) is dict and "githubPreflight" in value["shell"]
+
+
+def shell_github_readonly(value):
     return type(value.get("shell")) is dict and "githubReadOnly" in value["shell"]
+
+
+def shell_recovery_compile_selection():
+    # Q3 and the separate retained-Unknown experiment share these exact bytes.
+    return {"profile": SHELL_RECOVERY_COMPILE_PROFILE, "cases": list(SHELL_RECOVERY_ALL_CASES),
+            "ordinaryActivation": False, "androidPreparation": False, "androidExecution": False}
+
+
+def shell_recovery_selection(profile):
+    need(profile in (SHELL_RECOVERY_PROFILE, SHELL_RECOVERY_NEGATIVE_PROFILE), "Unknown project-recovery scope")
+    negative = profile == SHELL_RECOVERY_NEGATIVE_PROFILE
+    return {"profile": profile, "cases": [SHELL_RECOVERY_PARTIAL] if negative else list(SHELL_RECOVERY_CASES),
+            "compileProfile": SHELL_RECOVERY_COMPILE_PROFILE, "expectedRetainedUnknown": negative,
+            "ordinaryActivation": False, "androidPreparation": False, "androidExecution": False}
+
+
+def shell_recovery(value):
+    shell = value.get("shell")
+    if type(shell) is not dict or "projectRecovery" not in shell:
+        return False
+    selection = shell["projectRecovery"]
+    need(not {"ordinary21", "githubReadOnly", "githubPreflight", "androidPublication", "localTransport"} & set(shell)
+         and type(selection) is dict and canonical(selection) == canonical(shell_recovery_selection(selection.get("profile"))),
+         "Project-recovery selection differs or mixes another installed scope")
+    return True
+
+
+def shell_recovery_negative(value):
+    return shell_recovery(value) and value["shell"]["projectRecovery"]["profile"] == SHELL_RECOVERY_NEGATIVE_PROFILE
+
+
+def _recovery_fields(value, keys):
+    need(type(value) is dict and set(value) == set(keys), "Project-recovery closed fields differ")
+
+
+def _recovery_token(value, *, project=False):
+    need(type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}" if project else r"[0-9a-f]{32}", value) is not None,
+         "Project-recovery original identity differs")
+
+
+def shell_recovery_receipt(raw, case, *, source=None):
+    """Closed DATA only. Partial cannot become normal application finality."""
+    need(case in SHELL_RECOVERY_ALL_CASES and type(raw) is bytes and 0 < len(raw) <= SHELL_RECOVERY_REPORT_LIMIT
+         and raw.endswith(b"\n") and b"\r" not in raw and b"\n" not in raw[:-1], "Project-recovery receipt framing differs")
+    value = decode(raw, SHELL_RECOVERY_REPORT_LIMIT)
+    _recovery_fields(value, ("schemaVersion", "scope", "case", "sourceCommit", "testOnlyQualification", "applicationFinal",
+        "bootstrapReturned", "projectSelectionObserved", "originals", "requests", "replies", "freshUncheckedReview",
+        "explicitAcknowledgement", "heldSettlementObserved", "peerAdmissionRefused", "originalStatusReturned",
+        "originalCancelReturned", "partialWarningVisible", "finalVisible", "commandDispatches", "profileCalls", "ordinaryActivation"))
+    negative, cancelled = case == SHELL_RECOVERY_PARTIAL, case == "project-recovery-cancel"
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["scope"] == "project-build-input-recovery-native-observation-v1" and value["case"] == case
+         and type(value["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", value["sourceCommit"]) is not None
+         and (source is None or value["sourceCommit"] == source), "Project-recovery receipt source/schema differs")
+    wanted = {"testOnlyQualification": True, "applicationFinal": not negative, "bootstrapReturned": True,
+        "projectSelectionObserved": True, "freshUncheckedReview": True, "explicitAcknowledgement": True,
+        "heldSettlementObserved": cancelled, "peerAdmissionRefused": negative or cancelled,
+        "originalStatusReturned": negative, "originalCancelReturned": negative or cancelled,
+        "partialWarningVisible": negative, "finalVisible": not negative, "ordinaryActivation": False}
+    need(all(type(value[key]) is bool and value[key] is item for key, item in wanted.items())
+         and all(type(value[key]) is int and value[key] == 0 for key in ("commandDispatches", "profileCalls")),
+         "Project-recovery original observation or safety facts differ")
+    counts = [1, 1, 1, 1, int(negative or cancelled), int(negative)]
+    need(all(type(value[key]) is list and all(type(n) is int for n in value[key]) and value[key] == counts
+             for key in ("requests", "replies")) and type(value["originals"]) is list and len(value["originals"]) == 2,
+         "Project-recovery two-original request/reply roster differs")
+    common = {"inspectionJoined", "acquisitionJoined", "attempted", "childWaitedSuccess", "stdinClosed", "stdoutEofClosed",
+              "stderrEofClosed", "ioJoined"}
+    final = {"coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined", "driverJoined", "managerJoined",
+             "observerJoined", "watchdogJoined", "retiredBeforeCutoff"}
+    booleans = common | final | {"noChild", "activeRetained", "resourceUnknown"}
+    projections = []
+    for index, original in enumerate(value["originals"]):
+        _recovery_fields(original, ("facts", "projection", "accepted", "coreTerminal", "coreFatal", "reviewMinted"))
+        failed = negative and index == 1
+        need(original["accepted"] is True and original["coreTerminal"] is True
+             and original["coreFatal"] is failed and original["reviewMinted"] is (index == 0),
+             "Project-recovery actual original core/review facts differ")
+        facts = original["facts"]
+        _recovery_fields(facts, {"domain", "id", "generation", *booleans})
+        need(facts["domain"] == "project-recovery" and all(type(facts[key]) is bool for key in booleans)
+             and all(facts[key] is True for key in common) and facts["noChild"] is False
+             and facts["activeRetained"] is failed and facts["resourceUnknown"] is failed
+             and facts["retiredBeforeCutoff"] is (not failed), "Project-recovery native original resource facts differ")
+        if failed:
+            need(all(facts[key] is False for key in ("coreLifetimeSettled", "runtimeLedgerSettled", "runtimeSettlementJoined")),
+                 "Retained Unknown borrowed native settlement")
+        else:
+            need(all(facts[key] is True for key in final), "Project-recovery final native joins are incomplete")
+        _recovery_token(facts["id"]); _recovery_token(facts["generation"])
+        projection = original["projection"]
+        _recovery_fields(projection, ("operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "result", "effect"))
+        need(projection["operationId"] == facts["id"] and projection["ownerGeneration"] == facts["generation"]
+             and projection["intentUsable"] is False, "Project-recovery original public projection differs")
+        context = projection["context"]
+        _recovery_fields(context, ("projectId", "draftRevision", "baselineGeneration", "action", "review"))
+        _recovery_token(context["projectId"], project=True)
+        need(context["action"] == ("inspect" if index == 0 else "recover")
+             and all(type(context[key]) is int and 0 <= context[key] < 2**32 - 1 for key in ("draftRevision", "baselineGeneration")),
+             "Project-recovery original context differs")
+        outcome = "unknown" if failed else "cancelled" if index == 1 and cancelled else "complete"
+        need(projection["phase"] == ("unknown" if failed else "terminal") and projection["outcome"] == outcome
+             and projection["reason"] == ("cleanup-unknown" if failed else "cancelled" if outcome == "cancelled" else "none"),
+             "Project-recovery public outcome/finality differs")
+        result = projection["result"]
+        if outcome != "complete":
+            need(result is None and projection["effect"] is None, "Noncomplete recovery exposed provisional success/effect DATA")
+        else:
+            _recovery_fields(result, ("schemaVersion", "scope", "action", "observation", "recoveredSession", "limitations"))
+            need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["scope"] == "project-build-inputs-only"
+                 and result["action"] == context["action"] and projection["effect"] == ("inspection" if index == 0 else "recovery-attempted")
+                 and result["limitations"] == ["build-inputs-only-not-store-or-account-recovery", "recorded-quiescence-not-new-worker-proof",
+                     "foreign-changes-preserved", "cancellation-does-not-undo-completed-cleanup", "project-and-release-readiness-not-assessed"],
+                 "Project-recovery public DATA limits differ")
+            if index == 0:
+                observation = result["observation"]
+                _recovery_fields(observation, ("status", "session", "roles", "quiescence"))
+                _recovery_token(observation["session"])
+                cleanup = case == "project-recovery-cleanup-only"
+                need(observation["status"] == ("cleanup-only" if cleanup else "pending") and observation["quiescence"] == "original"
+                     and observation["roles"] == ([] if cleanup else ["android-services", "ios-services"])
+                     and result["recoveredSession"] is None and context["review"] is None,
+                     "Project-recovery real inspection/quiescence differs")
+            else:
+                _recovery_fields(context["review"], ("status", "session", "roles", "quiescence"))
+                need(result["observation"] is None and result["recoveredSession"] == context["review"]["session"],
+                     "Project-recovery restored session differs from original reviewed Inspect")
+        projections.append(projection)
+    inspect, recover = projections
+    need(inspect["operationId"] != recover["operationId"] and inspect["ownerGeneration"] != recover["ownerGeneration"]
+         and all(inspect["context"][key] == recover["context"][key] for key in ("projectId", "draftRevision", "baselineGeneration"))
+         and canonical(recover["context"]["review"]) == canonical(inspect["result"]["observation"]),
+         "Project-recovery retained originals or native review correspondence differ")
+    return value
+
+
+def shell_recovery_result(stdout, stderr, case, code):
+    need(case in SHELL_RECOVERY_CASES and type(code) is int and code == 0 and type(stdout) is bytes and type(stderr) is bytes
+         and len(stdout) + len(stderr) <= LIMIT, "Project-recovery positive capture incomplete")
+    lines = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    need(len(lines) == 5 and lines[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+         b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"]
+         and lines[3].startswith(SHELL_RECOVERY_MARKER)
+         and lines[4] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
+         and not any(line.startswith(b"MRK_") for line in stderr.splitlines()), "Project-recovery original success framing differs")
+    receipt = shell_recovery_receipt(lines[3][len(SHELL_RECOVERY_MARKER):], case)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "projectRecovery": receipt}
+
+
+def shell_github(value):
+    # Shared physical staging/namespace/owner, not shared action authority.
+    return shell_github_readonly(value) or shell_github_preflight(value)
+
+
+def _shell_github_selection(value):
+    need(shell_github(value) and not (shell_github_readonly(value) and shell_github_preflight(value)),
+         "Installed GitHub selections are absent or mixed")
+    shell_cases(value)
+    return value["shell"]["githubPreflight" if shell_github_preflight(value) else "githubReadOnly"]
+
+
+def _shell_github_peer_pins(value):
+    return shell_github_preflight_peer_pins() if shell_github_preflight(value) else SHELL_GITHUB_PEER_PINS
+
+
+def _shell_github_ambient_cases(value):
+    return () if shell_github_preflight(value) else SHELL_GITHUB_AMBIENT_CASES
 
 
 def shell_ordinary_selection():
@@ -2775,7 +3112,7 @@ def shell_ordinary(value):
     shell = value.get("shell")
     if type(shell) is not dict or "ordinary21" not in shell:
         return False  # Historical absence is full25, never a reduced pass.
-    need(not {"githubReadOnly", "androidPublication", "localTransport"} & set(shell)
+    need(not {"githubReadOnly", "githubPreflight", "projectRecovery", "androidPublication", "localTransport"} & set(shell)
          and type(shell["ordinary21"]) is dict
          and canonical(shell["ordinary21"]) == canonical(shell_ordinary_selection()),
          "Ordinary21 selection differs or mixes another installed scope")
@@ -2784,7 +3121,7 @@ def shell_ordinary(value):
 
 def shell_android(value):
     ordinary = shell_ordinary(value)
-    return "shell" in value and not ordinary and not shell_github(value)
+    return "shell" in value and not ordinary and not shell_github(value) and not shell_recovery(value)
 
 
 def shell_android_cases(value):
@@ -2792,14 +3129,23 @@ def shell_android_cases(value):
 
 
 def shell_normal_boundaries(value):
-    return shell_github(value) and type(value["shell"]["githubReadOnly"]) is dict \
+    return shell_github_readonly(value) and not shell_github_preflight(value) and type(value["shell"]["githubReadOnly"]) is dict \
         and value["shell"]["githubReadOnly"].get("profile") == SHELL_GITHUB_BOUNDARY_PROFILE
 
 
 def shell_cases(value):
+    if shell_recovery(value):
+        return tuple(value["shell"]["projectRecovery"]["cases"])
     if shell_ordinary(value):
         return SHELL_ORDINARY_CASES
-    if shell_github(value):
+    if shell_github_preflight(value):
+        shell = value["shell"]
+        need(not {"ordinary21", "projectRecovery", "githubReadOnly", "androidPublication", "localTransport"} & set(shell)
+             and type(shell["githubPreflight"]) is dict
+             and canonical(shell["githubPreflight"]) == canonical(shell_github_preflight_selection()),
+             "GitHub preflight selection differs or mixes another installed scope")
+        return SHELL_GITHUB_PREFLIGHT_CASES
+    if shell_github_readonly(value):
         selection = value["shell"]["githubReadOnly"]
         need(type(selection) is dict, "Closed GitHub selection is not an object")
         profile = selection.get("profile")
@@ -2814,10 +3160,14 @@ def shell_observers(value):
 
 
 def shell_fixture_children(value):
+    if shell_recovery(value):
+        return tuple(sorted(shell_cases(value)))
     return ("github-project",) if shell_github(value) else SHELL_FIXTURE_CHILDREN
 
 
 def shell_public_limit(value):
+    if shell_recovery(value):
+        return 96
     return SHELL_GITHUB_PUBLIC_FILE_LIMIT if shell_github(value) else SHELL_PUBLIC_FILE_LIMIT
 
 
@@ -3228,6 +3578,465 @@ def shell_github_result(stdout, stderr, case, code, expected):
     receipt = shell_github_receipt(output[5][len(SHELL_GITHUB_MARKER):], case, expected)
     return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
             "maps": [], "githubReadOnly": receipt}
+
+
+def _shell_github_preflight_case(case):
+    need(case in SHELL_GITHUB_PREFLIGHT_CASES, "Different closed preflight case")
+    return {
+        "github-preflight-success": (20, 1, ("connect", "prepare", "dispatch", "track")),
+        "github-preflight-response-loss": (21, 1, ("connect", "prepare", "dispatch", "pending", "reconcile")),
+        "github-preflight-pre-go-revocation": (10, 0, ("connect", "prepare", "dispatch")),
+        "github-preflight-journal-collision": (21, 1, ("connect", "prepare", "dispatch", "prepare", "dispatch")),
+        "github-preflight-finality-refusal": (15, 1, ("connect", "prepare", "dispatch")),
+    }[case]
+
+
+def _shell_github_preflight_journal_kinds(case):
+    _shell_github_preflight_case(case)
+    return (("intent", 8192),) if case == "github-preflight-pre-go-revocation" else (("intent", 8192), ("run", 512))
+
+
+def _shell_github_preflight_scheduling(value, case, originals):
+    fields = ("mechanism", "kernelCloseFaultInjected", "readyNs", "revocationReplyNs", "writerReleasedNs",
+              "claimReturnedNs", "settlementReservedNs", "settlementEnteredNs", "cancelReplyNs",
+              "cleanupEndpointNs", "unknownReceiptNs", "unknownDomNs", "settlementReleasedNs", "markerReused")
+    _shell_github_fields(value, fields, "preflight original scheduling")
+    revocation = case == "github-preflight-pre-go-revocation"
+    collision = case == "github-preflight-journal-collision"
+    late = case == "github-preflight-finality-refusal"
+    mechanism = ("original-writer-scheduling" if revocation else "same-original-marker" if collision
+                 else "original-settlement-scheduling" if late else "none")
+    need(value["mechanism"] == mechanism and value["kernelCloseFaultInjected"] is False
+         and value["markerReused"] is collision, "Preflight scheduling mechanism or marker custody differs")
+    present = {"readyNs", "claimReturnedNs"}
+    if revocation:
+        present |= {"revocationReplyNs", "writerReleasedNs"}
+    if late:
+        present |= {"settlementReservedNs", "settlementEnteredNs", "cancelReplyNs", "cleanupEndpointNs",
+                    "unknownReceiptNs", "unknownDomNs", "settlementReleasedNs"}
+    for key in fields:
+        if key.endswith("Ns"):
+            if key in present:
+                _shell_github_uint(value[key], (1 << 64) - 1, "preflight " + key)
+            else:
+                need(value[key] is None, "Unrelated preflight scheduling interval present")
+    def ordered(points):
+        need(all(a <= b for a, b in zip(points, points[1:])), "Preflight original scheduling order differs")
+    ordered([value["readyNs"], value["claimReturnedNs"], originals[2]["settledNs"]])
+    if revocation:
+        ordered([value["readyNs"], value["revocationReplyNs"], value["writerReleasedNs"],
+                 value["claimReturnedNs"], originals[-1]["settledNs"]])
+    if late:
+        # The original owner's fixed two-second cleanup interval, not a new clock.
+        endpoint = value["cleanupEndpointNs"]
+        need(endpoint >= 2_000_000_000 and value["cancelReplyNs"] < endpoint,
+             "Preflight original cleanup endpoint differs")
+        ordered([value["claimReturnedNs"], value["settlementReservedNs"], value["settlementEnteredNs"],
+                 endpoint - 2_000_000_000, value["cancelReplyNs"], endpoint, value["unknownReceiptNs"],
+                 value["unknownDomNs"], value["settlementReleasedNs"], originals[-1]["settledNs"]])
+    return value
+
+
+def shell_github_preflight_journal_receipt(journal, marker, case):
+    kinds = _shell_github_preflight_journal_kinds(case)
+    _shell_github_fields(journal, ("marker", "intentBytes", "intentSha256", "runBytes", "runSha256",
+                                  "runId", "attempt", "leafCount", "runReadBeforeCollision"), "preflight journal")
+    need(type(marker) is str and re.fullmatch(r"[0-9a-f]{32}", marker) is not None and journal["marker"] == marker,
+         "Preflight original journal marker differs")
+    _shell_github_uint(journal["intentBytes"], 8192, "preflight intentBytes", 1)
+    need(type(journal["intentSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", journal["intentSha256"]) is not None
+         and type(journal["leafCount"]) is int and journal["leafCount"] == len(kinds)
+         and journal["runReadBeforeCollision"] is (case == "github-preflight-journal-collision"),
+         "Preflight intent digest, leaf count or collision readback differs")
+    if len(kinds) == 1:
+        need(all(journal[key] is None for key in ("runBytes", "runSha256", "runId", "attempt")),
+             "Revocation journal unexpectedly contains a run")
+    else:
+        _shell_github_uint(journal["runBytes"], 512, "preflight runBytes", 1)
+        need(type(journal["runSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", journal["runSha256"]) is not None
+             and journal["runId"] == "9001" and type(journal["attempt"]) is int and journal["attempt"] == 1,
+             "Preflight journal digest or exact run/attempt differs")
+        run = canonical({"schemaVersion": 1, "intentSha256": journal["intentSha256"], "runId": "9001", "attempt": 1})
+        need(journal["runBytes"] == len(run) and journal["runSha256"] == hashlib.sha256(run).hexdigest(),
+             "Preflight canonical run record does not bind the original intent")
+    return journal
+
+
+def shell_github_preflight_peer_receipt(peer, case, marker):
+    need(case in SHELL_GITHUB_PREFLIGHT_CASES, "Different preflight peer case")
+    true_fields = ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                   "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")
+    false_fields = ("stopAttempted", "stdoutOverflow", "stderrOverflow")
+    _shell_github_fields(peer, (*true_fields, *false_fields, "exitCode", "stdoutBytes", "stderrBytes", "terminal", "control"),
+                         "preflight peer")
+    need(all(peer[key] is True for key in true_fields) and all(peer[key] is False for key in false_fields),
+         "Preflight peer lacks original wait/EOF/join/endpoint/protocol finality")
+    _shell_github_uint(peer["exitCode"], 0, "preflight peer exit")
+    _shell_github_uint(peer["stdoutBytes"], 8192, "preflight peer stdout", 1)
+    _shell_github_uint(peer["stderrBytes"], 0, "preflight peer stderr")
+    controls = ("acquired", "started", "joined", "writeComplete", "shutdownComplete", "productSettled", "withinEndpoint", "released")
+    control = peer["control"]
+    _shell_github_fields(control, (*controls, "failed"), "preflight peer control")
+    need(all(control[key] is True for key in controls) and control["failed"] is False,
+         "Preflight original S+EOF writer did not follow actual product settlement")
+    terminal = peer["terminal"]
+    _shell_github_fields(terminal, ("schemaVersion", "scope", "case", "state", "ownerTag", "manifestSha256", "peerSha256",
+        "toolingSha", "callerSha256", "primaryPort", "status", "requests", "posts", "decryptedBytes", "intentBeforeResponse",
+        "allSocketsClosed", "inputsCheckedClosed", "code", "completion", "journal"), "preflight peer terminal")
+    requests, posts, _ = _shell_github_preflight_case(case)
+    wanted = {"schemaVersion": 1, "scope": "github-preflight-installed-peer-v1", "case": case.removeprefix("github-"),
+              "state": "finished", "manifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+              "peerSha256": shell_github_preflight_peer_pins()["github_preflight_peer.py"][1],
+              "toolingSha": SHELL_GITHUB_PREFLIGHT_TOOLING_SHA, "callerSha256": SHELL_GITHUB_PREFLIGHT_CALLER[1],
+              "primaryPort": 18443, "status": "passed", "requests": requests, "posts": posts, "intentBeforeResponse": posts == 1,
+              "allSocketsClosed": True, "inputsCheckedClosed": True, "code": None,
+              "completion": {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True,
+                             "primaryUnexpected": 0, "primaryClosed": True, "redirect": None}}
+    need(canonical({key: terminal[key] for key in wanted}) == canonical(wanted)
+         and type(terminal["ownerTag"]) is str and re.fullmatch(r"[0-9a-f]{16}", terminal["ownerTag"]) is not None,
+         "Preflight peer SOURCE/one-POST/request/finality binding differs")
+    _shell_github_uint(terminal["decryptedBytes"], requests * 8192, "preflight peer decrypted bytes", 1)
+    shell_github_preflight_journal_receipt(terminal["journal"], marker, case)
+    return peer
+
+
+def _shell_github_preflight_pending_map(raw, expected):
+    """Actual before-IO subset for Pending/pre-GO refusal; never a general loader allowlist."""
+    need(type(expected) is dict and len(expected) == 6, "Preflight admitted full loader map differs")
+    rows = decode(raw, 8192)
+    need(type(rows) is list and 4 <= len(rows) <= 6 and all(type(row) is dict for row in rows),
+         "Pending original child map count differs")
+    roles = [row.get("role") for row in rows]
+    mandatory = {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+    need(all(type(role) is str for role in roles) and roles == sorted(set(roles))
+         and mandatory <= set(roles) <= set(expected), "Pending original mandatory/optional roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Pending original child mapping differs")
+    return rows
+
+
+def shell_github_preflight_receipt(raw, case, expected):
+    """Typed native five-case evidence; never readonly or ordinary authority."""
+    _, _, kinds = _shell_github_preflight_case(case)
+    need(type(raw) is bytes and 0 < len(raw) <= 32769, "Preflight native receipt bound differs")
+    shell_github_maps(expected)
+    receipt = decode(raw, 32769)
+    need(canonical(receipt) == raw, "Preflight native receipt is not canonical closed JSON")
+    _shell_github_fields(receipt, ("schemaVersion", "fixture", "case", "sourceCommit", "normalManifestSha256",
+        "productManifestSha256", "protocolSha256", "toolingSha", "callerSha256", "peerSha256", "project",
+        "nativeSession", "scheduling", "originals", "peer", "quit", "notProven"), "preflight native receipt")
+    loss = case == "github-preflight-response-loss"
+    revocation = case == "github-preflight-pre-go-revocation"
+    collision = case == "github-preflight-journal-collision"
+    late = case == "github-preflight-finality-refusal"
+    negative_case = revocation or collision or late
+    wanted = {"schemaVersion": 1, "fixture": "github-preflight-installed-negative-v1" if negative_case else "github-preflight-installed-v2",
+              "case": case, "normalManifestSha256": M, "productManifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+              "protocolSha256": Q, "toolingSha": SHELL_GITHUB_PREFLIGHT_TOOLING_SHA,
+              "callerSha256": SHELL_GITHUB_PREFLIGHT_CALLER[1],
+              "peerSha256": shell_github_preflight_peer_pins()["github_preflight_peer.py"][1],
+              "project": {"cancelSettled": True, "registered": True, "snapshot": True},
+              "quit": {"originalsFinal": True, "relayJoined": True, "gtkSettled": True, "exit": True},
+              "notProven": list(SHELL_GITHUB_PREFLIGHT_NOT_PROVEN)}
+    need(canonical({key: receipt[key] for key in wanted}) == canonical(wanted)
+         and type(receipt["sourceCommit"]) is str and re.fullmatch(r"[0-9a-f]{40}", receipt["sourceCommit"]) is not None
+         and receipt["sourceCommit"] != "0" * 40, "Preflight native SOURCE/profile/project/quit binding differs")
+    originals = receipt["originals"]
+    need(type(originals) is list and len(originals) == len(kinds), "Preflight original operation roster differs")
+    previous, previous_settled, marker = -1, 0, None
+    for index, (original, kind) in enumerate(zip(originals, kinds)):
+        _shell_github_fields(original, ("operationId", "kind", "manifestSha256", "reason", "effect", "marker", "terminal",
+            "originalObserverJoined", "nativeSettled", "environmentClear", "readyObserved", "claimReturned", "goWritten",
+            "goClaimed", "negative", "wasUnknown", "errorCode", "firstError", "exitCode", "exitSignal",
+            "ownedStopAttempted", "settledNs", "maps"), "preflight original")
+        prefix = "github-read-" if kind == "connect" else "github-preflight-"
+        operation = original["operationId"]
+        need(type(operation) is str and re.fullmatch(prefix + r"(0|[1-9][0-9]{0,19})", operation) is not None,
+             "Preflight original operation ID differs")
+        sequence = int(operation[len(prefix):])
+        _shell_github_uint(original["settledNs"], (1 << 64) - 1, "preflight original settled interval")
+        need(previous < sequence < 1 << 64 and previous_settled <= original["settledNs"],
+             "Preflight original operation was duplicated, reordered or replaced")
+        previous, previous_settled = sequence, original["settledNs"]
+        if index == 1:
+            marker = original["marker"]
+            need(type(marker) is str and re.fullmatch(r"[0-9a-f]{32}", marker) is not None,
+                 "Preflight actual native marker differs")
+        negative = negative_case and index == len(kinds) - 1
+        before_go = negative and (revocation or collision)
+        reason, effect, error, first = "none", "none", None, None
+        if kind == "dispatch":
+            reason = "tls-failed" if loss else "none"
+            effect = "potentially-applied" if loss else "accepted"
+        if negative:
+            effect = "potentially-applied" if late else "not-sent"
+            if collision:
+                first = original["firstError"]
+                reasons = {"protocol_error": "response-invalid", "engine_failed": "network-unavailable", "io_error": "network-unavailable"}
+                need(type(first) is str and first in reasons, "Preflight collision first failure differs")
+                error, reason = first, reasons[first]
+            else:
+                first = "cancelled"
+                error, reason = ("cleanup_unknown", "cleanup-unknown") if late else ("cancelled", "cancelled")
+        fixed = {"kind": kind, "manifestSha256": SHELL_GITHUB_PAYLOADS["D-S"]["manifestSha256"],
+                 "reason": reason, "effect": effect, "marker": None if index == 0 else marker,
+                 "terminal": True, "originalObserverJoined": True, "nativeSettled": True, "environmentClear": True,
+                 "readyObserved": index > 0 and not (negative and collision),
+                 "claimReturned": index > 0 and not (negative and collision),
+                 "goWritten": index > 0 and not before_go, "goClaimed": index > 0 and not before_go,
+                 "negative": negative, "wasUnknown": negative and late, "errorCode": error, "firstError": first}
+        need(canonical({key: original[key] for key in fixed}) == canonical(fixed)
+             and type(original["ownedStopAttempted"]) is bool,
+             "Preflight original outcome/marker/READY/GO/first-failure/finality differs")
+        code, signal = original["exitCode"], original["exitSignal"]
+        if before_go:
+            need(type(code) is int and code == 70 and signal is None
+                 or code is None and type(signal) is int and signal == 9 and original["ownedStopAttempted"] is True,
+                 "Preflight pre-GO original unsuccessful exit differs")
+        else:
+            need(type(code) is int and code == 0 and signal is None, "Preflight original successful child exit differs")
+        if kind == "pending" or before_go:
+            _shell_github_preflight_pending_map(canonical(original["maps"]), expected["D-S"])
+        else:
+            _shell_original_child_map(canonical(original["maps"]), expected["D-S"])
+    dispatch = [row for row in originals if row["kind"] == "dispatch"][-1]
+    retirement = ({"mode": "late-unknown", "unknownPreserved": True, "newWorkDenied": True,
+                   "initialDisplayedPending": 0, "lateNativeRecoveryRetained": True, "lateDisplayedPending": 0}
+                  if late else {"mode": "disconnected", "authorityRemoved": True,
+                                "terminalPreserved": True, "recoveryPreserved": True})
+    session = {"connect": 1, "prepare": 2 if collision else 1, "dispatch": 2 if collision else 1,
+               "observe": 0 if negative_case else 1, "disconnect": 0 if late else 1,
+               "pending": 1 if loss else 0, "pendingReloaded": loss, "retainedStatus": True, "tokenFieldCleared": True,
+               "reviewVisible": True, "consentObserved": True, "dispatchEffect": dispatch["effect"],
+               "dispatchReason": dispatch["reason"], "runObserved": not negative_case, "retirement": retirement}
+    need(canonical(receipt["nativeSession"]) == canonical(session),
+         "Preflight actual review/consent/Pending/retirement/status interval differs")
+    _shell_github_preflight_scheduling(receipt["scheduling"], case, originals)
+    shell_github_preflight_peer_receipt(receipt["peer"], case, marker)
+    return receipt
+
+
+def shell_github_preflight_result(stdout, stderr, case, code, expected):
+    need(case in SHELL_GITHUB_PREFLIGHT_CASES and type(code) is int and code == 0
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
+         "Preflight original capture failed, oversized or incomplete")
+    output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    diagnostics = [line for line in stderr.splitlines(keepends=True) if line.startswith(b"MRK_")]
+    need(len(output) == 7 and output[:4] == [
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n",
+        b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CATALOGUE=returned\n"]
+        and output[4] == b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+        and output[5].startswith(SHELL_GITHUB_PREFLIGHT_MARKER) and output[5].endswith(b"\n")
+        and output[6] == b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified\n"
+        and diagnostics == [], "Preflight original bootstrap/reload/receipt/completion marker order differs")
+    receipt = shell_github_preflight_receipt(output[5][len(SHELL_GITHUB_PREFLIGHT_MARKER):], case, expected)
+    return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+            "maps": [], "githubPreflight": receipt}
+
+
+SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES = (
+    ".local", ".local/share", ".local/share/mobile-release-kit", ".local/share/mobile-release-kit/github-preflight",
+)
+
+
+def shell_github_preflight_journal_data(value, case, raw, receipt):
+    """Private original identities/hashes only; no raw intent or credential export."""
+    need(shell_github_preflight(value) and case in shell_cases(value), "Different preflight journal route")
+    journal = receipt["peer"]["terminal"]["journal"]
+    shell_github_preflight_journal_receipt(journal, receipt["originals"][1]["marker"], case)
+    data = decode(raw, SHELL_GITHUB_PREFLIGHT_JOURNAL_LIMIT)
+    _shell_github_fields(data, ("schema", "sourceSha", "runId", "attempt", "case", "home", "created", "directories", "files", "journal"),
+                         "preflight original journal DATA")
+    need(canonical(data) == raw and data["schema"] == "installed-github-preflight-journal-v1"
+         and all(data[key] == value[key] for key in ("sourceSha", "runId", "attempt")) and data["case"] == case
+         and data["home"] == str(root_path(value) / ("gui-" + case) / "home")
+         and canonical(data["journal"]) == canonical(journal), "Preflight journal source/HOME/native correspondence differs")
+    created, directories, files = data["created"], data["directories"], data["files"]
+    _shell_github_fields(created, ("root", "gui", "home"), "preflight original HOME identities")
+    _shell_github_fields(directories, ("gui", "home", *SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES), "preflight journal directories")
+    marker = journal["marker"]
+    _shell_github_fields(files, tuple(marker + "." + kind + ".json" for kind, _ in _shell_github_preflight_journal_kinds(case)),
+                         "preflight journal leaves")
+    owners = [value["runnerUid"], value["runnerGid"]]
+    for name, row in created.items():
+        need(type(row) is list and len(row) == 5 and all(type(n) is int and 0 <= n < 1 << 64 for n in row)
+             and row[0] > 0 and row[1] > 0
+             and row[2:] == ([stat.S_IFDIR | 0o711, 0, 0] if name == "root" else [stat.S_IFDIR | 0o700, *owners]),
+             "Preflight original created HOME protection differs")
+    pairs = {tuple(created["root"][:2])}
+    for name, row in directories.items():
+        need(type(row) is list and len(row) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in row)
+             and row[0] == created["root"][0] and row[1] > 0 and row[2:5] == [stat.S_IFDIR | 0o700, *owners]
+             and row[5] > 0 and row[6] <= JSON_LIMIT
+             and (name not in created or row[:5] == created[name]), "Preflight journal directory original changed")
+        pair = tuple(row[:2])
+        need(pair not in pairs, "Preflight journal directory aliases another original")
+        pairs.add(pair)
+    for kind, bound in _shell_github_preflight_journal_kinds(case):
+        row = files[marker + "." + kind + ".json"]
+        _shell_github_fields(row, ("identity", "size", "sha256"), "preflight journal leaf")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+             and original[0] == created["root"][0] and original[1] > 0
+             and original[2:6] == [stat.S_IFREG | 0o400, *owners, 1]
+             and type(row["size"]) is int and 0 < row["size"] <= bound
+             and original[6] == row["size"] == journal[kind + "Bytes"] and row["sha256"] == journal[kind + "Sha256"],
+             "Preflight immutable journal owner/mode/size/hash differs")
+        pair = tuple(original[:2])
+        need(pair not in pairs, "Preflight journal leaf aliases another original")
+        pairs.add(pair)
+    return data
+
+
+def _shell_github_preflight_names(fd, expected):
+    # Enumerate only the fixed finite roster, before any private leaf read.
+    names = []
+    with os.scandir(fd) as iterator:
+        for entry in iterator:
+            need(len(names) < len(expected), "Preflight journal contains an unexpected entry")
+            names.append(entry.name)
+    need(sorted(names) == sorted(expected), "Preflight journal directory roster differs")
+
+
+def _shell_github_preflight_home(value, case):
+    need(shell_github_preflight(value) and case in shell_cases(value) and _ROOT == root_path(value)
+         and case not in _SHELL_GITHUB_PREFLIGHT_HOMES, "Preflight original HOME was reused")
+    home = _ROOT / ("gui-" + case) / "home"
+    _absent(home / ".local")
+    created = {name: list(identity(path.lstat())[:5]) for name, path in
+               (("root", _ROOT), ("gui", home.parent), ("home", home))}
+    need(created["root"][2:] == [stat.S_IFDIR | 0o711, 0, 0]
+         and all(created[name][2:] == [stat.S_IFDIR | 0o700, value["runnerUid"], value["runnerGid"]]
+                 and created[name][0] == created["root"][0] for name in ("gui", "home"))
+         and len({tuple(row[:2]) for row in created.values()}) == 3, "Fresh preflight HOME identity differs")
+    _SHELL_GITHUB_PREFLIGHT_HOMES[case] = created
+
+
+def _shell_github_preflight_journal_snapshot(value, case, receipt):
+    """Only called after original command and complete native receipt success.
+
+    Keep every no-follow directory and every1/2 file original until complete POST;
+    attempt every checked close on all outcomes. No cleanup or repaired record.
+    """
+    need(_ROOT == root_path(value) and case in _SHELL_GITHUB_PREFLIGHT_HOMES, "Preflight original HOME admission missing")
+    created = _SHELL_GITHUB_PREFLIGHT_HOMES[case]
+    journal = receipt["peer"]["terminal"]["journal"]
+    shell_github_preflight_journal_receipt(journal, receipt["originals"][1]["marker"], case)
+    marker, originals, pairs = journal["marker"], [], set()
+    directories, files = {}, {}
+    owners, device = (value["runnerUid"], value["runnerGid"]), created["root"][0]
+
+    def open_original(name, parent_fd, label, is_directory, mode, owner, maximum):
+        before = identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+        need(before[0] == device and before[1] > 0 and before[2:5] == (mode, *owner)
+             and before[5] > 0 and before[6] <= maximum and (is_directory or before[5] == 1)
+             and before[:2] not in pairs, "Preflight journal original owner/type/device/alias differs")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | (os.O_DIRECTORY if is_directory else 0)
+        fd = os.open(name, flags, dir_fd=parent_fd)
+        originals.append((name, parent_fd, fd, before, label))  # Custody before every fallible check.
+        need(identity(os.fstat(fd)) == before and os.listxattr(fd) == [], "Preflight journal opened original/xattrs differ")
+        pairs.add(before[:2])
+        return fd, before
+
+    try:
+        directory(_ROOT, protected=True)
+        root_fd, root_before = open_original(str(_ROOT), None, "root", True, stat.S_IFDIR | 0o711, (0, 0), JSON_LIMIT)
+        need(list(root_before[:5]) == created["root"], "Preflight original root changed")
+        gui_fd, gui = open_original("gui-" + case, root_fd, "gui", True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+        home_fd, home = open_original("home", gui_fd, "home", True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+        need(list(gui[:5]) == created["gui"] and list(home[:5]) == created["home"], "Preflight original per-case HOME changed")
+        directories.update(gui=list(gui), home=list(home))
+        _shell_github_preflight_names(home_fd, (".local",))
+        parent, rosters = home_fd, [(home_fd, (".local",))]
+        for index, relative in enumerate(SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES):
+            fd, before = open_original(Path(relative).name, parent, relative, True, stat.S_IFDIR | 0o700, owners, JSON_LIMIT)
+            directories[relative] = list(before)
+            expected = ((Path(SHELL_GITHUB_PREFLIGHT_JOURNAL_DIRECTORIES[index + 1]).name,) if index < 3
+                        else tuple(marker + "." + kind + ".json" for kind, _ in _shell_github_preflight_journal_kinds(case)))
+            _shell_github_preflight_names(fd, expected)
+            rosters.append((fd, expected))
+            parent = fd
+        leaf_fds = []
+        for kind, maximum in _shell_github_preflight_journal_kinds(case):
+            name = marker + "." + kind + ".json"
+            fd, before = open_original(name, parent, name, False, stat.S_IFREG | 0o400, owners, maximum)
+            need(before[6] == journal[kind + "Bytes"], "Preflight original journal length differs before read")
+            leaf_fds.append((kind, name, fd, before))
+        for kind, name, fd, before in leaf_fds:
+            blocks, count = [], 0
+            while block := os.read(fd, before[6] + 1):
+                count += len(block)
+                need(count <= before[6], "Preflight journal grew during original read")
+                blocks.append(block)
+            raw = b"".join(blocks)
+            need(count == before[6] and hashlib.sha256(raw).hexdigest() == journal[kind + "Sha256"],
+                 "Preflight journal actual bytes differ from native original")
+            if kind == "run":
+                need(raw == canonical({"schemaVersion": 1, "intentSha256": journal["intentSha256"], "runId": "9001", "attempt": 1}),
+                     "Preflight immutable run does not link the actual original intent")
+            files[name] = {"identity": list(before), "size": count, "sha256": hashlib.sha256(raw).hexdigest()}
+        for fd, expected in rosters:
+            _shell_github_preflight_names(fd, expected)
+        for name, parent_fd, fd, before, _ in originals:
+            need(os.listxattr(fd) == [] and identity(os.fstat(fd)) == before
+                 == identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)), "Preflight journal original full POST differs")
+        data = {"schema": "installed-github-preflight-journal-v1", "sourceSha": value["sourceSha"],
+                "runId": value["runId"], "attempt": value["attempt"], "case": case,
+                "home": str(_ROOT / ("gui-" + case) / "home"), "created": deepcopy(created),
+                "directories": directories, "files": files, "journal": deepcopy(journal)}
+        shell_github_preflight_journal_data(value, case, canonical(data), receipt)
+    finally:
+        close_errors = []
+        for _, _, fd, _, _ in reversed(originals):
+            try:
+                _shell_github_close(fd)
+            except BaseException as error:
+                close_errors.append(error)
+        need(not close_errors, "Preflight original journal descriptor close was not confirmed")
+    return data
+
+
+def _shell_github_preflight_after(value, case, observed):
+    global _FAILED
+    # No private filesystem observation is authorized by failed/Unknown owners
+    # or by terminal-looking bytes alone. This is after shell_result admission.
+    need(not _FAILED and time.monotonic() < _END and _OWNER is not None and case not in _SHELL_GITHUB_PREFLIGHT_COMPLETED
+         and _COMMANDS and _COMMANDS[-1]["phase"] == "shell-" + case
+         and _COMMANDS[-1]["argv"] == shell_argv(value, case) and _COMMANDS[-1]["exitCode"] == 0
+         and observed.get("exitCode") == 0 and type(observed.get("githubPreflight")) is dict,
+         "Preflight journal read lacks original successful command/native admission")
+    _FAILED = True
+    receipt = observed["githubPreflight"]
+    need(receipt["sourceCommit"] == value["sourceSha"], "Preflight journal native SOURCE differs")
+    data = _shell_github_preflight_journal_snapshot(value, case, receipt)
+    need(time.monotonic() < _END, "Preflight original journal read closed late")
+    _SHELL_GITHUB_PREFLIGHT_COMPLETED[case] = (deepcopy(receipt), data)
+    _FAILED = False
+
+
+def _shell_github_preflight_journals_final(value):
+    global _FAILED
+    need(not _FAILED and tuple(_SHELL_GITHUB_PREFLIGHT_COMPLETED) == SHELL_GITHUB_PREFLIGHT_CASES
+         and tuple(_SHELL_GITHUB_PREFLIGHT_HOMES) == SHELL_GITHUB_PREFLIGHT_CASES and time.monotonic() < _END,
+         "All five original preflight cases must settle before final journal observations")
+    _FAILED = True
+    retained = {}
+    all_pairs = set()
+    for case, (receipt, original) in _SHELL_GITHUB_PREFLIGHT_COMPLETED.items():
+        current = _shell_github_preflight_journal_snapshot(value, case, receipt)
+        need(canonical(current) == canonical(original), "Later preflight case changed an earlier original journal")
+        pairs = {tuple(row[:2]) for row in current["directories"].values()}
+        pairs.update(tuple(row["identity"][:2]) for row in current["files"].values())
+        need(pairs.isdisjoint(all_pairs), "Preflight cases reused original HOME/journal objects")
+        all_pairs.update(pairs)
+        retained[case] = canonical(current)
+    need(time.monotonic() < _END, "Final original preflight journal readback closed late")
+    for case, raw in retained.items():
+        _retain("shell-" + case + "-journal.json", raw)
+    _FAILED = False
 
 
 
@@ -4383,7 +5192,8 @@ def shell_github_boundary_closed(value, cases, outcome, raw_files):
 
 def shell_github_closed_result(value, outcome, raw_files, expected):
     """Only after the unchanged original service/client/StopPost finality gate."""
-    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub closed route differs")
+    need(shell_github_readonly(value) and not shell_github_preflight(value)
+         and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub closed route differs")
     before = raw_files["shell-github-materials-before.json"]
     after = raw_files["shell-github-materials-after.json"]
     need(type(before) is bytes and before == after, "GitHub actual N/D/peer/keylog originals changed")
@@ -4442,15 +5252,83 @@ def shell_github_closed_result(value, outcome, raw_files, expected):
             "cases": cases, "githubReadOnly": github, "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 
+def shell_github_preflight_closed_result(value, outcome, raw_files, expected):
+    """Reconcile G only after the SAME original service/client/StopPost finality."""
+    selection = _shell_github_selection(value)
+    need(shell_github_preflight(value) and canonical(outcome.get("githubPreflight")) == canonical(selection)
+         and not {"githubReadOnly", "ordinary21", "projectRecovery", "androidPublication", "androidBuild"} & set(outcome)
+         and outcome.get("serviceQualified") is False and outcome.get("normalDestinationAction") is False
+         and set(raw_files) == public_files(value), "Closed preflight selection or exact output scope differs")
+    before, after = (raw_files["shell-github-materials-" + phase + ".json"] for phase in ("before", "after"))
+    need(type(before) is bytes and before == after, "Preflight actual N/D/peer originals changed")
+    maps = shell_github_material_data(value, before, expected)
+    shell_github_maps(maps)
+    material = decode(before, SHELL_GITHUB_MATERIAL_LIMIT)
+    _shell_github_closed_loader(material, decode(raw_files["loader-final.json"], LIMIT))
+    fixture_before, fixture_after = (raw_files["shell-github-project-" + phase + ".json"] for phase in ("before", "after"))
+    fixture = shell_github_fixture(value, fixture_before, fixture_after)
+    project = decode(fixture_before, SHELL_GITHUB_FIXTURE_LIMIT)
+    pairs = {tuple(row["identity"][:2]) for tree in material["payloads"].values() for row in tree.values()}
+    pairs.update(tuple(row["identity"][:2]) for row in material["peer"].values())
+    project_pairs = {tuple(row["identity"][:2]) for row in project["nodes"].values()} | {tuple(project["namespace"]["identity"][:2])}
+    need(pairs.isdisjoint(project_pairs), "Preflight registered project aliases installed material")
+    pairs.update(project_pairs)
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(type(p0.get("published")) is dict and set(p0["published"]) == {"P0"}
+         and canonical(p0["published"]["P0"]) == canonical(material["payloads"]["N"])
+         and canonical(decode(raw_files["published-before-upgrade.txt"], LIMIT)) == canonical(p0["published"]),
+         "Preflight N is not the original unchanged P0 publication")
+    cases_raw = raw_files["shell-cases.json"]
+    cases = decode(cases_raw, LIMIT)
+    need(type(cases) is dict and set(cases) == set(SHELL_GITHUB_PREFLIGHT_CASES) and canonical(cases) == cases_raw
+         and type(outcome["commands"]) is list and tuple(row["phase"] for row in outcome["commands"]) == root_phases(value),
+         "Preflight closed original case/command roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    journals, original_root = {}, None
+    for case in SHELL_GITHUB_PREFLIGHT_CASES:
+        phase, command = "shell-" + case, commands["shell-" + case]
+        need(command["argv"] == shell_argv(value, case), "Preflight original observer argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "Preflight combined original capture differs")
+        observed = shell_github_preflight_result(streams[0], streams[1], case, command["exitCode"], maps)
+        receipt = observed["githubPreflight"]
+        need(receipt["sourceCommit"] == value["sourceSha"] and canonical(observed) == canonical(cases[case]),
+             "Preflight native receipt differs from original SOURCE/capture")
+        raw = raw_files[phase + "-journal.json"]
+        journal = shell_github_preflight_journal_data(value, case, raw, receipt)
+        root = journal["created"]["root"]
+        need(root == original_root or original_root is None, "Preflight original common root changed")
+        original_root = root
+        current_pairs = {tuple(row[:2]) for row in journal["directories"].values()}
+        current_pairs.update(tuple(row["identity"][:2]) for row in journal["files"].values())
+        need(current_pairs.isdisjoint(pairs) and tuple(root[:2]) not in pairs
+             and len({pair[0] for pair in current_pairs | pairs | {tuple(root[:2])}}) == 1,
+             "Preflight HOME/journal aliases another original or crosses devices")
+        pairs.update(current_pairs)
+        journals[case] = {"capture": _shell_github_pin(raw), "originals": journal}
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "githubPreflight": {"selection": selection, "expectedMaps": maps,
+                "materials": {"before": _shell_github_pin(before), "after": _shell_github_pin(after)},
+                "fixture": {**fixture, "before": _shell_github_pin(fixture_before), "after": _shell_github_pin(fixture_after)},
+                "casesCapture": _shell_github_pin(cases_raw), "journals": journals,
+                "normalDestinationAction": False, "normalTransportPositive": False,
+                "remainingCoverage": list(SHELL_GITHUB_PREFLIGHT_NOT_PROVEN)},
+            "packageLifecycleQualified": False, "shellPackageBuilt": False, "serviceQualified": False}
+
+
 def shell_handoff(value, original_paths):
     """The fixed connection is neither J's libtest nor a new package source."""
     shell = value["shell"]
-    ordinary = shell_ordinary(value)
+    ordinary, recovery = shell_ordinary(value), shell_recovery(value)
     need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
          "acceptedU", "loaderPolicy"} | ({"localTransport"} if "localTransport" in shell else {"artifactId"})
-         | ({"ordinary21"} if ordinary else {"githubReadOnly"} if "githubReadOnly" in shell else {"androidPublication"}),
+         | ({"projectRecovery"} if recovery else {"ordinary21"} if ordinary else {"githubPreflight"} if shell_github_preflight(value)
+            else {"githubReadOnly"} if shell_github_readonly(value) else {"androidPublication"}),
          "Fixed shell handoff fields differ")
-    if ordinary or shell_github(value):
+    if ordinary or recovery or shell_github(value):
         need("localTransport" not in shell, "Non-Android scope cannot adopt Android local transport")
     else:
         materials, publication = _android_handoff_profile(value)
@@ -4462,11 +5340,18 @@ def shell_handoff(value, original_paths):
          and type(shell["rosterSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", shell["rosterSha256"]) is not None,
          "Original shell producer/roster binding differs")
     if shell_github(value):
-        need(shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "GitHub fixed case binding differs")
+        _shell_github_selection(value)
     binaries, compiler, accepted = shell["binaries"], shell["compiler"], shell["acceptedU"]
     need(type(compiler) is dict and ("ordinary21" in compiler) == ordinary
          and (not ordinary or canonical(compiler["ordinary21"]) == canonical(shell["ordinary21"])),
          "Original compiler and root ordinary21 scopes differ")
+    need(("projectRecovery" in compiler) == recovery
+         and (not recovery or canonical(compiler["projectRecovery"]) == canonical(shell_recovery_compile_selection())),
+         "Original compiler and root project-recovery scopes differ")
+    preflight = shell_github_preflight(value)
+    need(("githubPreflight" in compiler) == preflight
+         and (not preflight or canonical(compiler["githubPreflight"]) == canonical(shell["githubPreflight"])),
+         "Original compiler and root GitHub preflight scopes differ")
     need(type(binaries) is dict and set(binaries) == {"normal", "observer"}, "Normal/observer shell pair missing")
     paths = list(original_paths)
     for role, row in binaries.items():
@@ -4485,16 +5370,21 @@ def shell_handoff(value, original_paths):
          and all(compiler["exportedArtifacts"][role][key] == row[key]
                  for role, row in binaries.items() for key in ("size", "sha256")),
          "Original normal/observer source, features or output bytes differ")
-    if ordinary or shell_github(value):
+    if ordinary or recovery or shell_github(value):
         need(compiler.get("androidBuildMaterials") is None
               and compiler.get("androidBuildBindings") == {}
               and compiler.get("androidBuildPublication") is None,
               "Non-Android shell cannot adopt an Android compile profile")
-        if ordinary:
+        if preflight:
             need({"androidBuildMaterials", "androidBuildBindings", "androidBuildPublication"} <= set(compiler)
                  and not {"androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild",
-                          "githubReadOnly", "githubReadOnlyProfile", "localTransport", "shellLocalTransport"} & set(compiler),
-                 "Ordinary21 compiler needs the exact null/empty/null Android contract")
+                          "githubReadOnly", "githubReadOnlyProfile", "projectRecovery", "localTransport", "shellLocalTransport"} & set(compiler),
+                 "GitHub preflight compiler has an unrelated action/profile")
+        if ordinary or recovery:
+            need({"androidBuildMaterials", "androidBuildBindings", "androidBuildPublication"} <= set(compiler)
+                 and not {"androidPreparation", "androidOsContractInput", "androidPublication", "androidBuild",
+                          "githubReadOnly", "githubReadOnlyProfile", "githubPreflight", "localTransport", "shellLocalTransport"} & set(compiler),
+                 "Named non-Android compiler needs the exact null/empty/null Android contract")
     else:
         need(compiler.get("androidBuildMaterials") == materials
              and compiler.get("androidBuildBindings") == shell_android_compile_environment(materials)
@@ -4827,7 +5717,7 @@ def _capacity(value):
     # The original Xvfb logs share the GUI per-file ceiling. Account for
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
-    if "shell" in value and not shell_github(value):
+    if "shell" in value and not shell_github(value) and not shell_recovery(value):
         # One write-only failure leaf per observer. The512-byte emitter/read
         # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
         required += (len(shell_cases(value)) + len(shell_observers(value))) * SHELL_WORK_FILE_LIMIT
@@ -4859,7 +5749,7 @@ def _capacity(value):
         # each needs twelve GUI environment nodes in block/inode accounting.
         session_environment_nodes = 12 * (len(SHELL_SESSION_CASES) + len(SHELL_TOOLS_OFFLINE_CASES) + len(shell_android_cases(value)) + 2)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + (shell_public_limit(value) if "shell" in value else 128)
-    if "shell" in value and not shell_github(value):
+    if "shell" in value and not shell_github(value) and not shell_recovery(value):
         inodes += len(shell_observers(value)) + 1 + 12 + 14 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + placeholder_nodes + session_environment_nodes
         inodes += android_publication_nodes  # Full25 manifest and at most three new directories; zero for ordinary21.
     if shell_github(value):
@@ -4867,15 +5757,29 @@ def _capacity(value):
         # Two distinct complete D copies, the fixed peer/project, and the
         # unchanged per-original GUI/log limits. No Tools/JDK fixtures.
         required += 2 * capacity["runtimeBytes"] + 2 * JSON_LIMIT + 2 * count * SHELL_WORK_FILE_LIMIT
-        required += sum(pin[0] for pin in SHELL_GITHUB_PEER_PINS.values()) + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
+        required += sum(pin[0] for pin in _shell_github_peer_pins(value).values()) + len(SHELL_PROJECT_SOURCE) + len(SHELL_PROJECT_VERSION)
         github_nodes = 2 * 8192 + 16 + 13 * count
+        if shell_github_preflight(value):
+            journal_kinds = [_shell_github_preflight_journal_kinds(case) for case in shell_cases(value)]
+            required += sum(bound for kinds in journal_kinds for _, bound in kinds)  # Five intents/four runs; no bodies exported.
+            github_nodes += count * 4 + sum(map(len, journal_kinds))  # Four directories PER HOME and exact1/2 leaves.
         inodes += github_nodes
+    if shell_recovery(value):
+        count = len(shell_cases(value))
+        # Exact bounded controls/fixture summaries plus existing GUI/log file
+        # ceilings; the negative observation has its own retained write leaf.
+        recovery_nodes = count * (160 + 13) + int(shell_recovery_negative(value))
+        required += count * (136 * (256 << 10) + 2 * SHELL_WORK_FILE_LIMIT)
+        required += int(shell_recovery_negative(value)) * SHELL_WORK_FILE_LIMIT
+        inodes += recovery_nodes
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
-    if "shell" in value and not shell_github(value):
+    if "shell" in value and not shell_github(value) and not shell_recovery(value):
         required += (27 + len(version_nodes) + len(session_nodes) + len(tools_offline_nodes) + len(android_nodes) + placeholder_nodes + session_environment_nodes) * space.f_frsize  # Finite nodes, not a quota.
         required += android_publication_nodes * space.f_frsize
+    if shell_recovery(value):
+        required += recovery_nodes * space.f_frsize
     if shell_github(value):
         required += github_nodes * space.f_frsize
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
@@ -4914,7 +5818,7 @@ def _command_capture(label, argv, result, seconds):
 
 
 def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, shell_log=None):
-    global _FAILED, _PHASE, _GITHUB_BOUNDARY_COMMAND_FINAL
+    global _FAILED, _PHASE, _GITHUB_BOUNDARY_COMMAND_FINAL, _RECOVERY_NEGATIVE
     _PHASE = label
     need(not _FAILED and _OWNER is not None, "Prior root command failed or owner missing")
     _root_ids()
@@ -4922,6 +5826,11 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
         need(type(shell_log) is tuple and len(shell_log) == 3
              and shell_log[1] in shell_observers(shell_log[0]) and label == "shell-" + shell_log[1]
              and argv == shell_argv(shell_log[0], shell_log[1]), "Different fixed shell log route")
+    recovery_negative = shell_log is not None and shell_recovery_negative(shell_log[0])
+    need(not recovery_negative or label == "shell-" + SHELL_RECOVERY_PARTIAL
+         and maximum == SHELL_RECOVERY_NEGATIVE_SECONDS and codes == (0,) and endpoint is None
+         and env == shell_environment(shell_log[0], SHELL_RECOVERY_PARTIAL),
+         "Recovery negative requires its exact original finite command route")
     settled_failure = label == "shell-settled-failure"
     need(not settled_failure or shell_log is not None and codes == (0,),
          "Settled-failure requires its original shell route, not an exit-code override")
@@ -4929,13 +5838,23 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
     need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
     bound = _END if endpoint is None else min(_END, endpoint)
     _FAILED = True
-    failure_sink, result = None, None
+    failure_sink, recovery_sink, result = None, None, None
     try:
         if shell_log is not None:
             failure_sink = _shell_labels_prepare(shell_log[0], shell_log[1])
+        if recovery_negative:
+            need(_RECOVERY_NEGATIVE is None, "Recovery negative original may not be reset/reused")
+            _RECOVERY_NEGATIVE = {"schemaVersion": 1, "scope": "original-recovery-negative-owner-v1",
+                "case": SHELL_RECOVERY_PARTIAL, "sourceSha": shell_log[0]["sourceSha"], "phase": label,
+                "classificationEligible": False, "applicationFinal": False, "originalOwnerFinal": False,
+                "error": None, "ownerCall": None, "labelsBytes": None, "observation": None,
+                "failureSinkClosed": False, "observationSinkClosed": False}
+            recovery_sink = _shell_recovery_negative_prepare(shell_log[0])
         started = time.monotonic()
         seconds = min(maximum, math.floor(bound - started))
         need(seconds > 0, "Original root command endpoint exhausted")
+        need(not recovery_negative or seconds == SHELL_RECOVERY_NEGATIVE_SECONDS,
+             "Recovery negative cannot start with a shortened original cap")
         call = _shell_call_started(seconds) if shell_log is not None else None
         try:
             _GITHUB_BOUNDARY_COMMAND_FINAL = False
@@ -4948,7 +5867,10 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
         except BaseException as error:
             if shell_log is not None:
                 try:
-                    _shell_owner_failure(shell_log[1], error, failure_sink, call)
+                    if recovery_negative:
+                        _shell_recovery_owner_failure(shell_log[0], error, failure_sink, recovery_sink, call)
+                    else:
+                        _shell_owner_failure(shell_log[1], error, failure_sink, call)
                 except BaseException:
                     pass
             raise  # Same original object; diagnosis supplies no continuation authority.
@@ -4957,6 +5879,7 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
                 _shell_call_finished(call, True)
             except BaseException:
                 pass  # Return DATA is recorded before its optional diagnostic clock.
+        need(not recovery_negative, "Retained-Unknown experiment returned normally instead of its original endpoint")
         _command_capture(label, argv, result, seconds)
         if endpoint is not None:
             _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
@@ -5015,11 +5938,22 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
             active_failure = sys.exc_info()[0] is not None
             try:
                 os.close(failure_sink[0])  # This exact retained original, once; no reopen/unlink.
+                if recovery_negative and _RECOVERY_NEGATIVE is not None:
+                    _RECOVERY_NEGATIVE["failureSinkClosed"] = True
             except BaseException as error:
                 if not active_failure:
                     if settled_failure:
                         raise Refused("Original root command failed or completed late") from error
                     raise  # _FAILED remains True; a lost close cannot qualify.
+        if recovery_sink is not None:
+            active_failure = sys.exc_info()[0] is not None
+            try:
+                os.close(recovery_sink[0])  # Original protected read FD; never seek/reopen/retry.
+                if _RECOVERY_NEGATIVE is not None:
+                    _RECOVERY_NEGATIVE["observationSinkClosed"] = True
+            except BaseException:
+                if not active_failure:
+                    raise
     if settled_failure:
         try:
             need(time.monotonic() < bound, "Original root command failed or completed late")
@@ -5589,6 +6523,11 @@ ROOT_PHASES = ("start-unit-show", "native-root", "native-user", "state-initial",
 
 def root_phases(value):
     if "shell" in value:
+        if shell_recovery(value):
+            initial = (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
+                       *("recovery-fixture-" + case for case in shell_cases(value)))
+            return (*initial, *("shell-" + case for case in shell_cases(value)),
+                    *(() if shell_recovery_negative(value) else ("state-shell-finished",)))
         if shell_normal_boundaries(value):
             phases = []
             for case in shell_cases(value):
@@ -5611,9 +6550,13 @@ def root_phases(value):
 
 
 def result_state(value):
+    if shell_recovery(value):
+        return "project-recovery-retained-unknown-experiment-observed" if shell_recovery_negative(value) else "project-recovery-native3-observed"
     if shell_ordinary(value):
         return "ordinary21-shell-installed-runtime-connection-observed"
-    if shell_github(value):
+    if shell_github_preflight(value):
+        return "installed-github-preflight-synthetic-observed"
+    if shell_github_readonly(value):
         return "installed-github-normal-boundaries-observed" if shell_normal_boundaries(value) else "installed-github-readonly-synthetic-observed"
     if "shell" in value:
         return "normal-shell-installed-runtime-connection-observed"
@@ -5625,7 +6568,22 @@ def result_state(value):
 def public_files(value):
     fixed = {phase + "." + suffix for phase in (*root_phases(value), "stop-unit-show") for suffix in ("stdout", "stderr")}
     fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "scripts-unpacked.json", "binaries-unpacked.json"}
+    if shell_recovery(value):
+        fixed |= {"loader-entry.json", "loader-runtime.json", "published-before-upgrade.txt"}
+        fixed |= {"shell-root-data-" + str(i) + ".json" for i in range(len(SHELL_DATA_ROOTS))}
+        fixed |= {"shell-" + case + "-" + phase + ".json" for case in shell_cases(value)
+                  for phase in ("initial", "generated", "before", "after")}
+        if shell_recovery_negative(value):
+            # No success result/final-loader/application stdout exists on this failed stream.
+            fixed -= {"unit-result.json", "unit-stop.json", "shell-" + SHELL_RECOVERY_PARTIAL + ".stdout",
+                      "shell-" + SHELL_RECOVERY_PARTIAL + ".stderr", "shell-" + SHELL_RECOVERY_PARTIAL + "-after.json"}
+            return fixed | {"unit-start-error.json", "project-recovery-negative-stop.json", "project-recovery-negative.observation",
+                            SHELL_RECOVERY_LOADER_BEFORE, SHELL_RECOVERY_INTERVAL}
+        return fixed | {"loader-final.json", "shell-cases.json", "mutation-denials.txt"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in shell_cases(value)}
     if shell_github(value):
+        if shell_github_preflight(value):
+            fixed |= {"shell-" + case + "-journal.json" for case in SHELL_GITHUB_PREFLIGHT_CASES}
         if shell_normal_boundaries(value):
             fixed |= {"github-boundary-host-before.json", "github-boundary-host-after.json"} \
                 | {_github_boundary_prefix(case) + "-policy.json" for case in SHELL_GITHUB_BOUNDARY_CASES}
@@ -5665,7 +6623,9 @@ def public_files(value):
 def lifecycle_states(value):
     rows = [("initial", "absent", None), ("unpacked", "install ok unpacked", "P0")]
     if "shell" in value:
-        rows += [("p0", "install ok installed", "P0"), ("shell-finished", "install ok installed", "P0")]
+        rows += [("p0", "install ok installed", "P0")]
+        if not shell_recovery_negative(value):
+            rows += [("shell-finished", "install ok installed", "P0")]
     elif "installed" in value and value["installed"]["case"] != "positive":
         rows.append(("refusal", "install ok unpacked", "P0"))
     else:
@@ -7709,13 +8669,28 @@ def _shell_github_sync(path):
 
 def _shell_github_stage_peer(value):
     """Fixed SOURCE copies only; the native retained owner alone starts a peer."""
-    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "Different GitHub peer staging route")
+    _shell_github_selection(value)
     root = root_path(value) / "github-peer"
     root.mkdir(mode=0o700)
     original = identity(root.lstat())
     (root / "github_tls").mkdir(mode=0o700)
     source = absolute(value["source"]) / "desktop/src-tauri/tests/fixtures"
-    for relative, (size, digest) in sorted(SHELL_GITHUB_PEER_PINS.items()):
+    for relative, (size, digest) in sorted(_shell_github_peer_pins(value).items()):
+        if relative == "mobile-preflight.yml":
+            template = absolute(value["source"]) / "templates/workflows/mobile-preflight.yml"
+            before = identity(template.lstat())
+            need(before[3:5] == (value["runnerUid"], value["runnerGid"]), "Preflight caller template SOURCE owner differs")
+            raw = read(template, SHELL_GITHUB_PREFLIGHT_TEMPLATE[0])
+            need((len(raw), hashlib.sha256(raw).hexdigest()) == SHELL_GITHUB_PREFLIGHT_TEMPLATE,
+                 "Preflight caller template SOURCE differs")
+            rendered = raw.replace(b"__MOBILE_RELEASE_KIT_REPOSITORY__", b"Apdelrahman1911/mobile-release-kit") \
+                .replace(b"__MOBILE_RELEASE_KIT_SHA__", SHELL_GITHUB_PREFLIGHT_TOOLING_SHA.encode("ascii"))
+            need((len(rendered), hashlib.sha256(rendered).hexdigest()) == (size, digest)
+                 and identity(template.lstat()) == before, "Canonical preflight caller rendering or original SOURCE differs")
+            _D.write(root / relative, rendered, 0o444)
+            need(record(root / relative, size) == {"path": str(root / relative), "size": size, "sha256": digest},
+                 "Canonical preflight caller protected readback differs")
+            continue
         path = source / relative
         before = identity(path.lstat())
         need(before[3:5] == (value["runnerUid"], value["runnerGid"]), "GitHub peer SOURCE owner differs")
@@ -7727,7 +8702,7 @@ def _shell_github_stage_peer(value):
     os.chmod(root, 0o555)
     _shell_github_sync(root)
     _shell_github_peer_snapshot(value)
-    for case in SHELL_GITHUB_AMBIENT_CASES:
+    for case in _shell_github_ambient_cases(value):
         path = root_path(value) / ("shell-" + case + "-keylog.log")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
@@ -7744,7 +8719,7 @@ def _shell_github_stage_peer(value):
 
 def _shell_github_keylog_snapshot(value):
     result = {}
-    for case in SHELL_GITHUB_AMBIENT_CASES:
+    for case in _shell_github_ambient_cases(value):
         path = root_path(value) / ("shell-" + case + "-keylog.log")
         before = identity(path.lstat())
         need(before[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0),
@@ -7760,9 +8735,10 @@ def _shell_github_keylog_snapshot(value):
 
 def _shell_github_peer_snapshot(value):
     root = root_path(value) / "github-peer"
-    need(sorted(path.name for path in root.iterdir()) == ["github_tls", "github_tls_peer.py"]
+    pins = _shell_github_peer_pins(value)
+    need(sorted(path.name for path in root.iterdir()) == sorted({Path(path).parts[0] for path in pins})
          and sorted(path.name for path in (root / "github_tls").iterdir())
-             == sorted(Path(path).name for path in SHELL_GITHUB_PEER_PINS if path.startswith("github_tls/")),
+             == sorted(Path(path).name for path in pins if path.startswith("github_tls/")),
          "GitHub peer SOURCE roster differs")
     result = {}
     for relative in (".", "github_tls"):
@@ -7772,7 +8748,7 @@ def _shell_github_peer_snapshot(value):
         _xattrs(path, True)
         need(identity(path.lstat()) == before, "GitHub peer directory changed")
         result[relative] = {"identity": list(before)}
-    for relative, (size, digest) in sorted(SHELL_GITHUB_PEER_PINS.items()):
+    for relative, (size, digest) in sorted(pins.items()):
         path = root / relative
         item = protected_record(path, size)
         need(item["size"] == size and item["sha256"] == digest
@@ -7903,8 +8879,18 @@ def _shell_github_publish_payload(value, role, normal, core, normal_raw):
                      "GitHub derivative core differs before copy")
                 _D.write(target, core, 0o444)
             elif relative == "github-ca.pem" and role == "D-S":
-                source = root_path(value) / "github-peer/github_tls/root-ca.pem"
+                # G's exact peer roster does not include a spare CA. Copy the
+                # identical pinned derivative SOURCE directly; old routes keep
+                # their original staged source. Never broaden peer authority.
+                source = (absolute(value["source"]) / "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem"
+                          if shell_github_preflight(value) else root_path(value) / "github-peer/github_tls/root-ca.pem")
+                before = identity(source.lstat())
+                if shell_github_preflight(value):
+                    need(before[3:5] == (value["runnerUid"], value["runnerGid"])
+                         and (row["size"], row["sha256"]) == SHELL_GITHUB_PEER_PINS["github_tls/root-ca.pem"],
+                         "Preflight derivative CA SOURCE owner/identity differs")
                 copy_pinned(source, target, {**row, "path": str(source)}, 0o444)
+                need(identity(source.lstat()) == before, "Original derivative CA SOURCE changed during copy")
             else:
                 source = PREFIX / M / relative
                 need(all(normal[relative][key] == row[key] for key in ("size", "sha256")),
@@ -7943,8 +8929,9 @@ def _shell_github_publish_payload(value, role, normal, core, normal_raw):
 def _shell_github_materials_snapshot(value):
     normal_raw = read(PREFIX / M / "manifest.json", 85945)
     shell_github_manifest(normal_raw, "N")
-    return {"schema": "installed-github-readonly-materials-v1", "sourceSha": value["sourceSha"],
-            "runId": value["runId"], "attempt": value["attempt"], "profile": value["shell"]["githubReadOnly"]["profile"],
+    return {"schema": "installed-github-preflight-materials-v1" if shell_github_preflight(value) else "installed-github-readonly-materials-v1",
+            "sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": value["attempt"],
+            "profile": _shell_github_selection(value)["profile"],
             "derivativeRecipeSha256": SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256,
             "normalManifest": decode(normal_raw),
             "payloads": {role: _tree(PREFIX / pin["manifestSha256"], pin["manifestSha256"], published=True, github=role != "N")
@@ -7953,7 +8940,8 @@ def _shell_github_materials_snapshot(value):
 
 
 def _shell_github_materials_prepare(value, proof, normal, normal_maps):
-    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES)
+    _shell_github_selection(value)
+    need(shell_github(value)
          and _tree(PREFIX / M, M, published=True) == normal, "GitHub N original changed before derivative construction")
     normal_raw = read(PREFIX / M / "manifest.json", 85945)
     core = shell_github_dial_core(read(PREFIX / M / "core.zip", 801091))
@@ -7990,9 +8978,9 @@ def shell_github_material_data(value, raw, normal_maps):
     need(canonical(data) == raw, "GitHub material DATA is not canonical")
     need(type(data) is dict and set(data) == {"schema", "sourceSha", "runId", "attempt", "profile",
          "derivativeRecipeSha256", "normalManifest", "payloads", "peer", "ambientKeylogs"}
-         and data["schema"] == "installed-github-readonly-materials-v1"
+         and data["schema"] == ("installed-github-preflight-materials-v1" if shell_github_preflight(value) else "installed-github-readonly-materials-v1")
          and all(data[key] == value[key] for key in ("sourceSha", "runId", "attempt"))
-         and data["profile"] == value["shell"]["githubReadOnly"]["profile"]
+         and data["profile"] == _shell_github_selection(value)["profile"]
          and data["derivativeRecipeSha256"] == SHELL_GITHUB_DERIVATIVE_RECIPE_SHA256
          and type(data["payloads"]) is dict and set(data["payloads"]) == set(SHELL_GITHUB_PAYLOADS),
          "GitHub original material DATA identity or role roster differs")
@@ -8032,8 +9020,8 @@ def shell_github_material_data(value, raw, normal_maps):
         if role == "N":
             need(canonical(selected) == canonical(normal_maps), "GitHub N material differs from the original loader proof")
         maps[role] = selected
-    peer = data["peer"]
-    need(type(peer) is dict and set(peer) == {".", "github_tls", *SHELL_GITHUB_PEER_PINS}, "GitHub peer material roster differs")
+    peer, pins = data["peer"], _shell_github_peer_pins(value)
+    need(type(peer) is dict and set(peer) == {".", "github_tls", *pins}, "GitHub peer material roster differs")
     for relative, row in peer.items():
         is_directory = relative in (".", "github_tls")
         need(type(row) is dict and set(row) == ({"identity"} if is_directory else {"identity", "size", "sha256"}),
@@ -8044,14 +9032,14 @@ def shell_github_material_data(value, raw, normal_maps):
              and original[2:5] == [stat.S_IFDIR | 0o555 if is_directory else stat.S_IFREG | 0o444, 0, 0]
              and original[5] > 0 and original[6] <= JSON_LIMIT, "GitHub peer material identity/mode differs")
         if not is_directory:
-            size, digest = SHELL_GITHUB_PEER_PINS[relative]
+            size, digest = pins[relative]
             need(original[5] == 1 and type(row["size"]) is int and original[6] == row["size"] == size and row["sha256"] == digest,
                  "GitHub peer SOURCE byte/hash binding differs")
         pair = tuple(original[:2])
         need(pair not in all_inodes, "GitHub peer aliases another admitted material original")
         all_inodes.add(pair)
     keylogs = data["ambientKeylogs"]
-    need(type(keylogs) is dict and set(keylogs) == set(SHELL_GITHUB_AMBIENT_CASES), "GitHub ambient keylog roster differs")
+    need(type(keylogs) is dict and set(keylogs) == set(_shell_github_ambient_cases(value)), "GitHub ambient keylog roster differs")
     for case, row in keylogs.items():
         need(type(row) is dict and set(row) == {"identity", "size", "sha256"}, "GitHub ambient keylog fields differ")
         original = row["identity"]
@@ -8078,7 +9066,7 @@ def _shell_github_roster(value):
 
 def _shell_github_fixtures_prepare(value):
     """One registered project, not the unrelated twenty legacy fixture trees."""
-    need(shell_github(value) and shell_cases(value) in (SHELL_GITHUB_CASES, SHELL_GITHUB_BOUNDARY_CASES), "Different GitHub fixture route")
+    _shell_github_selection(value)
     ancestry = _shell_fixture_ancestry(value)
     root = shell_fixture_root(value)
     root.mkdir(mode=0o700)
@@ -8379,6 +9367,323 @@ def shell_android_fixture(value, case, before_raw, after_raw):
         "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
+
+def shell_recovery_producer_result(stdout, stderr, case, code):
+    need(case in SHELL_RECOVERY_ALL_CASES and type(code) is int and code == 0 and stderr == b""
+         and type(stdout) is bytes and stdout.endswith(b"\n") and b"\n" not in stdout[:-1],
+         "Original recovery fixture producer failed or its capture is incomplete")
+    result = decode(stdout, 2048)
+    _recovery_fields(result, ("schemaVersion", "scope", "case", "materializationOutcome", "coreFatal", "commands",
+        "profileCalls", "attemptedDescriptors", "neverOpenedDescriptors", "attemptedDescriptorsClosed", "handlersRestored",
+        "invocationReleased", "originalQuiescenceRecorded", "retirementInterceptions", "observersRestored", "restored", "followupCoreOrFilesystemOperation"))
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["case"] == case
+         and result["scope"] == "real-core-project-recovery-fixture-v1"
+         and result["materializationOutcome"] == "expected-cleanup-failure",
+         "Original failed materialization generation contract differs")
+    need(all(result[key] is True for key in ("coreFatal", "attemptedDescriptorsClosed", "handlersRestored", "invocationReleased",
+        "originalQuiescenceRecorded", "observersRestored"))
+         and all(type(result[key]) is int and result[key] == 0 for key in ("commands", "profileCalls"))
+         and result["followupCoreOrFilesystemOperation"] is False
+         and type(result["retirementInterceptions"]) is int
+         and result["retirementInterceptions"] == int(case == "project-recovery-cleanup-only")
+         and all(type(result[key]) is int and 0 <= result[key] <= 2048 for key in ("attemptedDescriptors", "neverOpenedDescriptors"))
+         and 0 < result["attemptedDescriptors"] <= result["attemptedDescriptors"] + result["neverOpenedDescriptors"] <= 2048,
+         "Original fixture descriptor/handler/failure attestation differs")
+    _recovery_fields(result["restored"], ("android-services", "ios-services"))
+    need(result["restored"]["android-services"] is (case != SHELL_RECOVERY_PARTIAL)
+         and result["restored"]["ios-services"] is (case == "project-recovery-cleanup-only"),
+         "Real original materialization cleanup effects differ")
+    return result
+
+
+def shell_recovery_producer_argv(value, case):
+    need(shell_recovery(value) and case in shell_cases(value), "Wrong fixed Recovery producer route")
+    return _drop(value, [str(PREFIX / M / "python/bin/python3"), "-I", "-S", "-B", "-c", SHELL_RECOVERY_PRODUCER,
+                        str(PREFIX / M / "core.zip"), str(shell_fixture_root(value) / case / "project"), case])
+
+
+def _shell_recovery_namespace_live(value, binding):
+    """Metadata correspondence; also usable by the joined nonroot negative collector.
+
+    There is no permission change, private-root access, owner lookup or teardown
+    inference here. Callers must first establish original command/client finality.
+    """
+    namespace = _shell_namespace_data(value, decode(binding, SHELL_FIXTURE_NAMESPACE_LIMIT))
+    need(canonical(namespace) == binding, "Original Recovery namespace DATA is not canonical")
+    for row in (*namespace["ancestors"], namespace["control"]):
+        path = Path(row["path"])
+        need(list(identity(path.lstat())[:5]) == row["identity"], "Original Recovery namespace ancestry changed")
+        _xattrs(path, True)
+    root = shell_fixture_root(value)
+    need(list(identity(root.lstat())) == namespace["identity"], "Original Recovery namespace changed")
+    _xattrs(root, True)
+    _shell_namespace_roster(root, shell_fixture_children(value))
+    need(list(identity(root.lstat())) == namespace["identity"], "Original Recovery namespace changed during roster read")
+    return namespace
+
+
+def _recovery_entry_kind(relative):
+    # Finite real-core synthetic fixture names only; never an arbitrary walk.
+    if relative in (".", "project", "project/.mobile-release", "project/.mobile-release/build-inputs",
+                    "project/.mobile-release/build-inputs/scratch"):
+        return "directory"
+    if relative in ("project/.gitignore", "project/unrelated.txt", "project/google-services.json", "project/GoogleService-Info.plist",
+                    "project/saved-foreign-android", "project/saved-foreign-ios", "project/.mobile-release/build-inputs-complete.json"):
+        return "file"
+    if re.fullmatch(r"project/\.mobile-release/build-inputs/(?:header\.json|intent\.json|checkpoint-(?:0[0-9]{2}|1[01][0-9]|12[0-7])\.json|(?:backup|stage|retired)-[01])", relative):
+        return "file"
+    raise Refused("Unexpected Recovery fixture member; preserve the original subtree")
+
+
+def _shell_recovery_inventory(value, binding, case, stage):
+    need(shell_recovery(value) and case in shell_cases(value) and stage in ("initial", "generated", "before", "after"),
+         "Wrong fixed Recovery fixture inventory")
+    namespace = _shell_recovery_namespace_live(value, binding)
+    root, rows, total = shell_fixture_root(value) / case, [], 0
+    device = namespace["identity"][0]
+    seen = set()
+    def visit(path, relative):
+        nonlocal total
+        need(len(rows) < 160, "Recovery fixture member bound exceeded")
+        kind = _recovery_entry_kind(relative)  # Admit the fixed name before descending/reading.
+        before = identity(path.lstat())
+        need(before[0] == device and before[:2] not in seen
+             and before[3:5] == (value["runnerUid"], value["runnerGid"])
+             and before[2] == ((stat.S_IFDIR | 0o700) if kind == "directory" else (stat.S_IFREG | 0o600))
+             and (2 <= before[5] <= 6 if kind == "directory" else before[5] == 1),
+             "Recovery fixture aliases, ownership, kind or mode differ")
+        seen.add(before[:2]); _xattrs(path, kind == "directory")
+        row = {"path": relative, "identity": list(before), "sha256": None}
+        rows.append(row)
+        if kind == "directory":
+            children = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    need(len(children) < 136, "Recovery fixture directory bound exceeded")
+                    child = entry.name if relative == "." else relative + "/" + entry.name
+                    _recovery_entry_kind(child)
+                    children.append((entry.name, child))
+            for name, child in sorted(children):
+                visit(path / name, child)
+        else:
+            need(0 < before[6] <= 256 << 10, "Recovery synthetic/control file bound differs")
+            raw = read(path, 256 << 10)
+            total += len(raw)
+            need(total <= 136 * (256 << 10), "Recovery fixed fixture aggregate bound exceeded")
+            row["sha256"] = hashlib.sha256(raw).hexdigest()  # Private bytes never leave this bounded read.
+        need(identity(path.lstat()) == before, "Recovery original fixture changed during inventory")
+    visit(root, ".")
+    need(_shell_recovery_namespace_live(value, binding) == namespace, "Recovery namespace changed after inventory")
+    result = {"schemaVersion": 1, "fixture": "real-core-project-recovery-v1", "sourceSha": value["sourceSha"],
+              "case": case, "stage": stage, "namespace": namespace, "entries": rows}
+    need(len(canonical(result)) <= SHELL_RECOVERY_INVENTORY_LIMIT, "Recovery inventory DATA bound exceeded")
+    return result
+
+
+def _shell_recovery_inventory_data(value, raw, case, stage):
+    result = decode(raw, SHELL_RECOVERY_INVENTORY_LIMIT)
+    _recovery_fields(result, ("schemaVersion", "fixture", "sourceSha", "case", "stage", "namespace", "entries"))
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+         and result["fixture"] == "real-core-project-recovery-v1" and result["sourceSha"] == value["sourceSha"]
+         and result["case"] == case and result["stage"] == stage
+         and type(result["entries"]) is list and 6 <= len(result["entries"]) <= 160,
+         "Original Recovery fixture inventory DATA differs")
+    namespace = _shell_namespace_data(value, result["namespace"])
+    rows, seen = {}, set()
+    for row in result["entries"]:
+        _recovery_fields(row, ("path", "identity", "sha256"))
+        need(type(row["path"]) is str and row["path"] not in rows, "Repeated Recovery inventory member")
+        kind = _recovery_entry_kind(row["path"])
+        item = row["identity"]
+        need(type(item) is list and len(item) == 9 and all(type(n) is int and 0 <= n < 2**64 for n in item)
+             and item[0] == namespace["identity"][0] and item[1] > 0 and tuple(item[:2]) not in seen
+             and item[3:5] == [value["runnerUid"], value["runnerGid"]]
+             and item[2] == ((stat.S_IFDIR | 0o700) if kind == "directory" else (stat.S_IFREG | 0o600))
+             and (2 <= item[5] <= 6 if kind == "directory" else item[5] == 1), "Recovery inventory identity differs")
+        need((row["sha256"] is None and item[6] <= 1 << 20) if kind == "directory" else
+             (type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None and 0 < item[6] <= 256 << 10),
+             "Recovery inventory digest/size differs")
+        rows[row["path"]] = row; seen.add(tuple(item[:2]))
+    for name in rows:
+        if name != ".":
+            parent = str(Path(name).parent)
+            need(parent in rows and rows[parent]["sha256"] is None, "Recovery inventory omitted original ancestry")
+    need("project" in rows and "." in rows, "Recovery original project is missing")
+    checkpoints = sorted(name for name in rows if "/checkpoint-" in name)
+    need(checkpoints == ["project/.mobile-release/build-inputs/checkpoint-%03d.json" % i for i in range(len(checkpoints))],
+         "Recovery checkpoint sequence is not complete")
+    return result, rows
+
+
+def _recovery_content(row, name):
+    raw = SHELL_RECOVERY_BYTES[name]
+    need(row["identity"][6] == len(raw) and row["sha256"] == hashlib.sha256(raw).hexdigest(),
+         "Recovery synthetic file content changed")
+
+
+def _recovery_moved(original, later):
+    # Exclusive core rename may change ctime, but not file bytes, inode, mode,
+    # uid/gid, link count, length or mtime. Never treat same bytes as same file.
+    need(original["identity"][:8] == later["identity"][:8] and original["sha256"] == later["sha256"],
+         "Recovery original file identity/content correspondence differs")
+
+
+
+def _shell_recovery_generated(value, case, initial_raw, generated_raw):
+    initial_doc, initial = _shell_recovery_inventory_data(value, initial_raw, case, "initial")
+    generated_doc, generated = _shell_recovery_inventory_data(value, generated_raw, case, "generated")
+    need(initial_doc["namespace"] == generated_doc["namespace"], "Recovery producer changed original namespace")
+    private, pending = "project/.mobile-release", "project/.mobile-release/build-inputs"
+    android, ios = "project/google-services.json", "project/GoogleService-Info.plist"
+    static = {".", "project", "project/.gitignore", "project/unrelated.txt", android, ios}
+    need(set(initial) == static, "Recovery initial fixture contains an unexpected member")
+    cleanup, partial = case == "project-recovery-cleanup-only", case == SHELL_RECOVERY_PARTIAL
+    controls = {name for name in generated if "/checkpoint-" in name}
+    expected = static | {private, pending, pending + "/header.json", pending + "/intent.json"} | controls
+    expected |= {private + "/build-inputs-complete.json"} if cleanup else {pending + "/backup-1"}
+    if partial:
+        expected.add(pending + "/backup-0")
+    need(controls and set(generated) == expected, "Real core fixture materialization left an unexpected inventory")
+    for row, label in ((initial[android], "android-original"), (initial[ios], "ios-original"),
+                       (initial["project/.gitignore"], "ignore"), (initial["project/unrelated.txt"], "unrelated")):
+        _recovery_content(row, label)
+    need(all(generated[name] == initial[name] for name in ("project/.gitignore", "project/unrelated.txt"))
+         and all(generated[name]["identity"][:5] == initial[name]["identity"][:5] for name in (".", "project")),
+         "Recovery producer changed unrelated original files/ancestry")
+    _recovery_moved(initial[android], generated[pending + "/backup-0" if partial else android])
+    _recovery_moved(initial[ios], generated[ios if cleanup else pending + "/backup-1"])
+    if not cleanup:
+        _recovery_content(generated[ios], "ios-foreign")
+    if partial:
+        _recovery_content(generated[android], "android-foreign")
+    return generated
+
+def shell_recovery_fixture(value, case, initial_raw, generated_raw, before_raw, after_raw):
+    _shell_recovery_generated(value, case, initial_raw, generated_raw)
+    snapshots = [_shell_recovery_inventory_data(value, raw, case, stage) for raw, stage in
+                 zip((initial_raw, generated_raw, before_raw, after_raw), ("initial", "generated", "before", "after"))]
+    need(all(item[0]["namespace"] == snapshots[0][0]["namespace"] for item in snapshots), "Recovery inventories changed namespace")
+    initial, generated, before, after = [item[1] for item in snapshots]
+    android, ios, private, pending = "project/google-services.json", "project/GoogleService-Info.plist", "project/.mobile-release", "project/.mobile-release/build-inputs"
+    static = {".", "project", "project/.gitignore", "project/unrelated.txt", android, ios}
+    need(set(initial) == static, "Recovery initial synthetic fixture roster differs")
+    for row, name in ((initial[android], "android-original"), (initial[ios], "ios-original"),
+                      (initial["project/.gitignore"], "ignore"), (initial["project/unrelated.txt"], "unrelated")):
+        _recovery_content(row, name)
+    for current in (generated, before, after):
+        need(all(current[name] == initial[name] for name in ("project/.gitignore", "project/unrelated.txt")),
+             "Recovery changed an unrelated original or ignore file")
+        need(all(current[name]["identity"][:5] == initial[name]["identity"][:5] for name in (".", "project")),
+             "Recovery replaced original task/project directories")
+    need(private in generated and pending in generated and private in after
+         and all(current[private]["identity"][:5] == generated[private]["identity"][:5] for current in (before, after)),
+         "Recovery real private metadata directory binding differs")
+    terminal = private + "/build-inputs-complete.json"
+    cleanup, partial = case == "project-recovery-cleanup-only", case == SHELL_RECOVERY_PARTIAL
+    need((terminal in generated) is cleanup and (terminal in before) is cleanup and terminal not in after,
+         "Recovery terminal control lifecycle differs")
+    need(pending + "/header.json" in generated and pending + "/intent.json" in generated,
+         "Recovery generation lacks actual original controls")
+    backup_android, backup_ios = pending + "/backup-0", pending + "/backup-1"
+    if cleanup:
+        need(backup_android not in generated and backup_ios not in generated and set(generated) == set(before),
+             "Cleanup-only generation retained application restoration work")
+        _recovery_moved(initial[android], generated[android]); _recovery_moved(initial[ios], generated[ios])
+        _recovery_content(before[android], "later-edit")
+        need(before[android]["identity"][:6] == generated[android]["identity"][:6], "Later synthetic edit replaced its original")
+        need(all(before[name] == row for name, row in generated.items() if name != android), "Later edit changed private controls/unrelated files")
+        need(set(after) == static | {private} and after[android] == before[android] and after[ios] == before[ios],
+             "Cleanup-only metadata retirement touched a later application target")
+    else:
+        saved = "project/saved-foreign-android" if partial else "project/saved-foreign-ios"
+        removed = android if partial else ios
+        _recovery_content(generated[ios], "ios-foreign")
+        _recovery_moved(initial[ios], generated[backup_ios])
+        if partial:
+            _recovery_content(generated[android], "android-foreign"); _recovery_moved(initial[android], generated[backup_android])
+        else:
+            _recovery_moved(initial[android], generated[android]); need(backup_android not in generated, "Pending fixture did not restore Android independently")
+        need(set(before) == (set(generated) - {removed}) | {saved} and removed not in before,
+             "Parent fixture transition moved something other than its fixed synthetic sentinel")
+        _recovery_moved(generated[removed], before[saved])
+        need(all(before[name] == row for name, row in generated.items() if name not in (removed, "project")),
+             "Parent sentinel preservation changed private controls/unrelated files")
+        need(after[saved] == before[saved], "Desktop recovery changed the preserved foreign sentinel")
+        _recovery_moved(initial[android], after[android])
+        if partial:
+            need(pending in after and backup_android not in after and backup_ios in after
+                 and after[ios] == before[ios] and after[backup_ios] == before[backup_ios],
+                 "Partial recovery did not preserve the unresolved foreign target/backup")
+            appended = {name for name in after if name not in before and "/checkpoint-" in name}
+            need(appended and set(after) == (set(before) - {backup_android}) | {android} | appended
+                 and after[pending]["identity"][:5] == before[pending]["identity"][:5],
+                 "Partial recovery retained unexpected work or replaced the original pending directory")
+            for name, row in before.items():
+                if name.startswith(pending + "/") and row["sha256"] is not None and "/backup-" not in name:
+                    need(after.get(name) == row, "Partial recovery changed an original journal control")
+        else:
+            need(set(after) == static | {private, saved}, "Completed pending recovery retained unexpected metadata")
+            _recovery_moved(initial[ios], after[ios])
+    return {"fixture": "real-core-project-recovery-v1", "case": case, "realCoreGenerated": True,
+            "syntheticRetirementInjection": cleanup, "originalTargetsRestored": not partial,
+            "metadataRetired": not partial, "foreignPreserved": not cleanup, "laterEditPreserved": cleanup,
+            "partialEffectsObserved": partial, "privateContentsExported": False}
+
+
+def _shell_recovery_fixtures_prepare(value):
+    need(shell_recovery(value) and not _FAILED and _ROOT == root_path(value), "Recovery fixtures require the original healthy command stream")
+    ancestry = _shell_fixture_ancestry(value)
+    root = shell_fixture_root(value)
+    root.mkdir(mode=0o700)  # Exclusive; occupied names are never adopted or repaired.
+    original = identity(root.lstat())
+    need(original[2:5] == (stat.S_IFDIR | 0o700, 0, 0) and original[0] == ancestry["control"]["identity"][0],
+         "Fresh Recovery namespace protection differs")
+    _xattrs(root, True)
+    for case in shell_cases(value):
+        base, project = root / case, root / case / "project"
+        base.mkdir(mode=0o700); project.mkdir(mode=0o700)
+        for leaf, content in ((".gitignore", "ignore"), ("unrelated.txt", "unrelated"),
+                              ("google-services.json", "android-original"), ("GoogleService-Info.plist", "ios-original")):
+            _D.write(project / leaf, SHELL_RECOVERY_BYTES[content], 0o600)
+            os.chown(project / leaf, value["runnerUid"], value["runnerGid"])
+        os.chown(project, value["runnerUid"], value["runnerGid"])
+        os.chown(base, value["runnerUid"], value["runnerGid"])
+    _shell_namespace_roster(root, shell_fixture_children(value))
+    need(identity(root.lstat())[:5] == original[:5] and _shell_fixture_ancestry(value) == ancestry,
+         "Fresh Recovery namespace ancestry changed")
+    os.chmod(root, 0o755)
+    namespace = canonical({"root": str(root), "identity": list(identity(root.lstat())),
+                           "children": list(shell_fixture_children(value)), **ancestry})
+    _shell_namespace_check(value, namespace)
+    for case in shell_cases(value):
+        _retain("shell-" + case + "-initial.json", canonical(_shell_recovery_inventory(value, namespace, case, "initial")))
+        environment = {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "HOME": "/nonexistent"}
+        produced = command("recovery-fixture-" + case, shell_recovery_producer_argv(value, case), maximum=30, env=environment)
+        shell_recovery_producer_result(produced.stdout, produced.stderr, case, produced.returncode)
+        # Only the real original child/I/O/owner return and exact typed expected
+        # failure attestation permit the parent to touch these fixed sentinels.
+        generated = _shell_recovery_inventory(value, namespace, case, "generated")
+        _retain("shell-" + case + "-generated.json", canonical(generated))
+        _shell_recovery_generated(value, case,
+            read(_ROOT / "public" / ("shell-" + case + "-initial.json"), SHELL_RECOVERY_INVENTORY_LIMIT), canonical(generated))
+        project = root / case / "project"
+        if case == "project-recovery-cleanup-only":
+            fd = os.open(project / "google-services.json", os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                raw = SHELL_RECOVERY_BYTES["later-edit"]
+                need(os.write(fd, raw) == len(raw), "Fixed later synthetic edit was incomplete")
+                os.fsync(fd)
+            finally:
+                os.close(fd)  # One attempt; a close error aborts the original root stream.
+        else:
+            source, target = (("google-services.json", "saved-foreign-android") if case == SHELL_RECOVERY_PARTIAL
+                              else ("GoogleService-Info.plist", "saved-foreign-ios"))
+            _absent(project / target)
+            os.rename(project / source, project / target)
+        # No recovery/core operation is performed by the parent. The next core
+        # invocation is the actual UI-owned Inspect, with its own native owner.
+    return namespace
+
 def _shell_fixture_ancestry(value):
     """Metadata only; the search-only control root and private contents stay put."""
     need("shell" in value and "installed" not in value and _ROOT == root_path(value), "Different original shell fixture route")
@@ -8452,7 +9757,7 @@ def _shell_namespace_check(value, binding):
     need(list(identity(root.lstat())) == namespace["identity"], "Original shell fixture namespace changed")
     _xattrs(root, True)
     # Admit the selected names before any fixture descendant read.
-    if shell_github(value):
+    if shell_github(value) or shell_recovery(value):
         _shell_namespace_roster(root, shell_fixture_children(value))
     else:
         _shell_namespace_roster(root)
@@ -8548,6 +9853,8 @@ def _shell_fixtures_prepare(value):
     Ordinary21 keeps four Android-named entries empty and root-only so the
     unchanged native namespace capture applies; they are not Android fixtures.
     """
+    if shell_recovery(value):
+        return _shell_recovery_fixtures_prepare(value)
     if shell_github(value):
         return _shell_github_fixtures_prepare(value)
     if shell_android(value):
@@ -9539,15 +10846,16 @@ def _shell_android_terminal(projection, case, original):
 
 
 def shell_android_receipt(raw, case):
-    """Four source-defined engineering cases; no normal activation/full native gates."""
+    """Engineering cases; ordinary-selection history is not product/native gate credit."""
     need(type(case) is str and case in SHELL_ANDROID_CASES, "Different fixed Android receipt case")
     receipt = decode(raw, SHELL_ANDROID_RECEIPT_LIMIT)
-    _shell_android_object(receipt, {"schema", "case", "qualificationOnly", "builder", "projectPicker", "savedObservation",
+    _shell_android_object(receipt, {"schema", "case", "qualificationOnly", "builder", "normalSelection", "projectPicker", "savedObservation",
         "savedVersionObservation", "requests", "ui", "busyObserved", "original", "toolsLedgerSettled", "nativeIntegrity",
         "coreLifetime", "terminal", "fixture", "limits"}, "Android receipt fields differ")
     need(raw == canonical(receipt), "Android receipt is not original canonical LF DATA")
     cancelled, refused = case == "android-build-cancel", case == "android-build-refusals"
-    fixed = {"schema": "installed-android-build-v1", "case": case, "qualificationOnly": True, "builder": "normal",
+    fixed = {"schema": "installed-android-build-v2", "case": case, "qualificationOnly": True, "builder": "normal",
+        "normalSelection": {"selectedBeforeObservation": True, "observerGranted": False},
         "projectPicker": True, "savedObservation": True, "savedVersionObservation": True,
         "requests": {"androidPrepare": 1, "androidStart": 1, "androidCancel": 1 if cancelled else 0},
         "ui": {"start": True, "consent": True, "terminal": True, "cancel": cancelled}, "busyObserved": cancelled,
@@ -9739,6 +11047,10 @@ def _shell_prepare(value, case, namespace):
         _retain("shell-" + case + "-before.json", canonical(_shell_tools_offline_inventory(value, namespace, case)))
     if case in SHELL_ANDROID_CASES:
         _retain("shell-" + case + "-before.json", canonical(_shell_android_inventory(value, namespace, case)))
+    if case in SHELL_RECOVERY_ALL_CASES:
+        _retain("shell-" + case + "-before.json", canonical(_shell_recovery_inventory(value, namespace, case, "before")))
+    if shell_github_preflight(value):
+        _shell_github_preflight_home(value, case)
     return environment, log_binding
 
 
@@ -9747,7 +11059,16 @@ def _shell_fixtures_final(value, namespace):
     # Every original case, including the eight Tools/Offline cases, returned through the
     # same shell_result gate. Check every earlier original family and the
     # saved metadata/version together, never by following a failed/possibly-live case.
+    if shell_recovery(value):
+        need(not shell_recovery_negative(value), "Failed recovery experiment cannot enter success finality")
+        for case in shell_cases(value):
+            need(canonical(_shell_recovery_inventory(value, namespace, case, "after"))
+                 == read(_ROOT / "public" / ("shell-" + case + "-after.json"), SHELL_RECOVERY_INVENTORY_LIMIT),
+                 "A later Recovery case changed an earlier original fixture")
+        return
     if shell_github(value):
+        if shell_github_preflight(value):
+            _shell_github_preflight_journals_final(value)
         after = canonical(_shell_github_inventory(value, namespace))
         shell_github_fixture(value, read(_ROOT / "public/shell-github-project-before.json", SHELL_GITHUB_FIXTURE_LIMIT), after)
         _retain("shell-github-project-after.json", after)
@@ -9827,6 +11148,12 @@ def _shell_settled_failure_result(stdout, stderr, case, code, labels):
 
 def shell_result(stdout, stderr, case, code, expected, *, failure_labels=None):
     """Original bounded captures, not wrapper zero or an observation delay."""
+    if case in SHELL_RECOVERY_ALL_CASES:
+        need(failure_labels is None, "Recovery requires its own original observation, not failure labels")
+        return shell_recovery_result(stdout, stderr, case, code)
+    if case in SHELL_GITHUB_PREFLIGHT_CASES:
+        need(failure_labels is None, "Preflight success requires its actual receipt, not failure labels")
+        return shell_github_preflight_result(stdout, stderr, case, code, expected)
     if case in SHELL_GITHUB_ALL_CASES:
         need(failure_labels is None, "GitHub success requires its actual receipt, not legacy failure labels")
         return shell_github_result(stdout, stderr, case, code, expected)
@@ -10283,6 +11610,284 @@ def _shell_error_data(original, origin):
     return row
 
 
+
+def _shell_recovery_negative_prepare(value):
+    need(shell_recovery_negative(value) and _ROOT == root_path(value), "Wrong original recovery negative sink")
+    path = _ROOT / "shell-project-recovery-partial.observation"
+    parent = identity(_ROOT.lstat())
+    need(parent[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Recovery observation parent differs")
+    _xattrs(_ROOT, True)
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"]); os.fchmod(fd, 0o620)
+        original = identity(os.fstat(fd))
+        need(original[0] == parent[0] and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0)
+             and identity(path.lstat()) == original and identity(_ROOT.lstat())[:6] == parent[:6]
+             and os.listxattr(fd) == [], "Fresh original recovery negative sink differs")
+        return fd, original[:6]
+    except BaseException:
+        try:
+            os.close(fd)
+        except BaseException:
+            pass  # Preserve the primary; never retry an ambiguous descriptor close.
+        raise
+
+
+def _shell_recovery_owner_failure(value, error, labels, observation, call):
+    """Record the exact original expected failure; this never resumes the stream."""
+    need(_FAILED and shell_recovery_negative(value) and _RECOVERY_NEGATIVE is not None,
+         "Recovery failed stream is not original")
+    _shell_call_finished(call, False)
+    _RECOVERY_NEGATIVE["ownerCall"] = _shell_call_summary(call)
+    _RECOVERY_NEGATIVE["error"] = _shell_error_data(error, "owner")
+    need(type(error) is getattr(_OWNER, "ProcessError", None)
+         and BaseException.args.__get__(error) == ("owned command exceeded its original deadline",)
+         and all(vars(error).get(key) is True for key in ("dispatched", "contained", "cleanup_complete")),
+         "Recovery negative original command cleanup/failure differs")
+    _RECOVERY_NEGATIVE["originalOwnerFinal"] = True
+    raw_labels, parsed = _shell_labels_read(labels, with_raw=True)
+    need(raw_labels == b"" and parsed is None, "Recovery negative contains another native failure")
+    _RECOVERY_NEGATIVE["labelsBytes"] = 0
+    fd, binding = observation
+    before = identity(os.fstat(fd))
+    need(before[:6] == binding and 0 < before[6] <= SHELL_RECOVERY_REPORT_LIMIT and os.listxattr(fd) == [],
+         "Original recovery negative sink identity/bound differs")
+    raw = os.read(fd, SHELL_RECOVERY_REPORT_LIMIT + 1)  # One original read, no seek or reopened path.
+    need(len(raw) == before[6] and identity(os.fstat(fd)) == before, "Original recovery observation changed or was incomplete")
+    shell_recovery_receipt(raw, SHELL_RECOVERY_PARTIAL, source=value["sourceSha"])
+    _retain("project-recovery-negative.observation", raw)
+    _RECOVERY_NEGATIVE["observation"] = {"path": "project-recovery-negative.observation", "size": len(raw),
+                                         "sha256": hashlib.sha256(raw).hexdigest()}
+    _RECOVERY_NEGATIVE["classificationEligible"] = True
+    # Close facts are still false. Only command()'s actual finally can set them,
+    # and only main's later immutable error record publishes the complete facts.
+
+
+def shell_recovery_negative_owner_data(value, failure):
+    _recovery_fields(failure, ("schemaVersion", "scope", "case", "sourceSha", "phase", "classificationEligible",
+        "applicationFinal", "originalOwnerFinal", "error", "ownerCall", "labelsBytes", "observation",
+        "failureSinkClosed", "observationSinkClosed"))
+    need(type(failure["schemaVersion"]) is int and failure["schemaVersion"] == 1
+         and failure["scope"] == "original-recovery-negative-owner-v1" and failure["case"] == SHELL_RECOVERY_PARTIAL
+         and failure["sourceSha"] == value["sourceSha"] and failure["phase"] == "shell-" + SHELL_RECOVERY_PARTIAL
+         and all(failure[key] is True for key in ("classificationEligible", "originalOwnerFinal", "failureSinkClosed", "observationSinkClosed"))
+         and failure["applicationFinal"] is False and type(failure["labelsBytes"]) is int and failure["labelsBytes"] == 0,
+         "Recovery negative is not the exact final original failed owner")
+    error = failure["error"]
+    _recovery_fields(error, ("type", "origin", "originalProcessFacts", "message"))
+    need(error == {"type": "ProcessError", "origin": "owner", "message": "owned command exceeded its original deadline",
+                  "originalProcessFacts": {"dispatched": True, "contained": True, "cleanup_complete": True}}
+         and all(type(n) is bool for n in error["originalProcessFacts"].values()), "Recovery negative trusted error facts differ")
+    call = failure["ownerCall"]
+    _recovery_fields(call, ("timeoutSeconds", "ownerReturned", "startMonotonic", "endMonotonic", "ownerElapsedSeconds"))
+    need(type(call["timeoutSeconds"]) is int and call["timeoutSeconds"] == SHELL_RECOVERY_NEGATIVE_SECONDS
+         and call["ownerReturned"] is False
+         and all(type(call[key]) in (float, int) and math.isfinite(call[key]) and call[key] > 0
+                 for key in ("startMonotonic", "endMonotonic", "ownerElapsedSeconds"))
+         and call["ownerElapsedSeconds"] == call["endMonotonic"] - call["startMonotonic"]
+         and SHELL_RECOVERY_NEGATIVE_SECONDS <= call["ownerElapsedSeconds"] < SHELL_RECOVERY_NEGATIVE_SECONDS + 10
+         and call["endMonotonic"] < value["deadline"] - CLIENT_RESERVATION - 1,
+         "Recovery negative did not reach and settle its exact original finite endpoint")
+    observation = failure["observation"]
+    _recovery_fields(observation, ("path", "size", "sha256"))
+    need(observation["path"] == "project-recovery-negative.observation" and type(observation["size"]) is int
+         and 0 < observation["size"] <= SHELL_RECOVERY_REPORT_LIMIT and type(observation["sha256"]) is str
+         and re.fullmatch(r"[0-9a-f]{64}", observation["sha256"]) is not None, "Recovery original observation pin differs")
+    return failure
+
+
+def _shell_recovery_negative_public(name):
+    """One bounded original read, only of these two protected negative inputs."""
+    need(_ROOT is not None and name in (SHELL_RECOVERY_LOADER_BEFORE, "published-before-upgrade.txt"),
+         "Recovery negative interval input is not fixed")
+    path = _ROOT / "public" / name
+    directory(path.parent, protected=True)
+    before = path.lstat()
+    need(before.st_uid == before.st_gid == 0 and stat.S_IMODE(before.st_mode) == 0o444,
+         "Recovery negative interval input is not protected")
+    pin, raw = record(path, LIMIT, content=True)
+    need(identity(path.lstat()) == identity(before), "Recovery negative interval input changed after its original read")
+    return raw, {**pin, "path": name}
+
+
+def _shell_recovery_negative_loader_binding(value, start, request_sha):
+    need(shell_recovery_negative(value) and type(start) is dict and start.get("sourceSha") == value["sourceSha"]
+         and start.get("handoffSha256") == request_sha and start.get("deadline") == value["deadline"]
+         and type(start.get("entrySha256")) is str and re.fullmatch(r"[0-9a-f]{64}", start["entrySha256"]) is not None
+         and type(request_sha) is str and re.fullmatch(r"[0-9a-f]{64}", request_sha) is not None
+         and type(start.get("invocationId")) is str and re.fullmatch(r"[0-9a-f]{32}", start["invocationId"]) is not None,
+         "Recovery negative interval source/original invocation differs")
+    return {"sourceSha": value["sourceSha"], "entrySha256": start["entrySha256"], "handoffSha256": request_sha,
+            "invocationId": start["invocationId"], "deadline": value["deadline"]}
+
+
+def shell_recovery_negative_loader_before_data(value, start, request_sha, before, published_raw):
+    """Closed original snapshot correspondence; never runtime admission."""
+    binding = _shell_recovery_negative_loader_binding(value, start, request_sha)
+    _recovery_fields(before, ("schemaVersion", "scope", *binding, "publication", "loader"))
+    need(type(before["schemaVersion"]) is int and before["schemaVersion"] == 1
+         and before["scope"] == "project-recovery-negative-loader-before-v1"
+         and canonical({key: before[key] for key in binding}) == canonical(binding)
+         and type(published_raw) is bytes and 0 < len(published_raw) <= LIMIT,
+         "Recovery negative original admitted snapshot binding differs")
+    publication = {"path": "published-before-upgrade.txt", "size": len(published_raw),
+                   "sha256": hashlib.sha256(published_raw).hexdigest()}
+    need(canonical(before["publication"]) == canonical(publication), "Recovery negative original P0 pin differs")
+    published = decode(published_raw, LIMIT)
+    need(type(published) is dict and set(published) == {"P0"} and type(published["P0"]) is dict
+         and 0 < len(published["P0"]) <= 8192, "Recovery negative original publication roster differs")
+    proof = before["loader"]
+    need(type(proof) is dict and proof.get("payloadAdmitted") is True and proof.get("runtimeDataRechecked") is False
+         and type(start.get("namespaces")) is dict and canonical(proof.get("namespaces")) == canonical(start["namespaces"]),
+         "Recovery negative snapshot is not the actual prelaunch payload-admitted proof")
+    return proof, published["P0"]
+
+
+def _shell_recovery_negative_loader_before(value, start, request_sha, loader, original):
+    # Called once directly after actual payload admission, before the negative
+    # fixture/native launch. Entry/map summaries cannot replace this original.
+    need(not _FAILED and time.monotonic() < _END, "Recovery negative original snapshot was late or followed failure")
+    published_raw, publication = _shell_recovery_negative_public("published-before-upgrade.txt")
+    before = {"schemaVersion": 1, "scope": "project-recovery-negative-loader-before-v1",
+              **_shell_recovery_negative_loader_binding(value, start, request_sha), "publication": publication, "loader": loader}
+    _, published = shell_recovery_negative_loader_before_data(value, start, request_sha, before, published_raw)
+    need(canonical(published) == canonical(original) and time.monotonic() < _END,
+         "Recovery negative original admitted publication changed or closed late")
+    _retain(SHELL_RECOVERY_LOADER_BEFORE, canonical(before))
+    need(time.monotonic() < _END, "Recovery negative original snapshot closed late")
+
+
+def _shell_recovery_negative_interval(value, start, request_sha, domain):
+    # Only the existing authenticated root StopPost calls this after failed
+    # owner/read closure, MainPID0 and no-denials. It creates no process owner.
+    need(shell_recovery_negative(value) and not _FAILED and time.monotonic() < _END,
+         "Recovery negative original final interval is unavailable")
+    before_raw, before_pin = _shell_recovery_negative_public(SHELL_RECOVERY_LOADER_BEFORE)
+    need(time.monotonic() < _END, "Recovery negative original snapshot read closed late")
+    published_raw, publication = _shell_recovery_negative_public("published-before-upgrade.txt")
+    before = decode(before_raw, LIMIT)
+    proof, original = shell_recovery_negative_loader_before_data(value, start, request_sha, before, published_raw)
+    original_proof = canonical({**proof, "runtimeDataRechecked": True})
+    need(time.monotonic() < _END, "Recovery negative original P0 read closed late")
+    need(_tree(PREFIX / M, M, published=True) == original and time.monotonic() < _END,
+         "Recovery negative published runtime changed or final rewalk closed late")
+    _shell_data_check(proof)
+    need(time.monotonic() < _END, "Recovery negative original DATA recheck closed late")
+    _installed_loader_check(proof)
+    need(canonical(proof) == original_proof and time.monotonic() < _END,
+         "Recovery negative original loader interval changed or closed late")
+    closed_domain = _domain_events(domain)
+    _no_denials(closed_domain)
+    need(time.monotonic() < _END, "Recovery negative original no-denials interval closed late")
+    interval = {"schemaVersion": 1, "scope": "project-recovery-negative-final-interval-v1",
+                **_shell_recovery_negative_loader_binding(value, start, request_sha),
+                "before": before_pin, "publication": publication, "loader": proof, "publicationUnchanged": True}
+    raw = canonical(interval)
+    _retain(SHELL_RECOVERY_INTERVAL, raw)
+    pin = {"path": SHELL_RECOVERY_INTERVAL, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    need(_FILES[-1] == pin and time.monotonic() < _END, "Recovery negative original interval retention closed late or differs")
+    return closed_domain, pin
+
+
+def shell_recovery_negative_interval_data(value, start, stop, raw_files):
+    """After the original client joined, require the distinct real final interval."""
+    names = (SHELL_RECOVERY_LOADER_BEFORE, SHELL_RECOVERY_INTERVAL, "published-before-upgrade.txt")
+    need(type(raw_files) is dict and all(name in raw_files and type(raw_files[name]) is bytes
+         and 0 < len(raw_files[name]) <= LIMIT for name in names), "Recovery negative original interval files are missing")
+    before_raw, interval_raw, published_raw = (raw_files[name] for name in names)
+    before, interval = decode(before_raw, LIMIT), decode(interval_raw, LIMIT)
+    proof, _ = shell_recovery_negative_loader_before_data(value, start, start["handoffSha256"], before, published_raw)
+    binding = _shell_recovery_negative_loader_binding(value, start, start["handoffSha256"])
+    _recovery_fields(interval, ("schemaVersion", "scope", *binding, "before", "publication", "loader", "publicationUnchanged"))
+    need(type(interval["schemaVersion"]) is int and interval["schemaVersion"] == 1
+         and interval["scope"] == "project-recovery-negative-final-interval-v1"
+         and canonical({key: interval[key] for key in binding}) == canonical(binding)
+         and interval["publicationUnchanged"] is True
+         and canonical(interval["publication"]) == canonical(before["publication"])
+         and canonical(interval["before"]) == canonical({"path": SHELL_RECOVERY_LOADER_BEFORE, "size": len(before_raw),
+             "sha256": hashlib.sha256(before_raw).hexdigest()})
+         and canonical(stop.get("interval")) == canonical({"path": SHELL_RECOVERY_INTERVAL, "size": len(interval_raw),
+             "sha256": hashlib.sha256(interval_raw).hexdigest()})
+         and canonical(interval["loader"]) == canonical({**proof, "runtimeDataRechecked": True}),
+         "Recovery negative protected original final interval differs")
+    # Reuse closed loader/map/policy correspondence, not the normal success
+    # verifier and never a manufactured loader-final.json file.
+    shell_closed_loader(value, raw_files, negative_interval=interval["loader"])
+
+
+def _shell_recovery_negative_stop(value, request_sha, stop_end):
+    # A fresh original ExecStopPost, not continuation/reset of the failed body.
+    need(shell_recovery_negative(value) and not _FAILED and not _COMMANDS
+         and _END == min(value["deadline"], stop_end), "Recovery negative StopPost route/unchanged endpoint differs")
+    completion = {name: os.environ.get(name) for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
+    need(completion == {"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "1"},
+         "Recovery negative service failed for a different reason")
+    show = SHOW + ("LimitNOFILE", "LimitNOFILESoft", "ActiveState", "SubState", "ControlPID", "MainPID")
+    argv = ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), root_path(value).name + ".service"]
+    observed = command("stop-unit-show", argv, maximum=3)
+    need(observed.stderr == b"", "Recovery negative StopPost query produced a diagnostic")
+    domain = _domain_events(_domain_admission(value, observed.stdout, stop_boundary=True))
+    _no_denials(domain)
+    start = decode(read(_ROOT / "public/unit-start.json"))
+    error_raw = read(_ROOT / "public/unit-start-error.json")
+    error = decode(error_raw)
+    shell_recovery_negative_owner_data(value, error.get("projectRecoveryNegative"))
+    stop = {**domain, "entrySha256": record(_ROOT / "entry.py", JSON_LIMIT)["sha256"],
+            "handoffSha256": request_sha, "deadline": value["deadline"], "namespaces": _namespaces(True),
+            "completion": completion, "stopBoundary": {"activeState": "deactivating", "subState": "stop-post",
+                "controlPid": os.getpid(), "mainPid": 0},
+            "error": {"path": "unit-start-error.json", "size": len(error_raw), "sha256": hashlib.sha256(error_raw).hexdigest()},
+            "commands": list(_COMMANDS), "files": list(_FILES), "applicationFinal": False,
+            "experimentClientJoined": False}
+    shell_recovery_negative_finality(value, start, error, stop, 1, stop["entrySha256"], request_sha)
+    closed_domain, interval = _shell_recovery_negative_interval(value, start, request_sha, domain)
+    stop.update(closed_domain)
+    stop["interval"], stop["files"] = interval, list(_FILES)
+    _retain("project-recovery-negative-stop.json", canonical(stop))
+    need(time.monotonic() < _END, "Original recovery negative StopPost closed late")
+    print("Original retained-Unknown experiment StopPost observed; original client finality still required.", flush=True)
+
+
+def shell_recovery_negative_finality(value, start, error, stop, code, entry_sha, handoff_sha):
+    """Pure failed-unit correspondence. Never the ordinary success/finality gate."""
+    need(shell_recovery_negative(value) and type(code) is int and code == 1
+         and type(start) is dict and type(error) is dict and type(stop) is dict,
+         "Recovery negative requires its exact failed original client/unit")
+    for key in ("sourceSha", "entrySha256", "handoffSha256", "invocationId", "deadline", "namespaces", "effective"):
+        need(key in start and key in stop and type(start[key]) is type(stop[key]) and start[key] == stop[key],
+             "Recovery failed original unit correspondence differs: " + key)
+    need(start["sourceSha"] == value["sourceSha"] and start["entrySha256"] == entry_sha and start["handoffSha256"] == handoff_sha
+         and start["deadline"] == value["deadline"] and start["runnerUid"] == value["runnerUid"] and start["runnerGid"] == value["runnerGid"]
+         and type(start["invocationId"]) is str and re.fullmatch(r"[0-9a-f]{32}", start["invocationId"]) is not None,
+         "Recovery negative source/entry/handoff/invocation differs")
+    unit, stopped = start["unit"], stop["unit"]
+    need(type(unit) is dict and type(stopped) is dict and set(unit) == set(stopped)
+         and unit["Id"] == root_path(value).name + ".service" and unit["InvocationID"] == start["invocationId"]
+         and unit["ControlGroup"] == "/system.slice/" + unit["Id"] and unit["Result"] == "success"
+         and stopped["Result"] == "exit-code" and all(unit[key] == stopped[key] for key in unit if key != "Result")
+         and stop["completion"] == {"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "1"}
+         and stop["applicationFinal"] is False and stop["experimentClientJoined"] is False,
+         "Recovery negative did not preserve the failed original service")
+    boundary = stop["stopBoundary"]
+    _recovery_fields(boundary, ("activeState", "subState", "controlPid", "mainPid"))
+    need(boundary["activeState"] == "deactivating" and boundary["subState"] == "stop-post"
+         and type(boundary["controlPid"]) is int and boundary["controlPid"] > 0
+         and type(boundary["mainPid"]) is int and boundary["mainPid"] == 0,
+         "Recovery negative lacks actual original StopPost main teardown")
+    need(error.get("phase") == "shell-" + SHELL_RECOVERY_PARTIAL and error.get("errorType") == "ProcessError"
+         and error.get("reason") == "owned command exceeded its original deadline"
+         and error.get("laterLaunchesClosed") is True and error.get("cleanupProven") is False
+         and error.get("completion") is None and error.get("normalBoundaryDisposition") is None
+         and error.get("normalBoundaryCleanupErrors") == [] and error.get("androidPublication") is None,
+         "Recovery negative failed at another boundary or resumed work")
+    shell_recovery_negative_owner_data(value, error.get("projectRecoveryNegative"))
+    need(type(error.get("commands")) is list and tuple(row["phase"] for row in error["commands"]) == root_phases(value)[:-1]
+         and type(stop.get("commands")) is list and len(stop["commands"]) == 1
+         and stop["commands"][0]["phase"] == "stop-unit-show" and stop["commands"][0]["exitCode"] == 0,
+         "Recovery negative original command prefix/StopPost differs")
+    _no_denials(start); _no_denials(stop)
+
+
 def _shell_owner_failure(case, error, original, call):
     """Finite sidecar DATA only; neither exception text nor a new lifetime authority."""
     try:
@@ -10596,7 +12201,10 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
                  **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
                  "packageLifecycleQualified": False, "shellPackageBuilt": False,
                  **({"androidPublication": android_publication} if shell_android(value) else {}),
-                 **({"ordinary21": shell_ordinary_selection()} if shell_ordinary(value) else {})}
+                 **({"githubPreflight": shell["githubPreflight"], "serviceQualified": False,
+                     "normalDestinationAction": False} if shell_github_preflight(value) else {}),
+                 **({"ordinary21": shell_ordinary_selection()} if shell_ordinary(value) else {}),
+                 **({"projectRecovery": shell["projectRecovery"]} if shell_recovery(value) else {})}
     if "installed" not in value or value["installed"]["case"] == "positive":
         _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
@@ -10700,6 +12308,8 @@ def unit_start():
     if "shell" in value:
         original = observations["p0"]["published"]["P0"]
         expected = _installed_payload(value, loader, original)
+        if shell_recovery_negative(value):
+            _shell_recovery_negative_loader_before(value, start, request_sha, loader, original)
         github_expected = _shell_github_materials_prepare(value, loader, original, expected) if shell_github(value) else None
         namespace = _shell_fixtures_prepare(value)
         boundary_host = None
@@ -10718,7 +12328,8 @@ def unit_start():
                 if case == "normal":
                     cases[case] = _shell_normal(value, environment, expected, log_binding)
                 else:
-                    result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
+                    result = command("shell-" + case, shell_argv(value, case),
+                                     maximum=SHELL_RECOVERY_NEGATIVE_SECONDS if case == SHELL_RECOVERY_PARTIAL else 60, env=environment,
                                      shell_log=(value, case, log_binding))
                     # Only the immutable public copy is reread after command closed
                     # the single original label FD; never reopen the private leaf.
@@ -10726,6 +12337,15 @@ def unit_start():
                         if case == "settled-failure" else None
                     cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode,
                                               github_expected if shell_github(value) else expected, failure_labels=failure_labels)
+                    if case in SHELL_RECOVERY_CASES:
+                        after = canonical(_shell_recovery_inventory(value, namespace, case, "after"))
+                        _retain("shell-" + case + "-after.json", after)
+                        shell_recovery_fixture(value, case,
+                            *(read(_ROOT / "public" / ("shell-" + case + "-" + stage + ".json"), SHELL_RECOVERY_INVENTORY_LIMIT)
+                              for stage in ("initial", "generated", "before")), after)
+                        need(cases[case]["projectRecovery"]["sourceCommit"] == value["sourceSha"], "Recovery native source differs")
+                    if shell_github_preflight(value):
+                        _shell_github_preflight_after(value, case, cases[case])
                     if shell_github(value):
                         need(canonical(_shell_github_inventory(value, namespace))
                              == read(_ROOT / "public/shell-github-project-before.json", SHELL_GITHUB_FIXTURE_LIMIT),
@@ -10894,6 +12514,10 @@ def unit_stop():
     _root_ids()
     value, request_sha = _context()
     _END = stop_end
+    if shell_recovery_negative(value):
+        _END = min(value["deadline"], stop_end)
+        _shell_recovery_negative_stop(value, request_sha, stop_end)
+        return
     admitted_domain, disposition = _github_boundary_stop(value) if shell_normal_boundaries(value) else (None, None)
     # Completion, optional body/result files and resource-success verdicts are
     # intentionally AFTER authenticated disposition. None grants delete rights.
@@ -10995,10 +12619,14 @@ def installed_closed_result(value, outcome, raw_files):
             "lifecycleComplete": positive, "fixturePublished": positive}
 
 
-def shell_closed_loader(value, raw_files):
+def shell_closed_loader(value, raw_files, *, negative_interval=None):
     """Reconcile retained originals; never query a possibly live GUI process."""
+    if negative_interval is not None:
+        need(shell_recovery_negative(value) and type(negative_interval) is dict,
+             "Only the original recovery negative may supply a distinct final interval")
     policy = expand_shell_loader_policy(value["shell"]["loaderPolicy"], value["shell"]["compiler"])
-    entry, final = (decode(raw_files["loader-" + phase + ".json"], LIMIT) for phase in ("entry", "final"))
+    entry = decode(raw_files["loader-entry.json"], LIMIT)
+    final = decode(raw_files["loader-final.json"], LIMIT) if negative_interval is None else negative_interval
     for key in ("scope", "namespaces", "diagnostics", "cacheRows", "entryObjects", "globalObjects", "hwcapsTiers",
                 "moduleRoots", "privateSearch", "runtimeData", "externalPrerequisites"):
         need(entry[key] == final[key], "Closed original shell loader/DATA interval differs: " + key)
@@ -11071,6 +12699,37 @@ def shell_closed_loader(value, raw_files):
     return expected
 
 
+
+def shell_recovery_closed_result(value, outcome, raw_files):
+    need(shell_recovery(value) and not shell_recovery_negative(value)
+         and canonical(outcome.get("projectRecovery")) == canonical(value["shell"]["projectRecovery"])
+         and not {"ordinary21", "androidPublication", "androidBuild", "githubReadOnly", "githubPreflight"} & set(outcome)
+         and set(raw_files) == public_files(value), "Recovery positive outputs mix another scope or omit an original")
+    cases = decode(raw_files["shell-cases.json"])
+    need(type(cases) is dict and set(cases) == set(SHELL_RECOVERY_CASES), "Recovery positive case roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    fixtures = {}
+    for case in SHELL_RECOVERY_CASES:
+        producer, phase = "recovery-fixture-" + case, "shell-" + case
+        need(commands[producer]["argv"] == shell_recovery_producer_argv(value, case)
+             and commands[phase]["argv"] == shell_argv(value, case), "Recovery original producer/native command differs")
+        shell_recovery_producer_result(raw_files[producer + ".stdout"], raw_files[producer + ".stderr"], case, commands[producer]["exitCode"])
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(sum(map(len, streams)) <= LIMIT, "Recovery original combined capture exceeded its bound")
+        actual = shell_recovery_result(streams[0], streams[1], case, commands[phase]["exitCode"])
+        need(canonical(actual) == canonical(cases[case]) and actual["projectRecovery"]["sourceCommit"] == value["sourceSha"],
+             "Recovery actual original capture/source differs")
+        fixtures[case] = shell_recovery_fixture(value, case,
+            *(raw_files["shell-" + case + "-" + stage + ".json"] for stage in ("initial", "generated", "before", "after")))
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(set(p0["published"]) == {"P0"} and decode(raw_files["published-before-upgrade.txt"], LIMIT) == p0["published"],
+         "Recovery original unchanged publication observation differs")
+    shell = value["shell"]
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "projectRecovery": shell["projectRecovery"], "recoveryFixtures": fixtures,
+            "ordinaryActivation": False, "packageLifecycleQualified": False, "shellPackageBuilt": False}
+
 def shell_closed_result(value, outcome, raw_files):
     """Correspondence only, after the same original-client/StopPost gate."""
     shell = value["shell"]
@@ -11079,7 +12738,7 @@ def shell_closed_result(value, outcome, raw_files):
          and (not ordinary or canonical(outcome["ordinary21"]) == canonical(shell["ordinary21"])),
          "Closed original ordinary21 scope differs from the handoff")
     if ordinary:
-        need(not {"androidPublication", "androidBuild", "githubReadOnly"} & set(outcome)
+        need(not {"androidPublication", "androidBuild", "githubReadOnly", "githubPreflight", "projectRecovery"} & set(outcome)
              and set(raw_files) == public_files(value),
              "Ordinary21 closed outputs mix another scope or omit an original file")
     for key, field in (("shellRosterSha256", "rosterSha256"), ("shellProducerAttempt", "producerAttempt"),
@@ -11092,7 +12751,11 @@ def shell_closed_result(value, outcome, raw_files):
     need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("packageLifecycleQualified") is False
          and outcome.get("shellPackageBuilt") is False, "Connection was relabelled as a shell package qualification")
     expected = shell_closed_loader(value, raw_files)
-    if shell_github(value):
+    if shell_recovery(value):
+        return shell_recovery_closed_result(value, outcome, raw_files)
+    if shell_github_preflight(value):
+        return shell_github_preflight_closed_result(value, outcome, raw_files, expected)
+    if shell_github_readonly(value):
         return shell_github_closed_result(value, outcome, raw_files, expected)
     android_publication = _android_closed_publication(value, outcome.get("androidPublication")) if shell_android(value) else None
     cases = decode(raw_files["shell-cases.json"])
@@ -11269,6 +12932,112 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
                             else "published-versions-and-root-task-retained-until-disposable-vm-disposition"), **extra}
 
 
+
+def verify_project_recovery_negative_service_result(handoff_path, handoff_sha256, entry_sha256, client_result, public_destination):
+    """One failed-unit classifier, not a weakened ordinary success verifier.
+
+    The original --wait client must have returned in its original command owner;
+    no process polling, replacement wait or metadata-only cleanup assertion can
+    authorize the fixture read at the end of this function.
+    """
+    need(type(client_result) is subprocess.CompletedProcess and type(client_result.returncode) is int
+         and client_result.returncode == 1 and type(client_result.args) is list
+         and type(client_result.stdout) is bytes and type(client_result.stderr) is bytes
+         and len(client_result.stdout) + len(client_result.stderr) <= LIMIT, "Recovery negative original client did not return exactly exit1")
+    handoff_path = absolute(str(handoff_path))
+    value = handoff(handoff_path, handoff_sha256)
+    need(shell_recovery_negative(value) and os.getresuid() == (value["runnerUid"],) * 3
+         and os.getresgid() == (value["runnerGid"],) * 3 and time.monotonic() < value["deadline"],
+         "Recovery negative collector identity/route/endpoint differs")
+    runtime = [arg.removeprefix("--property=RuntimeMaxSec=") for arg in client_result.args if arg.startswith("--property=RuntimeMaxSec=")]
+    need(len(runtime) == 1 and re.fullmatch(r"[1-9][0-9]{0,3}s", runtime[0]) is not None and int(runtime[0][:-1]) < 1200,
+         "Recovery negative original client finite lifetime missing")
+    properties = {**PROPERTIES, "TasksMax": service_task_limit(value), "RuntimeMaxSec": runtime[0], "LimitNOFILE": str(SHELL_DESCRIPTOR_LIMIT)}
+    need(client_result.args == _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties),
+         "Recovery negative original client argv differs")
+    root = root_path(value)
+    directory(root / "public", protected=True)
+    start_raw = read(root / "public/unit-start.json")
+    error_raw = read(root / "public/unit-start-error.json")
+    stop_raw = read(root / "public/project-recovery-negative-stop.json")
+    start, error, stop = (decode(raw) for raw in (start_raw, error_raw, stop_raw))
+    shell_recovery_negative_finality(value, start, error, stop, client_result.returncode, entry_sha256, handoff_sha256)
+    finality = {"applicationFinal": False, "experimentFinal": True, "expectedRetainedUnknown": True}
+    need(stop["error"] == {"path": "unit-start-error.json", "size": len(error_raw), "sha256": hashlib.sha256(error_raw).hexdigest()}
+         and _D.same(decode(read(root / "public/inputs.json")), value), "Recovery negative closed original error/handoff differs")
+    _modules(root, owner=False)
+    for row in error["commands"]:
+        codes = (0, 1) if row["phase"] == "state-initial" else (1,) if row["phase"] == "nonroot-helper" else (0,)
+        need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Recovery negative had an earlier original command failure")
+    verify_package_observations(error["commands"], root)
+    rows = error["files"] + stop["files"] + [stop["error"],
+        {"path": "project-recovery-negative-stop.json", "size": len(stop_raw), "sha256": hashlib.sha256(stop_raw).hexdigest()}]
+    need(len(rows) <= shell_public_limit(value) and all(type(row) is dict and set(row) == {"path", "size", "sha256"} for row in rows)
+         and len({row["path"] for row in rows}) == len(rows)
+         and {path.name for path in (root / "public").iterdir()} == {row["path"] for row in rows} == public_files(value),
+         "Recovery negative fixed original public roster differs")
+    total, raw_files = 0, {}
+    for row in rows:
+        need(type(row["path"]) is str and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,100}", row["path"]) is not None
+             and type(row["size"]) is int and 0 <= row["size"] <= LIMIT, "Recovery negative evidence record bounds differ")
+        path = root / "public" / row["path"]
+        protected = protected_record(path, row["size"])
+        raw = read(path, row["size"])
+        need(protected["size"] == row["size"] and protected["sha256"] == row["sha256"]
+             and hashlib.sha256(raw).hexdigest() == row["sha256"] and stat.S_IMODE(protected["identity"][2]) == 0o444,
+             "Recovery negative original protected evidence changed")
+        total += len(raw)
+        need(total <= TOTAL_LIMIT and time.monotonic() < value["deadline"], "Recovery negative evidence aggregate/endpoint exceeded")
+        raw_files[row["path"]] = raw
+    show = SHOW + ("LimitNOFILE", "LimitNOFILESoft", "ActiveState", "SubState", "ControlPID", "MainPID")
+    stop_command = stop["commands"][0]
+    need(stop_command["argv"] == ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(show), root.name + ".service"]
+         and raw_files["stop-unit-show.stderr"] == b"", "Recovery negative original StopPost query changed")
+    show_rows = raw_files["stop-unit-show.stdout"].decode("ascii").splitlines()
+    props = dict(line.split("=", 1) for line in show_rows)
+    boundary = stop["stopBoundary"]
+    need(len(props) == len(show_rows) and props == {**stop["unit"], "ActiveState": boundary["activeState"],
+         "SubState": boundary["subState"], "ControlPID": str(boundary["controlPid"]), "MainPID": "0"},
+         "Recovery negative StopPost teardown facts do not match actual original command")
+    case = SHELL_RECOVERY_PARTIAL
+    producer = "recovery-fixture-" + case
+    command_row = error["commands"][-1]
+    need(command_row["phase"] == producer and command_row["argv"] == shell_recovery_producer_argv(value, case),
+         "Recovery negative producer differs")
+    shell_recovery_producer_result(raw_files[producer + ".stdout"], raw_files[producer + ".stderr"], case, command_row["exitCode"])
+    pin = error["projectRecoveryNegative"]["observation"]
+    raw = raw_files[pin["path"]]
+    need(len(raw) == pin["size"] and hashlib.sha256(raw).hexdigest() == pin["sha256"], "Recovery negative original observation binding differs")
+    receipt = shell_recovery_receipt(raw, case, source=value["sourceSha"])
+    need(decode(raw_files["observe-unpacked.stdout"], LIMIT)["published"] == {}
+         and set(decode(raw_files["observe-p0.stdout"], LIMIT)["published"]) == {"P0"}
+         and decode(raw_files["published-before-upgrade.txt"], LIMIT) == decode(raw_files["observe-p0.stdout"], LIMIT)["published"],
+         "Recovery negative installed publication preparation differs")
+    shell_recovery_negative_interval_data(value, start, stop, raw_files)
+    # First failed-fixture access: exact original command finality, authenticated
+    # original StopPost/main teardown, joined original client and no-denials have
+    # all been established above. This remains no application-finality claim.
+    before_raw = raw_files["shell-" + case + "-before.json"]
+    before, _ = _shell_recovery_inventory_data(value, before_raw, case, "before")
+    after = canonical(_shell_recovery_inventory(value, canonical(before["namespace"]), case, "after"))
+    fixture = shell_recovery_fixture(value, case, raw_files["shell-" + case + "-initial.json"],
+        raw_files["shell-" + case + "-generated.json"], before_raw, after)
+    raw_files["shell-" + case + "-after.json"] = after  # Nonroot post-client DATA, never a root/body receipt.
+    public_destination = absolute(str(public_destination))
+    directory(public_destination)
+    need(public_destination.is_relative_to(absolute(value["taskRoot"])) and public_destination.stat().st_uid == value["runnerUid"],
+         "Recovery negative public destination differs")
+    exported = [_D.write(public_destination / ("lifecycle-" + name), raw, 0o600) for name, raw in
+                {**raw_files, "client.stdout": client_result.stdout, "client.stderr": client_result.stderr}.items()]
+    need(time.monotonic() < value["deadline"], "Recovery negative post-client observation/export was late")
+    shell = value["shell"]
+    return {"state": result_state(value), "sourceSha": value["sourceSha"], "unit": start["unit"]["Id"], "invocationId": start["invocationId"],
+            "files": exported, "projectRecovery": shell["projectRecovery"], "observation": receipt, "recoveryFixture": fixture,
+            "shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            **shell_transport_provenance(shell), "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            **finality, "ordinaryActivation": False, "productQualified": False, "loaderFinalIntervalQualified": True,
+            "disposition": "unknown-application-and-synthetic-private-state-retained-until-disposable-vm-disposition"}
+
 def main():
     global _FAILED
     role = sys.argv[1] if len(sys.argv) > 1 else "missing"
@@ -11293,6 +13062,7 @@ def main():
                     "commands": list(_COMMANDS), "files": list(_FILES), "laterLaunchesClosed": True, "cleanupProven": False,
                     "normalBoundaryDisposition": _GITHUB_BOUNDARY_STOP, "normalBoundaryCleanupErrors": list(_GITHUB_BOUNDARY_BODY_ERRORS),
                     "androidPublication": _android_publication_summary(),
+                    **({"projectRecoveryNegative": _RECOVERY_NEGATIVE} if _RECOVERY_NEGATIVE is not None else {}),
                     "completion": {name: os.environ.get(name, "")[:128] for name in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS")}
                                   if role == "unit-stop" else None}))
             except BaseException:

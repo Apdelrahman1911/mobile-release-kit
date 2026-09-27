@@ -812,6 +812,12 @@ impl InstalledRuntimeCustody {
                     let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
                     self.inspect_inner_with_manifest(Some(anchor), end, stop)
                 },
+                InstalledEditProfile::GitHubPreflight(github) => {
+                    // Independent sealed action selection, never the read-only
+                    // book. Inspection and launch must select the SAME original.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
                 _ => self.inspect_inner(end, stop),
             }
         });
