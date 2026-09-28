@@ -67,7 +67,7 @@ pub(crate) enum AdmissionFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, ConfigurationPreparing, ConfigurationPrepared,
-    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, MetadataTextPreparing, MetadataTextPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared,
+    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, MetadataTextPreparing, MetadataTextPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared, MetadataImagesPreparing, MetadataImagesPrepared,
     EnvironmentDiagnosticsPreparing, EnvironmentDiagnosticsPrepared, OfflinePreflightPreparing, OfflinePreflightPrepared, ProjectRecoveryPreparing, ProjectRecoveryPrepared,
     Retained, Auditing, Refused, Settling, Settled, Unknown }
 
@@ -75,7 +75,7 @@ enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, 
 // renderer argument or extensible runtime interface. Keep the existing edit
 // facades stable; the slot, original ledger and sealed profile must agree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubPreflight, GitHubRelease, MetadataText, ReleaseVersion, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
+enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubPreflight, GitHubRelease, MetadataText, ReleaseVersion, MetadataImages, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
 impl InstalledEditDomain {
     fn preparing(self) -> Phase { match self {
         Self::Configuration => Phase::ConfigurationPreparing, Self::GitHubWorkflows => Phase::GitHubWorkflowPreparing,
@@ -84,6 +84,7 @@ impl InstalledEditDomain {
         Self::GitHubRelease => Phase::GitHubReleasePreparing,
         Self::MetadataText => Phase::MetadataTextPreparing,
         Self::ReleaseVersion => Phase::ReleaseVersionPreparing,
+        Self::MetadataImages => Phase::MetadataImagesPreparing,
         Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPreparing, Self::OfflinePreflight => Phase::OfflinePreflightPreparing, Self::ProjectRecovery => Phase::ProjectRecoveryPreparing,
     } }
     fn prepared(self) -> Phase { match self {
@@ -93,6 +94,7 @@ impl InstalledEditDomain {
         Self::GitHubRelease => Phase::GitHubReleasePrepared,
         Self::MetadataText => Phase::MetadataTextPrepared,
         Self::ReleaseVersion => Phase::ReleaseVersionPrepared,
+        Self::MetadataImages => Phase::MetadataImagesPrepared,
         Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPrepared, Self::OfflinePreflight => Phase::OfflinePreflightPrepared, Self::ProjectRecovery => Phase::ProjectRecoveryPrepared,
     } }
 }
@@ -104,6 +106,7 @@ enum InstalledEditProfile {
     GitHubRelease(crate::runtime::GitHubReleaseInstalledProfile),
     MetadataText(crate::runtime::MetadataTextInstalledProfile),
     ReleaseVersion(crate::runtime::ReleaseVersionInstalledProfile),
+    MetadataImages(crate::runtime::MetadataImagesInstalledProfile),
     EnvironmentDiagnostics(crate::runtime::EnvironmentDiagnosticsInstalledProfile),
     OfflinePreflight(crate::runtime::OfflinePreflightInstalledProfile),
     ProjectRecovery(crate::runtime::ProjectRecoveryInstalledProfile),
@@ -116,6 +119,7 @@ impl InstalledEditProfile {
         Self::GitHubRelease(_) => InstalledEditDomain::GitHubRelease,
         Self::MetadataText(_) => InstalledEditDomain::MetadataText,
         Self::ReleaseVersion(_) => InstalledEditDomain::ReleaseVersion,
+        Self::MetadataImages(_) => InstalledEditDomain::MetadataImages,
         Self::EnvironmentDiagnostics(_) => InstalledEditDomain::EnvironmentDiagnostics, Self::OfflinePreflight(_) => InstalledEditDomain::OfflinePreflight, Self::ProjectRecovery(_) => InstalledEditDomain::ProjectRecovery,
     } }
     fn selection(&self) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> { match self {
@@ -125,6 +129,7 @@ impl InstalledEditProfile {
         Self::GitHubRelease(profile) => profile.selection(),
         Self::MetadataText(profile) => profile.selection(),
         Self::ReleaseVersion(profile) => profile.selection(),
+        Self::MetadataImages(profile) => profile.selection(),
         Self::EnvironmentDiagnostics(profile) => profile.selection(), Self::OfflinePreflight(profile) => profile.selection(), Self::ProjectRecovery(profile) => profile.selection(),
     } }
     fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool { match self {
@@ -135,6 +140,7 @@ impl InstalledEditProfile {
         Self::GitHubRelease(profile) => profile.accepts_platform(sysname, machine, release),
         Self::MetadataText(profile) => profile.accepts_platform(sysname, machine, release),
         Self::ReleaseVersion(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::MetadataImages(profile) => profile.accepts_platform(sysname, machine, release),
         Self::EnvironmentDiagnostics(profile) => profile.accepts_platform(sysname, machine, release),
         Self::OfflinePreflight(profile) => profile.accepts_platform(sysname, machine, release),
         Self::ProjectRecovery(profile) => profile.accepts_platform(sysname, machine, release),
@@ -177,6 +183,7 @@ impl CustodyObservation {
             Phase::GitHubReleasePreparing => "githubReleasePreparing", Phase::GitHubReleasePrepared => "githubReleasePrepared",
             Phase::MetadataTextPreparing => "metadataTextPreparing", Phase::MetadataTextPrepared => "metadataTextPrepared",
             Phase::ReleaseVersionPreparing => "releaseVersionPreparing", Phase::ReleaseVersionPrepared => "releaseVersionPrepared",
+            Phase::MetadataImagesPreparing => "metadataImagesPreparing", Phase::MetadataImagesPrepared => "metadataImagesPrepared",
             Phase::EnvironmentDiagnosticsPreparing => "environmentDiagnosticsPreparing", Phase::EnvironmentDiagnosticsPrepared => "environmentDiagnosticsPrepared",
             Phase::OfflinePreflightPreparing => "offlinePreflightPreparing", Phase::OfflinePreflightPrepared => "offlinePreflightPrepared",
             Phase::ProjectRecoveryPreparing => "projectRecoveryPreparing", Phase::ProjectRecoveryPrepared => "projectRecoveryPrepared",
@@ -557,7 +564,7 @@ impl OriginalDescriptorBook {
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         self.settlement_started = true; // Absorbing: even empty/positive settlement disables transfer.
         if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing
-            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing) { self.mark_interrupted(); }
+            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing) { self.mark_interrupted(); }
         if !self.unknown { self.phase = Phase::Settling; }
         for index in (0..self.records.len()).rev() {
             let _ = self.close_one(SlotId(index)); // Continue every independent known original.
@@ -594,7 +601,7 @@ impl OriginalDescriptorBook {
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing
-            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::Retained | Phase::Auditing)
+            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::Retained | Phase::Auditing)
             || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
@@ -1141,6 +1148,7 @@ impl InstalledEditRuntimeSlots {
             InstalledEditDomain::GitHubRelease => "The GitHub release installed runtime failed original-custody inspection.",
             InstalledEditDomain::MetadataText => "The metadata text installed runtime failed original-custody inspection.",
             InstalledEditDomain::ReleaseVersion => "The saved-version installed runtime failed original-custody inspection.",
+            InstalledEditDomain::MetadataImages => "The public-image installed runtime failed original-custody inspection.",
             InstalledEditDomain::EnvironmentDiagnostics => "The build-tool diagnostics installed runtime failed original-custody inspection.",
             InstalledEditDomain::OfflinePreflight => "The saved offline-preflight installed runtime failed original-custody inspection.",
             InstalledEditDomain::ProjectRecovery => "The project recovery installed runtime failed original-custody inspection.",
@@ -1375,6 +1383,31 @@ impl ReleaseVersionRuntimeSlots {
         self.inner.settle_originals()
     }
     pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ReleaseVersion).is_ok() && self.inner.settled() }
+}
+
+/// Domain-fixed storage inside the original diagnostics Session. The owner
+/// must settle its core C/A/W and native consumers BEFORE consuming these closes.
+pub(crate) struct MetadataImagesRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl MetadataImagesRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::MetadataImages) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::MetadataImagesInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::MetadataImages(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::MetadataImages)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::MetadataImages)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::MetadataImages).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.settled() }
 }
 
 /// Domain-fixed storage inside the original diagnostics Session. The owner
@@ -3076,7 +3109,7 @@ mod pure_tests {
         // Test the real predicate as DATA, never mint an installed profile,
         // transferred original or capability from synthetic successful facts.
         for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
-            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::Retained, Phase::Auditing,
+            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::MetadataImagesPreparing, Phase::MetadataImagesPrepared, Phase::Retained, Phase::Auditing,
             Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared,
             Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
             for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
@@ -3110,7 +3143,7 @@ mod pure_tests {
         assert_eq!(pending.observation().positive_closes(), 0);
 
         for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows,
-            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
+            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
             InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
             let mut other = GitHubReadOnlyRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
             assert!(!other.never_started() && !other.no_child_effect() && !other.settled());
@@ -3226,9 +3259,9 @@ mod pure_tests {
         assert!(workflow.transfer_once().is_err() && workflow.capability().is_err());
         assert_eq!(config.settle_originals(), CloseOutcome::Unknown);
         assert_eq!(workflow.settle_originals(), CloseOutcome::Unknown);
-        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
+        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
             InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
-            for other in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
+            for other in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
                 InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
                 if domain == other { continue; }
                 let mut slots = InstalledEditRuntimeSlots::new(domain);
@@ -3313,10 +3346,10 @@ mod pure_tests {
         assert_eq!(pending.observation().positive_closes(),0);
     }
     pub(super) fn all_edit_claim_domains_require_their_own_preparation_once() {
-        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
+        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
             InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
             for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
-                Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared,
+                Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::MetadataImagesPreparing, Phase::MetadataImagesPrepared,
                 Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared, Phase::GitHubPreflightPreparing, Phase::GitHubPreflightPrepared, Phase::GitHubReleasePreparing, Phase::GitHubReleasePrepared,
                 Phase::Retained, Phase::Auditing, Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
                 for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
@@ -3343,7 +3376,7 @@ mod pure_tests {
         assert_eq!(offline.inner.inspection.as_ref().map(std::ptr::from_ref), offline_original);
         assert_eq!(tools.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
         assert_eq!(offline.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
-        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
             InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
             if wrong != InstalledEditDomain::EnvironmentDiagnostics {
                 let mut bad = EnvironmentDiagnosticsRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };

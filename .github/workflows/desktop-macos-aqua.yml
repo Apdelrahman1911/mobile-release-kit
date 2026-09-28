@@ -22,9 +22,11 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       # Exact independently accepted current-payload DATA; not native qualification.
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
+      # Closed source selection; this successor requests P2 only, not iOS qualification.
+      MRK_MACOS_AQUA_SCOPE: project-fields
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
@@ -34,13 +36,14 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
+          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic ]]
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
           # Supplier reuse does not qualify a historical core as current source.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e ]]
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c ]]
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37 ]]
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371 ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
       - name: Check out exact reviewed source without retained credentials
@@ -115,6 +118,7 @@ jobs:
               os.fsync(stream.fileno())
           PY_SOURCE
       - name: Prepare only the fixed disposable Xcode ancestor before any worker
+        if: success() && env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic'
         timeout-minutes: 2
         # Empty environment before even this noninteractive shell starts. The
         # second env -i carries only provider-owned, fixed-route inputs into
@@ -151,12 +155,17 @@ jobs:
         with:
           node-version: '24.20.0'
           package-manager-cache: false
-      - name: Record exact source and actual tool bindings only after host preparation
+      - name: Record exact source and actual tool bindings only after route admission
         shell: bash
         run: |
           set -euo pipefail
           "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-binding.json" <<'PY'
           import json, os, subprocess, sys
+          aqua_scope = os.environ["MRK_MACOS_AQUA_SCOPE"]
+          scope_cases = {"project-fields": ("one-project-fields-Aqua-engineering-case", ["project-fields"]),
+                         "ios-current-synthetic": ("nine-current-ios-Aqua-engineering-cases", ["ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality", "ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel", "ios-recovery-empty"])}
+          if aqua_scope not in scope_cases: raise ValueError("Aqua scope refused")
+          scope_label, case_names = scope_cases[aqua_scope]
           tools = {}
           for name, command in (
               ("rustc", ["rustc", "--version", "--verbose"]),
@@ -178,9 +187,10 @@ jobs:
                     "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
                     "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
                     "reusedSupplierOnly": True,
-                   "scope": "one-project-fields-and-nine-current-ios-Aqua-engineering-cases", "instrumentedEngineeringApp": True,
-                   "scopes": ["project-fields", "ios-current-synthetic"],
-                   "caseNames": ["project-fields", "ios-toolchain-prerequisite", "ios-version-stale", "ios-unsigned-archive", "ios-cancel", "ios-finality", "ios-signing-inputs", "ios-signed-refusal", "ios-signed-cancel", "ios-recovery-empty"], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
+                   "scope": scope_label, "instrumentedEngineeringApp": True,
+                   "scopes": [aqua_scope], "caseNames": case_names,
+                   "unselectedScopes": [scope for scope in scope_cases if scope != aqua_scope],
+                   "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "not-yet-executed", "shippingBinaryQualified": False, "distributionQualified": False}
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 65536: raise ValueError("source/tool binding size refused")
@@ -412,7 +422,7 @@ jobs:
               receipt["passed"] = ("failure" not in receipt and not close_errors
                   and receipt["originalReturned"] and receipt["artifactOriginalUnchanged"] and receipt["artifactOriginalClosed"]
                   and all(row["testsPassed"] for row in receipt["targets"]))
-              if receipt["passed"]: receipt.update(tests=7, failed=0, ignored=0, measured=0)
+              if receipt["passed"]: receipt.update(tests=len(names) + len(native_names), failed=0, ignored=0, measured=0)
               # No exception-path directory cleanup or fabricated finality.
               data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode() + b"\n"
               if len(data) > 16384: raise ValueError("headless-receipt-bound")
@@ -677,8 +687,9 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
-          printf '%s\n' 'Instrumented engineering installation only; the project-field journey and all nine current-iOS cases must separately pass.'
+          printf '%s\n' "Instrumented engineering installation only; requested Aqua scope: $MRK_MACOS_AQUA_SCOPE. Other scopes are not requested or qualified by this run."
       - name: One project-field Aqua journey through the reviewed original invocation owner
+        if: success() && env.MRK_MACOS_AQUA_SCOPE == 'project-fields'
         timeout-minutes: 3
         shell: bash
         env:
@@ -697,9 +708,10 @@ jobs:
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/aqua-project-fields.status"
           [[ $status == 0 ]]
           # The original helper returns zero only after original calls/readbacks,
-          # fixture closes and complete-record publication. Otherwise no later
-          # native case starts; the separate fixture namespace remains evidence.
+          # fixture closes and complete-record publication. Failure remains job
+          # failure; the separate fixture namespace remains evidence.
       - name: Nine serial current-iOS Aqua cases through the reviewed original invocation owner
+        if: success() && env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic'
         timeout-minutes: 50
         shell: bash
         env:
@@ -743,6 +755,9 @@ jobs:
           umask 077
           "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS'
           import hashlib, json, os, pathlib, re, stat
+          aqua_scope = os.environ["MRK_MACOS_AQUA_SCOPE"]
+          admitted_scopes = ("project-fields", "ios-current-synthetic")
+          if aqua_scope not in admitted_scopes: raise ValueError("Aqua scope refused")
           root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           parent = pathlib.Path(os.environ["RUNNER_TEMP"])
           if root.parent != parent or not root.name.startswith("mrk-macos-aqua."): raise ValueError("fixed work root required")
@@ -800,6 +815,8 @@ jobs:
               records.append(record)
           report = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
                     "scope": "bounded-diagnostic-snapshots-only-not-original-process-family-finality",
+                    "requestedScope": aqua_scope,
+                    "unselectedScopes": [scope for scope in admitted_scopes if scope != aqua_scope],
                     "originalsPreserved": True, "records": records}
           data = json.dumps(report, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 4096: raise ValueError("diagnostic metadata bound")
@@ -809,7 +826,7 @@ jobs:
         if: always() && steps.work.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
             ${{ steps.work.outputs.root }}/package-format-input.json

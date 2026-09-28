@@ -2770,7 +2770,8 @@ def path_fixture_data(value, *, changed=False):
     absent = ["path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
               "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
               "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
-            "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup"]
+              "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup",
+              "path-project/.mobile-release-metadata-images-prepare", "path-project/.mobile-release-metadata-images", "path-project/.mobile-release-metadata-images-cleanup"]
     absent += ["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else [
         "path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"]
     namespace = fixture_namespace_data(value)
@@ -2825,7 +2826,8 @@ def workflow_fixture_data(value, *, installed=False):
                      "identity": [1, 404 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
     absent = ["release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
               ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
-            ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": namespace["root"] + "/workflow-project",
             "installed": installed, "entries": rows, "absent": absent + ([] if installed else list(callers[1:])), "namespace": namespace}
@@ -2892,7 +2894,8 @@ def metadata_fixture_data(value, *, saved=False):
                      "identity": [1, 514 if replaced else 506 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
     absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
               ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
-            ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": namespace["root"] + "/metadata-project",
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else [locale + "/full_description.txt"]), "namespace": namespace}
@@ -2980,7 +2983,8 @@ def version_fixture_data(value, *, saved=False):
                      "identity": [1, 602 + index, stat.S_IFREG | 0o600, *owner, 1, len(raw), stamp, stamp]})
     absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
               ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
-              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "release-version-save-v1", "root": namespace["root"] + "/version-project",
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else ["version.properties"]), "namespace": namespace}
@@ -3578,8 +3582,21 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(L.SHELL_PROJECT_CONFIG).hexdigest(), L.SHELL_PROJECT_RECEIPT["readback"]["sha256"])
         ignored, additions = prepare_edit_ignore(b"")
         self.assertEqual(ignored, L.SHELL_PROJECT_IGNORE)
-        self.assertEqual(len(additions), 10)
+        self.assertEqual(len(additions), 13)
         self.assertEqual(prepare_edit_ignore(ignored), (ignored, ()))
+        # The installed observers compare against these literal bytes; stale
+        # count/size copies must fail here rather than in an expensive GUI run.
+        for name in ("installed_shell_observation.rs", "installed_shell_observation_macos.rs"):
+            native = (SOURCE / "desktop/src-tauri/src" / name).read_text()
+            declared, lines = native.split("const IGNORE_LINES: [&str; ", 1)[1].split("] = [", 1)
+            self.assertEqual((int(declared), tuple(json.loads("[" + lines.split("];", 1)[0] + "]"))),
+                             (len(additions), additions))
+            if name == "installed_shell_observation.rs":
+                self.assertIn(f"const IGNORE_BYTES: u32 = {len(ignored)};", native)
+        aqua = ast.parse((SOURCE / "desktop/tools/macos_aqua_qualification.py").read_bytes())
+        rules = next(node for node in aqua.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "IGNORE_RULES" for target in node.targets))
+        self.assertEqual(ast.literal_eval(rules.value), ignored)
 
     def test_shell_fixture_roster_fits_shell_only_cap_without_changing_aggregate_or_other_profiles(self):
         value, _, _, _ = closed_shell_data()

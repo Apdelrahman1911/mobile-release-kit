@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending, assetStorageReason } from '../src/assetSessionController.ts';
+import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason, assetStorageReason } from '../src/assetSessionController.ts';
 import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
@@ -1165,4 +1165,135 @@ test('encrypted live help keeps user labels nonsecret and saving distinct from a
   assert.match(sessionTargetLabel(guide, subject, [vaultRecord({ label: '<nonsecret text>' })], 'encrypted'), /<nonsecret text> · item 1 · revision 1/);
   assert.equal(sessionTargetLabel(guide, { ...subject, recordRevision: 2 }, [vaultRecord()], 'encrypted'), null);
   assert.deepEqual(guide, before, 'the static catalogue and requiredness are unchanged');
+});
+
+
+function imageOperation(patch = {}) {
+  return operation({ operation: 'choose-images', phase: 'capturing', source: 'pending', settlement: 'pending',
+    assessment: null, preview: null, selectionToken: null, ...patch });
+}
+
+test('generic choose-images status is passive closed DATA, never a credential kind or authority', () => {
+  for (const mode of ['closed', 'session', 'encrypted']) {
+    for (const phase of ['admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown', 'idle']) {
+      const op = imageOperation({ phase, source: phase === 'selected' ? 'captured' : phase === 'unknown' ? 'unknown' : 'pending',
+        settlement: phase === 'selected' || phase === 'idle' ? 'known' : phase === 'unknown' ? 'unknown' : 'pending' });
+      const frame = status(1, { mode, context: null, operation: op,
+        persistence: mode === 'encrypted' ? { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' } : null });
+      assert.deepEqual(parseAssetStatus(frame), frame);
+      for (const change of [
+        (v) => { v.operation.selectionToken = A; }, (v) => { v.operation.assessment = assessment(); },
+        (v) => { v.operation.preview = operation().preview; }, (v) => { v.operation.items = []; },
+        (v) => { v.operation.root = '/inert-not-a-source'; }, (v) => { v.operation.bytes = [1]; },
+        (v) => { v.operation.operationId = A; },
+        (v) => { v.operation.phase = 'assessing'; }, (v) => { v.operation.phase = 'preview'; },
+        (v) => { v.operation.phase = 'mutating'; },
+        (v) => { v.operation.storageOutcome = { effect: 'known-none', durability: 'not-run', cleanup: 'known' }; },
+      ]) {
+        const invalid = structuredClone(frame); change(invalid); assert.equal(parseAssetStatus(invalid), null);
+      }
+    }
+  }
+  assert.equal(ASSET_KINDS.includes('choose-images'), false);
+  assert.equal(isAssetFileKind('choose-images'), false);
+  assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind: 'choose-images', replacement: null }), false);
+});
+
+test('every active image phase blocks credential context, mutations, discard and lock without another cancellation route', async () => {
+  for (const phase of ['admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown']) {
+    const h = harness();
+    try {
+      await ready(h); const before = h.calls.length, scope = h.controller.getSnapshot().scope;
+      h.emit(status(2, { operation: imageOperation({ phase, source: phase === 'selected' ? 'captured' : phase === 'unknown' ? 'unknown' : 'pending',
+        settlement: phase === 'selected' ? 'known' : phase === 'unknown' ? 'unknown' : 'pending' }) }));
+      const observed = h.controller.getSnapshot();
+      assert.equal(assetImageOperationPending(observed.status), true);
+      assert.notEqual(assetSessionReason(observed), null);
+      assert.match(assetCancellationReason(observed), /original image operation in Metadata/);
+      assert.equal(observed.contextCurrent, false);
+      h.controller.setScope({ platform: 'ios', stage: 'production', purpose: 'store' });
+      assert.deepEqual(h.controller.getSnapshot().scope, scope);
+      h.controller.submitContext();
+      assert.equal(h.controller.choose('android-keystore'), false);
+      assert.equal(h.controller.prepareScalar('google-wif', fields), false);
+      assert.equal(h.controller.prepareSelection({}), false);
+      assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), false);
+      assert.equal(h.controller.prepareDelete({ recordId: C, expectedRevision: 1 }), false);
+      assert.equal(h.controller.confirmPreview(A, 'save'), false);
+      assert.equal(h.controller.discard(), false); assert.equal(h.controller.lock(), false);
+      h.setProject({ ...h.selected(), revision: 2 });
+      await settle(); assert.equal(h.calls.length, before, phase);
+      assert.equal(h.controller.getSnapshot().selectionKind, null);
+      assert.equal(h.controller.getSnapshot().reviewReady, false);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('an image slot suppresses an already queued credential context but does not auto-submit it on retirement', async () => {
+  const h = harness();
+  try {
+    await ready(h); const before = h.calls.length;
+    h.controller.setScope({ platform: 'android', stage: 'production', purpose: 'full' });
+    h.emit(status(2, { operation: imageOperation() })); await settle();
+    assert.equal(h.calls.length, before);
+    assert.equal(h.controller.getSnapshot().updatingContext, false);
+    h.emit(status(3, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) })); await settle();
+    assert.equal(h.calls.length, before, 'retirement is passive, not permission to mutate credential context');
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    h.controller.submitContext(); await settle();
+    assert.equal(h.calls.length, before + 1);
+    assert.equal(h.latest('context').args.stage, 'production');
+    h.latest('context').resolve(status(4, { context: { ...context, revision: 2, stage: 'production' },
+      operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) })); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, true);
+  } finally { h.controller.dispose(); }
+});
+
+test('image retirement is monotone, unknown stays blocked and idle never supplies credential origin authority', async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    const selected = status(2, { operation: imageOperation({ phase: 'selected', source: 'captured', settlement: 'known' }) });
+    h.emit(selected); h.emit(status(1));
+    assert.equal(h.controller.getSnapshot().status.operation.operation, 'choose-images');
+    assert.equal(h.controller.getSnapshot().originPending, false);
+    assert.equal(h.controller.getSnapshot().intent, null);
+    assert.equal(h.controller.getSnapshot().previewDeadline, null);
+    h.emit(status(3, { operation: imageOperation({ phase: 'unknown', source: 'unknown', settlement: 'unknown', reason: 'cleanup-unknown' }) }));
+    h.emit(status(4, { operation: imageOperation({ phase: 'unknown', source: 'unknown', settlement: 'late-known', reason: 'cleanup-unknown' }) }));
+    h.emit(status(5, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
+    assert.equal(h.controller.getSnapshot().blocked, true);
+    assert.equal(h.controller.choose('android-keystore'), false);
+    assert.equal(h.controller.discard(), false); assert.equal(h.controller.lock(), false);
+    assert.equal(h.calls.some((row) => row.command === 'discard' || row.command === 'lock'), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('CredentialSession renders choose-images only as passive status without a second Stop or private form', () => {
+  const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
+  const start = component.indexOf('imageOperation ? <div'), end = component.indexOf(': projectPathOperation ?', start);
+  assert.ok(start >= 0 && end > start);
+  const passive = component.slice(start, end);
+  assert.ok(passive.includes('Original image selection status'));
+  assert.ok(passive.includes('passive busy and retirement display'));
+  assert.ok(passive.includes('original image operation in Metadata'));
+  assert.doesNotMatch(passive, /onClick=|controller\.(discard|lock|choose)|selectionToken|assessment|preview\.token/);
+  assert.ok(component.includes('nativeAvailable && writable && guide && !projectPathActive && !imageActive'));
+  assert.equal((component.match(/disabled=\{!!state\.busy \|\| projectPathActive \|\| imageActive\}/g) ?? []).length, 2);
+  assert.ok(component.includes('nativeBusyReason !== null || imageActive'));
+});
+
+test('image retirement never auto-submits a deferred credential context even with a writable storage observation', async () => {
+  const h = harness(vaultStatus(0, { context: null, persistence: { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' } }));
+  try {
+    await h.controller.connect(h.api); const before = h.calls.length;
+    h.emit(vaultStatus(1, { context: null, persistence: { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' },
+      operation: imageOperation() }));
+    h.emit(vaultStatus(2, { context: null, operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
+    await settle(); assert.equal(h.calls.length, before);
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    h.controller.submitContext(); await settle(); assert.equal(h.calls.length, before + 1);
+    h.latest('context').resolve(vaultStatus(3, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
+    await settle(); assert.equal(h.controller.getSnapshot().contextCurrent, true);
+  } finally { h.controller.dispose(); }
 });

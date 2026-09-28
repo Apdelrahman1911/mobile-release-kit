@@ -1123,7 +1123,7 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                  "Bind the complete reviewed first-party checkout before compilation",
                  "Prepare only the fixed disposable Xcode ancestor before any worker",
                  "Select fixed frontend compiler",
-                 "Record exact source and actual tool bindings only after host preparation",
+                 "Record exact source and actual tool bindings only after route admission",
                  "Check current owner pins before native preparation"]
         offsets = [workflow.index("      - name: " + name + "\n") for name in names]
         self.assertEqual(offsets, sorted(offsets))
@@ -1132,6 +1132,13 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertNotIn("--version", reserve)
         self.assertNotIn("xcrun", reserve)
         preparation = workflow[offsets[3]:offsets[4]]
+        self.assertEqual(workflow.count("      MRK_MACOS_AQUA_SCOPE: project-fields\n"), 1)
+        admission = workflow.split("      - name: Admit only this exact disposable-hosted source route\n", 1)[1].split("\n      - name:", 1)[0]
+        guard = '[[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic ]]'
+        self.assertIn(guard, admission)
+        self.assertLess(admission.index(guard), admission.index("/usr/bin/uname"))
+        self.assertEqual([line.strip() for line in preparation.splitlines() if line.strip().startswith("if:")],
+                         ["if: success() && env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic'"])
         self.assertIn("timeout-minutes: 2", preparation)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", preparation)
         self.assertIn("exec /usr/bin/env -i", preparation)
@@ -1159,10 +1166,18 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         native_step = "Nine serial current-iOS Aqua cases through the reviewed original invocation owner"
         self.assertIn(native_step, workflow)
         self.assertLess(offsets[-1], workflow.index("      - name: " + native_step + "\n"))
-        self.assertIn('"scopes": ["project-fields", "ios-current-synthetic"]', workflow)
-        self.assertIn('"caseNames": ["project-fields", "ios-toolchain-prerequisite",', workflow)
-        self.assertIn("2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e", workflow)
-        self.assertIn("35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c", workflow)
+        self.assertIn('"scopes": [aqua_scope], "caseNames": case_names', workflow)
+        self.assertIn('if aqua_scope not in scope_cases: raise ValueError("Aqua scope refused")', workflow)
+        self.assertIn('"unselectedScopes": [scope for scope in scope_cases if scope != aqua_scope]', workflow)
+        self.assertIn("bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37", workflow)
+        self.assertIn("f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371", workflow)
+        diagnostics = block(workflow, "PY_DIAGNOSTICS").decode()
+        self.assertIn('admitted_scopes = ("project-fields", "ios-current-synthetic")', diagnostics)
+        self.assertIn('if aqua_scope not in admitted_scopes: raise ValueError("Aqua scope refused")', diagnostics)
+        self.assertIn('"requestedScope": aqua_scope', diagnostics)
+        self.assertIn('"unselectedScopes": [scope for scope in admitted_scopes if scope != aqua_scope]', diagnostics)
+        self.assertIn('"scope": "bounded-diagnostic-snapshots-only-not-original-process-family-finality"', diagnostics)
+        self.assertIn('name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}', workflow)
         helper = PATH.read_text()
         self.assertEqual(helper.count("subprocess.Popen("), 1)
         self.assertNotIn("shell=True", helper)

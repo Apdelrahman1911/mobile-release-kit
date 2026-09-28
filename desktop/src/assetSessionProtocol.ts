@@ -152,7 +152,7 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     const operation = value.operation;
     if (operation !== null) {
       if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview']) ||
-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-project', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock']) ||
+          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'choose-project', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock']) ||
           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
@@ -162,7 +162,8 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
       if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit']) ||
           !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
           !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
-      if (['choose-project-path', 'choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
+      if (operation.operation === 'choose-images' && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown'])) return null;
+      if (['choose-images', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
       if (operation.preview !== null && (!keys(operation.preview, ['token', 'action', 'expiresInMs', 'subject']) || !token(operation.preview.token) ||
           !one(operation.preview.action, ['save', 'bind', 'delete', 'initialize']) || !assetCounter(operation.preview.expiresInMs) || operation.preview.expiresInMs > 300000 ||

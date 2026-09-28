@@ -500,6 +500,41 @@ impl DesktopBridge {
         document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration|
             bridge.edits.apply_release_version(window, session_id, plan_token, registration))
     }
+    pub(crate) fn metadata_images_selection_available(&self) -> bool {
+        self.edits.metadata_images_selection_profile_available()
+    }
+    pub(crate) fn open_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_commands::Open) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        // Keep entropy outside the document mutex, but a matching selection
+        // must still be retired when ticket/admission preparation fails.
+        let ticket = self.edits.metadata_images_open_ticket(window);
+        let selected = args.project_id.clone();
+        document.metadata_images_import_admit(&selected, &args.selection_token, |bridge, registration, data, claimed|
+            bridge.edits.open_metadata_images(window, args.project_id, data, registration, ticket?, claimed))
+    }
+    pub(crate) fn open_metadata_images_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_commands::RecoveryOpen) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        use crate::metadata_images_commands::recovery_not_admitted;
+        let ticket = self.edits.metadata_images_open_ticket(window).map_err(recovery_not_admitted)?;
+        let selected = args.project_id.clone();
+        let mut entered_original_open = false;
+        let result = document.metadata_images_edit_admit(|_| Ok(selected), |bridge, registration| {
+            entered_original_open = true;
+            bridge.edits.open_metadata_images_recovery(window, args.project_id, registration, ticket)
+        });
+        result.map_err(|error| if entered_original_open { error } else { recovery_not_admitted(error) })
+    }
+    pub(crate) fn prepare_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_edit_protocol::PrepareMetadataImagesEdit) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        let session = args.session_id.clone();
+        document.metadata_images_edit_admit(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration|
+            bridge.edits.prepare_metadata_images(window, args, registration))
+    }
+    pub(crate) fn apply_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session: &str, plan: &str) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        document.metadata_images_edit_admit(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration|
+            bridge.edits.apply_metadata_images(window, session, plan, registration))
+    }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.
     pub(crate) fn native_roster(&self) -> Result<ProjectRoster, crate::asset_commands::AssetError> {

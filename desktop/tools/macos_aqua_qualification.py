@@ -204,7 +204,8 @@ IGNORE_PREFIX = b"# MRK Mac Aqua user ignore\nuser-output/\n"
 IGNORE_RULES = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n"
                 b".mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n"
                 b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n"
-    b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n")
+                b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n"
+                b".mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n")
 STALE = b"# MRK Mac Aqua stale base\n"
 # Literal public fixture DATA, not another core configuration serializer.
 CONFIG = b'''{

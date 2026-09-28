@@ -33,7 +33,7 @@ from test_workflow_transaction_profile import (InertGuard, ROOT, binding, direct
 
 PROFILE = tx.TypedEditProfile.METADATA_TEXT
 REVISION, TOKEN = "a" * 32, "b" * 32
-# Deliberately seven-only: adding version rules must not break metadata.
+# Deliberately seven-only: adding version/image rules must not break metadata.
 COVERED = ("\n".join(tx.METADATA_IGNORE_LINES) + "\n").encode()
 _NATIVE = {"ctypes", "_ctypes", "fcntl", "subprocess", "socket"}
 _OWNERS = {"mobile_release.init_workspace_custody", "mobile_release.build_inputs", "mobile_release.cancellation",
@@ -505,7 +505,7 @@ class MetadataTargetAndStateTests(unittest.TestCase):
 
     def test_legacy_four_ignore_lines_and_negation_refuse_before_any_target_binding(self):
         self.assertEqual(tx.STATE_NAMES, (tx.PREPARING, tx.READY, tx.CLEANUP))
-        self.assertEqual(len(tx.IGNORE_LINES), 10)
+        self.assertEqual(len(tx.IGNORE_LINES), 13)
         self.assertEqual(len(tx.METADATA_IGNORE_LINES), 7)
         self.assertEqual(tx.METADATA_IGNORE_LINES[4:], tuple(name + "/" for name in tx.METADATA_STATE_NAMES))
         with inert_custody() as custody, patch.object(os, "fstat", return_value=stat_value()):

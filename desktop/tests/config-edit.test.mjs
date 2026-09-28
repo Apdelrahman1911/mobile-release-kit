@@ -23,7 +23,8 @@ const TOK = {
 const BASE = { schemaVersion: 1, android: { enabled: true, applicationId: 'com.example.inert' }, source: { candidateBranch: 'main' } };
 const IGNORE = ['.mobile-release/', '.mobile-release-init-prepare/', '.mobile-release-init/', '.mobile-release-init-cleanup/',
   '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/',
-  '.mobile-release-version-prepare/', '.mobile-release-version/', '.mobile-release-version-cleanup/'];
+  '.mobile-release-version-prepare/', '.mobile-release-version/', '.mobile-release-version-cleanup/',
+  '.mobile-release-metadata-images-prepare/', '.mobile-release-metadata-images/', '.mobile-release-metadata-images-cleanup/'];
 const assurance = {
   basis: 'schema-policy', projectCodeExecuted: false, toolsProbed: false,
   credentialsRead: false, gitObserved: false, storeContacted: false,
@@ -60,7 +61,8 @@ function view(config = 'replace', ignore = 'preserve') {
     schemaVersion: 1,
     files: [
       { path: 'release/mobile-release.json', action: config, beforeBytes: create ? null : 240, afterBytes: config === 'preserve' ? 240 : 260 },
-      { path: '.gitignore', action: ignore, beforeBytes: ignore === 'create' ? null : 130, afterBytes: ignore === 'preserve' ? 130 : 160 },
+      { path: '.gitignore', action: ignore, beforeBytes: ignore === 'create' ? null : 130,
+        afterBytes: ignore === 'preserve' ? 130 : ignore === 'create' ? Buffer.byteLength(IGNORE.join('\n') + '\n') : 160 },
     ],
     createReleaseDirectory: create, rewritesConfigFormatting: config === 'replace',
     ignoreAdditions: ignore === 'preserve' ? [] : ignore === 'create' ? [...IGNORE] : [IGNORE[0]],
@@ -1213,4 +1215,24 @@ test('disposal only requests best-effort close of the known owner; it never clai
   assert.equal(h.workspace.projects.a, before);
   assert.equal(h.state.attempt.projection.phase, 'reviewing');
   assert.equal(h.controller.start('a'), false);
+});
+
+
+test('default configuration ignore inventory includes the three image journals in fixed thirteen-rule order', () => {
+  assert.equal(IGNORE.length, 13);
+  assert.deepEqual(IGNORE.slice(10), ['.mobile-release-metadata-images-prepare/', '.mobile-release-metadata-images/', '.mobile-release-metadata-images-cleanup/']);
+  assert.equal(Buffer.byteLength(IGNORE.join('\n') + '\n'), 414);
+  const created = view('create', 'create');
+  assert.ok(parseConfigEditStatus(status(1, owner('reviewing', { base: null, plan: created }))));
+  assert.deepEqual(created.ignoreAdditions, IGNORE);
+  const oldTen = structuredClone(created); oldTen.ignoreAdditions = IGNORE.slice(0, 10);
+  assert.equal(parseConfigEditStatus(status(1, owner('reviewing', { base: null, plan: oldTen }))), null);
+  for (const additions of [IGNORE.slice(10), [IGNORE[10], IGNORE[12]], [IGNORE[11]]]) {
+    const plan = view('replace', 'append'); plan.ignoreAdditions = additions;
+    assert.ok(parseConfigEditStatus(status(1, owner('reviewing', { plan }))));
+  }
+  for (const additions of [[IGNORE[12], IGNORE[10]], [IGNORE[10], IGNORE[10]], ['.mobile-release-other-images/']]) {
+    const plan = view('replace', 'append'); plan.ignoreAdditions = additions;
+    assert.equal(parseConfigEditStatus(status(1, owner('reviewing', { plan }))), null);
+  }
 });

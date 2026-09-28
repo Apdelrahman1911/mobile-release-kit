@@ -1328,10 +1328,11 @@ const METADATA_FIELDS: [(&str, &str, u32); 3] = [
     ("title.txt", "Public title", 30), ("short_description.txt", "Public summary", 80),
     ("full_description.txt", "Public description", 4000),
 ];
-const IGNORE_BYTES: u32 = 299;
-const IGNORE_LINES: [&str; 10] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
+const IGNORE_BYTES: u32 = 414;
+const IGNORE_LINES: [&str; 13] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
     ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/",
-    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/"];
+    ".mobile-release-version-prepare/", ".mobile-release-version/", ".mobile-release-version-cleanup/",
+    ".mobile-release-metadata-images-prepare/", ".mobile-release-metadata-images/", ".mobile-release-metadata-images-cleanup/"];
 
 // Control and synthetic DATA have distinct protected parents. No environment,
 // renderer input or CLI option chooses either root.

@@ -434,6 +434,7 @@ class AquaDataTests(unittest.TestCase):
                          'receipt["passed"] = ("failure" not in receipt and not close_errors',
                          'and receipt["originalReturned"] and receipt["artifactOriginalUnchanged"] and receipt["artifactOriginalClosed"]',
                          'and all(row["testsPassed"] for row in receipt["targets"]))',
+                         'if receipt["passed"]: receipt.update(tests=len(names) + len(native_names), failed=0, ignored=0, measured=0)',
                          'if close_errors and "failure" not in receipt: raise ValueError("headless-original-close-unconfirmed")'):
             self.assertIn(required, settlement)
         self.assertEqual(settlement.count("os.close(descriptor)"), 1)
@@ -3312,7 +3313,7 @@ class IOSAquaDataTests(unittest.TestCase):
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
         self.assertIn("macos_aqua_qualification.py --scope project-fields", workflow)
         self.assertIn("macos_aqua_qualification.py --scope ios-current-synthetic", workflow)
-        self.assertIn('"caseNames": ["project-fields", ' + ", ".join('"' + case + '"' for case in M.IOS_CURRENT_CASES) + "]", workflow)
+        self.assertIn('"ios-current-synthetic": ("nine-current-ios-Aqua-engineering-cases", [' + ", ".join('"' + case + '"' for case in M.IOS_CURRENT_CASES) + "])", workflow)
 
     def test_five_reports_and_dynamic_original_ids_are_closed_and_bounded(self):
         for case in M.IOS_CASES:
@@ -4101,9 +4102,10 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             M.run_cases(BINDING, fixtures, foreign, UID, "runner", emitted.append, case)
         self.assertTrue(fixtures.inflight); self.assertEqual(fixtures.reads, [])
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        self.assertIn('"scope": "one-project-fields-and-nine-current-ios-Aqua-engineering-cases"', workflow)
-        self.assertIn('"scopes": ["project-fields", "ios-current-synthetic"]', workflow)
-        self.assertIn('"caseNames": ["project-fields", ' + ", ".join('"' + name + '"' for name in M.IOS_CURRENT_CASES) + "]", workflow)
+        self.assertIn('"project-fields": ("one-project-fields-Aqua-engineering-case", ["project-fields"])', workflow)
+        self.assertIn('"scope": scope_label', workflow)
+        self.assertIn('"scopes": [aqua_scope], "caseNames": case_names', workflow)
+        self.assertIn('"ios-current-synthetic": ("nine-current-ios-Aqua-engineering-cases", [' + ", ".join('"' + name + '"' for name in M.IOS_CURRENT_CASES) + "])", workflow)
         self.assertEqual(workflow.count("macos_aqua_qualification.py --scope project-fields"), 1)
         self.assertEqual(workflow.count("macos_aqua_qualification.py --scope ios-current-synthetic"), 1)
         self.assertNotIn("--scope ios-unsigned-archive", workflow)
@@ -4114,14 +4116,16 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         ios_step = workflow.split(ios_label, 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("timeout-minutes: 3", p2_step)
         self.assertIn("timeout-minutes: 50", ios_step)
-        for step, prefix in ((p2_step, "aqua-project-fields"), (ios_step, "aqua")):
+        for step, prefix, scope in ((p2_step, "aqua-project-fields", "project-fields"), (ios_step, "aqua", "ios-current-synthetic")):
+            self.assertEqual([line.strip() for line in step.splitlines() if line.strip().startswith("if:")],
+                             ["if: success() && env.MRK_MACOS_AQUA_SCOPE == " + repr(scope)])
             for required in ("set -euo pipefail", "set -o noclobber", "umask 077", "status=$?", "[[ $status == 0 ]]"):
                 self.assertIn(required, step)
             self.assertIn('> "$MRK_MACOS_WORK/' + prefix + '-results.jsonl" 2> "$MRK_MACOS_WORK/' + prefix + '-failure.jsonl"', step)
             status_write = 'printf \'%s\\n\' "$status" > "$MRK_MACOS_WORK/' + prefix + '.status"'
             self.assertLess(step.index("status=$?"), step.index(status_write))
             self.assertLess(step.index(status_write), step.index("[[ $status == 0 ]]"))
-            for unsafe in ("continue-on-error", "if:", "rm -", "|| true"):
+            for unsafe in ("continue-on-error", "rm -", "|| true"):
                 self.assertNotIn(unsafe, step)
         uploads = workflow.split("          path: |\n", 1)[1]
         for name in ("aqua-project-fields-results.jsonl", "aqua-project-fields-failure.jsonl", "aqua-project-fields.status",

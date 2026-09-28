@@ -530,9 +530,10 @@ _VERSION_PATHS = {'nestedVersion': 'public/version-tree/version.properties',
 
 _VERSION_IGNORE = (b'.mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobi'
  b'le-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n'
- b'.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n')
+ b'.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n'
+ b'.mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n')
 
-_VERSION_IGNORE_SHA256 = 'cdf75f09188ea0e3712fcd26c9dbb42819dd467e9744676c6448b2a29a789c5b'
+_VERSION_IGNORE_SHA256 = '27c34f6146a9b24b047e64fd7cdee34aeeaf89cddaa2ca6c29b6681497e85b9c'
 
 _VERSION_TEXT = {'created': 'VERSION_NAME=2.3.4\nBUILD_NUMBER=8\n',
  'edited': '# Café\r\n VERSION_NAME = \'2.3.4\' \nBUILD_NUMBER = "8"\r\nOTHER = keep',

@@ -320,8 +320,8 @@ The unchanged historical `runtime` subcommand still enforces that old profile.
 
 The ordinary installed workflow now binds the already independently accepted
 current-payload DATA:
-- M (manifest): `2b02faf5968de3c1dffbda62ccf3e4553c8940df81c5faa7c439ce9a2ae0fd5e`.
-- S (source inputs): `35ac91f489a69dfa49806836115db5affcceefd3da69bfffbae477bc33afa44c`.
+- M (manifest): `bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37`.
+- S (source inputs): `f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371`.
 - Q (protocol): `083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
 
 Its existing `current-runtime` action reuses only the accepted interpreter

@@ -341,7 +341,8 @@ export interface CoreEditOutcome {
 }
 export type FixedIgnoreLine = '.mobile-release/' | '.mobile-release-init-prepare/' | '.mobile-release-init/' | '.mobile-release-init-cleanup/' |
   '.mobile-release-metadata-text-prepare/' | '.mobile-release-metadata-text/' | '.mobile-release-metadata-text-cleanup/' |
-  '.mobile-release-version-prepare/' | '.mobile-release-version/' | '.mobile-release-version-cleanup/';
+  '.mobile-release-version-prepare/' | '.mobile-release-version/' | '.mobile-release-version-cleanup/' |
+  '.mobile-release-metadata-images-prepare/' | '.mobile-release-metadata-images/' | '.mobile-release-metadata-images-cleanup/';
 export interface PreparedConfigView {
   schemaVersion: 1;
   files: [

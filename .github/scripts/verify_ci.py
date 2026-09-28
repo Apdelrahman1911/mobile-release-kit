@@ -725,6 +725,7 @@ RUBY_PARTITION_CONTRACTS = (
 PARTITIONED_RUBY_GATES = tuple(row[0] for row in RUBY_PARTITION_CONTRACTS)
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
+    ("ruby-metadata-image-catalog", "test_metadata_image_catalog.rb", 0),
     ("ruby-store_document", "test_store_document.rb", 0),
     ("ruby-store_lane_lifetime", "test_store_lane_lifetime.rb", 0),
     ("ruby-store_lane_nested_validation", "test_store_lane_nested_validation.rb", 0),

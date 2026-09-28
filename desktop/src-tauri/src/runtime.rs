@@ -644,6 +644,31 @@ impl ReleaseVersionInstalledProfile {
     }
 }
 
+// The image selector is deliberately closed until the image transaction,
+// restart recovery, native multi-picker and this exact installed source are
+// independently accepted. Other domains' supplier/core pins cannot admit it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct MetadataImagesInstalledProfile { _private: () }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl MetadataImagesInstalledProfile {
+    const TARGET: &'static str = "x86_64-unknown-linux-gnu";
+    const SOURCE_BINDING: Option<(&'static str, &'static str)> = None;
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        Self::SOURCE_BINDING.is_some_and(|(approved_manifest, approved_protocol)|
+            target == Self::TARGET && manifest == Some(approved_manifest) && protocol == Some(approved_protocol))
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let (manifest, _) = Self::SOURCE_BINDING.ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(manifest);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 // Project recovery binds exactly the admitted current core/bootstrap payload. Old A
 // and another domain's positive evidence MUST NOT select it. Only the normal
 // installed version selector below mints this fixed DATA profile.
@@ -1369,6 +1394,31 @@ impl RuntimeConfig {
         // The registered original worker borrows its domain-bound slots. The
         // returned paths are DATA; they cannot carry the ledger or spawn.
         originals.inspect_once(self.release_version_installed_profile()?, end, stop)
+    }
+    pub(crate) fn metadata_images_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.metadata_images_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    pub(crate) fn metadata_images_selection_profile_available(&self) -> bool {
+        // A public selection cannot mint unusable retained bytes under a
+        // different profile. Selection and edit share the exact fixed image gate.
+        self.metadata_images_edit_profile_available()
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn metadata_images_installed_profile(&self) -> Result<MetadataImagesInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher")))]
+        if MetadataImagesInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(MetadataImagesInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The public-image installed runtime and native selection profile are not qualified."))
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_metadata_images_installed(&self, originals: &mut crate::installed_runtime::MetadataImagesRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.metadata_images_installed_profile()?, end, stop)
     }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
