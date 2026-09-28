@@ -885,6 +885,78 @@ class AquaDataTests(unittest.TestCase):
             self.assertTrue(fixtures.inflight)
             self.assertEqual((fixtures.before, fixtures.reads), (["first-save"], []))
 
+    def test_project_chooser_context_preserves_original_returned_scalar_history(self):
+        base = {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None}
+        for count in (0, 1, 160):
+            value = {**base, "dom": {"evaluations": count, "lastProjectChooser": None}}
+            self.assertEqual(M.failure_context(context_row(value), b""), value)
+        cases = [(False, None, "none"), (True, None, "none"), (True, False, "none")]
+        cases += [(True, True, reason) for reason in M.DOM_CHOOSER_REASONS]
+        for step in ("ChooseCancel", "ChooseProject"):
+            for dashboard, disabled, reason in cases:
+                sample = {"step": step, "sequence": 1, "dashboardSelected": dashboard,
+                          "buttonDisabled": disabled, "reason": reason}
+                # A retained earlier callback remains historical even though
+                # more DOM evaluations occurred; it is not a fresh observation.
+                value = {**base, "dom": {"evaluations": 160, "lastProjectChooser": sample}}
+                self.assertEqual(M.failure_context(context_row(value), b""), value)
+        # Even enabled/returned DATA plus a successful-looking result cannot
+        # erase the actual failure marker or establish native finality.
+        sample = {"step": "ChooseProject", "sequence": 160, "dashboardSelected": True,
+                  "buttonDisabled": False, "reason": "none"}
+        value = {**base, "dom": {"evaluations": 160, "lastProjectChooser": sample}}
+        with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+            M.parse_result(captured(M.expected_result(BINDING, "first-save")), context_row(value), BINDING, "first-save")
+
+    def test_project_chooser_context_refuses_open_types_and_contradictions(self):
+        sample = {"step": "ChooseProject", "sequence": 160, "dashboardSelected": True,
+                  "buttonDisabled": True, "reason": "metadata-images"}
+        base = {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
+                "dom": {"evaluations": 160, "lastProjectChooser": sample}}
+        variants = []
+        for key, value in (("evaluations", True), ("evaluations", -1), ("evaluations", 161),
+                           ("evaluations", 160.0), ("evaluations", 159), ("extra", "PRIVATE"),
+                           ("lastProjectChooser", [])):
+            bad = deepcopy(base); bad["dom"][key] = value; variants.append(bad)
+        for key, value in (("step", "OpenProject"), ("step", None), ("sequence", True), ("sequence", 0),
+                           ("sequence", 161), ("sequence", 160.0), ("dashboardSelected", 1),
+                           ("dashboardSelected", False), ("buttonDisabled", 0), ("buttonDisabled", "false"),
+                           ("buttonDisabled", False), ("reason", "PRIVATE"), ("reason", []),
+                           ("reason", "x" * 4096), ("reasonText", "PRIVATE"), ("window", 1)):
+            bad = deepcopy(base); bad["dom"]["lastProjectChooser"][key] = value; variants.append(bad)
+        for field in base["dom"]:
+            bad = deepcopy(base); del bad["dom"][field]; variants.append(bad)
+        for field in sample:
+            bad = deepcopy(base); del bad["dom"]["lastProjectChooser"][field]; variants.append(bad)
+        for source in ("prearm-open-progress", None):
+            bad = deepcopy(base); bad["snapshotSource"] = source; variants.append(bad)
+        bad = deepcopy(base); del bad["snapshotSource"]; variants.append(bad)
+        for value in (None, [], "PRIVATE"):
+            bad = deepcopy(base); bad["dom"] = value; variants.append(bad)
+        for bad in variants:
+            self.assertIsNone(M.failure_context(context_row(bad), b""))
+
+    def test_project_chooser_diagnostics_use_existing_original_and_unchanged_bounds(self):
+        observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        labels = observer.split("const CHOOSER_REASON_FAMILIES: &[&str] = &[", 1)[1].split("];", 1)[0]
+        self.assertEqual(set(M.re.findall(r'"([a-z-]+)"', labels)), M.DOM_CHOOSER_REASONS)
+        self.assertIn('if r.evaluations >= 160 { self.fail_with("dom-evaluation-budget"); return; }', observer)
+        self.assertIn('else { 45 }', observer)
+        self.assertIn('edit::bounded(&failure_context(&self), 8192)', observer)
+        self.assertIn('(frame.len() <= 8448).then_some(frame)', observer)
+        self.assertIn("self.dom = None;", observer.split("fn at_expiry(", 1)[1].split("fn frame(", 1)[0])
+        body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
+        self.assertLess(body.index("project_chooser_sample(original, &v)"), body.index("r.last_project_chooser = Some(sample)"))
+        self.assertIn('if v["state"] == "wait" && object.len() == 1 { return; }', body)
+        self.assertIn('if !project_chooser_data_checks() { return false; }', observer)
+        chooser = observer.split("Step::ChooseCancel|Step::ChooseProject =>", 1)[1].split("Step::ReadCancelled =>", 1)[0]
+        self.assertIn("document.getElementById('project-choose-reason')", chooser)
+        self.assertIn("??'other'", chooser)
+        self.assertEqual(chooser.count("b.click()"), 1)
+        self.assertLess(chooser.index("if(!b||b.disabled)return {state:'wait',projectChooser}"), chooser.index("b.click()"))
+        self.assertIn("return {state:'ready',projectChooser}", chooser)
+        self.assertNotIn("projectChooser.reason=reasonText;", chooser)
+
     def test_original_window_success_requires_the_returned_positive_witness(self):
         for case in M.CASES:
             good = M.expected_result(BINDING, case)
@@ -1587,6 +1659,10 @@ class AquaDataTests(unittest.TestCase):
         largest["projectSelection"] = project_selection_context_data("inconsistent-original-data", "captured-object-metadata-changed")["projectSelection"]
         largest["accessibilityBinding"]["configuration"].update(parent="type-invalid", prompt="type-invalid",
             site="initial-directory-url", error="cleanup-unknown", initialDirectorySetterEntered=False, initialDirectorySetterReturned=False)
+        largest["snapshotSource"] = "record"
+        largest["dom"] = {"evaluations": 160, "lastProjectChooser": {
+            "step": "ChooseProject", "sequence": 160, "dashboardSelected": True,
+            "buttonDisabled": True, "reason": "offline-preflight"}}
         self.assertLessEqual(len(context_row(largest).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
 
     def test_original_exception_buffers_do_not_change_error_or_finality(self):
@@ -2640,15 +2716,15 @@ class AquaDataTests(unittest.TestCase):
         wrapper = observer.split("    fn dom(", 1)[1].split("    fn dom_body(", 1)[0]
         self.assertIn("let Some(mut r) = self.record() else { return; };", wrapper)
         authenticated = 'if !dom_step_entry(r.pending, r.step, original) { self.fail_with("dom-pending-custody"); return; }'
-        self.assertLess(wrapper.index(authenticated), wrapper.index("self.dom_body(&mut r, original.step, raw)"))
-        self.assertLess(wrapper.index("self.dom_body(&mut r, original.step, raw)"), wrapper.index("retire_returned_dom(&mut r.pending, original)"))
+        self.assertLess(wrapper.index(authenticated), wrapper.index("self.dom_body(&mut r, original, raw)"))
+        self.assertLess(wrapper.index("self.dom_body(&mut r, original, raw)"), wrapper.index("retire_returned_dom(&mut r.pending, original)"))
         self.assertEqual(wrapper.count("self.record()"), 1)
         for forbidden in ("catch_unwind", "drop(r)", "r.pending.take()", "r.step !="):
             self.assertNotIn(forbidden, wrapper)
         body = observer.split("    fn dom_body(", 1)[1].split("    pub(super) fn relay_joined", 1)[0]
         for forbidden in ("self.record()", "r.pending", "catch_unwind", "failed.store", "self.end ="):
             self.assertNotIn(forbidden, body)
-        self.assertEqual(body.count("if !self.timely() { return; }"), 4)
+        self.assertEqual(body.count("if !self.timely() { return; }"), 5)
         for label in ("dom-callback-size", "dom-callback-json", "dom-callback-object", "dom-callback-state"):
             self.assertIn(f'self.fail_with("{label}")', body)
         # Legacy, iOS and session branches retain the original DOM wrapper/cutoff.
@@ -2668,7 +2744,8 @@ class AquaDataTests(unittest.TestCase):
         self.assertNotRegex(before_transition, r"r\.[a-z_]+\s*(?:\+=|=(?!=))")
         shutdown = observer.split("fn failure_shutdown(", 1)[1].split("    fn dom(", 1)[0]
         self.assertIn("if r.pending.is_some() || r.failure_quit_attempted { return; }", shutdown)
-        context = observer.split("fn failure_context(", 1)[1].split("pub(super) struct Observation", 1)[0]
+        context = observer[observer.index("fn failure_context("):]
+        context = context[:context.index("\n}\n") + 3]
         self.assertIn('Pending::Dom(original) => ("dom", Some(original.step))', context)
         self.assertNotIn("sequence", context)
 

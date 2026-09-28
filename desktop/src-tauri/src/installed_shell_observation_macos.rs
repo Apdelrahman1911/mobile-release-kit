@@ -31,6 +31,7 @@ const FAILURE_REASONS: &[&str] = &[
     "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
     "dom-dispatch-refused", "dom-pending-custody", "dom-callback-size", "dom-callback-json",
     "dom-callback-object", "dom-callback-state", "picker-unexpected-result",
+    "dom-evaluation-budget", "dom-project-chooser-data",
     "native-wrong-thread", "native-step", "native-pending-custody", "native-original-id",
     "native-kind", "native-not-started", "native-ineligible", "native-action-attempted",
     "native-action-returned", "native-callback-returned", "native-response-present",
@@ -228,6 +229,83 @@ fn dom_step_entry(pending: Option<Pending>, current: Step, original: DomDispatch
 fn retire_returned_dom(pending: &mut Option<Pending>, original: DomDispatch) -> bool {
     if !(1..=160).contains(&original.sequence) || *pending != Some(Pending::Dom(original)) { return false; }
     *pending = None; true
+}
+
+// Returned renderer DATA only. The original Step/sequence belongs to the
+// native dispatch, not to a renderer field or a replacement callback.
+const CHOOSER_REASON_FAMILIES: &[&str] = &[
+    "none", "loading", "selection-pending", "offline-preflight", "android-build",
+    "ios-archive", "project-recovery", "github-preflight", "github-release",
+    "project-path", "version-edit", "metadata-images", "shutdown", "native-selection", "other",
+];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectChooserSample {
+    original: DomDispatch, dashboard_selected: bool, button_disabled: Option<bool>, reason: &'static str,
+}
+impl ProjectChooserSample {
+    fn value(self) -> Value {
+        json!({"step":format!("{:?}", self.original.step), "sequence":self.original.sequence,
+            "dashboardSelected":self.dashboard_selected, "buttonDisabled":self.button_disabled, "reason":self.reason})
+    }
+}
+fn project_chooser_sample(original: DomDispatch, value: &Value) -> Option<ProjectChooserSample> {
+    if !matches!(original.step, Step::ChooseCancel | Step::ChooseProject) || !(1..=160).contains(&original.sequence)
+        || value.as_object()?.len() != 2 { return None; }
+    let ready = match value.get("state")?.as_str()? { "wait" => false, "ready" => true, _ => return None };
+    let sample = value.get("projectChooser")?.as_object()?;
+    if sample.len() != 3 { return None; }
+    let dashboard_selected = sample.get("dashboardSelected")?.as_bool()?;
+    let button_disabled = match sample.get("buttonDisabled")? {
+        Value::Null => None, Value::Bool(value) => Some(*value), _ => return None,
+    };
+    let reason = CHOOSER_REASON_FAMILIES.iter().copied().find(|reason| Some(*reason) == sample.get("reason").and_then(Value::as_str))?;
+    // Before Dashboard there is no button/reason sample. An enabled control
+    // has no rendered disabling reason; only its existing click may say ready.
+    if !dashboard_selected && (button_disabled.is_some() || reason != "none")
+        || button_disabled == Some(false) && reason != "none"
+        || ready != (dashboard_selected && button_disabled == Some(false)) { return None; }
+    Some(ProjectChooserSample { original, dashboard_selected, button_disabled, reason })
+}
+fn project_chooser_data_checks() -> bool {
+    let original = DomDispatch { step: Step::ChooseProject, sequence: 160 };
+    let reply = |dashboard, disabled: Option<bool>, reason: &str, state| json!({"state":state,
+        "projectChooser":{"dashboardSelected":dashboard,"buttonDisabled":disabled,"reason":reason}});
+    for (dashboard, disabled, reason, state) in [
+        (false, None, "none", "wait"), (true, None, "none", "wait"),
+        (true, Some(true), "loading", "wait"), (true, Some(true), "other", "wait"),
+        (true, Some(false), "none", "ready"),
+    ] {
+        let Some(sample) = project_chooser_sample(original, &reply(dashboard, disabled, reason, state)) else { return false; };
+        if sample.original != original || sample.dashboard_selected != dashboard || sample.button_disabled != disabled
+            || sample.reason != reason || sample.value()["sequence"] != 160 { return false; }
+    }
+    for reason in CHOOSER_REASON_FAMILIES {
+        if project_chooser_sample(original, &reply(true, Some(true), reason, "wait")).is_none() { return false; }
+    }
+    let good = reply(true, Some(false), "none", "ready");
+    for invalid in [DomDispatch { sequence: 0, ..original }, DomDispatch { sequence: 161, ..original },
+        DomDispatch { step: Step::Dashboard, ..original }] {
+        if project_chooser_sample(invalid, &good).is_some() { return false; }
+    }
+    if project_chooser_sample(DomDispatch { step: Step::ChooseCancel, sequence: 1 }, &good).is_none() { return false; }
+    for invalid in [
+        reply(false, Some(false), "none", "wait"), reply(false, None, "loading", "wait"),
+        reply(true, Some(false), "loading", "ready"), reply(true, Some(true), "loading", "ready"),
+        reply(true, None, "none", "ready"), reply(true, Some(false), "none", "wait"),
+        reply(true, Some(true), "unbounded-supplied-reason", "wait"), reply(true, None, "none", "error"),
+        json!({"state":"wait"}), json!({"state":"ready","projectChooser":null}),
+    ] {
+        if project_chooser_sample(original, &invalid).is_some() { return false; }
+    }
+    for field in ["dashboardSelected", "buttonDisabled", "reason"] {
+        let mut missing = good.clone(); missing["projectChooser"].as_object_mut().unwrap().remove(field);
+        let mut wrong = good.clone(); wrong["projectChooser"][field] = json!(1);
+        if project_chooser_sample(original, &missing).is_some() || project_chooser_sample(original, &wrong).is_some() { return false; }
+    }
+    let mut extra = good.clone(); extra["projectChooser"]["step"] = json!("ChooseProject");
+    let mut raw = good.clone(); raw["reasonText"] = json!("private-supplied-text");
+    if project_chooser_sample(original, &extra).is_some() || project_chooser_sample(original, &raw).is_some() { return false; }
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -714,6 +792,7 @@ impl Session {
 struct OpenHistory { sample: OpenInputSample, identity: IdentitySample, completion: CompletionSample, progress: Arc<OpenRelease> }
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
+    last_project_chooser: Option<ProjectChooserSample>,
     original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     ax_trusted: bool, prepared_open: Option<PreparedOpenInput>, accessibility: Option<OpenInputSample>,
@@ -771,6 +850,7 @@ impl Record {
 #[derive(Clone, Copy)]
 struct FailureSnapshot {
     source: &'static str, step: Step, pending: Option<Pending>, native_dispatch: Option<NativeDispatch>,
+    dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>, completion_selection: Option<CompletionSample>,
@@ -780,7 +860,7 @@ struct FailureSnapshot {
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch,
-            original_window: r.original_window,
+            dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
             field_preparation: match r.step {
@@ -793,6 +873,7 @@ impl FailureSnapshot {
         // Non-accessibility fields are the original pre-arm sample, NOT fresh
         // pending/panel absence observations. The schema labels this explicitly.
         self.source = "prearm-open-progress";
+        self.dom = None; // No fresh DOM/counter observation at this cached expiry.
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
@@ -835,6 +916,9 @@ fn failure_context(r: &FailureSnapshot) -> Value {
         "originalWindow":r.original_window.map(OriginalWindowSample::value),
         "accessibility":r.accessibility.map(OpenInputSample::value),
         "accessibilityBinding":r.identity_binding.map(IdentitySample::value)});
+    if let Some((evaluations, chooser)) = r.dom {
+        value["dom"] = json!({"evaluations":evaluations, "lastProjectChooser":chooser.map(ProjectChooserSample::value)});
+    }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some((i,data)) = r.field_preparation {
@@ -923,7 +1007,7 @@ impl Observation {
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
-                original_window: None,
+                last_project_chooser: None, original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
@@ -1695,7 +1779,7 @@ impl Observation {
         }
         let original = {
             let Some(mut r) = self.record() else { return; };
-            if r.evaluations >= 160 { self.fail(); return; }
+            if r.evaluations >= 160 { self.fail_with("dom-evaluation-budget"); return; }
             r.evaluations += 1;
             let original = DomDispatch { step, sequence: r.evaluations };
             r.pending = Some(Pending::Dom(original)); original
@@ -2306,18 +2390,28 @@ impl Observation {
         // Keep this guard and marker throughout the body: no lock reacquisition,
         // second dispatch or substituted callback can acquire its custody. A
         // panic unwinds with the marker retained and poisons this Record lock.
-        self.dom_body(&mut r, original.step, raw);
+        self.dom_body(&mut r, original, raw);
         // Known returned bookkeeping only, including late/malformed failures.
         // This does not restore success or establish native/invocation finality.
         if !retire_returned_dom(&mut r.pending, original) { self.fail_with("dom-pending-custody"); }
     }
-    fn dom_body(&self, r: &mut Record, step: Step, raw: &str) {
+    fn dom_body(&self, r: &mut Record, original: DomDispatch, raw: &str) {
+        let step = original.step;
         if !self.timely() { return; }
         if raw.len() > 128 * 1024 { self.fail_with("dom-callback-size"); return; }
         let Ok(v) = crate::protocol::strict_json(raw.as_bytes()) else { self.fail_with("dom-callback-json"); return; };
         let Some(object) = v.as_object() else { self.fail_with("dom-callback-object"); return; };
-        if v["state"] == "wait" && object.len() == 1 { return; }
-        if v["state"] != "ready" { self.fail_with("dom-callback-state"); return; }
+        if matches!(step, Step::ChooseCancel | Step::ChooseProject) {
+            let Some(sample) = project_chooser_sample(original, &v) else { self.fail_with("dom-project-chooser-data"); return; };
+            if !self.timely() { return; }
+            // Only the matching original callback under the SAME Record guard.
+            // This returned DATA neither enables a control nor proves finality.
+            r.last_project_chooser = Some(sample);
+            if v["state"] == "wait" { return; }
+        } else {
+            if v["state"] == "wait" && object.len() == 1 { return; }
+            if v["state"] != "ready" { self.fail_with("dom-callback-state"); return; }
+        }
         if let Step::Ios(step) = step {
             let Case::Ios(case) = self.case else { self.fail_with("ios-dom-contract"); return; };
             let Some(record) = r.ios_record.as_ref() else { self.fail_with("ios-dom-contract"); return; };
@@ -2954,9 +3048,30 @@ fn script(case: Case, step: Step) -> Option<String> {
             return {state:'ready',title:text(card.querySelector('h2')),mode:text(card.querySelector('.badge')),platform:versions[2],rows:rows.length,
                 available:rows.filter(r=>text(r.querySelector('.badge'))==='Available · passive').length,
                 unavailable:rows.filter(r=>text(r.querySelector('.badge'))==='Unavailable').length};"#,
-        Step::ChooseCancel|Step::ChooseProject => r#"if(!selected('Dashboard'))return wait();
+        Step::ChooseCancel|Step::ChooseProject => r#"const projectChooser={dashboardSelected:selected('Dashboard'),buttonDisabled:null,reason:'none'};
+            if(!projectChooser.dashboardSelected)return {state:'wait',projectChooser};
             const b=[...document.querySelectorAll('.page-heading button')].find(b=>text(b)==='Choose a project');
-            if(!b||b.disabled)return wait();show(b);b.click();return ready();"#,
+            projectChooser.buttonDisabled=b?b.disabled:null;
+            const reasonText=text(document.getElementById('project-choose-reason'));
+            const reasonFamilies=[
+                ['loading',['Application capabilities are being loaded.']],
+                ['selection-pending',['Finish the original project selection first.']],
+                ['offline-preflight',['Offline-check ownership or finality','Saved offline checks hold','The original offline-check status']],
+                ['android-build',['Android-build ownership or finality','The Android build holds','The original Android-build status']],
+                ['ios-archive',['iOS-archive ownership or finality','The iOS archive holds','The original iOS-archive status']],
+                ['project-recovery',['Project-recovery ownership or finality','Project build-input recovery holds','The original project-recovery status']],
+                ['github-preflight',['The original GitHub preflight action']],
+                ['github-release',['The original protected release workflow action']],
+                ['project-path',['The original project-path outcome or cleanup','Finish the original project-path selection.']],
+                ['version-edit',['Saved-version edit ownership','A saved-version edit is still owned.','This project needs separately authorized saved-version recovery.']],
+                ['metadata-images',['Original image ownership or cleanup','An original image selection or local-copy review','This project needs a separate image recovery inspection.']],
+                ['shutdown',['The application is shutting down.']],
+                ['native-selection',['Project selection is not available in the current desktop runtime profile.',
+                    'The native desktop bridge is unavailable.','Application capabilities have not been loaded.',
+                    'Browser preview cannot select a native project folder.']]
+            ];
+            projectChooser.reason=reasonText===''?'none':reasonFamilies.find(([,prefixes])=>prefixes.some(prefix=>reasonText.startsWith(prefix)))?.[0]??'other';
+            if(!b||b.disabled)return {state:'wait',projectChooser};show(b);b.click();return {state:'ready',projectChooser};"#,
         Step::ReadCancelled => r#"const b=[...document.querySelectorAll('.page-heading button')].find(b=>text(b)==='Choose a project');
             if(!b||b.disabled)return wait();show(b);return {state:'ready',chooseEnabled:!b.disabled,
                 unselected:text(document.querySelector('.project-identity h2'))==='Your next release, organized.'&&!document.querySelector('.observation-facts,.draft-banner')};"#,
@@ -3282,6 +3397,7 @@ fn completion_ownership_data_check() -> bool {
 }
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
+    if !project_chooser_data_checks() { return false; }
     crate::asset_session::assert_project_selection_gate_contract();
     crate::runtime::assert_installed_session_selection_contract();
     // Compiled profile DATA only: this inert path is never resolved or opened.

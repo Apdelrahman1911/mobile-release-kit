@@ -85,7 +85,7 @@ FAILURE_STEPS |= frozenset(f"ProjectFields({name}({i}))" for name in (
 FAILURE_REASONS = frozenset((
     "observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
-    "dom-callback-object dom-callback-state picker-unexpected-result "
+    "dom-callback-object dom-callback-state picker-unexpected-result dom-evaluation-budget dom-project-chooser-data "
     "native-wrong-thread native-step native-pending-custody native-original-id native-kind native-not-started "
     "native-ineligible native-action-attempted native-action-returned native-callback-returned "
     "native-response-present native-selection-present native-close-attempted native-closed "
@@ -1748,6 +1748,34 @@ def _field_preparation_context(value, case, step):
         return None  # Diagnostic loss cannot become success or replace failure.
 
 
+DOM_CHOOSER_REASONS = frozenset((
+    "none loading selection-pending offline-preflight android-build ios-archive project-recovery "
+    "github-preflight github-release project-path version-edit metadata-images shutdown native-selection other"
+).split())
+
+
+def _dom_failure_context(value, source):
+    # Only the current Record's retained original callback DATA. This optional
+    # field has no authority to settle a callback, native call, or invocation.
+    need(source == "record" and type(value) is dict
+         and set(value) == {"evaluations", "lastProjectChooser"}, "failure-context")
+    count = value["evaluations"]
+    need(type(count) is int and 0 <= count <= 160, "failure-context")
+    sample = value["lastProjectChooser"]
+    if sample is None:
+        return value
+    need(type(sample) is dict and set(sample) == {
+        "step", "sequence", "dashboardSelected", "buttonDisabled", "reason"}, "failure-context")
+    need(type(sample["step"]) is str and sample["step"] in ("ChooseCancel", "ChooseProject")
+         and type(sample["sequence"]) is int and 1 <= sample["sequence"] <= count
+         and type(sample["dashboardSelected"]) is bool
+         and (sample["buttonDisabled"] is None or type(sample["buttonDisabled"]) is bool)
+         and type(sample["reason"]) is str and sample["reason"] in DOM_CHOOSER_REASONS, "failure-context")
+    need((sample["dashboardSelected"] or sample["buttonDisabled"] is None and sample["reason"] == "none")
+         and (sample["buttonDisabled"] is not False or sample["reason"] == "none"), "failure-context")
+    return value
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -1755,12 +1783,14 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
         if "snapshotSource" in value:
             need(type(value["snapshotSource"]) is str and value["snapshotSource"] in ("record", "prearm-open-progress"), "failure-context")
+        if "dom" in value:
+            value["dom"] = _dom_failure_context(value["dom"], value.get("snapshotSource"))
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])
         if "projectSelection" in value:
