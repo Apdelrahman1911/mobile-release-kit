@@ -16722,8 +16722,9 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
             self.assertEqual(argv,["/inert/cargo","test","--locked","--offline","--jobs","1","--no-default-features",
                 "--target",helper.TARGETS["windows"],"--manifest-path",str(SOURCE/directory/"Cargo.toml"),
                 "--target-dir",str(Path(context["root"])/"target"),"--features",features,"--lib","--no-run","--message-format=json"])
+            capture=[] if role=="native" else ["--nocapture"]
             self.assertEqual(helper.windows_normal_ui_inert_argv({"path":"/never-run/original.exe"},credential=role),
-                ["/never-run/original.exe",*names,"--exact","--nocapture","--test-threads=1"])
+                ["/never-run/original.exe",*names,"--exact",*capture,"--test-threads=1"])
             result=helper.windows_normal_ui_inert_output(self.output(credential=role),credential=role)
             self.assertEqual(result["tests"],list(names));self.assertEqual(result["passed"],len(names))
             raw=self.output(credential=role);first=("test "+names[0]+" ... ok\n").encode("ascii")
@@ -16740,6 +16741,14 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
         crate=SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src";app=SOURCE/helper.WINDOWS_INSTALLED_APP/"src"
         self.assertIn('#[path = "ui_dialog.rs"]\nmod dialog;', (crate/"ui.rs").read_text())
         self.assertEqual(len(expected["native"]), 20)
+        # Keep the actual caught-unwind case: capture is not a coverage exclusion.
+        cleanup_source=(crate/"vault_fs.rs").read_text()
+        self.assertIn("std::panic::catch_unwind",cleanup_source)
+        self.assertIn('panic!("inert cleanup clock failure")',cleanup_source)
+        for scalar in (False,True):
+            self.assertEqual(helper.windows_normal_ui_inert_argv({"path":"/never-run/original.exe"},scalar=scalar),
+                ["/never-run/original.exe",*helper.windows_normal_ui_inert_names(scalar=scalar),
+                 "--exact","--nocapture","--test-threads=1"])
         for name in expected["native"]:
             module = name.split("::", 1)[0]
             filename = "ui_dialog.rs" if module == "ui" else module + ".rs"

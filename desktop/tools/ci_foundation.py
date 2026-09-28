@@ -16101,7 +16101,11 @@ def windows_normal_ui_inert_names(*, scalar: bool = False, credential: str | Non
 
 def windows_normal_ui_inert_argv(artifact: dict, *, scalar: bool = False, credential: str | None = None) -> list[str]:
     names = windows_normal_ui_inert_names(scalar=scalar, credential=credential)
-    return [artifact["path"], *names, "--exact", "--nocapture", "--test-threads=1"]
+    # The native credential DATA roster deliberately catches a cleanup panic.
+    # Normal libtest capture contains that expected diagnostic on success; genuine
+    # failures still return nonzero and cannot satisfy the exact success parser.
+    capture = [] if credential == "native" else ["--nocapture"]
+    return [artifact["path"], *names, "--exact", *capture, "--test-threads=1"]
 
 
 def windows_normal_ui_inert_output(raw: bytes, *, scalar: bool = False, credential: str | None = None) -> dict:
@@ -17304,7 +17308,7 @@ def windows_normal_ui_credential_facts(context: dict) -> dict:
 
 
 def windows_normal_ui_credential_build(context: dict, cargo: str, environment: dict, deadline: float) -> dict:
-    """Five selected DATA tests in two real libtests; never the harness=false main.
+    """Role-selected DATA tests in two real libtests; never the harness=false main.
 
     Reuse the already acquired exact locked graphs and original compile-phase
     endpoint. No native UI/account/source capture is executed by these tests.
