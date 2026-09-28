@@ -706,6 +706,34 @@ test('App owns one image controller app-wide, with reciprocal busy gates and syn
   assert.ok(capability.includes('editStatus?.capability.available === true')); assert.ok(capability.includes('!metadataImagesState.integrityFailed'));
 });
 
+test('all closed image commands reach the existing native handlers through the local main-window ACL', () => {
+  const expected = [
+    'metadata_images_catalog', 'metadata_images_choose', 'metadata_images_selection_status', 'metadata_images_selection_cancel',
+    'metadata_images_edit_open', 'metadata_images_recovery_open', 'metadata_images_edit_prepare',
+    'metadata_images_edit_apply', 'metadata_images_edit_close', 'metadata_images_edit_status',
+  ].sort();
+  const types = readFileSync(new URL('../src/metadataImages.ts', import.meta.url), 'utf8');
+  const build = readFileSync(new URL('../src-tauri/build.rs', import.meta.url), 'utf8');
+  const shell = readFileSync(new URL('../src-tauri/src/shell.rs', import.meta.url), 'utf8');
+  const main = JSON.parse(readFileSync(new URL('../src-tauri/capabilities/main.json', import.meta.url), 'utf8'));
+  const body = (source, pattern) => { const match = source.match(pattern); assert.ok(match); return match[1]; };
+  const commands = (source) => [...source.matchAll(/\bmetadata_images_[a-z_]+\b/g)].map((match) => match[0]).sort();
+  const sameClosedSet = (actual) => {
+    assert.equal(new Set(actual).size, actual.length, 'duplicate image command or permission');
+    assert.deepEqual(actual, expected);
+  };
+  sameClosedSet(commands(body(types, /export type MetadataImagesCommand\s*=([\s\S]*?);/)));
+  sameClosedSet(commands(body(build, /const COMMANDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/)));
+  sameClosedSet(commands(body(shell, /tauri::generate_handler!\[([\s\S]*?)\]/)));
+  sameClosedSet([...shell.matchAll(/#\[tauri::command\]\s*async fn (metadata_images_[a-z_]+)\(/g)].map((match) => match[1]).sort());
+  assert.match(build, /AppManifest::new\(\)\s*\.commands\(COMMANDS\)/);
+  assert.equal(main.local, true);
+  assert.deepEqual(main.windows, ['main']);
+  assert.equal(Object.hasOwn(main, 'remote'), false);
+  sameClosedSet(main.permissions.filter((entry) => typeof entry === 'string' && entry.startsWith('allow-metadata-images-'))
+    .map((entry) => entry.slice('allow-'.length).replaceAll('-', '_')).sort());
+});
+
 test('guided Metadata UI displays real metadata, not fabricated thumbnails or browser/file-byte fallbacks', () => {
   const page = readFileSync(new URL('../src/pages/Metadata.tsx', import.meta.url), 'utf8');
   const ui = readFileSync(new URL('../src/components/MetadataImagesEditor.tsx', import.meta.url), 'utf8');
