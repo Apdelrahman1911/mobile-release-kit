@@ -335,8 +335,8 @@ impl Observation{
     pub(in crate::shell) fn session_context_input(&self,args:&input::Context<'_>){if self.case!=Case::CredentialSession{return;}let Some(mut r)=self.record()else{return;};
         let project=r.project.as_ref().map(|p|p.id.clone());let Some(s)=r.credentials.as_mut()else{self.fail(Refusal::CredentialRequest);return;};
         let ios=matches!(s.step,SessionStep::Ios|SessionStep::IosReady);
-        if project.as_deref()!=Some(args.project_id)||args.draft!=&self.base||args.platform.name()!=if ios{"ios"}else{"android"}
-            ||args.stage.name()!="candidate"||args.purpose.name()!="signing"||!s.input(Command::Context){self.fail(Refusal::CredentialRequest);}}
+        if project.as_deref()!=Some(args.project_id)||args.draft!=&self.base||args.platform!=if ios{input::Platform::Ios}else{input::Platform::Android}
+            ||args.stage!=input::Stage::Candidate||args.purpose!=input::Purpose::Signing||!s.input(Command::Context){self.fail(Refusal::CredentialRequest);}}
     pub(in crate::shell) fn session_choose_input(&self,args:&input::Choose<'_>){if self.case!=Case::CredentialSession{return;}let Some(mut r)=self.record()else{return;};
         let Some(s)=r.credentials.as_mut()else{self.fail(Refusal::CredentialRequest);return;};let Some(i)=row_index(s.step)else{self.fail(Refusal::CredentialRequest);return;};
         let replacement=if i==1{args.replacement.as_ref().is_some_and(|actual|s.records[0].as_ref().is_some_and(|(id,revision)|id==actual.record_id&&*revision==actual.expected_revision))}else{args.replacement.is_none()};
