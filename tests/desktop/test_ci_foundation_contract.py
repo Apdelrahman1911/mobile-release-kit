@@ -14688,6 +14688,8 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
     def test_directory_fence_hook_retains_owner_and_original_lifecycle_custody(self):
         native = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"; app = SOURCE / helper.WINDOWS_INSTALLED_APP / "src"
         fixture = (native / "credential_ui_fixture.rs").read_text()
+        self.assertIn(r'const JKS: &[u8] = b"\xfe\xed\xfe\xed\0\0\0\x02\0\0\0\0";', fixture)
+        self.assertIn(r'const REPLACEMENT: &[u8] = b"\xfe\xed\xfe\xed\0\0\0\x01\0\0\0\0";', fixture)
         attempt = fixture.split("pub fn directory_fence_once", 1)[1].split("pub fn path", 1)[0]
         self.assertIn("directory_fence: DirectoryFenceProbe", fixture)
         self.assertIn("!self.directory_fence_attempted", attempt)

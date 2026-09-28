@@ -5,8 +5,8 @@ use crate::{CredentialError, CredentialOrigin, CredentialSnapshot, DirectoryFenc
     DirectoryFenceObservation, DirectoryFenceProbe, ProjectBook, RegisteredProject};
 
 pub(crate) const INPUT_NAMES: [&str; 5] = ["input.jks", "replacement.keystore", "google-services.json", "GoogleService-Info.plist", "foreign-readable.jks"];
-const JKS: &[u8] = b"\xfe\xed\xfe\xed\0\0\0\2\0\0\0\0";
-const REPLACEMENT: &[u8] = b"\xfe\xed\xfe\xed\0\0\0\1\0\0\0\0";
+const JKS: &[u8] = b"\xfe\xed\xfe\xed\0\0\0\x02\0\0\0\0";
+const REPLACEMENT: &[u8] = b"\xfe\xed\xfe\xed\0\0\0\x01\0\0\0\0";
 const ANDROID: &[u8] = b"{\"project_info\":{\"project_id\":\"mrk-synthetic\"},\"client\":[{\"client_info\":{\"android_client_info\":{\"package_name\":\"org.example.mrk.observed\"}}}]}\n";
 const IOS: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>BUNDLE_ID</key><string>org.example.mrk.observed</string></dict></plist>\n";
 pub(crate) fn input_bytes(index: usize, changed: bool) -> Result<&'static [u8]> { match index {
