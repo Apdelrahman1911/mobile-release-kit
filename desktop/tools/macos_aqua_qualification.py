@@ -1821,8 +1821,12 @@ def failure_context(stdout, stderr, case=None):
                  and type(native["entered"]) is bool and type(native["returned"]) is bool
                  and (not native["returned"] or native["entered"]), "failure-context")
         if panel is not None:
-            need(type(panel) is dict and set(panel) == {"step", "id", "kind", "parentPresent", "panelPresent",
-                                                      "parentReferencesPanel", "panelReferencesParent", "panelVisible"}
+            panel_keys = {"step", "id", "kind", "parentPresent", "panelPresent",
+                          "parentReferencesPanel", "panelReferencesParent", "panelVisible"}
+            readiness_keys = {"directoryBound", "directoryReturned", "directoryReady", "directoryReadiness", "waitLocation"}
+            # Historical frames remain historical: accept either the old exact
+            # shape or the complete new sample, never synthesize missing values.
+            need(type(panel) is dict and set(panel) in (panel_keys, panel_keys | readiness_keys)
                  and native is not None and native["entered"] and panel["step"] == native["step"]
                  and type(panel["id"]) is int and type(panel["kind"]) is str
                  and type(panel["parentPresent"]) is bool and type(panel["panelPresent"]) is bool, "failure-context")
@@ -1840,6 +1844,23 @@ def failure_context(stdout, stderr, case=None):
                      for key in ("parentReferencesPanel", "panelReferencesParent"))
                  and (type(panel["panelVisible"]) is bool if panel["panelPresent"] else panel["panelVisible"] is None),
                  "failure-context")
+            if "directoryReadiness" in panel:
+                readiness = panel["directoryReadiness"]
+                need(all(type(panel[key]) is bool for key in ("directoryBound", "directoryReturned", "directoryReady"))
+                     and type(readiness) is str
+                     and readiness in {"not-ready", "directory-not-matched", "filename-not-matched", "ready"}
+                     and panel["directoryReady"] == (readiness == "ready")
+                     and (readiness == "not-ready" or panel["directoryBound"] and panel["directoryReturned"] and panel["panelPresent"])
+                     and (readiness != "filename-not-matched" or panel["kind"] in ("file", "version-source"))
+                     and (panel["kind"] != "quit" or readiness == "not-ready"), "failure-context")
+                wait = panel["waitLocation"]
+                need(wait is None or type(wait) is str and wait == "open-directory-readiness", "failure-context")
+                if wait is not None:
+                    open_step = _field_open_step(case, panel["id"]) or _file_open_step(case, panel["id"])
+                    need(value.get("snapshotSource") == "record" and native["returned"]
+                         and (panel["step"] == open_step or panel["step"] == "OpenProject" and panel["kind"] == "project")
+                         and not all(panel[key] for key in ("directoryBound", "directoryReturned", "directoryReady")),
+                         "failure-context")
         if "nativeAction" in value:
             value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel, case=case)
         if "accessibility" in value:

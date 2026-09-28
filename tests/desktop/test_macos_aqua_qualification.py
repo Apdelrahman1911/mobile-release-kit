@@ -2035,7 +2035,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("uint32_t attachment = mrk_observation_attachment(s);", native)
         self.assertIn("attachment == MRK_ATTACHMENT_ALL ? 2u : 0u", native)
         self.assertIn("if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);", native)
-        self.assertIn("flags & !0x1ffff == 0", rust)
+        self.assertIn("flags & !0x7ffff == 0", rust)
         self.assertIn("(parent_present && panel_present).then_some", rust)
 
     def test_native_action_source_keeps_original_calls_status_and_closed_decoder(self):
@@ -4454,6 +4454,142 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                           "Application installation uses only standard privileged Installer; app and Python stay nonroot"):
             self.assertIn(preserved, workflow)
 
+    @staticmethod
+    def _readiness_failure_data():
+        # Synthetic decoder DATA shaped like the returned op2 failure, not a
+        # replacement receipt for that run's unrecorded readiness getters.
+        step = "ProjectFields(Native(0))"
+        value = accessibility_context_data()
+        value.update(snapshotSource="record", accessibility=None)
+        value["nativeHandler"].update(step=step, returned=True)
+        value["lastPanel"].update(step=step, id=2, kind="version-source",
+                                  directoryBound=True, directoryReturned=True, directoryReady=False,
+                                  directoryReadiness="directory-not-matched", waitLocation="open-directory-readiness")
+        value["accessibilityBinding"] = deepcopy(M.expected_result(BINDING, "project-fields")["native"]["projectOpenBinding"])
+        value["accessibilityBinding"].update(id=2, kind="version-source", binding=None)
+        value["projectFieldPreparation"] = {"operationId": 2, "kind": "version-source", "returned": True,
+                                             "result": "ok", "facts": 8191}
+        marker = f"MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON=observer-deadline\n".encode("ascii")
+        return value, marker
+
+    def test_readiness_failure_retains_same_query_and_exact_returned_wait(self):
+        value, marker = self._readiness_failure_data()
+        for classification in ("not-ready", "directory-not-matched", "filename-not-matched"):
+            current = deepcopy(value)
+            current["lastPanel"]["directoryReadiness"] = classification
+            returned = M.failure_context(b"", marker + context_row(current), "project-fields")
+            self.assertEqual(returned, current)
+            self.assertEqual(returned["projectFieldPreparation"]["facts"], 8191)
+            self.assertIsNone(returned["accessibility"])
+            self.assertIsNone(returned["nativeAction"])
+            self.assertIsNone(returned["accessibilityBinding"]["binding"])
+            self.assertFalse(returned["lastPanel"]["directoryReady"])
+            self.assertEqual(M.failure_reason(b"", marker + context_row(current)), "observer-deadline")
+        # A ready query is not proof that the later Open preparation ran.
+        value["lastPanel"].update(directoryReady=True, directoryReadiness="ready", waitLocation=None)
+        self.assertEqual(M.failure_context(b"", marker + context_row(value), "project-fields"), value)
+        self.assertIsNone(value["accessibility"])
+
+    def test_readiness_failure_legacy_and_preparation_do_not_invent_wait(self):
+        value, marker = self._readiness_failure_data()
+        for key in ("directoryBound", "directoryReturned", "directoryReady", "directoryReadiness", "waitLocation"):
+            del value["lastPanel"][key]
+        self.assertEqual(M.failure_context(b"", marker + context_row(value), "project-fields"), value)
+        self.assertNotIn("directoryReady", value["lastPanel"])
+        self.assertNotIn("waitLocation", value["lastPanel"])
+        value, marker = self._readiness_failure_data()
+        value["lastPanel"].update(directoryReadiness="not-ready", waitLocation=None)
+        # The native query can have returned before the enclosing body returns.
+        value["nativeHandler"]["returned"] = False
+        self.assertEqual(M.failure_context(b"", marker + context_row(value), "project-fields"), value)
+        self.assertIsNone(value["lastPanel"]["waitLocation"])
+
+    def test_readiness_failure_rejects_partial_foreign_or_contradictory_data(self):
+        value, marker = self._readiness_failure_data()
+        for key in ("directoryBound", "directoryReturned", "directoryReady", "directoryReadiness", "waitLocation"):
+            bad = deepcopy(value); del bad["lastPanel"][key]
+            self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"), key)
+        for mutation in (
+                lambda v: v["lastPanel"].update(directoryBound=1),
+                lambda v: v["lastPanel"].update(directoryReturned=1),
+                lambda v: v["lastPanel"].update(directoryReady=0),
+                lambda v: v["lastPanel"].update(directoryReadiness="filename-ready"),
+                lambda v: v["lastPanel"].update(directoryReadiness=None),
+                lambda v: v["lastPanel"].update(directoryReadiness=2),
+                lambda v: v["lastPanel"].update(directoryReady=True),
+                lambda v: v["lastPanel"].update(directoryReadiness="ready"),
+                lambda v: v["lastPanel"].update(directoryReturned=False),
+                lambda v: v["lastPanel"].update(directoryBound=False),
+                lambda v: v["lastPanel"].update(waitLocation="project-field-preparation"),
+                lambda v: v["lastPanel"].update(waitLocation=1),
+                lambda v: v["lastPanel"].update(directoryReady=True, directoryReadiness="ready"),
+                lambda v: v["lastPanel"].update(id=3),
+                lambda v: v["lastPanel"].update(path="/not-a-diagnostic-field"),
+                lambda v: v["nativeHandler"].update(returned=False),
+                lambda v: v.update(snapshotSource="prearm-open-progress")):
+            bad = deepcopy(value); mutation(bad)
+            self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"), bad)
+        # A filename mismatch is impossible for a directory-kind original.
+        bad = deepcopy(value)
+        bad["nativeHandler"]["step"] = "ProjectFields(Native(1))"
+        bad["lastPanel"].update(step="ProjectFields(Native(1))", id=3, kind="ios-project",
+                                directoryReadiness="filename-not-matched")
+        self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
+        for step, (identifier, kind) in M.PROJECT_FIELD_PANELS.items():
+            if identifier not in (6, 7):
+                continue
+            bad = deepcopy(value); bad["nativeHandler"]["step"] = step
+            bad["lastPanel"].update(step=step, id=identifier, kind=kind)
+            self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
+        bad = deepcopy(value)
+        bad["nativeHandler"]["step"] = "CancelProject"
+        bad["lastPanel"].update(step="CancelProject", id=1, kind="project")
+        self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
+
+    def test_readiness_diagnostic_source_adds_no_query_action_or_wait_owner(self):
+        root = PATH.parents[1]
+        native = (root / "native/macos-installed-native/src/native.m").read_text()
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        helper = native.split("static BOOL mrk_observation_directory_ready(", 1)[1].split("int mrk_panel_observe(", 1)[0]
+        observe = native.split("int mrk_panel_observe(", 1)[1].split("// Closed DATA from this one original return.", 1)[0]
+        self.assertEqual(helper.count("[(NSOpenPanel *)s->window directoryURL]"), 1)
+        self.assertEqual(helper.count("[(NSOpenPanel *)s->window nameFieldStringValue]"), 1)
+        self.assertLess(helper.index("strcmp(path, expected) == 0"), helper.index("s->kind == 4 ?"))
+        self.assertLess(helper.index("s->kind == 4 ?"), helper.index("nameFieldStringValue]"))
+        self.assertEqual(native.count("mrk_observation_directory_ready("), 4)
+        self.assertEqual(native.count("mrk_observation_directory_ready(s, NULL)"), 2)
+        self.assertEqual(native.count("setDirectoryURL:"), 3)
+        self.assertEqual(observe.count("mrk_observation_directory_ready(s, &readiness)"), 1)
+        self.assertLess(observe.index("mrk_observation_directory_ready(s, &readiness)"), observe.index("*flags |= readiness << 17;"))
+        for token in ("setDirectoryURL:", "setNameFieldStringValue:", "dispatch_", "sleep(", "performClick", "AXUIElement"):
+            self.assertNotIn(token, helper)
+        self.assertIn("flags & !0x7ffff == 0", rust)
+        self.assertIn("(flags & 16 != 0) == (flags >> 17 == 3)", rust)
+        self.assertIn("flags >> 17 == 0 || flags & 0x200c == 0x200c", rust)
+        self.assertIn("observation_directory_readiness(kind, 0x4200c)", rust)
+        self.assertIn('directory_ready: flags & 16 != 0, directory_readiness', rust)
+        dispatch = observer.split("fn native_step(&self", 1)[1].split("fn native_step_body(", 1)[0]
+        body = observer.split("fn native_step_body(", 1)[1].split("    fn ", 1)[0]
+        self.assertLess(dispatch.index("self.native_step_body("), dispatch.index("native.returned = true"))
+        self.assertLess(dispatch.index("native.returned = true"), dispatch.index('panel.wait_location = Some("open-directory-readiness")'))
+        self.assertLess(dispatch.index('r.pending != Some(Pending::Native(step)) || r.step != step'),
+                        dispatch.index('panel.wait_location = Some("open-directory-readiness")'))
+        self.assertIn("p.step == step && readiness_wait == Some(p.id)", dispatch)
+        gate = "if open && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {"
+        self.assertEqual(body.count("*readiness_wait = Some(id);"), 1)
+        self.assertLess(body.index("record.prepared(i)"), body.index(gate))
+        self.assertLess(body.index(gate), body.index("*readiness_wait = Some(id);"))
+        self.assertLess(body.index("*readiness_wait = Some(id);"), body.index("prepare_open_input(id, target, binding_return)"))
+        wait = body.split(gate, 1)[1].split("        if open {", 1)[0]
+        self.assertIn("return Ok(false); // Before any Open action; original deadline remains unchanged.", wait)
+        for token in ("observed_panel(", "prepare_open_input(", "prepare_project_field(", "Instant::", "Duration::", "self.record("):
+            self.assertNotIn(token, wait)
+        sample = observer.split("impl PanelSample {", 1)[1].split("fn same_panel_action_returned(", 1)[0]
+        self.assertIn("wait_location: None", sample)
+        for field in ("directory_bound", "directory_returned", "directory_ready", "directory_readiness"):
+            self.assertIn(f"{field}: native.{field}", sample)
+
     def test_field_failure_diagnostics_bind_exact_original_and_never_fill_missing_evidence(self):
         case = "project-fields"
         for index, identifier, kind in ((0, 2, "version-source"), (1, 3, "ios-project"), (2, 4, "ios-workspace"),
@@ -4611,7 +4747,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
 class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
     def test_source_fixed_read_only_route_excludes_every_build_and_keeps_failure_post(self):
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        self.assertEqual(workflow.count("      MRK_MACOS_AQUA_SCOPE: project-fields-android-inputs\n"), 1)
+        self.assertEqual(workflow.count("      MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}\n"), 1)
         self.assertNotIn("workflow_dispatch", workflow)
         steps = {}
         for block in workflow.split("      - name: ")[1:]:
@@ -4644,10 +4780,16 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         classifiers = {
             "Classify installed Xcode originals without preparing or selecting a toolchain":
                 "success() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification'",
-            "Recheck admitted classification source even after an incomplete observation":
-                "always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'",
+            "Recheck admitted classification/private-native source even after an incomplete observation":
+                "always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private') && steps.source.outcome == 'success'",
             "Preserve bounded classification DATA and original workflow exit evidence":
                 "always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'",
+        }
+        private = {
+            "Compile only native wrapping variants and run the one owned private cohort":
+                "success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'",
+            "Preserve bounded private-cohort public facts and compiler-only diagnostics":
+                "always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success'",
         }
         scoped = {
             "Prepare only the fixed disposable Xcode ancestor before any worker": "ios-current-synthetic",
@@ -4659,13 +4801,15 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Export bounded diagnostics without altering original command evidence",
             "Preserve bounded original evidence; upload alone is not an Aqua pass",
         }
-        self.assertEqual(set(steps), admitted | legacy | set(classifiers) | set(scoped) | legacy_exports)
+        self.assertEqual(set(steps), admitted | legacy | set(classifiers) | set(private) | set(scoped) | legacy_exports)
         for name, body in steps.items():
             gates = [line.strip() for line in body.splitlines() if line.startswith("        if:")]
             if name in admitted:
                 expected = []
             elif name in classifiers:
                 expected = ["if: " + classifiers[name]]
+            elif name in private:
+                expected = ["if: " + private[name]]
             elif name in scoped:
                 selection = "env.MRK_MACOS_AQUA_SCOPE == " + repr(scoped[name])
                 if scoped[name] in ("project-fields", "android-inputs"):
@@ -4686,9 +4830,9 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         for forbidden in ("sudo", "xcodebuild", "xcrun", "cargo", "npm", "continue-on-error", "set +e", "|| true", "rm -"):
             self.assertNotIn(forbidden, classify)
         admission = steps["Admit only this exact disposable-hosted source route"]
-        self.assertIn('if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification ]]; then', admission)
+        self.assertIn('if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private ]]; then', admission)
         self.assertIn("        id: source\n", steps["Bind the complete reviewed first-party checkout before compilation"])
-        post = steps["Recheck admitted classification source even after an incomplete observation"]
+        post = steps["Recheck admitted classification/private-native source even after an incomplete observation"]
         self.assertIn("git -c core.fsmonitor=false diff --exit-code HEAD --", post)
         self.assertIn("status --porcelain=v1 --untracked-files=all", post)
         self.assertIn('[[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]', post)
@@ -4700,6 +4844,75 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "${{ steps.work.outputs.root }}/xcode-installed-classification-result.json",
         ])
         self.assertIn("if-no-files-found: error", upload)
+
+    def test_two_scoped_jobs_keep_unique_artifacts_and_three_private_variants(self):
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        header = workflow.split("    steps:\n", 1)[0]
+        expected_job = (
+            "  aqua:\n"
+            "    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-aqua'\n"
+            "    name: aqua-${{ matrix.scope }}\n"
+            "    strategy:\n"
+            "      fail-fast: false\n"
+            "      matrix:\n"
+            "        scope:\n"
+            "          - project-fields-android-inputs\n"
+            "          - wrapping-keychain-private\n"
+            "    runs-on: macos-26\n"
+            "    timeout-minutes: 75\n"
+        )
+        self.assertEqual(header.split("jobs:\n", 1)[1].split("    env:\n", 1)[0], expected_job)
+        self.assertIn("on:\n  push:\n    branches:\n      - verify/desktop-macos-aqua\n", header)
+        self.assertIn("permissions:\n  contents: read\n  actions: read\n", header)
+        self.assertIn("concurrency:\n  group: desktop-macos-aqua-${{ github.ref }}\n  cancel-in-progress: false\n", header)
+        for line in (
+            "      MRK_EXPECTED_SHA: ${{ github.sha }}\n",
+            "      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}\n",
+            "      MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}\n",
+        ):
+            self.assertEqual(header.count(line), 1)
+        for forbidden in ("workflow_dispatch", "continue-on-error"):
+            self.assertNotIn(forbidden, workflow)
+        steps = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
+        compiler = "Compile the fixed debug actual-main observer and normal embedded frontend once"
+        self.assertEqual(workflow.count("      - name: " + compiler + "\n"), 1)
+        self.assertEqual(steps[compiler].count("cargo test --locked"), 1)
+        self.assertEqual(steps[compiler].count("npm run build"), 1)
+        private = steps["Compile only native wrapping variants and run the one owned private cohort"]
+        self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'", private)
+        for required in (
+            'for role, features, flags in (("normal", [], ""), ("observer", ["installed-observation"], ""),\n'
+            '                                            ("qualification", ["installed-observation"], "--cfg mrk_wrapping_keychain_qualification")):',
+            'target = work / ("wrapping-" + role + "-target")',
+            'environment = dict(build_env, CARGO_TARGET_DIR=str(target), RUSTFLAGS=flags)',
+            'argv = ["cargo", "test", "--locked", "--no-default-features", "--jobs", "2",',
+            '"--manifest-path", str(native / "Cargo.toml"),',
+            '"--lib", "--no-run", "--message-format=json"]',
+            'owner = qualification.load_owner(checkout)',
+            'name = "wrapping_keychain::private_fixture::private_keychain_cohort"',
+        ):
+            self.assertIn(required, private)
+        self.assertEqual(private.count('name = "wrapping_keychain::private_fixture::private_keychain_cohort"'), 1)
+        self.assertNotIn("npm", private)
+        self.assertNotIn("sudo", private)
+        artifact_prefix = "desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-"
+        primary_upload = steps["Preserve bounded original evidence; upload alone is not an Aqua pass"]
+        private_upload = steps["Preserve bounded private-cohort public facts and compiler-only diagnostics"]
+        self.assertIn("name: " + artifact_prefix + "${{ env.MRK_MACOS_AQUA_SCOPE }}", primary_upload)
+        self.assertIn("name: " + artifact_prefix + "wrapping-keychain-private", private_upload)
+        resolved = [artifact_prefix + scope for scope in ("project-fields-android-inputs", "wrapping-keychain-private")]
+        self.assertEqual(len(set(resolved)), 2)
+        private_leaves = ["source-inventory.json", "wrapping-native.receipt.json", "wrapping-native.report.json"]
+        private_leaves += ["wrapping-" + role + "-build." + suffix
+                           for role in ("normal", "observer", "qualification")
+                           for suffix in ("jsonl", "stderr", "status")]
+        self.assertEqual([line.strip() for line in private_upload.splitlines()
+                          if "${{ steps.work.outputs.root }}/" in line],
+                         ["${{ steps.work.outputs.root }}/" + leaf for leaf in private_leaves])
+        for upload in (primary_upload, private_upload):
+            self.assertIn("if-no-files-found: error", upload)
+        # Exact private leaves exclude native stdout/stderr, the fixture, binaries
+        # and Keychain bytes; upload success cannot replace any original result.
 
     def test_paired_native_scopes_share_one_compile_but_not_original_owners(self):
         import ast

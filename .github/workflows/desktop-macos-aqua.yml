@@ -16,6 +16,13 @@ concurrency:
 jobs:
   aqua:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-aqua'
+    name: aqua-${{ matrix.scope }}
+    strategy:
+      fail-fast: false
+      matrix:
+        scope:
+          - project-fields-android-inputs
+          - wrapping-keychain-private
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -25,8 +32,8 @@ jobs:
       MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
-      # Closed source selection: two independent native journeys share one build/install.
-      MRK_MACOS_AQUA_SCOPE: project-fields-android-inputs
+      # Exactly two source-fixed scopes; original bodies and owners remain separate.
+      MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
@@ -36,14 +43,14 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs ]]
+          [[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs || "$MRK_MACOS_AQUA_SCOPE" == wrapping-keychain-private ]]
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-aqua ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-aqua.yml@$GITHUB_REF" ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 ]]
-          if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification ]]; then
+          if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private ]]; then
             # Supplier/CLT admission belongs only to the unchanged build routes.
             [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37 ]]
             [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371 ]]
@@ -475,6 +482,438 @@ jobs:
               publish("headless-tests.receipt.json", data)
               if close_errors and "failure" not in receipt: raise ValueError("headless-original-close-unconfirmed")
           PY_HEADLESS
+      - name: Compile only native wrapping variants and run the one owned private cohort
+        if: success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ -d "$DEVELOPER_DIR" ]]
+          # Existing pinned loader + run_owned, no new executor or fixture CLI.
+          # Cargo/rustc cwd remains below desktop/rust-toolchain.toml.
+          # Select the native package as root; its standalone Cargo.lock is the
+          # unchanged four-package application-lock closure, not a re-resolution.
+          "$MRK_PYTHON" -I -S -B - <<'PY_WRAPPING'
+          import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys
+          work = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          native = checkout / "desktop/native/macos-installed-native"
+          name = "wrapping_keychain::private_fixture::private_keychain_cohort"
+          library = "mrk_macos_installed_native"
+          package = "path+" + native.as_uri() + "#mrk-macos-installed-native@0.1.0"
+          fixture_symbols = {
+              "_mrk_wrapping_fixture_frame_bytes", "_mrk_wrapping_fixture_abi",
+              "_mrk_wrapping_fixture_new", "_mrk_wrapping_fixture_run",
+              "_mrk_wrapping_fixture_material", "_mrk_wrapping_fixture_binding", "_mrk_wrapping_fixture_free",
+          }
+          case_names = ("Selector", "HelperShapes", "AddBaseline", "LookupBaseline", "DuplicateBaseline", "MissingOther",
+                        "DenyDeleteAndReadonlyAllow", "ForeignUserMutationAllow", "ForeignGroupInheritOnlyMutationAllow",
+                        "PosixForeignWrite", "SymlinkLeaf", "PostAddNamespaceRefusal", "LockedPrivateFixture", "StopAfterAdd")
+          spec = importlib.util.spec_from_file_location("_mrk_wrapping_existing_owner", checkout / "desktop/tools/macos_aqua_qualification.py")
+          qualification = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = qualification
+          spec.loader.exec_module(qualification)
+          owner = qualification.load_owner(checkout)
+          # Build environment only; never forwarded to the native cohort.
+          # No Cargo/Rust wrapper, encoded flags or ambient target override.
+          build_env = {key: os.environ[key] for key in ("PATH", "HOME", "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
+          for key in ("CARGO_HOME", "RUSTUP_HOME"):
+              if key in os.environ: build_env[key] = os.environ[key]
+          build_env.update(LANG="C", LC_ALL="C", TZ="UTC", CARGO_INCREMENTAL="0")
+          # Deliberately no HOME/TMPDIR override and no fixture/password/token
+          # input. The native selector obtains the real ordinary account.
+          native_env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+                        "__CF_USER_TEXT_ENCODING": f"0x{os.getuid():X}:0:0"}
+          receipt = {"schemaVersion": 1, "scope": "wrapping-private-common-cohort",
+                     "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                     "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
+                     "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "nativeEntry": name,
+                     "innerCutoffSeconds": 45, "outerTimeoutSeconds": 90, "calls": [], "variants": [],
+                     "nativeOriginalReturned": False, "nativeReportAdmitted": False, "passed": False,
+                     "receiptProvisionalUntilStepExitZero": True, "shippingBinaryQualified": False,
+                     "distributionQualified": False, "perQueryUIFailQualified": False,
+                     "fixtureCleanupOnUncertainty": False}
+          originals, files, errors = [], [], []
+          stage = "source-owner"
+          def pairs(items):
+              value = {}
+              for key, item in items:
+                  if key in value: raise ValueError("duplicate-json")
+                  value[key] = item
+              return value
+          def parse(data):
+              return json.loads(data, object_pairs_hook=pairs,
+                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite-json")))
+          def sig(s):
+              return (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          def publish(leaf, data):
+              if len(data) > 4 * 1024 * 1024: raise ValueError("wrapping-public-output-bound")
+              fd = os.open(work / leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+              with os.fdopen(fd, "wb") as stream:
+                  stream.write(data)
+                  stream.flush()
+                  os.fsync(stream.fileno())
+          def invoke(role, argv, *, environ, cwd, timeout, limit):
+              # Thin recording at the EXISTING owner call, not a second owner.
+              # The actual CompletedProcess/error enters this original first.
+              global stage
+              stage = role
+              row = {"role": role, "argv": argv, "timeoutSeconds": timeout, "outputBound": limit,
+                     "entered": True, "returned": False}
+              receipt["calls"].append(row)
+              original = {"record": row, "result": None, "error": None}
+              originals.append(original)
+              try:
+                  original["result"] = owner.run_owned(argv, environ=environ, cwd=cwd, timeout=timeout,
+                                                      capture=True, text=False, output_limit=limit)
+              except BaseException as error:
+                  original["error"] = error
+                  row["errorType"] = type(error).__name__
+                  if isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)):
+                      row.update(dispatched=error.dispatched, contained=error.contained)
+                      if isinstance(error, owner.ProcessError): row["cleanupComplete"] = error.cleanup_complete
+                  raise
+              result = original["result"]
+              row["returned"] = True
+              if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
+                      or type(result.stdout) is not bytes or type(result.stderr) is not bytes
+                      or len(result.stdout) + len(result.stderr) > limit):
+                  raise ValueError("wrapping-original-return-contract")
+              row.update(returncode=result.returncode, stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr),
+                         stdoutSha256=hashlib.sha256(result.stdout).hexdigest(),
+                         stderrSha256=hashlib.sha256(result.stderr).hexdigest())
+              return result, row
+          def admit_file(path, role, executable=False):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              cell = {"fd": fd, "path": path, "role": role, "closed": False, "unchanged": False}
+              files.append(cell)
+              before = os.fstat(fd)
+              cell["before"] = before
+              if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid()
+                      or before.st_mode & 0o022 or not 0 < before.st_size <= 1024 * 1024 * 1024
+                      or executable and not before.st_mode & 0o111):
+                  raise ValueError("wrapping-original-artifact-shape")
+              cell["sha256"] = file_digest(cell)
+              return cell
+          def file_digest(cell):
+              fd, path, before = cell["fd"], cell["path"], cell["before"]
+              if sig(before) != sig(os.fstat(fd)) or sig(before) != sig(path.lstat()):
+                  raise ValueError("wrapping-original-artifact-changed")
+              digest, offset = hashlib.sha256(), 0
+              while offset < before.st_size:
+                  block = os.pread(fd, min(before.st_size - offset, 1024 * 1024), offset)
+                  if not block: raise ValueError("wrapping-original-artifact-short")
+                  digest.update(block)
+                  offset += len(block)
+              if os.pread(fd, 1, before.st_size) or sig(before) != sig(os.fstat(fd)) or sig(before) != sig(path.lstat()):
+                  raise ValueError("wrapping-original-artifact-changed")
+              return digest.hexdigest()
+          def exact_keys(value, keys):
+              if type(value) is not dict or set(value) != set(keys.split()): raise ValueError("wrapping-report-keys")
+          def ints(value, length):
+              if type(value) is not list or len(value) != length or any(type(n) is not int or not -(1 << 63) <= n < (1 << 63) for n in value):
+                  raise ValueError("wrapping-report-scalars")
+              return value
+          def settled_raw(raw):
+              exact_keys(raw, "header references calls descriptors acl native")
+              h = ints(raw["header"], 18)
+              if h[0] != 2 or h[6] & 3 != 1 or h[9] != len(raw["references"]) or h[10] != len(raw["calls"]) or h[14] != len(raw["descriptors"]):
+                  raise ValueError("wrapping-settled-header")
+              if not 0 <= h[9] <= 24 or not 0 <= h[10] <= 12 or not 0 <= h[14] <= 72:
+                  raise ValueError("wrapping-raw-bounds")
+              for ref in raw["references"]:
+                  r = ints(ref, 6)
+                  if r[0] != 1 or any(n not in (0, 1) for n in r) or r[1] != r[2] or r[3] != r[5] or r[4] != r[5]:
+                      raise ValueError("wrapping-cf-original-unsettled")
+              for call in raw["calls"]:
+                  c = ints(call, 4)
+                  if c[1:3] != [1, 1]: raise ValueError("wrapping-security-return-unobserved")
+              for descriptor in raw["descriptors"]:
+                  d = ints(descriptor, 10)
+                  if (d[0] != 1 or d[1] != d[2] or d[3] != d[7] or d[5] != d[6]
+                          or d[7] and (d[5:8] != [1, 1, 1] or d[8] != 0)):
+                      raise ValueError("wrapping-descriptor-original-unsettled")
+              a = ints(raw["acl"], 21)
+              n = ints(raw["native"], 9)
+              if (a[0] != a[1] or a[4] != a[5] or not a[6] == a[7] == a[8]
+                      or a[9] != a[10] or not a[11] == a[12] == a[13] == a[14]
+                      or a[15] != a[16] or not a[17] == a[18] == a[19] == a[20] or n[0] != n[1]):
+                  raise ValueError("wrapping-acl-original-unsettled")
+              return h
+          def public_report(result):
+              # Partial failure receipts are useful too, but only a bounded
+              # closed scalar alphabet may leave the original native stdout.
+              marker = b"MRK_WRAPPING_PRIVATE_RESULT="
+              if result.stdout.count(marker) != 1: raise ValueError("wrapping-one-public-report")
+              line, newline, rest = result.stdout.split(marker)[1].partition(b"\n")
+              if not newline or len(line) > 128 * 1024: raise ValueError("wrapping-public-report-bound")
+              value = parse(line)
+              keys = set(("schemaVersion scope provisional outerFinalityRequired shippingBinaryQualified distributionQualified "
+                  "perQueryUIFailQualified cutoffSeconds adapterInvocationBound fixtureActionBound caller originalActions fixtureReturns "
+                  "fixture cases owed atomicProviderFdAttestation reportUnavailable runEntered runReturned completed originalSlotRetained "
+                  "registered chargedBytes chargeLimit nativeAbi fixtureFrameBytes adapterFrameBytes retirementAdmitted stopRequested "
+                  "deadlineObserved poisoned stage callbackOrCallerPanic clockChecks forwardAdmissions retirementAdmissions harnessRefused "
+                  "materialWiped materialGetter bindingGetter fixtureAllocation postAdd terminalStop verified header actions calls "
+                  "references selections namespace descriptors acl native ordinal case evidence expected acknowledged nativeReturned "
+                  "settled retainedNativeBytes frameRetired scopedValuePresent comparisonRefused selection helperCounts comparison raw").split())
+              labels = set(case_names) | {"wrapping-private-common-cohort", "production-selector-only", "helper-shape-only",
+                  "synthetic-provider-only", "native-exception", "returned-failed-close", "incomplete-acl",
+                  "unforced-native-bounds", "before-item-stop", "second-executable-creator", "uifail-no-prompt-denial"}
+              def checked(node, depth=0):
+                  if depth > 8: raise ValueError("wrapping-public-report-depth")
+                  if type(node) is dict:
+                      if len(node) > 64 or any(key not in keys for key in node): raise ValueError("wrapping-public-report-key")
+                      for item in node.values(): checked(item, depth + 1)
+                  elif type(node) is list:
+                      if len(node) > 1024: raise ValueError("wrapping-public-report-list")
+                      for item in node: checked(item, depth + 1)
+                  elif type(node) is str:
+                      if node not in labels: raise ValueError("wrapping-public-report-label")
+                  elif type(node) is int:
+                      if not -(1 << 63) <= node < (1 << 63): raise ValueError("wrapping-public-report-scalar")
+                  elif node is not None and type(node) is not bool:
+                      raise ValueError("wrapping-public-report-type")
+              checked(value)
+              if type(value) is not dict or value.get("scope") != "wrapping-private-common-cohort" or value.get("provisional") is not True:
+                  raise ValueError("wrapping-public-report-scope")
+              return value
+          def admit_native_report(result):
+              if result.returncode != 0 or result.stderr: raise ValueError("wrapping-native-not-successful")
+              marker = b"MRK_WRAPPING_PRIVATE_RESULT="
+              # --nocapture may place the libtest prefix immediately before the
+              # marker. Only one bounded marker and one exact test are accepted.
+              if result.stdout.count(marker) != 1: raise ValueError("wrapping-one-native-report")
+              before, after = result.stdout.split(marker)
+              line, newline, rest = after.partition(b"\n")
+              if not newline or len(line) > 128 * 1024: raise ValueError("wrapping-native-report-bound")
+              # Nothing other than source-fixed libtest framing may be shared.
+              framing = (before + rest).decode("ascii", "strict")
+              lines = [line.strip() for line in framing.splitlines() if line.strip()]
+              if (len(lines) != 3 or lines[0] != "running 1 test" or lines[1] != "test " + name + " ... ok"
+                      or re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", lines[2]) is None):
+                  raise ValueError("wrapping-exact-native-libtest-return")
+              value = parse(line)
+              exact_keys(value, "schemaVersion scope provisional outerFinalityRequired shippingBinaryQualified distributionQualified perQueryUIFailQualified cutoffSeconds adapterInvocationBound fixtureActionBound caller originalActions fixtureReturns fixture cases owed atomicProviderFdAttestation")
+              if (value["schemaVersion"] != 1 or value["scope"] != "wrapping-private-common-cohort"
+                      or value["provisional"] is not True or value["outerFinalityRequired"] is not True
+                      or value["cutoffSeconds"] != 45 or value["adapterInvocationBound"] != 14 or value["fixtureActionBound"] != 17
+                      or any(value[key] is not False for key in ("shippingBinaryQualified", "distributionQualified", "perQueryUIFailQualified", "atomicProviderFdAttestation"))):
+                  raise ValueError("wrapping-native-scope")
+              c = value["caller"]
+              exact_keys(c, "runEntered runReturned completed originalSlotRetained registered chargedBytes chargeLimit nativeAbi fixtureFrameBytes adapterFrameBytes retirementAdmitted stopRequested deadlineObserved poisoned stage callbackOrCallerPanic clockChecks forwardAdmissions retirementAdmissions harnessRefused materialWiped materialGetter bindingGetter fixtureAllocation")
+              if (any(c[key] is not True for key in ("runEntered", "runReturned", "completed", "originalSlotRetained", "registered", "retirementAdmitted", "stopRequested", "materialWiped"))
+                      or any(c[key] is not False for key in ("deadlineObserved", "poisoned", "callbackOrCallerPanic", "harnessRefused"))
+                      or c["nativeAbi"] != 0x51460101 or c["stage"] != 300 or c["chargeLimit"] != 2 * 1024 * 1024
+                      or not 0 < c["chargedBytes"] <= c["chargeLimit"] or not 0 < c["fixtureFrameBytes"] <= 196608
+                      or not 0 < c["adapterFrameBytes"] <= 65536
+                      or ints(c["materialGetter"], 3) != [1, 1, 1] or ints(c["bindingGetter"], 3) != [1, 1, 1]
+                      or ints(c["fixtureAllocation"], 6) != [1, 1, 1, 1, 1, 1]):
+                  raise ValueError("wrapping-original-caller-not-complete")
+              exact_keys(value["originalActions"], "postAdd terminalStop")
+              for action in value["originalActions"].values():
+                  if ints(action, 9) != [1, 1, 1, 1, 1, 10, 1, 0, 1]: raise ValueError("wrapping-original-action-missing")
+              if len(value["fixtureReturns"]) != 17: raise ValueError("wrapping-fixture-return-roster")
+              for i, row in enumerate(value["fixtureReturns"]):
+                  if ints(row, 8) != [i + 1, 1, 1, 1, 0, 0, 0, 0]: raise ValueError("wrapping-fixture-action-unsettled")
+              f = value["fixture"]
+              exact_keys(f, "verified header actions calls references selections namespace")
+              h = ints(f["header"], 20)
+              if (f["verified"] is not True or h[:3] != [1, 29384, 17] or h[4:] != [10, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0]
+                      or not 0 < h[3] <= 1024 or h[3] != len(f["calls"]) or len(f["actions"]) != 17
+                      or len(f["references"]) != 10 or len(f["selections"]) != 4):
+                  raise ValueError("wrapping-fixture-finalized-without-facts")
+              end = 0
+              for i, action in enumerate(f["actions"]):
+                  a = ints(action, 6)
+                  if a[:4] != [i + 1, 1, 1, 1] or a[4] != end or not end <= a[5] <= h[3]: raise ValueError("wrapping-fixture-actual-call-roster")
+                  end = a[5]
+              if end != h[3]: raise ValueError("wrapping-fixture-call-coverage")
+              for call in f["calls"]:
+                  a = ints(call, 5)
+                  if not 1 <= a[0] <= 46 or a[1:3] != [1, 1]: raise ValueError("wrapping-fixture-call-not-returned")
+              for ref in f["references"]:
+                  a = ints(ref, 6)
+                  if a[0:3] != [1, 1, 1] or a[3] not in (0, 1) or not a[3] == a[4] == a[5]: raise ValueError("wrapping-fixture-cf-not-settled")
+              for i, selection in enumerate(f["selections"]):
+                  s = ints(selection, 15)
+                  paths = s[4] + (s[3] == 2)
+                  if (s[:3] != [1, 1, 1] or s[3] not in (1, 2) or not 0 <= s[4] <= 64
+                          or s[5:8] != [s[4]] * 3 or s[8:11] != [paths] * 3 or s[11] != s[12]
+                          or s[13] != (0 if i == 0 else 1) or s[14] != 1):
+                      raise ValueError("wrapping-readonly-selections-not-admitted")
+              settled_raw(f["namespace"])
+              if len(value["cases"]) != 14: raise ValueError("wrapping-fourteen-original-cases")
+              outcomes = (0, 12, 1, 2, 4, 3, 2, 10, 10, 10, 10, 10, 5, 14)
+              effects = (0, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 1)
+              for i, case in enumerate(value["cases"]):
+                  exact_keys(case, "ordinal case evidence expected acknowledged nativeReturned verified settled retainedNativeBytes frameRetired scopedValuePresent comparisonRefused selection helperCounts comparison raw")
+                  evidence = "production-selector-only" if i == 0 else "helper-shape-only" if i == 1 else "synthetic-provider-only"
+                  if (case["ordinal"] != i + 1 or case["case"] != case_names[i] or case["evidence"] != evidence
+                          or any(case[key] is not True for key in ("expected", "nativeReturned", "verified", "settled"))
+                          or case["acknowledged"] is not (i != 13) or case["retainedNativeBytes"] != 0 or case["comparisonRefused"] is not False):
+                      raise ValueError("wrapping-original-adapter-case-not-complete")
+                  h = settled_raw(case["raw"])
+                  if h[2] != outcomes[i] or h[3] != effects[i] or h[12] != 1 or h[4] != 16:
+                      raise ValueError("wrapping-actual-adapter-outcome")
+                  if i in (3, 6):
+                      if ints(case["comparison"], 5) != [1, 1, 1, c["adapterFrameBytes"], 1]: raise ValueError("wrapping-candidate-not-consumed")
+                  elif case["comparison"] is not None or case["frameRetired"] is not True:
+                      raise ValueError("wrapping-adapter-frame-not-retired")
+              if value["cases"][1]["helperCounts"] != [20, 20, 20]: raise ValueError("wrapping-helper-shape-observations")
+              if value["owed"] != ["native-exception", "returned-failed-close", "incomplete-acl", "unforced-native-bounds", "before-item-stop", "second-executable-creator", "uifail-no-prompt-denial"]:
+                  raise ValueError("wrapping-unexecuted-obligations-not-passes")
+              # Validate the entire export's value alphabet too: even a field
+              # not used for a positive decision cannot smuggle private text.
+              public_labels = set(case_names) | set(value["owed"]) | {
+                  "wrapping-private-common-cohort", "production-selector-only", "helper-shape-only", "synthetic-provider-only"}
+              def public_values(node, depth=0):
+                  if depth > 8: raise ValueError("wrapping-public-report-depth")
+                  if type(node) is dict:
+                      for item in node.values(): public_values(item, depth + 1)
+                  elif type(node) is list:
+                      for item in node: public_values(item, depth + 1)
+                  elif type(node) is str:
+                      if node not in public_labels: raise ValueError("wrapping-nonpublic-report-label")
+                  elif type(node) is int:
+                      if not -(1 << 63) <= node < (1 << 63): raise ValueError("wrapping-public-scalar-bound")
+                  elif node is not None and type(node) is not bool:
+                      raise ValueError("wrapping-public-report-type")
+              public_values(value)
+              for key in ("chargedBytes", "chargeLimit", "nativeAbi", "fixtureFrameBytes", "adapterFrameBytes",
+                          "stage", "clockChecks", "forwardAdmissions", "retirementAdmissions"):
+                  if type(c[key]) is not int or c[key] <= 0: raise ValueError("wrapping-caller-scalar-type")
+              # Only this closed public report is exported. Raw native stderr or
+              # other SDK/libtest text is never uploaded on failure.
+              return value
+          try:
+              # Version queries bind actual tools under the checked desktop
+              # toolchain selection; no frontend/Tauri/installer/supplier work.
+              for role, argv in (
+                  ("rustc-version", ["rustc", "--version", "--verbose"]),
+                  ("cargo-version", ["cargo", "--version", "--verbose"]),
+                  ("sdk-version", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
+                  ("compiler-version", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "--version"]),
+              ):
+                  result, row = invoke(role, argv, environ=build_env, cwd=checkout / "desktop", timeout=30, limit=16384)
+                  if result.returncode != 0 or not result.stdout: raise ValueError("wrapping-tool-binding-refused")
+                  row["toolOutput"] = result.stdout.decode("ascii", "strict")
+              qualification_binary = None
+              for role, features, flags in (("normal", [], ""), ("observer", ["installed-observation"], ""),
+                                            ("qualification", ["installed-observation"], "--cfg mrk_wrapping_keychain_qualification")):
+                  target = work / ("wrapping-" + role + "-target")
+                  environment = dict(build_env, CARGO_TARGET_DIR=str(target), RUSTFLAGS=flags)
+                  argv = ["cargo", "test", "--locked", "--no-default-features", "--jobs", "2",
+                          "--target", "aarch64-apple-darwin", "--package", "mrk-macos-installed-native",
+                          "--manifest-path", str(native / "Cargo.toml"),
+                          "--lib", "--no-run", "--message-format=json"]
+                  if features: argv += ["--features", ",".join(features)]
+                  result, build = invoke(role + "-build", argv, environ=environment, cwd=native,
+                                         timeout=600, limit=4 * 1024 * 1024)
+                  # Actual complete compiler returns only; preserve bounded
+                  # compiler originals locally, never a live/tail success guess.
+                  publish("wrapping-" + role + "-build.jsonl", result.stdout)
+                  publish("wrapping-" + role + "-build.stderr", result.stderr)
+                  publish("wrapping-" + role + "-build.status", (str(result.returncode) + "\n").encode("ascii"))
+                  if result.returncode != 0: raise ValueError("wrapping-native-compiler-failed")
+                  rows = [parse(line) for line in result.stdout.splitlines()]
+                  if any(type(row) is not dict for row in rows): raise ValueError("wrapping-compiler-json-shape")
+                  if [row.get("success") for row in rows if row.get("reason") == "build-finished"] != [True]:
+                      raise ValueError("wrapping-compiler-original-finish")
+                  artifacts = [row for row in rows if row.get("reason") == "compiler-artifact" and row.get("executable") is not None]
+                  scripts = [row for row in rows if row.get("reason") == "build-script-executed" and row.get("package_id") == package]
+                  if len(artifacts) != 1 or len(scripts) != 1: raise ValueError("wrapping-fixed-native-build-target")
+                  artifact = artifacts[0]
+                  if (artifact.get("package_id") != package or artifact.get("manifest_path") != str(native / "Cargo.toml")
+                          or artifact.get("features") != features or artifact.get("target", {}).get("name") != library
+                          or artifact["target"].get("kind") != ["lib"] or artifact["target"].get("crate_types") != ["lib"]
+                          or artifact["target"].get("src_path") != str(native / "src/lib.rs")
+                          or artifact.get("profile", {}).get("test") is not True
+                          or artifact["profile"].get("debug_assertions") is not True):
+                      raise ValueError("wrapping-native-feature-profile-binding")
+                  binary = pathlib.Path(artifact["executable"])
+                  out = pathlib.Path(scripts[0]["out_dir"])
+                  if (binary.parent != target / "aarch64-apple-darwin/debug/deps"
+                          or re.fullmatch(library + r"-[0-9a-f]+", binary.name) is None
+                          or out.name != "out" or out.parent.parent != target / "aarch64-apple-darwin/debug/build"
+                          or re.fullmatch(r"mrk-macos-installed-native-[0-9a-f]+", out.parent.name) is None):
+                      raise ValueError("wrapping-native-artifact-location")
+                  cells = [admit_file(out / "libmrk_macos_installed_native.a", role + "-archive"),
+                           admit_file(binary, role + "-binary", executable=True)]
+                  variant = {"role": role, "features": features, "rustFlags": flags, "profile": artifact["profile"],
+                             "compilerCall": build["role"], "artifacts": [], "fixtureSymbols": [], "listAdmitted": False}
+                  receipt["variants"].append(variant)
+                  for cell in cells:
+                      if file_digest(cell) != cell["sha256"]: raise ValueError("wrapping-pre-symbol-artifact-changed")
+                      result, row = invoke(cell["role"] + "-symbols", ["/usr/bin/nm", "-gU", str(cell["path"])],
+                                           environ=native_env, cwd=work, timeout=30, limit=2 * 1024 * 1024)
+                      if result.returncode != 0 or result.stderr: raise ValueError("wrapping-native-symbol-original")
+                      symbols = {line.split()[-1] for line in result.stdout.decode("ascii", "strict").splitlines() if line.split()}
+                      observed = symbols & fixture_symbols
+                      if observed != (fixture_symbols if role == "qualification" else set()):
+                          raise ValueError("wrapping-native-cfg-exclusion")
+                      if file_digest(cell) != cell["sha256"]: raise ValueError("wrapping-post-symbol-artifact-changed")
+                      variant["fixtureSymbols"].append(sorted(observed))
+                      variant["artifacts"].append({"role": cell["role"], "path": str(cell["path"].relative_to(work)),
+                                                   "sha256": cell["sha256"], "identity": sig(cell["before"])})
+                  result, row = invoke(role + "-list", [str(binary), "--list", "--format=terse"],
+                                       environ=native_env, cwd=work, timeout=30, limit=256 * 1024)
+                  if result.returncode != 0 or result.stderr: raise ValueError("wrapping-list-original-return")
+                  lines = result.stdout.decode("ascii", "strict").splitlines()
+                  private = [line for line in lines if "wrapping_keychain::private_fixture::" in line]
+                  if private != ([name + ": test"] if role == "qualification" else []):
+                      raise ValueError("wrapping-rust-cfg-exclusion")
+                  if any(file_digest(cell) != cell["sha256"] for cell in cells): raise ValueError("wrapping-list-artifact-changed")
+                  variant["listAdmitted"] = True
+                  if role == "qualification": qualification_binary = cells[1]
+              if qualification_binary is None or len(receipt["variants"]) != 3: raise ValueError("wrapping-no-admitted-binary")
+              if file_digest(qualification_binary) != qualification_binary["sha256"]: raise ValueError("wrapping-cohort-original-changed")
+              # The native entry starts its one45s clock BEFORE all its work.
+              # This original90s enclosure is strictly longer; no clock equality,
+              # deadline translation, per-case renewal or uncertainty cleanup.
+              result, row = invoke("native-cohort", [str(qualification_binary["path"]), "--exact", name,
+                                   "--test-threads=1", "--color=never", "--format=pretty", "--nocapture"],
+                                   environ=native_env, cwd=work, timeout=90, limit=256 * 1024)
+              receipt["nativeOriginalReturned"] = True
+              report = public_report(result)
+              publish("wrapping-native.report.json", (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
+              receipt["publicNativeReportPreserved"] = True  # A partial report is never a pass.
+              admit_native_report(result)
+              if file_digest(qualification_binary) != qualification_binary["sha256"]: raise ValueError("wrapping-returned-original-changed")
+              receipt["nativeReportAdmitted"] = True
+          except BaseException as error:
+              errors.append(error)  # Retain the real error, never serialize its private text.
+              receipt["failure"] = {"stage": stage, "type": type(error).__name__}
+          finally:
+              close_errors = []
+              for cell in files:
+                  descriptor, cell["fd"] = cell["fd"], None
+                  try:
+                      # Fresh held/named admission and digest before the one
+                      # consuming close, never a historical-directory equality.
+                      cell["fd"] = descriptor
+                      cell["unchanged"] = file_digest(cell) == cell["sha256"]
+                      if not cell["unchanged"]: raise ValueError("wrapping-consuming-artifact-changed")
+                  except BaseException as error:
+                      errors.append(error)
+                      close_errors.append({"role": cell["role"], "admission": False, "type": type(error).__name__})
+                  finally:
+                      cell["fd"] = None
+                  try:
+                      os.close(descriptor)  # Spend once; failed/unknown close is never retried.
+                      cell["closed"] = True
+                  except BaseException as error:
+                      errors.append(error)
+                      close_errors.append({"role": cell["role"], "close": False, "type": type(error).__name__})
+              receipt["artifactOriginals"] = [{"role": cell["role"], "unchanged": cell["unchanged"], "closed": cell["closed"]} for cell in files]
+              receipt["closeErrors"] = close_errors
+              receipt["passed"] = (not errors and len(files) == 6 and receipt["nativeOriginalReturned"]
+                                   and receipt["nativeReportAdmitted"] and all(cell["unchanged"] and cell["closed"] for cell in files))
+              # NO fixture path admission/deletion from Python, even on timeout,
+              # failed SDK call, parser refusal, close failure or process exit.
+              publish("wrapping-native.receipt.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
+          if not receipt["passed"]: raise SystemExit("private wrapping cohort incomplete; originals retained")
+          PY_WRAPPING
       - name: Fail fast on native Scripts ownership and package format (never Installer)
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs')
         timeout-minutes: 2
@@ -811,8 +1250,8 @@ jobs:
           [[ $status == 0 ]]
           # No retry/open/launchctl/TCC changes or false success after an owner
           # exception. Missing output does not establish original app finality.
-      - name: Recheck admitted classification source even after an incomplete observation
-        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'
+      - name: Recheck admitted classification/private-native source even after an incomplete observation
+        if: always() && (env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' || env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private') && steps.source.outcome == 'success'
         timeout-minutes: 1
         shell: bash
         run: |
@@ -820,7 +1259,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           git -c core.fsmonitor=false diff --exit-code HEAD --
           [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]]
-          # No build output was acquired: this POST never performs build cleanup.
+          # Source-only POST: no build, fixture, Keychain or shared-cache cleanup.
       - name: Verify source stayed unchanged; retire only disposable owned build output
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs')
         shell: bash
@@ -988,3 +1427,26 @@ jobs:
             ${{ steps.work.outputs.root }}/xcode-installed-classification-result.json
           if-no-files-found: error
           retention-days: 7
+      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics
+        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-wrapping-keychain-private
+          path: |
+            ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/wrapping-native.receipt.json
+            ${{ steps.work.outputs.root }}/wrapping-native.report.json
+            ${{ steps.work.outputs.root }}/wrapping-normal-build.jsonl
+            ${{ steps.work.outputs.root }}/wrapping-normal-build.stderr
+            ${{ steps.work.outputs.root }}/wrapping-normal-build.status
+            ${{ steps.work.outputs.root }}/wrapping-observer-build.jsonl
+            ${{ steps.work.outputs.root }}/wrapping-observer-build.stderr
+            ${{ steps.work.outputs.root }}/wrapping-observer-build.status
+            ${{ steps.work.outputs.root }}/wrapping-qualification-build.jsonl
+            ${{ steps.work.outputs.root }}/wrapping-qualification-build.stderr
+            ${{ steps.work.outputs.root }}/wrapping-qualification-build.status
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      # Never upload native stdout/stderr, a private Keychain, task-root contents
+      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.

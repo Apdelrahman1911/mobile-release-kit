@@ -3,6 +3,8 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
+// Unwired wrapping-key primitive; no availability or execution authority.
+pub mod wrapping_keychain;
 use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
     os::{fd::{AsRawFd, BorrowedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, ptr::NonNull, rc::Rc};
 
@@ -340,6 +342,8 @@ mod observation {
         pub directory_bound: bool,
         pub directory_returned: bool,
         pub directory_ready: bool,
+        /// Closed diagnostic from the same query; never an action or completion receipt.
+        pub directory_readiness: &'static str,
         pub action_attempted: bool,
         pub action_returned: bool,
         pub callback_returned: bool,
@@ -1199,19 +1203,43 @@ mod observation {
     }
     fn observation_flags_valid(flags: u32) -> bool {
         let both_present = flags & 0x3000 == 0x3000;
-        flags & !0x1ffff == 0 && (flags & 2 != 0) == (flags & 0x1f000 == 0x1f000)
+        flags & !0x7ffff == 0 && (flags & 2 != 0) == (flags & 0x1f000 == 0x1f000)
             && (both_present || flags & 0xc000 == 0)
             && (flags & 0x2000 != 0 || flags & 0x10000 == 0)
+            && (flags & 16 != 0) == (flags >> 17 == 3)
+            && (flags >> 17 == 0 || flags & 0x200c == 0x200c)
+    }
+    fn observation_directory_readiness(kind: PanelKind, flags: u32) -> Option<&'static str> {
+        if !observation_flags_valid(flags) { return None; }
+        match flags >> 17 {
+            0 => Some("not-ready"),
+            1 if !matches!(kind, PanelKind::Quit) => Some("directory-not-matched"),
+            2 if matches!(kind, PanelKind::File | PanelKind::VersionSource) => Some("filename-not-matched"),
+            3 if !matches!(kind, PanelKind::Quit) => Some("ready"),
+            _ => None,
+        }
     }
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
         action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
             && project_field_data_check()
-            && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
-            .into_iter().all(observation_flags_valid)
-            && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
+            && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x2200c, 0x4200c, 0x6201c, 0x7ffff]
+                .into_iter().all(observation_flags_valid)
+            && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x1ffff, 0x20000,
+                0x22008, 0x22004, 0x6001c, 0x6200c, 0x2201c, 0x4201c, 0x80000, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
+            && [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::VersionSource,
+                PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot].into_iter().all(|kind| {
+                observation_directory_readiness(kind, 0) == Some("not-ready")
+                    && observation_directory_readiness(kind, 0x2200c)
+                        == (!matches!(kind, PanelKind::Quit)).then_some("directory-not-matched")
+                    && observation_directory_readiness(kind, 0x4200c)
+                        == matches!(kind, PanelKind::File | PanelKind::VersionSource).then_some("filename-not-matched")
+                    && observation_directory_readiness(kind, 0x6201c)
+                        == (!matches!(kind, PanelKind::Quit)).then_some("ready")
+                    && observation_directory_readiness(kind, 0x1ffff).is_none()
+            })
     }
     impl Panel {
         pub fn installed_project_field(&mut self, kind: PanelKind, navigate: bool,
@@ -1293,7 +1321,7 @@ mod observation {
                 let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit, 3 => PanelKind::File,
                     4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
-                if !observation_flags_valid(flags) { return Err(io::ErrorKind::InvalidData.into()); }
+                let directory_readiness = observation_directory_readiness(kind, flags).ok_or(io::ErrorKind::InvalidData)?;
                 let parent_present = flags & 0x1000 != 0; let panel_present = flags & 0x2000 != 0;
                 let end = path.iter().position(|byte| *byte == 0).ok_or(io::ErrorKind::InvalidData)?;
                 let selected = if end == 0 { None } else { std::str::from_utf8(&path[..end]).ok().map(PathBuf::from) };
@@ -1304,7 +1332,7 @@ mod observation {
                     panel_references_parent: (parent_present && panel_present).then_some(flags & 0x8000 != 0),
                     panel_visible: panel_present.then_some(flags & 0x10000 != 0),
                     directory_bound: flags & 4 != 0, directory_returned: flags & 8 != 0,
-                    directory_ready: flags & 16 != 0, action_attempted: flags & 32 != 0,
+                    directory_ready: flags & 16 != 0, directory_readiness, action_attempted: flags & 32 != 0,
                     action_returned: flags & 64 != 0, callback_returned: flags & 256 != 0,
                     response, selected, close_attempted: flags & 512 != 0,
                     dismissed: flags & 1024 != 0, closed: flags & 2048 != 0 })

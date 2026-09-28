@@ -559,6 +559,8 @@ struct NativeActionSample {
 struct PanelSample {
     step: Step, id: u32, kind: &'static str, parent_present: bool, panel_present: bool,
     parent_references_panel: Option<bool>, panel_references_parent: Option<bool>, panel_visible: Option<bool>,
+    directory_bound: bool, directory_returned: bool, directory_ready: bool,
+    directory_readiness: &'static str, wait_location: Option<&'static str>,
 }
 impl PanelSample {
     fn from_original(step: Step, panel: &ObservedPanel) -> Self {
@@ -570,7 +572,10 @@ impl PanelSample {
                 mrk_macos_installed_native::PanelKind::IosWorkspace => "ios-workspace", mrk_macos_installed_native::PanelKind::MetadataRoot => "metadata-root" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
-            panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible }
+            panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible,
+            directory_bound: native.directory_bound, directory_returned: native.directory_returned,
+            directory_ready: native.directory_ready, directory_readiness: native.directory_readiness,
+            wait_location: None }
     }
 }
 
@@ -908,7 +913,9 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     let panel = r.last_panel.map(|panel| json!({"step":format!("{:?}", panel.step),
         "id":panel.id, "kind":panel.kind, "parentPresent":panel.parent_present, "panelPresent":panel.panel_present,
         "parentReferencesPanel":panel.parent_references_panel, "panelReferencesParent":panel.panel_references_parent,
-        "panelVisible":panel.panel_visible}));
+        "panelVisible":panel.panel_visible, "directoryBound":panel.directory_bound,
+        "directoryReturned":panel.directory_returned, "directoryReady":panel.directory_ready,
+        "directoryReadiness":panel.directory_readiness, "waitLocation":panel.wait_location}));
     let action = r.native_action.map(|action| json!({"step":format!("{:?}", action.step), "id":action.id,
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
@@ -2156,15 +2163,22 @@ impl Observation {
                 if let Some(native) = r.native_dispatch.as_mut().filter(|native| native.step == step) { native.entered = true; }
             }
         }
-        let mut action_diagnostic = None;
+        let mut action_diagnostic = None; let mut readiness_wait = None;
         let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None; let mut field_preparation = None;
         let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample,
-            &mut binding_return, &mut field_preparation);
+            &mut binding_return, &mut field_preparation, &mut readiness_wait);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
         if r.pending != Some(Pending::Native(step)) || r.step != step { self.fail_with("native-pending-custody"); return; }
         if let Some(native) = r.native_dispatch.as_mut().filter(|native| native.step == step) { native.returned = true; }
+        // Only the exact returned body's existing wait branch can mark this
+        // same sample. No inference from preparation flags or a missing AX sample.
+        if result == Ok(false) && r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned) {
+            if let Some(panel) = r.last_panel.as_mut().filter(|p| p.step == step && readiness_wait == Some(p.id)) {
+                panel.wait_location = Some("open-directory-readiness");
+            }
+        }
         if let Some((i, returned)) = field_preparation {
             if step != Step::ProjectFields(project_fields::Step::Native(i))
                 || !r.project_field_record.as_mut().is_some_and(|record| record.preparation(i, returned)) {
@@ -2234,7 +2248,8 @@ impl Observation {
     fn native_step_body(&self, step: Step, timely: bool,
         action_diagnostic: &mut Option<NativeActionSample>, prepared_open: &mut Option<PreparedOpenInput>,
         open_sample: &mut Option<OpenInputSample>, binding_return: &mut Option<mrk_macos_installed_native::IdentityBindingReturn>,
-        field_preparation: &mut Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation)>) -> Result<bool, &'static str> {
+        field_preparation: &mut Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation)>,
+        readiness_wait: &mut Option<u32>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
         // retire in the caller, permitting ordinary failure shutdown to check.
@@ -2289,6 +2304,7 @@ impl Observation {
             }
         }
         if open && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {
+            *readiness_wait = Some(id);
             return Ok(false); // Before any Open action; original deadline remains unchanged.
         }
         if open {
@@ -3466,7 +3482,7 @@ fn observer_data_checks() -> bool {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
         parent_present: true, panel_present: true, parent_references_panel: Some(false),
         panel_references_parent: Some(false), panel_visible: Some(false),
-        directory_returned: false, directory_ready: false, action_attempted: false, action_returned: false,
+        directory_returned: false, directory_ready: false, directory_readiness: "not-ready", action_attempted: false, action_returned: false,
         callback_returned: false, response: None, selected: None, close_attempted: false, dismissed: false, closed: false,
     }};
     for dismissed in [false, true] {
