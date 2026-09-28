@@ -29,7 +29,7 @@ helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
 
 
-# Synthetic direct parser declarations; the source-parity contract below reads
+# Synthetic direct DATA declarations (parsers and private-PEM scratch); parity reads
 # the actual manifest/lock independently rather than trusting this fixture.
 WINDOWS_COMMON_PARSERS = {
     "plist": {"version": "1.10.1", "rename": None,
@@ -37,7 +37,8 @@ WINDOWS_COMMON_PARSERS = {
     "quick-xml": {"version": "0.42.0", "rename": "quick_xml", "features": []},
     "pkcs12": {"version": "0.1.0", "rename": None, "features": []},
     "cms": {"version": "0.2.3", "rename": None, "features": ["alloc"]},
-    "der": {"version": "0.7.10", "rename": "der_07", "features": ["alloc", "oid"]},
+    "der": {"version": "0.7.10", "rename": "der_07", "features": ["alloc", "oid", "pem"]},
+    "zeroize": {"version": "1.9.0", "rename": None, "features": ["alloc"]},
 }
 
 
@@ -8057,8 +8058,8 @@ class WindowsReaderGateTests(unittest.TestCase):
                               "src_path": str(directory / "tests" / ("case_" + str(index) + ".rs"))}
                              for index in range(157))
             packages.append({"id": ids[name], "name": name, "version": version, "source": registry,
-                "manifest_path": str(directory / "Cargo.toml"), "features": {"allowed": []},
-                "targets": units})
+                "manifest_path": str(directory / "Cargo.toml"),
+                "features": {"alloc": []} if name == "zeroize" else {"allowed": []}, "targets": units})
             locked.append({"name": name, "version": version, "source": registry, "checksum": "3" * 64})
         # Keep native last: existing normal/dev edge mutations address that role.
         direct = ["getrandom", "serde", "serde_json", "sha2", "tokio", *WINDOWS_COMMON_PARSERS,
@@ -8077,6 +8078,8 @@ class WindowsReaderGateTests(unittest.TestCase):
             dependencies = edges.get(name, [])
             features = (["qualification-result", "runtime-publication"] if publication else ["qualification-result"]) if name == "mrk-windows-installed-native" else (
                 ["windows-runtime-publisher"] if publication and name == "mobile-release-kit-desktop" else [])
+            if name == "zeroize":
+                features = ["alloc"]  # Synthetic direct request, not an observed compiler receipt.
             nodes.append({"id": ids[name], "features": features,
                 "dependencies": [ids[item] for item in dependencies],
                 "deps": [{"name": (WINDOWS_COMMON_PARSERS.get(item, {}).get("rename") or item).replace("-", "_"),
@@ -8270,7 +8273,7 @@ class WindowsReaderGateTests(unittest.TestCase):
                          {"mrk-windows-installed-native": {"path": "../native/windows-installed-native"}})
         self.assertIn(("mrk-windows-installed-native", "0.1.0", None), locked)
         direct.add(("mrk-windows-installed-native", "0.1.0"))
-        self.assertEqual(len(direct), 11)
+        self.assertEqual(len(direct), 12)
         self.assertEqual(direct, helper.WINDOWS_INSTALLED_APP_DIRECT_ROLES)
         for name, row in WINDOWS_COMMON_PARSERS.items():
             expected = {"version": "=" + row["version"], "default-features": False}
@@ -8287,7 +8290,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             self.assertEqual(manifest[table][name]["version"], "=" + version)
             self.assertIn((name, version, registry), locked)
             gui.add((name, version))
-        self.assertEqual(len(direct | gui), 14)
+        self.assertEqual(len(direct | gui), 15)
         self.assertEqual(manifest["build-dependencies"]["sha2"], manifest["dependencies"]["sha2"])
         # Move a missing direct edge beneath another node so connectivity and
         # declarations remain valid; the exact root-role gate must reject it.
@@ -8814,6 +8817,10 @@ class WindowsReaderGateTests(unittest.TestCase):
                 key = packages[name]["id"]
                 self.assertEqual(selected[key], expected)
                 self.assertNotEqual(graph["nodes"][key]["features"], expected)
+            # Zeroize keeps exact metadata equality, not a new union correction.
+            zeroize = packages["zeroize"]
+            self.assertEqual(graph["nodes"][zeroize["id"]]["features"], ["alloc"])
+            self.assertEqual(selected[zeroize["id"]], ["alloc"])
             # A valid unselected nonlocal feature is not a normal-unit grant.
             self.assertEqual(packages["typenum"]["features"]["scale_info"], ["scale-info/derive"])
             app, native = packages["mobile-release-kit-desktop"], packages["mrk-windows-installed-native"]
@@ -8830,6 +8837,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             # its library, in every role's successful complete stream.
             rows.append({**unit(packages["serde_core"], wanted["serde_core"]),
                          "target": packages["serde_core"]["targets"][1]})
+            rows.append(unit(zeroize, ["alloc"]))
             rows.append(unit(native, expected_native))
             app_features = ["windows-runtime-publisher"] if publication else []
             library = unit(app, app_features)
@@ -8867,6 +8875,13 @@ class WindowsReaderGateTests(unittest.TestCase):
                         with self.subTest(unit=name, kind=altered[index]["target"]["kind"], features=features), redirect_stdout(io.StringIO()), \
                              self.assertRaisesRegex(helper.CheckFailure, "compiler unit features/source differ"):
                             parse(altered)
+                for features in ([], ["default"], ["alloc", "default"], ["alloc", "std"],
+                                 ["alloc", "zeroize_derive"], ["alloc", "unknown"], ["alloc", "alloc"]):
+                    altered = deepcopy(rows)
+                    next(row for row in altered if row.get("package_id") == zeroize["id"])["features"] = features
+                    with self.subTest(unit="zeroize", features=features), redirect_stdout(io.StringIO()), \
+                         self.assertRaisesRegex(helper.CheckFailure, "compiler unit features/source differ"):
+                        parse(altered)
         # Corrected parent features, not inactive metadata forwarding, drive the
         # existing windows-sys closure. The incoming normal contract stays exact.
         value, lock, context = self.graph_data()
@@ -15356,7 +15371,7 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             active = (helper.windows_normal_ui_features("observer" if observer else "app") if ids[name] == app else
                 ["desktop-ui", "desktop-ui-dialogs", "qualification-result", *(["windows-installed-observation"] if observer else [])] if ids[name] == native else
                 sorted(("compression", "custom-protocol", "tauri-runtime-wry", "webview2-com", "webkit2gtk", "wry")) if name == "tauri" else
-                ["os-webview", "protocol"] if name == "wry" else [])
+                ["os-webview", "protocol"] if name == "wry" else ["alloc"] if name == "zeroize" else [])
             declarations = app_features if ids[name] == app else deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES) if ids[name] == native else {feature: [] for feature in active}
             dependencies = list(direct) if ids[name] == app else [item for item in selected if item not in direct and item != "mobile-release-kit-desktop"] if name == "tauri" else []
             targets = [{"name": name.replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"], "src_path": str(manifest.parent / "src/lib.rs")}]
@@ -15642,6 +15657,17 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
             actual = helper.windows_normal_ui_gui_compiler_data(encode(rows), graph, source=source, root=root)
             self.assertEqual(actual["path"], path)
             self.assertEqual(actual["auxiliaryPackageBinary"], str(root / "target/x86_64-pc-windows-msvc/debug/mobile-release-kit-desktop.exe") if observer else None)
+            zeroize = next(key for key, package in graph["packages"].items() if package["name"] == "zeroize")
+            units = [unit for unit in actual["units"] if unit["packageId"] == zeroize]
+            self.assertEqual(len(units), 1)
+            self.assertEqual((units[0]["kind"], units[0]["scope"], units[0]["features"]), (["lib"], "target", ["alloc"]))
+            # Preserve the existing nonmaterial subset policy; no new empty-set refusal.
+            for features in (["default"], ["alloc", "std"], ["alloc", "zeroize_derive"],
+                             ["alloc", "unknown"], ["alloc", "alloc"]):
+                changed = deepcopy(rows)
+                next(row for row in changed if row.get("package_id") == zeroize)["features"] = features
+                with self.subTest(observer=observer, zeroize_features=features), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_gui_compiler_data(encode(changed), graph, source=source, root=root)
             for change in ("incomplete", "failure", "native-features", "native-host", "missing-native", "duplicate-executable", "wrong-path"):
                 changed = deepcopy(rows)
                 native = next(row for row in changed if row.get("package_id") == graph["nativeId"])

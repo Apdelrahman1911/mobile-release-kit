@@ -1588,12 +1588,12 @@ WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
     "zbus": "5.19.0",
 }
 # Fixed current Windows roles, not an allowlist derived from supplied metadata.
-# The common parsers do not enable any Apple native or signing operation.
+# Common DATA parsers and private-PEM scratch enable no Apple native/signing operation.
 WINDOWS_INSTALLED_APP_DIRECT_ROLES = frozenset({
     ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
     ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0"),
     ("plist", "1.10.1"), ("quick-xml", "0.42.0"), ("pkcs12", "0.1.0"),
-    ("cms", "0.2.3"), ("der", "0.7.10"),
+    ("cms", "0.2.3"), ("der", "0.7.10"), ("zeroize", "1.9.0"),
 })
 WINDOWS_INSTALLED_APP_INERT = (
     "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
