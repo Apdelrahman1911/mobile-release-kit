@@ -14297,8 +14297,11 @@ class WindowsNormalUiPolicyDiagnosticTests(unittest.TestCase):
             reads, writes = [], []
             def read(path, limit):
                 name = Path(path).name; reads.append((name, limit))
-                self.assertIn(name, ("compile-messages.jsonl", "normal-ui-native-policy.stdout", "normal-ui-native-policy.stderr"))
-                if name == "compile-messages.jsonl" or not available:
+                self.assertIn(name, ("compile-messages.jsonl", "normal-ui-credential-native-compile-messages.jsonl",
+                    "normal-ui-credential-session-compile-messages.jsonl", "normal-ui-native-policy.stdout", "normal-ui-native-policy.stderr"))
+                if name.endswith("compile-messages.jsonl"):
+                    self.assertEqual(limit, 16 << 20)
+                if name.endswith("compile-messages.jsonl") or not available:
                     raise OSError("PRIVATE-MISSING-OUTPUT")
                 self.assertEqual(limit, 64 << 10)
                 return out if name.endswith(".stdout") else err
@@ -14320,6 +14323,9 @@ class WindowsNormalUiPolicyDiagnosticTests(unittest.TestCase):
             self.assertEqual((result["guiCasesExecuted"], result["verifiedMethods"], result["guiCases"]), (0, 0, []))
             self.assertEqual(result["notVerified"], list(helper.WINDOWS_NORMAL_UI_NOT_VERIFIED))
             self.assertEqual(result["policyDiagnostic"]["category"], "admitted-failures" if available else "unavailable")
+            self.assertEqual(result["credentialCompileDiagnostics"], {
+                role: {"stage": stage, "category": "unavailable", "diagnosticOnly": True, "errors": []}
+                for role, stage in (("native", "standalone"), ("session", "app"))})
             self.assertNotIn("PRIVATE", json.dumps(result))
         _, _, blocks = WindowsNormalUiPrerequisiteTests.prerequisite_workflow_blocks()
         self.assertIn('desktop/tools/ci_foundation.py retain', blocks["retain"])
@@ -16851,6 +16857,7 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
 
     def test_credential_data_build_fails_fast_closes_writers_and_uses_original_deadline(self):
         data=WindowsNormalUiPrerequisiteTests.probe_data()
+        diagnostic_context,diagnostic_row=WindowsReaderGateTests.compile_failure_data()
         class CloseFailure(io.StringIO):
             name="normal-ui-credential-native.stdout"
             def __exit__(self,*args):
@@ -16858,9 +16865,12 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                 raise OSError("synthetic original close failure")
         stages=["metadata","native-compile","native-regression","session-compile","session-regression"]
         for failure in (None,"occupied","expired",*stages,"native-output","session-output","native-identity",
-                        "session-identity","native-artifact","session-artifact","close","late-output"):
+                        "session-identity","native-artifact","session-artifact","close","late-output",
+                        "native-diagnostic","session-diagnostic"):
+            failing_stage=failure.replace("-diagnostic","-compile") if failure in ("native-diagnostic","session-diagnostic") else failure
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory:
-                root=Path(directory);context={**data["context"],"root":directory,"source":str(SOURCE)}
+                root=Path(directory);context={**data["context"],"root":directory,"source":str(SOURCE),
+                    "sourceFiles":diagnostic_context["sourceFiles"]}
                 (root/"observer-metadata.json").write_text("{}\n",encoding="utf-8")
                 if failure=="occupied": (root/"normal-ui-credential-native.stdout").write_text("preserved",encoding="utf-8")
                 artifacts={role:{**data["artifact"],"path":str(root/"target"/helper.TARGETS["windows"]/"debug/deps"/
@@ -16868,6 +16878,14 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                     for role in ("native","session")}
                 original_open=helper.Path.open;writers=[];calls=[];deadline=123456.0
                 artifact_reads={"native":0,"session":0};identity_reads={"native":0,"session":0}
+                original_failure=helper.CheckFailure("PRIVATE-CREDENTIAL-ORIGINAL")
+                projected=[];captured=io.StringIO();real_projection=helper.windows_installed_compile_failure_data
+                def project(raw,actual_context,stage):
+                    projected.append({"closed":all(stream.closed for stream in writers),"stage":stage})
+                    self.assertIs(actual_context,context)
+                    if failure in ("native-diagnostic","session-diagnostic"):
+                        raise RuntimeError("PRIVATE-CREDENTIAL-PROJECTION")
+                    return real_projection(raw,actual_context,stage)
                 def opened(path,*args,**kwargs):
                     stream=CloseFailure() if failure=="close" and path.name=="normal-ui-credential-native.stdout" else original_open(path,*args,**kwargs)
                     if args and args[0]=="x": writers.append(stream)
@@ -16892,7 +16910,15 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                         self.assertIn(check,("windows-normal-ui-credential-compile-only","windows-normal-ui-credential-regression"))
                     calls.append(stage);self.assertFalse(output.closed);self.assertFalse(diagnostics.closed)
                     self.assertEqual(timeout,11.0);self.assertEqual(kwargs["cwd"],root);self.assertEqual(kwargs["env"],{"synthetic":"env"})
-                    if failure==stage: raise helper.CheckFailure("synthetic nonzero original exit")
+                    if failing_stage==stage:
+                        if stage.endswith("-compile"):
+                            message=deepcopy(diagnostic_row)
+                            crate=helper.WINDOWS_INSTALLED_CRATE if role=="native" else helper.WINDOWS_INSTALLED_APP
+                            message["target"]["src_path"]=str(SOURCE/crate/"src/lib.rs")
+                            message["message"]["spans"][0]["file_name"]="src/qualification_fixture.rs" if role=="native" else "src/lib.rs"
+                            output.write(helper.canonical_json(message).decode("ascii")+"\n")
+                            diagnostics.write("PRIVATE-CREDENTIAL-STDERR\n")
+                        raise original_failure
                     if stage.endswith("-regression"):
                         self.assertEqual(argv,helper.windows_normal_ui_inert_argv(artifacts[role],credential=role))
                         output.write((b"running 0 tests\n" if failure==role+"-output" else self.output(credential=role)).decode("ascii"))
@@ -16909,6 +16935,8 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                 with ExitStack() as stack:
                     stack.enter_context(patch.object(helper.Path,"open",opened))
                     stack.enter_context(patch.object(helper,"run",side_effect=invoked))
+                    projection=stack.enter_context(patch.object(helper,"windows_installed_compile_failure_data",side_effect=project))
+                    stack.enter_context(redirect_stdout(captured))
                     stack.enter_context(patch.object(helper,"windows_installed_remaining",side_effect=remaining))
                     stack.enter_context(patch.object(helper,"windows_normal_ui_credential_graph",return_value={}))
                     stack.enter_context(patch.object(helper,"windows_normal_ui_credential_artifact",side_effect=artifact))
@@ -16923,14 +16951,92 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                             self.assertFalse(regression["nativeAvailabilityObserved"])
                         facts.assert_called_once_with(context)
                     else:
-                        with self.assertRaises((helper.CheckFailure,OSError)):
+                        with self.assertRaises((helper.CheckFailure,OSError)) as refused:
                             helper.windows_normal_ui_credential_build(context,"/inert/cargo",{"synthetic":"env"},deadline)
+                        if failing_stage in stages: self.assertIs(refused.exception,original_failure)
                         if failure!="late-output": facts.assert_not_called()
                     self.assertTrue(all(stream.closed for stream in writers))
-                expected=([] if failure in ("occupied","expired") else stages[:stages.index(failure)+1] if failure in stages else
+                    if failing_stage in ("native-compile","session-compile"):
+                        selected=failing_stage.split("-",1)[0];stage="standalone" if selected=="native" else "app"
+                        projection.assert_called_once()
+                        self.assertEqual(projected,[{"closed":True,"stage":stage}])
+                        if failure.endswith("-diagnostic"):
+                            self.assertEqual(captured.getvalue(),"")
+                        else:
+                            name=(helper.WINDOWS_INSTALLED_CRATE+"/src/qualification_fixture.rs" if selected=="native"
+                                  else helper.WINDOWS_INSTALLED_APP+"/src/lib.rs")
+                            expected={"role":selected,"stage":stage,"category":"admitted-errors","diagnosticOnly":True,
+                                "errors":[{"code":"E0499","path":name,"line":607}]}
+                            self.assertEqual(captured.getvalue(),"MRK_WINDOWS_NORMAL_UI_CREDENTIAL_COMPILE_REFUSED="+
+                                helper.canonical_json(expected).decode("ascii")+"\n")
+                    else:
+                        projection.assert_not_called();self.assertEqual(projected,[]);self.assertEqual(captured.getvalue(),"")
+                    for private in ("PRIVATE-COMPILER-TEXT","PRIVATE-CREDENTIAL-STDERR",
+                                    "PRIVATE-CREDENTIAL-ORIGINAL","PRIVATE-CREDENTIAL-PROJECTION"):
+                        self.assertNotIn(private,captured.getvalue())
+                expected=([] if failure in ("occupied","expired") else stages[:stages.index(failing_stage)+1] if failing_stage in stages else
                     stages[:3] if failure in ("native-output","native-identity","native-artifact","close") else stages)
                 self.assertEqual(calls,expected)
                 if failure=="occupied": self.assertEqual((root/"normal-ui-credential-native.stdout").read_text(),"preserved")
+
+    def test_credential_compile_diagnostics_keep_role_streams_and_never_credit_a_gui_result(self):
+        diagnostic_context,original=WindowsReaderGateTests.compile_failure_data()
+        context={**WindowsNormalUiPrerequisiteTests.context(),**diagnostic_context};root=Path(context["root"])
+        encode=lambda row:helper.canonical_json(row)+b"\n"
+        success=encode({"reason":"build-finished","success":True});messages={}
+        for role,crate,filename in (("native",helper.WINDOWS_INSTALLED_CRATE,"src/qualification_fixture.rs"),
+                                    ("session",helper.WINDOWS_INSTALLED_APP,"src/lib.rs")):
+            row=deepcopy(original);row["target"]["src_path"]=context["source"]+"/"+crate+"/src/lib.rs"
+            row["message"]["spans"][0]["file_name"]=filename
+            messages[role]=encode(row)
+        variants=(
+            ("session-error",success,messages["session"],"no-admitted-error","admitted-errors"),
+            ("native-error",messages["native"],None,"admitted-errors","unavailable"),
+            ("session-missing",success,None,"no-admitted-error","unavailable"),
+            ("session-malformed",success,b"PRIVATE-COMPILER-TEXT\n","no-admitted-error","unavailable"),
+            ("no-admitted-error",success,success,"no-admitted-error","no-admitted-error"))
+        for label,native,session,native_category,session_category in variants:
+            streams={root/"compile-messages.jsonl":success,
+                root/"normal-ui-credential-native-compile-messages.jsonl":native,
+                root/"normal-ui-credential-session-compile-messages.jsonl":session,
+                root/"normal-ui-native-policy.stdout":b"",root/"normal-ui-native-policy.stderr":b""}
+            reads=[]
+            def read(path,limit):
+                path=Path(path);reads.append((path,limit));self.assertIn(path,streams)
+                self.assertEqual(limit,16<<20 if path.name.endswith("compile-messages.jsonl") else 64<<10)
+                if streams[path] is None: raise OSError("PRIVATE-MISSING-CREDENTIAL-STREAM")
+                return streams[path]
+            with self.subTest(variant=label),ExitStack() as stack:
+                stack.enter_context(patch.dict(helper.os.environ,{},clear=True))
+                stack.enter_context(patch.object(helper,"windows_normal_ui_profile",return_value=True))
+                stack.enter_context(patch.object(helper,"windows_installed_bytes",side_effect=read))
+                write=stack.enter_context(patch.object(helper,"windows_fullwalk_write"))
+                guards=[stack.enter_context(patch.object(helper,name,side_effect=AssertionError("diagnostics have no native authority")))
+                        for name in ("run","source_unchanged","windows_ordinary_original","windows_normal_ui_compile_binding")]
+                helper.windows_normal_ui_retain(context)
+                for guard in guards: guard.assert_not_called()
+                write.assert_called_once()
+                (path,raw,limit),kwargs=write.call_args
+            self.assertEqual(reads,[(path,16<<20 if path.name.endswith("compile-messages.jsonl") else 64<<10) for path in streams])
+            self.assertEqual(path,root/"public/windows-normal-project-ui.json");self.assertEqual(limit,64<<10)
+            self.assertEqual(kwargs,{});self.assertLessEqual(len(raw),limit)
+            result=helper.bounded_json(raw,limit)
+            self.assertEqual(result["compileDiagnostic"],
+                {"stage":"standalone","category":"no-admitted-error","diagnosticOnly":True,"errors":[]})
+            expected={}
+            for role,stage,category,name in (
+                    ("native","standalone",native_category,helper.WINDOWS_INSTALLED_CRATE+"/src/qualification_fixture.rs"),
+                    ("session","app",session_category,helper.WINDOWS_INSTALLED_APP+"/src/lib.rs")):
+                expected[role]={"stage":stage,"category":category,"diagnosticOnly":True,
+                    "errors":[{"code":"E0499","path":name,"line":607}] if category=="admitted-errors" else []}
+            self.assertEqual(result["credentialCompileDiagnostics"],expected)
+            self.assertFalse(result["combinedPassed"])
+            self.assertEqual((result["guiCasesExecuted"],result["verifiedMethods"],result["guiCases"]),(0,0,[]))
+            for name in ("prerequisite","runtimeSetup","guiCompilation"):
+                self.assertEqual(result[name],{"status":"unavailable","facts":None})
+            self.assertEqual(result["notVerified"],list(helper.WINDOWS_NORMAL_UI_NOT_VERIFIED))
+            for private in ("PRIVATE","private-checkout","private-run"):
+                self.assertNotIn(private,raw.decode("ascii"))
 
 
 if __name__ == "__main__":

@@ -17331,10 +17331,23 @@ def windows_normal_ui_credential_build(context: dict, cargo: str, environment: d
     observed = {}
     for role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS:
         prefix = "normal-ui-credential-" + role
-        with (root / (prefix + "-compile-messages.jsonl")).open("x", encoding="utf-8", newline="\n") as output, \
-                (root / (prefix + "-compile.stderr")).open("x", encoding="utf-8") as diagnostics:
-            run(windows_normal_ui_credential_argv(cargo, context, role), check="windows-normal-ui-credential-compile-only",
-                cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 1800), output=output, diagnostics=diagnostics)
+        output = diagnostics = None
+        try:
+            with (root / (prefix + "-compile-messages.jsonl")).open("x", encoding="utf-8", newline="\n") as output, \
+                    (root / (prefix + "-compile.stderr")).open("x", encoding="utf-8") as diagnostics:
+                run(windows_normal_ui_credential_argv(cargo, context, role), check="windows-normal-ui-credential-compile-only",
+                    cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 1800), output=output, diagnostics=diagnostics)
+        except Exception:
+            try:
+                if output is not None and diagnostics is not None and output.closed and diagnostics.closed:
+                    detail = windows_installed_compile_failure_data(
+                        windows_installed_bytes(root / (prefix + "-compile-messages.jsonl"), 16 << 20),
+                        context, "standalone" if role == "native" else "app")
+                    print("MRK_WINDOWS_NORMAL_UI_CREDENTIAL_COMPILE_REFUSED=" +
+                          canonical_json({"role": role, **detail}).decode("ascii"), flush=True)
+            except BaseException:
+                pass
+            raise
         require(output.closed and diagnostics.closed, "Windows credential DATA compiler writers did not close")
         artifact = windows_normal_ui_credential_artifact(context, role)
         identity = windows_ordinary_original(artifact, app_role=role == "session")
@@ -17749,6 +17762,13 @@ def windows_normal_ui_retain(context: dict) -> None:
         compile_raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
     except (OSError, ValueError, CheckFailure):
         compile_raw = None
+    credential_diagnostics = {}
+    for role, stage in (("native", "standalone"), ("session", "app")):
+        try:
+            credential_raw = windows_installed_bytes(root / ("normal-ui-credential-" + role + "-compile-messages.jsonl"), 16 << 20)
+        except (OSError, ValueError, CheckFailure):
+            credential_raw = None
+        credential_diagnostics[role] = windows_installed_compile_failure_data(credential_raw, context, stage)
     try:
         policy_stdout = windows_installed_bytes(root / "normal-ui-native-policy.stdout", 64 << 10)
         policy_stderr = windows_installed_bytes(root / "normal-ui-native-policy.stderr", 64 << 10)
@@ -17796,6 +17816,7 @@ def windows_normal_ui_retain(context: dict) -> None:
         "combinedPassed": complete, "verifiedMethods": sum(item["verifiedMethods"] for item in cases),
         "guiCasesExecuted": len(cases), "runtimeSetup": setup, "guiCompilation": gui, "guiCases": cases,
         "compileDiagnostic": windows_installed_compile_failure_data(compile_raw, context, "standalone"),
+        "credentialCompileDiagnostics": credential_diagnostics,
         "policyDiagnostic": windows_normal_ui_policy_failure_data(policy_stdout, policy_stderr, context),
         "notVerified": [name for name in WINDOWS_NORMAL_UI_NOT_VERIFIED if name not in completed]}
     # Never publish raw native accounts/SIDs/paths/ACLs, compiler text, or a
