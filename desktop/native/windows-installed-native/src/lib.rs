@@ -35,6 +35,12 @@ pub use loader::SystemImage;
 pub mod ui_startup_data;
 #[cfg(all(feature = "desktop-ui", any(test, all(feature = "qualification-result", feature = "windows-installed-observation"))))]
 pub mod ui_observer_diagnostic_data;
+#[cfg(all(test, feature = "desktop-ui"))]
+mod output_origin_capsule_data;
+#[cfg(all(test, feature = "desktop-ui"))]
+mod output_origin_capsule_public_key;
+#[cfg(all(test, feature = "desktop-ui"))]
+mod output_origin_capsule;
 mod project;
 pub use project::{ProjectBook, project_path_hint};
 #[cfg(feature = "desktop-ui")]

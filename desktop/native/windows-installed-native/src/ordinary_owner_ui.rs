@@ -3,6 +3,7 @@
 use super::*;
 use crate::ui_startup_data::Word as StartupWord;
 use crate::ui_observer_diagnostic_data::Projection as ObserverProjection;
+use crate::output_origin_capsule_data as origin_data;
 use std::{cell::Cell, ffi::c_void, io::Write, marker::PhantomData, path::PathBuf};
 use windows_sys::Win32::System::{Com as CO, Ole as OLE, Registry as R};
 use windows_sys::Win32::UI::WindowsAndMessaging as W;
@@ -45,6 +46,7 @@ struct ObserverCapture {
     clock: Option<Arc<ObserverDiagnosticClock>>, claimed: bool, unresolved: bool,
     binding: Option<(String, String, String, String)>, output: Option<(usize, Stamp)>,
     projection: ObserverProjection, reader: ObserverCaptureTrace,
+    origin: origin_data::Capture, // Disjoint historical context/private first-refusal DATA.
 }
 fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }
 fn observer_finality(facts: crate::ui_observer_diagnostic_data::ChildFinality, trace: &ObserverCaptureTrace) -> bool {
@@ -76,6 +78,31 @@ fn observer_capture_frame(role: UiRole, capture: &ObserverCapture, bytes: &mut [
     capture.reader.write_json(&mut output).ok()?; output.write_all(b"}\n").ok()?;
     usize::try_from(output.position()).ok().filter(|length| *length <= 4096)
 }
+
+// BEGIN OUTPUT ORIGIN CAPSULE ADAPTER
+// This is only a tap on the existing failed exact parent/name guard. It borrows
+// the same returned entry and bound metadata, not another cursor or UDF getter.
+fn observer_output_origin_refused(role: UiRole, position: u8,
+    binding: Option<&(String, String, String, String)>, output: Option<&Metadata>,
+    entry: &DirectoryEntry, capture: &mut origin_data::Capture) {
+    if role != UiRole::ProjectDraft || position != 0 || entry.kind != FileKind::Directory { return; }
+    let binding = binding.and_then(|(source, tree, run, request)| origin_data::Binding::parse(source, tree, run, request));
+    let output = output.map(|metadata| (metadata.identity.volume_serial, metadata.identity.file_id));
+    capture.record_once(binding, entry.attributes, output, entry.file_id, &entry.name);
+}
+fn observer_output_origin_returned(role: UiRole, original: Result<()>, capture: &mut ObserverCapture,
+    seal: impl FnOnce(&mut origin_data::Capture, Option<&ObserverDiagnosticClock>) -> origin_data::Reply,
+    output: &mut impl Write) -> Result<()> {
+    if role != UiRole::ProjectDraft || original != Err(Error::Unsafe) || capture.unresolved || !capture.origin.selected() { return original; }
+    let context = capture.origin.public_context();
+    let reply = seal(&mut capture.origin, capture.clock.as_deref());
+    let mut bytes = [0; origin_data::FRAME_BYTES];
+    if let Some(length) = context.and_then(|context| origin_data::frame(context, &reply, &mut bytes)) {
+        let _ = prerequisite_sink(output, &bytes[..length]);
+    }
+    original // Neither crypto nor delivery can replace the settled roster refusal.
+}
+// END OUTPUT ORIGIN CAPSULE ADAPTER
 
 // Keep application scratch out of the strict result/fixture output inventory.
 // This is the existing prepared expected profile path, not post-logon custody;
@@ -1030,6 +1057,7 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
             poststate_result!(O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
             let name = diagnostic.name();
             let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false, read_trace)?;
+            if role == UiRole::ProjectDraft { capture.origin.journal_returned(observed); }
             projection = Some(observed); poststate_result!(O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
             children.push((at, name, stamp, FileKind::File)); entries.push((original, metadata, (O::JournalCursorMetadataAfter, Some(16))));
         }
@@ -1122,6 +1150,8 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                             trace.unexpected_entry_with_relation(role, &entry,
                                 children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str()), relation);
                         }
+                        observer_output_origin_refused(role, position, capture.binding.as_ref(),
+                            entries.get(index).map(|(_, metadata, _)| metadata), &entry, &mut capture.origin);
                         error
                     }))?;
                     output_result!(OutputEntryBinding, O::DirectoryEntry, Some(position), HelperReturn, need(
@@ -2768,6 +2798,13 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             let _ = prerequisite_sink(&mut std::io::stdout().lock(), &bytes[..length]);
         }
     }
+    // The original child/inventory/journal/files/profile failure path returned
+    // before CNG. The existing legacy frame above survives unknown crypto.
+    let original = if role == UiRole::ProjectDraft && original == Err(Error::Unsafe) && capture.origin.selected() {
+        observer_output_origin_returned(role, original, &mut capture, |private, clock| {
+            crate::output_origin_capsule::seal(private, || clock.is_some_and(|clock| clock.permitted(true)))
+        }, &mut std::io::stdout().lock())
+    } else { original };
     if !matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke) || original.is_ok() { return original; }
     // Standard Write facade for the already-owned harness stdout. No new file,
     // HANDLE, alternate sink or close, and no additional owner-clock sample.
@@ -3765,12 +3802,90 @@ mod contract_tests {
     }
 
     // END OUTPUT SOURCE RELATION OWNER TESTS
+    // BEGIN OUTPUT ORIGIN CAPSULE OWNER TESTS
+    fn observer_output_origin_capsule_contract() -> Result<()> {
+        struct Sink { writes: usize, flushes: usize, fail: bool, public: Vec<u8> }
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1; self.public.extend_from_slice(bytes);
+                if self.fail { Err(std::io::ErrorKind::Interrupted.into()) } else { Ok(bytes.len()) }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                if self.fail { Err(std::io::ErrorKind::Other.into()) } else { Ok(()) }
+            }
+        }
+        let metadata = Metadata { identity: FileIdentity { volume_serial: 0x1122_3344_5566_7788, file_id: [0x19; 16] },
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY, size: 0,
+            allocation_size: 0, links: 1, creation: 1, write: 1, change: 1 };
+        let binding = ("a".repeat(40), "b".repeat(40), "123456".to_owned(), "c".repeat(64));
+        let mut entry = DirectoryEntry { name: "inert-private-leaf".to_owned(), file_id: [0x27; 16],
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+        for (role, position, kind) in [(UiRole::QuitPassive, 0, FileKind::Directory),
+            (UiRole::DocumentLoss, 0, FileKind::Directory), (UiRole::NormalSmoke, 0, FileKind::Directory),
+            (UiRole::Prerequisite, 0, FileKind::Directory), (UiRole::ProjectDraft, 1, FileKind::Directory),
+            (UiRole::ProjectDraft, 2, FileKind::Directory), (UiRole::ProjectDraft, 3, FileKind::Directory),
+            (UiRole::ProjectDraft, 0, FileKind::File)] {
+            let mut capture = origin_data::Capture::default(); entry.kind = kind;
+            observer_output_origin_refused(role, position, Some(&binding), Some(&metadata), &entry, &mut capture);
+            assert!(!capture.selected());
+        }
+        entry.kind = FileKind::Directory;
+        for fail in [false, true] {
+            let mut capture = ObserverCapture::default(); capture.binding = Some(binding.clone());
+            let checked = ObserverProjection::decode(b"");
+            capture.origin.journal_returned(checked);
+            let original = capture.reader.scope(ObserverCaptureOperation::DirectoryEntry, Some(0), || {
+                observer_output_origin_refused(UiRole::ProjectDraft, 0, capture.binding.as_ref(), Some(&metadata), &entry, &mut capture.origin);
+                capture.reader.result::<()>(ObserverCaptureCheck::ExpectedChild, Err(Error::Unsafe))
+            });
+            let first = capture.reader.first();
+            let private = *capture.origin.private_buffer();
+            let other = DirectoryEntry { name: "must-not-replace-first".to_owned(), file_id: [0x38; 16],
+                kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+            observer_output_origin_refused(UiRole::ProjectDraft, 0, capture.binding.as_ref(), Some(&metadata), &other, &mut capture.origin);
+            assert!(capture.origin.private_buffer() == &private);
+            let mut sink = Sink { writes: 0, flushes: 0, fail, public: Vec::new() };
+            let mut calls = 0;
+            let returned = observer_output_origin_returned(UiRole::ProjectDraft, original, &mut capture, |private, clock| {
+                calls += 1; assert!(clock.is_none()); assert_eq!(private.begin_seal(), Ok(()));
+                origin_data::Reply::Sealed { key_id: [0x52; 32], ciphertext: [0x61; origin_data::CIPHERTEXT_BYTES] }
+            }, &mut sink);
+            assert_eq!(returned, original); assert_eq!(returned, Err(Error::Unsafe));
+            assert_eq!((calls, sink.writes, sink.flushes), (1, 1, 1));
+            assert_eq!(capture.reader.first(), first); assert_eq!(capture.projection, ObserverProjection::default());
+            let text = std::str::from_utf8(&sink.public).unwrap();
+            assert!(text.contains("\"checkedJournalContext\":{\"bytes\":0,\"records\":0,\"reason\":2"));
+            assert!(text.contains("\"inventoryComplete\":false"));
+            assert!(!text.contains("inert-private-leaf") && !text.contains("must-not-replace-first"));
+            assert!(!text.contains(&metadata.identity.volume_serial.to_string()));
+            assert!(!text.contains("1919191919191919") && !text.contains("2727272727272727"));
+        }
+        for (role, original, selected, unresolved) in [(UiRole::ProjectDraft, Ok(()), true, false),
+            (UiRole::ProjectDraft, Err(Error::Bounds), true, false), (UiRole::ProjectDraft, Err(Error::Unknown), true, false),
+            (UiRole::QuitPassive, Err(Error::Unsafe), true, false), (UiRole::ProjectDraft, Err(Error::Unsafe), false, false),
+            (UiRole::ProjectDraft, Err(Error::Unsafe), true, true)] {
+            let mut capture = ObserverCapture::default(); capture.unresolved = unresolved;
+            if selected {
+                capture.origin.journal_returned(ObserverProjection::decode(b""));
+                observer_output_origin_refused(UiRole::ProjectDraft, 0, Some(&binding), Some(&metadata), &entry, &mut capture.origin);
+            }
+            let mut sink = Sink { writes: 0, flushes: 0, fail: true, public: Vec::new() };
+            let returned = observer_output_origin_returned(role, original, &mut capture,
+                |_, _| panic!("unrelated or unresolved owner must not enter crypto"), &mut sink);
+            assert_eq!(returned, original); assert_eq!((sink.writes, sink.flushes), (0, 0));
+        }
+        Ok(())
+    }
+    // END OUTPUT ORIGIN CAPSULE OWNER TESTS
+
     fn observer_capture_failure_contract() -> Result<()> {
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
         use crate::ui_observer_diagnostic_data::ChildFinality;
         ObserverCaptureTrace::reader_contract()?;
         ObserverCaptureTrace::unexpected_entry_contract()?;
         observer_output_source_relation_contract()?;
+        observer_output_origin_capsule_contract()?;
         // Actual shared scalar decisions, not a child, clock or native fixture.
         for mask in 0..128u8 {
             let facts = ChildFinality { returned: mask & 1 != 0, created: mask & 2 != 0, signaled: mask & 4 != 0,
