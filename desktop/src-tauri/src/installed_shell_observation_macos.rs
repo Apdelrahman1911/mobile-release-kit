@@ -860,7 +860,7 @@ struct FailureSnapshot {
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
     accessibility: Option<OpenInputSample>, identity_binding: Option<IdentitySample>, completion_selection: Option<CompletionSample>,
     project_selection: Option<ProjectSelectionSample>,
-    field_preparation: Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation)>,
+    field_preparation: Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation,Option<mrk_macos_installed_native::VersionSourceNamePreparation>)>,
 }
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
@@ -870,7 +870,8 @@ impl FailureSnapshot {
             project_selection: r.project_selection, completion_selection: r.completion_selection,
             field_preparation: match r.step {
                 Step::ProjectFields(project_fields::Step::Native(i) | project_fields::Step::Chosen(i)) =>
-                    r.project_field_record.as_ref().and_then(|record| record.preparation_sample(i)).map(|data| (i,data)),
+                    r.project_field_record.as_ref().and_then(|record| record.preparation_sample(i)
+                        .map(|data| (i,data,record.name_preparation_sample(i)))),
                 _ => None,
             } }
     }
@@ -928,9 +929,10 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
-    if let Some((i,data)) = r.field_preparation {
+    if let Some((i,data,name)) = r.field_preparation {
         value["projectFieldPreparation"] = json!({"operationId":project_fields::id(i),"kind":project_fields::kind_name(i),
-            "returned":true,"result":data.result,"facts":data.facts});
+            "returned":true,"result":data.result,"facts":data.facts,
+            "nameFieldPreparation":name.map(|name| json!({"returned":true,"result":name.result,"facts":name.facts}))});
     }
     value
 }
@@ -2164,9 +2166,10 @@ impl Observation {
             }
         }
         let mut action_diagnostic = None; let mut readiness_wait = None;
-        let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None; let mut field_preparation = None;
+        let mut prepared_open = None; let mut open_sample = None; let mut binding_return = None;
+        let mut field_preparation = None; let mut field_name_preparation = None;
         let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample,
-            &mut binding_return, &mut field_preparation, &mut readiness_wait);
+            &mut binding_return, &mut field_preparation, &mut field_name_preparation, &mut readiness_wait);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
@@ -2179,9 +2182,21 @@ impl Observation {
                 panel.wait_location = Some("open-directory-readiness");
             }
         }
+        if field_preparation.is_some() || field_name_preparation.is_some() {
+            if field_preparation.is_some() && field_name_preparation.is_some()
+                || !r.native_dispatch.is_some_and(|native| native.step == step && native.entered && native.returned) {
+                self.fail_with("native-pending-custody"); return;
+            }
+        }
         if let Some((i, returned)) = field_preparation {
             if step != Step::ProjectFields(project_fields::Step::Native(i))
                 || !r.project_field_record.as_mut().is_some_and(|record| record.preparation(i, returned)) {
+                self.fail_with("project-fields-original-contract");
+            }
+        }
+        if let Some((i, returned)) = field_name_preparation {
+            if step != Step::ProjectFields(project_fields::Step::Native(i))
+                || !r.project_field_record.as_mut().is_some_and(|record| record.name_preparation(i, returned)) {
                 self.fail_with("project-fields-original-contract");
             }
         }
@@ -2249,6 +2264,7 @@ impl Observation {
         action_diagnostic: &mut Option<NativeActionSample>, prepared_open: &mut Option<PreparedOpenInput>,
         open_sample: &mut Option<OpenInputSample>, binding_return: &mut Option<mrk_macos_installed_native::IdentityBindingReturn>,
         field_preparation: &mut Option<(u8,mrk_macos_installed_native::ProjectFieldPreparation)>,
+        field_name_preparation: &mut Option<(u8,mrk_macos_installed_native::VersionSourceNamePreparation)>,
         readiness_wait: &mut Option<u32>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
@@ -2288,18 +2304,38 @@ impl Observation {
         }
         if step == Step::PickerPending { return Ok(true); } // Observation only; never dismiss-as-Cancel.
         if let Some(i) = self.case.field_index(id) {
-            let prepared = {
+            let (navigation_prepared, prepared, name_pending) = {
                 let r = self.record().ok_or("observer-record-unavailable")?;
-                r.project_field_record.as_ref().is_some_and(|record| record.prepared(i))
+                let record = r.project_field_record.as_ref().ok_or("project-fields-original-contract")?;
+                (record.navigation_prepared(i), record.prepared(i), record.name_pending(i))
             };
-            if !prepared {
+            if !navigation_prepared {
                 if !self.timely() { return Err("observer-deadline"); }
                 let mut returned = None;
                 let result = super::owned_macos::observation::prepare_project_field(id, kind, project_fields::accepts(i), &mut returned);
                 *field_preparation = returned.map(|value| (i,value));
                 result.map_err(|error| error.reason())?;
-                // Publish actual initial-root/options DATA only after this
-                // body returns. The next original opportunity can act.
+                // Publish actual initial-root/options/navigation DATA only
+                // after this body returns. It is not final name/Open readiness.
+                return Ok(false);
+            }
+            if !prepared {
+                if !name_pending { return Err("project-fields-original-contract"); }
+                if !panel.native.version_source_name_ready() { return Ok(false); }
+                {
+                    let r = self.record().ok_or("observer-record-unavailable")?;
+                    if r.pending != Some(Pending::Native(step)) || r.step != step
+                        || !r.project_field_record.as_ref().is_some_and(|record| record.name_pending(i)) {
+                        return Err("native-pending-custody");
+                    }
+                }
+                if !self.timely() { return Err("observer-deadline"); }
+                let mut returned = None;
+                let result = super::owned_macos::observation::prepare_version_source_name(id, panel, &mut returned);
+                *field_name_preparation = returned.map(|value| (i,value));
+                result.map_err(|error| error.reason())?;
+                // The sole name phase returned, not Open. A later existing
+                // observation must still prove exact directory AND filename.
                 return Ok(false);
             }
         }
@@ -3482,7 +3518,8 @@ fn observer_data_checks() -> bool {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
         parent_present: true, panel_present: true, parent_references_panel: Some(false),
         panel_references_parent: Some(false), panel_visible: Some(false),
-        directory_returned: false, directory_ready: false, directory_readiness: "not-ready", action_attempted: false, action_returned: false,
+        directory_returned: false, directory_ready: false, directory_readiness: "not-ready", version_source_parent_ready: None,
+        action_attempted: false, action_returned: false,
         callback_returned: false, response: None, selected: None, close_attempted: false, dismissed: false, closed: false,
     }};
     for dismissed in [false, true] {

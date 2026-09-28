@@ -33,7 +33,7 @@ enum {
     MRK_Q_RENAME, MRK_Q_SYMLINK_CALL, MRK_Q_LINK_STAT, MRK_Q_READLINK,
     MRK_Q_UNLINK_LINK, MRK_Q_KEYCHAIN_LOCK, MRK_Q_KEYCHAIN_UNLOCK,
     MRK_Q_SYNC_COPY, MRK_Q_SYNC_COUNT, MRK_Q_KEYCHAIN_DELETE, MRK_Q_RMDIR,
-    MRK_Q_OWNER_PROPERTY, MRK_Q_GROUP_PROPERTY, MRK_Q_MODE_PROPERTY
+    MRK_Q_OWNER_PROPERTY, MRK_Q_GROUP_PROPERTY, MRK_Q_MODE_PROPERTY, MRK_Q_ACL_REMOVE_PROPERTY
 };
 // result is the actual integral result/status, or pointer nonnull0/1 for the
 // documented pointer-return kinds. FILESEC_FREE records0 after the void return.
@@ -78,7 +78,7 @@ typedef struct {
     uint32_t search_slot, default_slot;
 } MRKQSelectionCell;
 typedef struct {
-    filesec_t filesec;
+    filesec_t filesec, removal;
     acl_t original, replacement;
     acl_entry_t entry;
     acl_flagset_t flags;
@@ -522,7 +522,7 @@ static int mrk_q_foreign_uuids(MRKQFixture *f) {
     return 1;
 }
 static int mrk_q_save_acl(MRKQFixture *f, MRKQMutation *m) {
-    if (m->saved || m->filesec || m->original || m->replacement || f->active_acl || f->active_mode || !mrk_q_ancestry(f))
+    if (m->saved || m->filesec || m->removal || m->original || m->replacement || f->active_acl || f->active_mode || !mrk_q_ancestry(f))
         return mrk_q_fail(f);
     MRKQCall *call = mrk_q_call(f, MRK_Q_FILESEC_INIT, MRK_W_BEFORE_CALL); if (!call) return 0;
     errno = 0; m->filesec = filesec_init(); int saved = errno;
@@ -551,6 +551,16 @@ static int mrk_q_save_acl(MRKQFixture *f, MRKQMutation *m) {
         }
         if (!mrk_q_admit(f, MRK_W_AFTER_CALL)) return 0;
         MRK_Q_SCALAR(MRK_Q_ACL_VALID, acl_valid(m->original), q_rc == 0);
+    } else {
+        // Prepare an ACL-only removal request before changing the fixture.
+        // The populated snapshot also has owner/group/mode and is never used
+        // for fchmodx_np. An empty ACL would not restore original absence.
+        call = mrk_q_call(f, MRK_Q_FILESEC_INIT, MRK_W_BEFORE_CALL); if (!call) return 0;
+        errno = 0; m->removal = filesec_init(); saved = errno;
+        mrk_q_return(call, m->removal != NULL, saved);
+        if (!m->removal || !mrk_q_admit(f, MRK_W_AFTER_CALL)) return mrk_q_fail(f);
+        MRK_Q_SCALAR(MRK_Q_ACL_REMOVE_PROPERTY,
+            filesec_set_property(m->removal, FILESEC_ACL, _FILESEC_REMOVE_ACL), q_rc == 0);
     }
     if (!mrk_q_ancestry(f)) return 0;
     m->saved = 1;
@@ -610,17 +620,30 @@ static int mrk_q_acl_free(MRKQFixture *f, acl_t *original) {
 static int mrk_q_restore_acl(MRKQFixture *f, uint32_t index) {
     if (index >= 3 || f->active_acl != index + 1 || f->active_mode) return mrk_q_fail(f);
     MRKQMutation *m = &f->mutations[index];
-    if (!m->saved || !m->changed || m->restored || !mrk_q_ancestry(f)) return mrk_q_fail(f);
+    if (!m->saved || !m->changed || m->restored
+        || (m->present ? m->removal != NULL : m->removal == NULL) || !mrk_q_ancestry(f)) return mrk_q_fail(f);
     int fd = f->ns.fds[f->root_index].fd;
     MRKQCall *call = mrk_q_call(f, m->present ? MRK_Q_ACL_SET : MRK_Q_ACL_DELETE, MRK_W_BEFORE_CALL);
     if (!call) return 0;
     errno = 0;
-    int rc = m->present ? acl_set_fd_np(fd, m->original, ACL_TYPE_EXTENDED) : acl_delete_fd_np(fd, ACL_TYPE_EXTENDED);
+    int rc = m->present ? acl_set_fd_np(fd, m->original, ACL_TYPE_EXTENDED) : fchmodx_np(fd, m->removal);
     int saved = errno; mrk_q_return(call, rc, saved);
     if (rc) return mrk_q_fail(f);
     m->restored = 1; f->active_acl = 0;
     if (!mrk_q_admit(f, MRK_W_AFTER_CALL) || !mrk_q_ancestry(f)) return 0;
+    if (!m->present) {
+        struct stat restored = {0}; int restored_present = -1;
+        MRK_Q_SCALAR(MRK_Q_FSTATX, fstatx_np(fd, &restored, m->filesec), q_rc == 0);
+        if (!mrk_w_same(mrk_w_identity(&restored), f->ns.fds[f->root_index].identity)) return mrk_q_fail(f);
+        MRK_Q_SCALAR(MRK_Q_ACL_PRESENT,
+            filesec_query_property(m->filesec, FILESEC_ACL, &restored_present), q_rc == 0 && restored_present == 0);
+    }
     if (!mrk_q_acl_free(f, &m->replacement) || !mrk_q_acl_free(f, &m->original)) return 0;
+    if (m->removal) {
+        call = mrk_q_call(f, MRK_Q_FILESEC_FREE, MRK_W_BEFORE_RELEASE); if (!call) return 0;
+        errno = 0; filesec_free(m->removal); saved = errno;
+        mrk_q_return(call, 0, saved); m->removal = NULL;
+    }
     call = mrk_q_call(f, MRK_Q_FILESEC_FREE, MRK_W_BEFORE_RELEASE); if (!call) return 0;
     errno = 0; filesec_free(m->filesec); saved = errno;
     mrk_q_return(call, 0, saved); m->filesec = NULL; m->entry = NULL; m->flags = NULL;
@@ -761,7 +784,7 @@ static int mrk_q_retire(MRKQFixture *f) {
         || !mrk_q_ancestry(f)) return mrk_q_fail(f);
     for (uint32_t i = 0; i < 3; ++i) {
         MRKQMutation *m = &f->mutations[i];
-        if (!m->saved || !m->changed || !m->restored || m->filesec || m->original || m->replacement) return mrk_q_fail(f);
+        if (!m->saved || !m->changed || !m->restored || m->filesec || m->removal || m->original || m->replacement) return mrk_q_fail(f);
     }
     MRKWrappingFrame *s = &f->ns;
     uint32_t current_index = s->result.directory_count + 2;

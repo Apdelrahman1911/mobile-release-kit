@@ -2035,7 +2035,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("uint32_t attachment = mrk_observation_attachment(s);", native)
         self.assertIn("attachment == MRK_ATTACHMENT_ALL ? 2u : 0u", native)
         self.assertIn("if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);", native)
-        self.assertIn("flags & !0x7ffff == 0", rust)
+        self.assertIn("flags & !0xfffff == 0", rust)
         self.assertIn("(parent_present && panel_present).then_some", rust)
 
     def test_native_action_source_keeps_original_calls_status_and_closed_decoder(self):
@@ -4255,21 +4255,22 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
         self.assertLessEqual(len(captured(good)) - len(M.MARKER) - 1, M.JSON_LIMIT)
         fields = good["projectFields"]
+        self.assertEqual(fields["schemaVersion"], 2)
         self.assertEqual(fields["previewValidation"], "invalid-retained-ios-fields")
         self.assertIs(fields["normalProfileAvailable"], False)
         self.assertIs(fields["shippingProfileEnabledByThisReceipt"], False)
         # Literal independent journey roster. The helper's own table is not
         # used as the oracle for IDs, purpose, source entry, masks or results.
         expected = (
-            (2, "version.source", "version-source", "inputs/VERSION", None, 8191, True),
+            (2, "version.source", "version-source", "inputs/VERSION", None, 6143, True),
             (3, "ios.project", "ios-project", "ios/Example.xcodeproj", None, 6143, True),
             (4, "ios.workspace", "ios-workspace", "ios/Example.xcworkspace", None, 6143, True),
             (5, "metadata.root", "metadata-root", "metadata", None, 6143, True),
             (6, "version.source", "version-source", None, None, 4607, False),
             (7, "metadata.root", "metadata-root", None, None, 4607, False),
-            (8, "version.source", "version-source", None, "project_path_unsafe", 8191, False),
-            (9, "version.source", "version-source", None, "project_path_unsafe", 8191, True),
-            (10, "version.source", "version-source", None, "project_path_unsafe", 8191, True),
+            (8, "version.source", "version-source", None, "project_path_unsafe", 6143, False),
+            (9, "version.source", "version-source", None, "project_path_unsafe", 6143, True),
+            (10, "version.source", "version-source", None, "project_path_unsafe", 6143, True),
             (11, "ios.workspace", "ios-workspace", None, "project_path_changed", 6143, True),
         )
         self.assertEqual(len(fields["rows"]), len(expected))
@@ -4279,6 +4280,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                 "operationId": identifier, "field": field, "kind": kind,
                 "nativeResponse": "accept" if accepted else "decline",
                 "initialRootAndOptions": {"result": "ok", "facts": mask},
+                "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31} if accepted and kind == "version-source" else None,
                 "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
                 "sourceBookStarted": started, "originalSourceChildGuiAndCoordinatorSettled": True,
                 "relativePath": relative, "errorCode": error, "draftObserved": True})
@@ -4286,6 +4288,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertEqual([row["operationId"] for row in histories], [1, 2, 3, 4, 5, 8, 9, 10, 11])
         self.assertEqual(len(histories), 9)
         for mutation in (
+            lambda v: v.update(schemaVersion=1),
             lambda v: v.update(normalProfileAvailable=True),
             lambda v: v.update(shippingProfileEnabledByThisReceipt=True),
             lambda v: v.update(oneUseOriginalDocumentRegistration=False),
@@ -4300,6 +4303,14 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda v: v["rows"][0].update(sourceBookStarted=False),
             lambda v: v["rows"][0].update(originalSourceChildGuiAndCoordinatorSettled=False),
             lambda v: v["rows"][0]["initialRootAndOptions"].update(facts=4095),
+            lambda v: v["rows"][0]["initialRootAndOptions"].update(facts=8191),
+            lambda v: v["rows"][0].pop("nameFieldPreparation"),
+            lambda v: v["rows"][0].update(nameFieldPreparation=None),
+            lambda v: v["rows"][0]["nameFieldPreparation"].update(returned=False),
+            lambda v: v["rows"][0]["nameFieldPreparation"].update(result="io"),
+            lambda v: v["rows"][0]["nameFieldPreparation"].update(facts=15),
+            lambda v: v["rows"][1].update(nameFieldPreparation={"returned": True, "result": "ok", "facts": 31}),
+            lambda v: v["rows"][4].update(nameFieldPreparation={"returned": True, "result": "ok", "facts": 31}),
             lambda v: v["rows"][1].update(relativePath="../Example.xcodeproj"),
             lambda v: v["rows"][4].update(nativeResponse="accept", exactNativeSelection=True),
             lambda v: v["rows"][5].update(laterSyntheticNavigation=True),
@@ -4555,35 +4566,52 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         observe = native.split("int mrk_panel_observe(", 1)[1].split("// Closed DATA from this one original return.", 1)[0]
         self.assertEqual(helper.count("[(NSOpenPanel *)s->window directoryURL]"), 1)
         self.assertEqual(helper.count("[(NSOpenPanel *)s->window nameFieldStringValue]"), 1)
-        self.assertLess(helper.index("strcmp(path, expected) == 0"), helper.index("s->kind == 4 ?"))
+        self.assertLess(helper.index("strcmp(path, expected) == 0"), helper.index("*versionSourceParentReady = YES"))
+        self.assertLess(helper.index("*versionSourceParentReady = YES"), helper.index("s->kind == 4 ?"))
+        self.assertIn("s->kind == 4 ? s->observationNamePhase == MRK_NAME_ALL", helper)
         self.assertLess(helper.index("s->kind == 4 ?"), helper.index("nameFieldStringValue]"))
         self.assertEqual(native.count("mrk_observation_directory_ready("), 4)
-        self.assertEqual(native.count("mrk_observation_directory_ready(s, NULL)"), 2)
+        self.assertEqual(native.count("mrk_observation_directory_ready(s, NULL, NULL)"), 2)
         self.assertEqual(native.count("setDirectoryURL:"), 3)
-        self.assertEqual(observe.count("mrk_observation_directory_ready(s, &readiness)"), 1)
-        self.assertLess(observe.index("mrk_observation_directory_ready(s, &readiness)"), observe.index("*flags |= readiness << 17;"))
+        self.assertEqual(native.count("setNameFieldStringValue:"), 2)
+        query = "mrk_observation_directory_ready(s, &readiness, &parentReady)"
+        self.assertEqual(observe.count(query), 1)
+        self.assertLess(observe.index(query), observe.index("*flags |= readiness << 17;"))
+        self.assertLess(observe.index("s->observationParentSample = 0"), observe.index("++s->observationSample"))
+        self.assertIn("s->observationSample == UINT32_MAX", observe)
+        self.assertIn("parentReady && *flags == 0x1f00fu", observe)
+        self.assertLess(observe.index("*flags |= readiness << 17;"), observe.index("*flags |= MRK_VERSION_SOURCE_PARENT_READY"))
         for token in ("setDirectoryURL:", "setNameFieldStringValue:", "dispatch_", "sleep(", "performClick", "AXUIElement"):
             self.assertNotIn(token, helper)
-        self.assertIn("flags & !0x7ffff == 0", rust)
-        self.assertIn("(flags & 16 != 0) == (flags >> 17 == 3)", rust)
-        self.assertIn("flags >> 17 == 0 || flags & 0x200c == 0x200c", rust)
+        self.assertIn("flags & !0xfffff == 0", rust)
+        self.assertIn("(flags & 16 != 0) == (readiness == 3)", rust)
+        self.assertIn("readiness == 0 || flags & 0x200c == 0x200c", rust)
+        self.assertIn("flags & 0x80000 == 0 || flags == 0x9f00f", rust)
         self.assertIn("observation_directory_readiness(kind, 0x4200c)", rust)
-        self.assertIn('directory_ready: flags & 16 != 0, directory_readiness', rust)
+        self.assertIn("observation_name_sample_valid(kind, 0x9f00f, 1)", rust)
+        self.assertIn("!observation_name_sample_valid(kind, 0x6201c, 1)", rust)
+        self.assertIn("directory_ready: flags & 16 != 0, directory_readiness", rust)
         dispatch = observer.split("fn native_step(&self", 1)[1].split("fn native_step_body(", 1)[0]
         body = observer.split("fn native_step_body(", 1)[1].split("    fn ", 1)[0]
+        self.assertEqual(body.count("observed_panel()"), 1)
         self.assertLess(dispatch.index("self.native_step_body("), dispatch.index("native.returned = true"))
         self.assertLess(dispatch.index("native.returned = true"), dispatch.index('panel.wait_location = Some("open-directory-readiness")'))
-        self.assertLess(dispatch.index('r.pending != Some(Pending::Native(step)) || r.step != step'),
+        self.assertLess(dispatch.index("r.pending != Some(Pending::Native(step)) || r.step != step"),
                         dispatch.index('panel.wait_location = Some("open-directory-readiness")'))
         self.assertIn("p.step == step && readiness_wait == Some(p.id)", dispatch)
         gate = "if open && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {"
         self.assertEqual(body.count("*readiness_wait = Some(id);"), 1)
         self.assertLess(body.index("record.prepared(i)"), body.index(gate))
+        self.assertLess(body.index("panel.native.version_source_name_ready()"), body.index("prepare_version_source_name(id, panel, &mut returned)"))
+        name_call = body.index("prepare_version_source_name(id, panel, &mut returned)")
+        self.assertLess(name_call, body.index("return Ok(false);", name_call))
+        self.assertLess(body.index("return Ok(false);", name_call), body.index(gate))
         self.assertLess(body.index(gate), body.index("*readiness_wait = Some(id);"))
         self.assertLess(body.index("*readiness_wait = Some(id);"), body.index("prepare_open_input(id, target, binding_return)"))
         wait = body.split(gate, 1)[1].split("        if open {", 1)[0]
         self.assertIn("return Ok(false); // Before any Open action; original deadline remains unchanged.", wait)
-        for token in ("observed_panel(", "prepare_open_input(", "prepare_project_field(", "Instant::", "Duration::", "self.record("):
+        for token in ("observed_panel(", "prepare_open_input(", "prepare_project_field(", "prepare_version_source_name(",
+                      "Instant::", "Duration::", "self.record("):
             self.assertNotIn(token, wait)
         sample = observer.split("impl PanelSample {", 1)[1].split("fn same_panel_action_returned(", 1)[0]
         self.assertIn("wait_location: None", sample)
@@ -4654,6 +4682,33 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertIsNone(M._accessibility_binding_context(bad, case, allow_files=True))
         for step in ("ProjectFields(Native(10))", "ProjectFields(Chosen(10))", "ProjectFields(Read(10))"):
             self.assertNotIn(step, M.FAILURE_STEPS)
+        # New frames preserve separate navigation/name receipts. Retained old
+        # five-key8191 frames above are not silently upgraded to this shape.
+        for index, identifier in ((0, 2), (6, 8), (7, 9), (8, 10)):
+            step = f"ProjectFields(Native({index}))"
+            base = {"operationId": identifier, "kind": "version-source", "returned": True,
+                    "result": "ok", "facts": 6143, "nameFieldPreparation": None}
+            self.assertEqual(M._field_preparation_context(base, case, step), base)
+            for result, flags in (("ok", 31), ("io", 7), ("io", 15), ("io", 23), ("io", 31),
+                                  ("permission-denied", 0), ("already", 31), ("invalid-return", None), ("would-block", None)):
+                value = deepcopy(base)
+                value["nameFieldPreparation"] = {"returned": True, "result": result, "facts": flags}
+                self.assertEqual(M._field_preparation_context(value, case, step), value)
+            named = deepcopy(base)
+            named["nameFieldPreparation"] = {"returned": True, "result": "ok", "facts": 31}
+            for flags in (-1, 2, 4, 8, 16, 27, 32, 8191, True):
+                bad = deepcopy(named); bad["nameFieldPreparation"]["facts"] = flags
+                self.assertIsNone(M._field_preparation_context(bad, case, step))
+            for mutation in (lambda v: v.update(facts=8191), lambda v: v.update(result="io"),
+                             lambda v: v["nameFieldPreparation"].update(returned=1),
+                             lambda v: v["nameFieldPreparation"].update(result="would-block", facts=0),
+                             lambda v: v["nameFieldPreparation"].update(extra=True)):
+                bad = deepcopy(named); mutation(bad)
+                self.assertIsNone(M._field_preparation_context(bad, case, step))
+        for identifier, kind, index in ((3, "ios-project", 1), (6, "version-source", 4)):
+            bad = {"operationId": identifier, "kind": kind, "returned": True, "result": "ok", "facts": 6143,
+                   "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31}}
+            self.assertIsNone(M._field_preparation_context(bad, case, f"ProjectFields(Native({index}))"))
 
     def test_source_reuses_original_document_sourcebook_and_draft_only_ui(self):
         root = PATH.parents[1]
@@ -4705,6 +4760,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
         adapter = (root / "src-tauri/src/shell_macos_dialog.rs").read_text()
         observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        fields = (root / "src-tauri/src/installed_shell_observation_macos_project_fields.rs").read_text()
         start = native.split("static int mrk_panel_start_inner(", 1)[1].split("int mrk_panel_start(", 1)[0]
         self.assertLess(start.index("length > 4096"), start.index("s->attempted = YES"))
         self.assertLess(start.index("mrk_panel_configure_open_identity(s)"), start.index("mrk_panel_initial_directory(s, initial, length)"))
@@ -4716,7 +4772,9 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                      "[panel setAllowsMultipleSelection:NO]", "[panel setCanCreateDirectories:NO]", "[panel setResolvesAliases:NO]"):
             self.assertIn(fact, start)
         production = native.split("static int mrk_panel_initial_directory(", 1)[1].split("static int mrk_panel_start_inner(", 1)[0]
-        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("enum { MRK_OPEN_ENTRY", 1)[0]
+        navigation = native.split("int mrk_panel_observe_project_field(", 1)[1].split("int mrk_panel_observe_version_source_name(", 1)[0]
+        name = native.split("int mrk_panel_observe_version_source_name(", 1)[1].split("// Main-only original proof", 1)[0]
+        state = native.split("static BOOL mrk_version_source_name_state(", 1)[1].split("static BOOL mrk_observation_directory_ready(", 1)[0]
         self.assertNotIn("observationTarget", production)
         self.assertIn("memcpy(s->observationInitialRoot, bytes, length)", production)
         for temporary in ("initialDirectory", "initialPath"):
@@ -4727,19 +4785,68 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertLess(navigation.index("strcmp(path, s->observationInitialRoot)"), navigation.index("[panel setDirectoryURL:"))
         self.assertLess(navigation.index("s->observationProjectField |= 512u"), navigation.index("[panel setDirectoryURL:"))
         self.assertLess(navigation.index("[panel setDirectoryURL:"), navigation.index("s->observationProjectField |= 1024u"))
-        self.assertLess(navigation.index("[s->observationFieldName release]"), navigation.index("s->observationProjectField |= 4096u"))
+        self.assertNotIn("setNameFieldStringValue:", navigation)
+        self.assertNotIn("[s->observationFieldName release]", navigation)
+        self.assertIn("s->kind == 4", state)
+        for fact in ("s->observationProjectField == 6143u", "s->observationNamePhase == phase", "s->observationSample == sample",
+                     "!s->unknown", "!s->responded", "!s->callbackActive", "!s->closeAttempted", "!s->closed",
+                     "!s->observationActionAttempted", "!s->observationActionReturned"):
+            self.assertIn(fact, state)
+        self.assertLess(name.index("s->observationParentSample = 0"), name.index("sample != granted"))
+        self.assertIn("if (s->observationNamePhase) return EALREADY", name)
+        self.assertLess(name.index("s->observationNamePhase = MRK_NAME_PHASE_ENTERED"), name.index("mrk_observation_attached(s)"))
+        self.assertEqual(name.count("mrk_observation_attached(s)"), 1)
+        self.assertEqual(name.count("setNameFieldStringValue:"), 1)
+        self.assertLess(name.index("MRK_NAME_SET_ENTERED"), name.index("setNameFieldStringValue:"))
+        self.assertLess(name.index("setNameFieldStringValue:"), name.index("MRK_NAME_SET_RETURNED"))
+        self.assertLess(name.index("[s->observationFieldName release]"), name.index("MRK_NAME_RETIRED"))
+        self.assertIn("s->observationFieldName = nil", name)
+        self.assertIn("result == 0 && !mrk_version_source_name_state(s, sample, MRK_NAME_ALL)", name)
+        self.assertEqual(name.count("@catch (NSException *e)"), 2)
+        for forbidden in ("directoryURL]", "setDirectoryURL:", "nameFieldStringValue]", "return EAGAIN",
+                          "dispatch_", "sleep(", "AXUIElement", "s->selected", "s->response =", "s->completion(", "beginSheet", "performClick", "cancel:nil"):
+            self.assertNotIn(forbidden, name)
         for forbidden in ("s->selected", "s->response =", "s->completion(", "beginSheet", "performClick", "cancel:nil"):
             self.assertNotIn(forbidden, navigation)
         prepare = adapter.split("pub(crate) fn prepare_project_field(", 1)[1].split("// Retained by", 1)[0]
-        for fact in ("original(entry)?", "entry.open_release.is_some()", "!allowed(&call, &owner)?", "owner.interrupted()",
-                     ".installed_project_field(kind, navigate, returned)"):
+        prepare_name = adapter.split("pub(crate) fn prepare_version_source_name(", 1)[1].split("pub(crate) fn prepare_project_field(", 1)[0]
+        for fact in ("original(entry)?", "entry.open_release.is_some()", "!allowed(&call, &owner)?", "owner.interrupted()"):
             self.assertIn(fact, prepare)
+            self.assertIn(fact, prepare_name)
+        self.assertIn(".installed_project_field(kind, navigate, returned)", prepare)
+        for fact in ("panel.id != id", "entry.id == id", "!panel.action_allowed", "!panel.native.version_source_name_ready()",
+                     "panel.native.version_source_parent_ready", ".installed_version_source_name(sample, returned)"):
+            self.assertIn(fact, prepare_name)
+        self.assertNotIn("observed_panel(", prepare_name)
+        method = rust.split("pub fn installed_version_source_name(", 1)[1].split("pub fn installed_project_field(", 1)[0]
+        self.assertIn("version_source_parent_matches(&sample, self.original)", method)
+        self.assertIn("sample.sample, &mut facts", method)
+        self.assertIn("Ok(()) if data.succeeded()", method)
+        self.assertIn("Err(error) => { self.unknown = true; Err(error) }", method)
+        self.assertNotIn("Ok(false)", method)
+        self.assertIn("flags & !6143 == 0", rust)
+        self.assertIn("flags & !31 == 0", rust)
+        self.assertIn("self.navigation_prepared(i)", fields)
+        self.assertIn("if needs_name(i) { r.name_preparation.is_some_and(|p| p.succeeded()) }", fields)
+        record_name = fields.split("pub(super) fn name_preparation(&mut self", 1)[1].split("pub(super) fn preparation_sample(", 1)[0]
+        self.assertIn("if !self.name_pending(i) { return false; }", record_name)
+        self.assertIn("row.name_preparation = Some(value)", record_name)
+        self.assertIn("value.succeeded()", record_name)
         dispatch = observer.split("fn native_step(&self", 1)[1].split("fn native_step_body(", 1)[0]
-        self.assertLess(dispatch.index("self.native_step_body("), dispatch.index("record.preparation(i, returned)"))
-        self.assertLess(dispatch.index("native.returned = true"), dispatch.index("record.preparation(i, returned)"))
+        for publication in ("record.preparation(i, returned)", "record.name_preparation(i, returned)"):
+            self.assertLess(dispatch.index("self.native_step_body("), dispatch.index(publication))
+            self.assertLess(dispatch.index("native.returned = true"), dispatch.index(publication))
+        self.assertIn("native.step == step && native.entered && native.returned", dispatch)
+        body = observer.split("fn native_step_body(", 1)[1].split("    fn ", 1)[0]
+        phase = body.split("            if !prepared {", 1)[1].split("        if open &&", 1)[0]
+        for fact in ("record.name_pending(i)", "r.pending != Some(Pending::Native(step)) || r.step != step", "self.timely()"):
+            self.assertIn(fact, phase)
+        for forbidden in ("observed_panel(", "Instant::", "Duration::", "dispatch", "spawn", "sleep"):
+            self.assertNotIn(forbidden, phase)
         self.assertIn("enum { MRK_PROMPT_ORIGINALS = 9 };", native)
         self.assertIn("project_field_data_check()", rust.split("pub fn installed_observation_flags_data_check()", 1)[1])
-        pure = rust.split("fn project_field_data_check()", 1)[1].split('unsafe extern "C"', 1)[0]
+        self.assertIn("version_source_name_data_check()", rust.split("fn project_field_data_check()", 1)[1])
+        pure = rust.split("fn version_source_name_data_check()", 1)[1].split('unsafe extern "C"', 1)[0]
         for forbidden in ("Panel::", "mrk_panel_", "thread::spawn", "std::fs::"):
             self.assertNotIn(forbidden, pure)
 
@@ -4913,6 +5020,27 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             self.assertIn("if-no-files-found: error", upload)
         # Exact private leaves exclude native stdout/stderr, the fixture, binaries
         # and Keychain bytes; upload success cannot replace any original result.
+        native = PATH.parents[2] / "desktop/native/macos-installed-native/src"
+        fixture = (native / "wrapping_keychain_fixture.m").read_text()
+        rust = (native / "wrapping_keychain_fixture.rs").read_text()
+        save_acl = fixture.split("static int mrk_q_save_acl(", 1)[1].split("static int mrk_q_acl_entry(", 1)[0]
+        restore_acl = fixture.split("static int mrk_q_restore_acl(", 1)[1].split("static int mrk_q_mode(", 1)[0]
+        self.assertNotIn("acl_delete_fd_np(", fixture)
+        self.assertIn("m->removal = filesec_init()", save_acl)
+        self.assertIn("filesec_set_property(m->removal, FILESEC_ACL, _FILESEC_REMOVE_ACL)", save_acl)
+        self.assertIn("acl_set_fd_np(fd, m->original, ACL_TYPE_EXTENDED) : fchmodx_np(fd, m->removal)", restore_acl)
+        self.assertNotIn("fchmodx_np(fd, m->filesec)", restore_acl)
+        self.assertNotIn("fchmod(", restore_acl)
+        self.assertLess(restore_acl.index("m->restored = 1;"), restore_acl.index("fstatx_np(fd, &restored, m->filesec)"))
+        self.assertIn("mrk_w_same(mrk_w_identity(&restored)", restore_acl)
+        self.assertIn("q_rc == 0 && restored_present == 0", restore_acl)
+        self.assertIn("filesec_free(m->removal)", restore_acl)
+        self.assertIn("m->filesec || m->removal || m->original || m->replacement", fixture)
+        self.assertIn("!(1..=47).contains(&row.kind)", rust)
+        self.assertIn("count(47, 0) != 3 || count(29, 0) != 3 || count(16, 0) != 6 || count(17, 0) != 6", rust)
+        self.assertIn("count(15, 1) != 6", rust)
+        self.assertIn("count(31, 0) != 6", rust)
+        self.assertIn("not 1 <= a[0] <= 47", private)
 
     def test_paired_native_scopes_share_one_compile_but_not_original_owners(self):
         import ast

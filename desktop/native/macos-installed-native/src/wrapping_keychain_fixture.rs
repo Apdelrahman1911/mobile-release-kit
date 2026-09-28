@@ -118,7 +118,7 @@ impl RawFixture {
         for (i, row) in self.calls.iter().enumerate() {
             if i >= self.call_count as usize {
                 if *row != Call::default() { return false; }
-            } else if !(1..=46).contains(&row.kind) || row.entered != 1 || row.returned > 1
+            } else if !(1..=47).contains(&row.kind) || row.entered != 1 || row.returned > 1
                 || row.returned == 0 && (row.result != 0 || row.actual_errno != 0 || i + 1 != self.call_count as usize)
                 || final_return && self.unknown == 0 && row.returned != 1 { return false; }
         }
@@ -179,10 +179,14 @@ impl RawFixture {
         if !self.valid(true) || self.finalized != 1 { return false; }
         let count = |kind, result| self.calls[..self.call_count as usize].iter()
             .filter(|row| row.kind == kind && row.returned == 1 && row.result == result).count();
+        // This cohort must actually exercise all three absent-ACL restorations.
+        // Present-ACL setters cannot stand in for the corrected Darwin route.
+        if count(47, 0) != 3 || count(29, 0) != 3 || count(16, 0) != 6 || count(17, 0) != 6
+            || count(28, 0) != 3 { return false; }
         // Actual fixed API entries/returns, not an assertion-derived fixture.
         if count(1, 0) != 4 || count(4, 0) != 1 || count(5, 0) != 4 || count(11, 0) != 1
-            || count(13, 0) != 1 || count(14, 0) != 1 || count(15, 1) != 3 || count(20, 1) != 3
-            || count(31, 0) != 3 || count(32, 0) != 4 || count(33, 0) != 2
+            || count(13, 0) != 1 || count(14, 0) != 1 || count(15, 1) != 6 || count(20, 1) != 3
+            || count(31, 0) != 6 || count(32, 0) != 4 || count(33, 0) != 2
             || count(34, 0) != 1 || count(37, 0) != 1 || count(38, 0) != 1
             || count(39, 0) != 1 || count(42, 0) != 1 || count(43, 0) != 1 { return false; }
         let mut default_calls = self.calls[..self.call_count as usize].iter().filter(|row| row.kind == 6);

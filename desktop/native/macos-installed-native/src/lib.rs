@@ -252,7 +252,7 @@ impl Panel {
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
     OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
-    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, installed_original_window,
+    OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
@@ -344,6 +344,8 @@ mod observation {
         pub directory_ready: bool,
         /// Closed diagnostic from the same query; never an action or completion receipt.
         pub directory_readiness: &'static str,
+        /// Same returned sample's intermediate parent DATA, never full readiness.
+        pub version_source_parent_ready: Option<VersionSourceParentReady>,
         pub action_attempted: bool,
         pub action_returned: bool,
         pub callback_returned: bool,
@@ -354,23 +356,104 @@ mod observation {
         pub dismissed: bool,
         pub closed: bool,
     }
-    /// Saved scalar DATA from a returned original P2 preparation, not a new
-    /// native observation, action grant, selection, or finality receipt.
+    /// Opaque main-thread DATA from one returned native sample. Moving it does
+    /// not grant an action: the same original, owner, pending slot and native
+    /// sample generation must still admit the one-use name preparation.
+    pub struct VersionSourceParentReady { original: NonNull<c_void>, sample: u32 }
+    impl PanelObservation {
+        pub fn version_source_name_ready(&self) -> bool {
+            self.kind == PanelKind::VersionSource && self.started && self.attached
+                && self.parent_present && self.panel_present && self.parent_references_panel == Some(true)
+                && self.panel_references_parent == Some(true) && self.panel_visible == Some(true)
+                && self.directory_bound && self.directory_returned && !self.directory_ready
+                && self.directory_readiness == "not-ready"
+                && self.version_source_parent_ready.as_ref().is_some_and(|sample| sample.sample != 0)
+                && !self.action_attempted && !self.action_returned && !self.callback_returned
+                && self.response.is_none() && self.selected.is_none()
+                && !self.close_attempted && !self.dismissed && !self.closed
+        }
+    }
+    /// Saved scalar DATA from a returned original initial-root/navigation
+    /// preparation. It does not include VersionSource's later name phase.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ProjectFieldPreparation { pub result: &'static str, pub facts: Option<u32> }
     impl ProjectFieldPreparation {
         pub fn succeeded(self, kind: PanelKind, navigate: bool) -> bool {
-            kind.project_field() && self.result == "ok" && self.facts == Some(511 | 4096
-                | if navigate { 512 | 1024 | if kind == PanelKind::VersionSource { 2048 } else { 0 } } else { 0 })
+            kind.project_field() && self.result == "ok"
+                && self.facts == Some(511 | 4096 | if navigate { 512 | 1024 } else { 0 })
         }
     }
+    /// Separate closed five-bit original name receipt: phase entry, saved
+    /// parent/current topology admission, setter entry, setter return, cleanup.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct VersionSourceNamePreparation { pub result: &'static str, pub facts: Option<u32> }
+    impl VersionSourceNamePreparation {
+        pub fn succeeded(self) -> bool { self.result == "ok" && self.facts == Some(31) }
+    }
+    fn project_field_result(status: c_int) -> &'static str {
+        match status { 0 => "ok", 1 => "permission-denied", 5 => "io", 22 => "invalid-input",
+            35 => "would-block", 37 => "already", _ => "invalid-return" }
+    }
     fn project_field_preparation(status: c_int, flags: u32) -> ProjectFieldPreparation {
-        let result = match status { 0 => "ok", 1 => "permission-denied", 5 => "io", 22 => "invalid-input",
-            35 => "would-block", 37 => "already", _ => "invalid-return" };
-        let valid = flags & !8191 == 0 && (flags == 0 || flags & 257 == 257)
+        // Bit2048 is no longer a navigation fact. Historical failure DATA is
+        // parsed separately; no old8191 mask can stand in for the new name call.
+        let valid = flags & !6143 == 0 && (flags == 0 || flags & 257 == 257)
             && (flags & 512 == 0 || flags & 511 == 511) && (flags & 1024 == 0 || flags & 512 != 0)
-            && (flags & 2048 == 0 || flags & 1024 != 0) && (status != 35 || flags == 0);
-        ProjectFieldPreparation { result, facts: valid.then_some(flags) }
+            && (status != 35 || flags == 0);
+        ProjectFieldPreparation { result: project_field_result(status), facts: valid.then_some(flags) }
+    }
+    fn version_source_name_preparation(status: c_int, flags: u32) -> VersionSourceNamePreparation {
+        let valid = flags & !31 == 0 && (flags == 0 || flags & 1 != 0)
+            && (flags & 4 == 0 || flags & 3 == 3) && (flags & 8 == 0 || flags & 4 != 0)
+            && status != 35;
+        VersionSourceNamePreparation { result: project_field_result(status), facts: valid.then_some(flags) }
+    }
+    fn version_source_parent_matches(sample: &VersionSourceParentReady, original: NonNull<c_void>) -> bool {
+        sample.original == original && sample.sample != 0
+    }
+    fn version_source_name_data_check() -> bool {
+        // Inert addresses and scalar DATA only; no native Panel is constructed.
+        let original = NonNull::<c_void>::dangling();
+        let fresh = || PanelObservation { kind: PanelKind::VersionSource, started: true, attached: true,
+            parent_present: true, panel_present: true, parent_references_panel: Some(true),
+            panel_references_parent: Some(true), panel_visible: Some(true),
+            directory_bound: true, directory_returned: true, directory_ready: false, directory_readiness: "not-ready",
+            version_source_parent_ready: Some(VersionSourceParentReady { original, sample: 1 }),
+            action_attempted: false, action_returned: false, callback_returned: false, response: None, selected: None,
+            close_attempted: false, dismissed: false, closed: false };
+        if !fresh().version_source_name_ready() || fresh().directory_ready { return false; }
+        let invalid: &[fn(&mut PanelObservation)] = &[
+            |p| p.started = false, |p| p.attached = false, |p| p.parent_present = false, |p| p.panel_present = false,
+            |p| p.parent_references_panel = Some(false), |p| p.panel_references_parent = None,
+            |p| p.panel_visible = Some(false), |p| p.directory_bound = false, |p| p.directory_returned = false,
+            |p| p.directory_ready = true, |p| p.directory_readiness = "directory-not-matched",
+            |p| p.version_source_parent_ready = None,
+            |p| p.version_source_parent_ready.as_mut().unwrap().sample = 0,
+            |p| p.action_attempted = true, |p| p.action_returned = true, |p| p.callback_returned = true,
+            |p| p.response = Some(PanelResponse::Accept), |p| p.selected = Some(PathBuf::from("/inert-data-not-opened")),
+            |p| p.close_attempted = true, |p| p.dismissed = true, |p| p.closed = true,
+        ];
+        for change in invalid { let mut sample = fresh(); change(&mut sample); if sample.version_source_name_ready() { return false; } }
+        for kind in [PanelKind::Project, PanelKind::Quit, PanelKind::File, PanelKind::IosProject, PanelKind::IosWorkspace, PanelKind::MetadataRoot] {
+            let mut sample = fresh(); sample.kind = kind; if sample.version_source_name_ready() { return false; }
+        }
+        let sample = fresh().version_source_parent_ready.unwrap();
+        let mut other_byte = 0u8; let other = NonNull::from(&mut other_byte).cast::<c_void>();
+        if !version_source_parent_matches(&sample, original) || version_source_parent_matches(&sample, other)
+            || version_source_parent_matches(&VersionSourceParentReady { original, sample: 0 }, original) { return false; }
+        for flags in 0..64 {
+            let expected = [0, 1, 3, 7, 15, 17, 19, 23, 31].contains(&flags);
+            if version_source_name_preparation(5, flags).facts.is_some() != expected
+                || version_source_name_preparation(0, flags).succeeded() != (flags == 31) { return false; }
+        }
+        for status in [1, 5, 22, 35, 37, -1] {
+            if version_source_name_preparation(status, 31).succeeded() { return false; }
+        }
+        // An exception after setter entry/return may retain known cleanup, but
+        // neither partial flags nor a nonzero native result becomes success.
+        version_source_name_preparation(5, 23).facts == Some(23)
+            && !version_source_name_preparation(5, 31).succeeded()
+            && version_source_name_preparation(35, 0).facts.is_none()
     }
     fn project_field_data_check() -> bool {
         // Pure spelling/ABI DATA in the existing observer entry. No Panel,
@@ -383,7 +466,7 @@ mod observation {
                 if project_field_initial(kind, Path::new(invalid)).is_ok() { return false; }
             }
             for navigate in [false, true] {
-                let mask = 511 | 4096 | if navigate { 512 | 1024 | if kind == PanelKind::VersionSource { 2048 } else { 0 } } else { 0 };
+                let mask = 511 | 4096 | if navigate { 512 | 1024 } else { 0 };
                 if !project_field_preparation(0, mask).succeeded(kind, navigate) { return false; }
                 for bit in 0..13 {
                     if project_field_preparation(0, mask ^ (1 << bit)).succeeded(kind, navigate) { return false; }
@@ -397,20 +480,22 @@ mod observation {
             if project_field_initial(kind, Path::new("/Users/owner/project")).is_ok()
                 || project_field_preparation(0, 511 | 4096).succeeded(kind, false) { return false; }
         }
-        for flags in [8192, 1, 256, 512, 257 | 1024, 257 | 2048, 4096, u32::MAX] {
+        for flags in [2048, 8191, 8192, 1, 256, 512, 257 | 1024, 257 | 2048, 4096, u32::MAX] {
             if project_field_preparation(5, flags).facts.is_some() { return false; }
         }
         project_field_preparation(35, 0) == (ProjectFieldPreparation { result: "would-block", facts: Some(0) })
             && project_field_preparation(35, 257).facts.is_none()
             && project_field_initial(PanelKind::VersionSource, Path::new(&format!("/{}", "a".repeat(4096)))).is_err()
+            && version_source_name_data_check()
     }
     unsafe extern "C" {
         fn mrk_observation_original_window(original: usize, flags: *mut u32) -> c_int;
         fn mrk_panel_observe(panel: *mut c_void, kind: *mut c_int, flags: *mut u32,
-            response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
+            response: *mut c_int, path: *mut u8, capacity: usize, name_sample: *mut u32) -> c_int;
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
             diagnostic: *mut u32) -> c_int;
         fn mrk_panel_observe_project_field(panel: *mut c_void, navigate: c_int, facts: *mut u32) -> c_int;
+        fn mrk_panel_observe_version_source_name(panel: *mut c_void, sample: u32, facts: *mut u32) -> c_int;
         fn mrk_observation_ax_trusted() -> c_int;
         fn mrk_panel_observe_arm_open_identity(panel: *mut c_void, target: *const u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_identity_data(panel: *mut c_void, data: *mut IdentityWire);
@@ -1203,15 +1288,17 @@ mod observation {
     }
     fn observation_flags_valid(flags: u32) -> bool {
         let both_present = flags & 0x3000 == 0x3000;
-        flags & !0x7ffff == 0 && (flags & 2 != 0) == (flags & 0x1f000 == 0x1f000)
+        let readiness = (flags >> 17) & 3;
+        flags & !0xfffff == 0 && (flags & 2 != 0) == (flags & 0x1f000 == 0x1f000)
             && (both_present || flags & 0xc000 == 0)
             && (flags & 0x2000 != 0 || flags & 0x10000 == 0)
-            && (flags & 16 != 0) == (flags >> 17 == 3)
-            && (flags >> 17 == 0 || flags & 0x200c == 0x200c)
+            && (flags & 16 != 0) == (readiness == 3)
+            && (readiness == 0 || flags & 0x200c == 0x200c)
+            && (flags & 0x80000 == 0 || flags == 0x9f00f)
     }
     fn observation_directory_readiness(kind: PanelKind, flags: u32) -> Option<&'static str> {
-        if !observation_flags_valid(flags) { return None; }
-        match flags >> 17 {
+        if !observation_flags_valid(flags) || flags & 0x80000 != 0 && kind != PanelKind::VersionSource { return None; }
+        match (flags >> 17) & 3 {
             0 => Some("not-ready"),
             1 if !matches!(kind, PanelKind::Quit) => Some("directory-not-matched"),
             2 if matches!(kind, PanelKind::File | PanelKind::VersionSource) => Some("filename-not-matched"),
@@ -1219,12 +1306,15 @@ mod observation {
             _ => None,
         }
     }
+    fn observation_name_sample_valid(kind: PanelKind, flags: u32, sample: u32) -> bool {
+        observation_directory_readiness(kind, flags).is_some() && (sample != 0) == (flags & 0x80000 != 0)
+    }
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
         action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
             && project_field_data_check()
-            && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x2200c, 0x4200c, 0x6201c, 0x7ffff]
+            && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x2200c, 0x4200c, 0x6201c, 0x7ffff, 0x9f00f]
                 .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x1ffff, 0x20000,
                 0x22008, 0x22004, 0x6001c, 0x6200c, 0x2201c, 0x4201c, 0x80000, u32::MAX]
@@ -1239,9 +1329,31 @@ mod observation {
                     && observation_directory_readiness(kind, 0x6201c)
                         == (!matches!(kind, PanelKind::Quit)).then_some("ready")
                     && observation_directory_readiness(kind, 0x1ffff).is_none()
+                    && observation_name_sample_valid(kind, 0x9f00f, 1) == (kind == PanelKind::VersionSource)
+                    && !observation_name_sample_valid(kind, 0x9f00f, 0)
+                    && !observation_name_sample_valid(kind, 0x6201c, 1)
+                    && !observation_name_sample_valid(kind, 0x9f01f, 1)
+                    && !observation_name_sample_valid(kind, 0xbf00f, 1)
             })
     }
     impl Panel {
+        pub fn installed_version_source_name(&mut self, sample: VersionSourceParentReady,
+            returned: &mut Option<VersionSourceNamePreparation>) -> io::Result<()> {
+            *returned = None;
+            self.usable()?;
+            if !version_source_parent_matches(&sample, self.original) { return Err(io::ErrorKind::PermissionDenied.into()); }
+            let mut facts = 0;
+            // SAFETY: the same retained main-thread original and a consumed,
+            // opaque returned sample. C rejects a stale generation without a
+            // new directory query and retains entry/return/cleanup separately.
+            let status = unsafe { mrk_panel_observe_version_source_name(self.original.as_ptr(), sample.sample, &mut facts) };
+            let data = version_source_name_preparation(status, facts); *returned = Some(data);
+            match result(status) {
+                Ok(()) if data.succeeded() => Ok(()),
+                Err(error) => { self.unknown = true; Err(error) },
+                Ok(()) => { self.unknown = true; Err(io::ErrorKind::InvalidData.into()) },
+            }
+        }
         pub fn installed_project_field(&mut self, kind: PanelKind, navigate: bool,
             returned: &mut Option<ProjectFieldPreparation>) -> io::Result<bool> {
             *returned = None;
@@ -1311,17 +1423,19 @@ mod observation {
         }
         pub fn installed_observation(&mut self) -> io::Result<PanelObservation> {
             self.usable()?;
-            let mut kind = 0; let mut flags = 0; let mut response = 0; let mut path = [0u8; 4097];
+            let mut kind = 0; let mut flags = 0; let mut response = 0; let mut path = [0u8; 4097]; let mut name_sample = 0;
             // SAFETY: same retained main-thread original and exact writable
-            // DATA cells. Unlike poll, this neither consumes nor adds a fact.
+            // DATA cells. A bounded sample number only rejects stale name
+            // preparation; it never grants completion or original finality.
             let status = unsafe { mrk_panel_observe(self.original.as_ptr(), &mut kind, &mut flags,
-                &mut response, path.as_mut_ptr(), path.len()) };
+                &mut response, path.as_mut_ptr(), path.len(), &mut name_sample) };
             if let Err(error) = result(status) { self.unknown = true; return Err(error); }
             let parsed = (|| {
                 let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit, 3 => PanelKind::File,
                     4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 let directory_readiness = observation_directory_readiness(kind, flags).ok_or(io::ErrorKind::InvalidData)?;
+                if !observation_name_sample_valid(kind, flags, name_sample) { return Err(io::ErrorKind::InvalidData.into()); }
                 let parent_present = flags & 0x1000 != 0; let panel_present = flags & 0x2000 != 0;
                 let end = path.iter().position(|byte| *byte == 0).ok_or(io::ErrorKind::InvalidData)?;
                 let selected = if end == 0 { None } else { std::str::from_utf8(&path[..end]).ok().map(PathBuf::from) };
@@ -1332,7 +1446,9 @@ mod observation {
                     panel_references_parent: (parent_present && panel_present).then_some(flags & 0x8000 != 0),
                     panel_visible: panel_present.then_some(flags & 0x10000 != 0),
                     directory_bound: flags & 4 != 0, directory_returned: flags & 8 != 0,
-                    directory_ready: flags & 16 != 0, directory_readiness, action_attempted: flags & 32 != 0,
+                    directory_ready: flags & 16 != 0, directory_readiness,
+                    version_source_parent_ready: (name_sample != 0).then_some(VersionSourceParentReady { original: self.original, sample: name_sample }),
+                    action_attempted: flags & 32 != 0,
                     action_returned: flags & 64 != 0, callback_returned: flags & 256 != 0,
                     response, selected, close_attempted: flags & 512 != 0,
                     dismissed: flags & 1024 != 0, closed: flags & 2048 != 0 })

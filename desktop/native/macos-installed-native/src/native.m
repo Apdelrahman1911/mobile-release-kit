@@ -281,7 +281,8 @@ enum { MRK_SELECTION_UNOBSERVED, MRK_SELECTION_EMPTY, MRK_SELECTION_MALFORMED,
     // Copied only from the production start's original ProjectPathBinding.
     // It is distinct from the later synthetic navigation target.
     char observationInitialRoot[4097];
-    uint32_t observationProjectField;
+    uint32_t observationProjectField, observationNamePhase;
+    uint32_t observationSample, observationParentSample;
     NSString *observationFieldName;
     char observationParentTag[64], observationPanelTag[64];
     char observationPrompt[8];
@@ -581,8 +582,23 @@ static void mrk_panel_completion_selection(MRKInstalledPanel *s) {
 // Closed DATA from the existing readiness query, not a new query or action.
 // "Not matched" includes a missing/non-file/overlong value; no path is exposed.
 enum { MRK_DIRECTORY_NOT_READY, MRK_DIRECTORY_NOT_MATCHED, MRK_FILENAME_NOT_MATCHED, MRK_DIRECTORY_READY };
-static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *readiness) {
+enum { MRK_VERSION_SOURCE_PARENT_READY = 1u << 19 };
+enum { MRK_NAME_PHASE_ENTERED = 1u, MRK_NAME_PARENT_ADMITTED = 2u,
+    MRK_NAME_SET_ENTERED = 4u, MRK_NAME_SET_RETURNED = 8u, MRK_NAME_RETIRED = 16u, MRK_NAME_ALL = 31u };
+// Scalar original-state check only. No additional directory/filename query.
+static BOOL mrk_version_source_name_state(MRKInstalledPanel *s, uint32_t sample, uint32_t phase) {
+    return s->kind == 4 && s->started && s->parent && s->window && s->completion
+        && !s->unknown && !s->responded && !s->callbackActive && !s->closeAttempted && !s->closed && !s->selected[0]
+        && !s->observationActionAttempted && !s->observationActionReturned
+        && !s->initialPath && !s->initialDirectory && s->observationDirectoryReturned
+        && s->observationProjectField == 6143u && s->observationNamePhase == phase
+        && sample && s->observationSample == sample
+        && mrk_target_path(s->observationInitialRoot) && mrk_target_path(s->observationTarget)
+        && (s->observationIdentity.flags & (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE)) == (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE);
+}
+static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *readiness, BOOL *versionSourceParentReady) {
     if (readiness) *readiness = MRK_DIRECTORY_NOT_READY;
+    if (versionSourceParentReady) *versionSourceParentReady = NO;
     // Actual pre-presentation setter return + current ROOT browsing, not selection.
     if (!mrk_panel_open_kind(s->kind) || !s->window || !s->observationDirectoryReturned
         || !mrk_target_path(s->observationTarget)) return NO;
@@ -608,33 +624,51 @@ static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *read
         if (readiness) *readiness = MRK_DIRECTORY_NOT_MATCHED;
         return NO;
     }
-    if (!(s->kind == 4 ? (s->observationProjectField & 2048u) != 0
+    // This intermediate fact permits only the separate one-use name phase.
+    // It is never full readiness, and it comes from the same comparison above.
+    if (versionSourceParentReady && s->kind == 4 && s->observationProjectField == 6143u
+        && !s->observationNamePhase) *versionSourceParentReady = YES;
+    if (!(s->kind == 4 ? s->observationNamePhase == MRK_NAME_ALL
         : (s->observationIdentity.flags & (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)) == (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED))) return NO;
     BOOL ready = [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];
     if (readiness) *readiness = ready ? MRK_DIRECTORY_READY : MRK_FILENAME_NOT_MATCHED;
     return ready;
 }
-int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity) {
-    if (!pthread_main_np() || !opaque || !kind || !flags || !response || !path || capacity != 4097) return EINVAL;
-    MRKInstalledPanel *s = opaque;
+int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity, uint32_t *nameSample) {
+    if (!pthread_main_np() || !opaque || !kind || !flags || !response || !path || capacity != 4097 || !nameSample) return EINVAL;
+    MRKInstalledPanel *s = opaque; *nameSample = 0;
+    // Every existing original observation invalidates any older parent sample.
+    s->observationParentSample = 0;
     if (s->unknown) return EIO;
+    if (s->kind == 4) {
+        if (s->observationSample == UINT32_MAX) { s->unknown = YES; return EOVERFLOW; }
+        ++s->observationSample; // Bounded comparison DATA, never a new poll/owner.
+    }
     @try {
-        // Closed nineteen-bit ABI with the Rust PanelObservation decoder. Reads
+        // Closed twenty-bit ABI with the Rust PanelObservation decoder. Reads
         // do not set reported, manufacture completion, or authorize retirement.
         uint32_t attachment = mrk_observation_attachment(s);
-        uint32_t readiness = MRK_DIRECTORY_NOT_READY;
+        uint32_t readiness = MRK_DIRECTORY_NOT_READY; BOOL parentReady = NO;
         *kind = s->kind; *response = s->response;
         *flags = attachment | (s->started ? 1u : 0u) | (attachment == MRK_ATTACHMENT_ALL ? 2u : 0u)
             | (s->observationTarget[0] || s->observationInitialRoot[0] ? 4u : 0u) | (s->observationDirectoryReturned ? 8u : 0u)
-            | (mrk_observation_directory_ready(s, &readiness) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
+            | (mrk_observation_directory_ready(s, &readiness, &parentReady) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
             | (s->observationActionReturned ? 64u : 0u) | (s->responded ? 128u : 0u)
             | (s->responded && !s->callbackActive ? 256u : 0u) | (s->closeAttempted ? 512u : 0u)
             | (s->window && ![s->window isVisible] && ![s->window sheetParent] ? 1024u : 0u)
             | (s->closed ? 2048u : 0u);
         // Sequence the tag read AFTER the helper writes it in the expression above.
         *flags |= readiness << 17;
+        if (parentReady && *flags == 0x1f00fu && !s->observationFieldName
+            && mrk_version_source_name_state(s, s->observationSample, 0)) {
+            *flags |= MRK_VERSION_SOURCE_PARENT_READY;
+            s->observationParentSample = s->observationSample;
+            *nameSample = s->observationParentSample;
+        }
         memcpy(path, s->selected, sizeof(s->selected)); return 0;
-    } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }
+    } @catch (NSException *e) {
+        (void)e; s->observationParentSample = 0; *nameSample = 0; s->unknown = YES; return EIO;
+    }
 }
 // Closed DATA from this one original return. No exception object, subsequent
 // query, native status replacement, or permission is carried by these sites.
@@ -748,15 +782,10 @@ int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts)
             if (!directoryLength) directoryLength = 1;
             s->initialPath = [[NSString alloc] initWithBytes:s->observationTarget length:directoryLength encoding:NSUTF8StringEncoding];
             if (s->initialPath) s->initialDirectory = [[NSURL alloc] initFileURLWithPath:s->initialPath isDirectory:YES];
-            if (leaf) s->observationFieldName = [[NSString alloc] initWithBytes:leaf length:strlen(leaf) encoding:NSUTF8StringEncoding];
-            if (s->initialDirectory && [s->initialDirectory isFileURL] && (!leaf || s->observationFieldName)) {
+            if (s->initialDirectory && [s->initialDirectory isFileURL]) {
                 s->observationProjectField |= 512u;
                 [panel setDirectoryURL:s->initialDirectory];
                 s->observationProjectField |= 1024u;
-                if (leaf) {
-                    [panel setNameFieldStringValue:s->observationFieldName];
-                    s->observationProjectField |= 2048u;
-                }
                 result = 0;
             }
         }
@@ -765,10 +794,43 @@ int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts)
     @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
     @try { if (s->initialPath) { [s->initialPath release]; s->initialPath = nil; } }
     @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
-    @try { if (s->observationFieldName) { [s->observationFieldName release]; s->observationFieldName = nil; } }
-    @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
     if (!s->unknown && !s->initialDirectory && !s->initialPath && !s->observationFieldName) s->observationProjectField |= 4096u;
     *facts = s->observationProjectField; return result;
+}
+
+int mrk_panel_observe_version_source_name(void *opaque, uint32_t sample, uint32_t *facts) {
+    if (!pthread_main_np() || !opaque || !facts) return EINVAL;
+    MRKInstalledPanel *s = opaque; *facts = s->observationNamePhase;
+    uint32_t granted = s->observationParentSample;
+    s->observationParentSample = 0; // Consume once, including a refused/stale call.
+    if (s->unknown) return EIO;
+    if (s->observationNamePhase) return EALREADY;
+    if (!sample || sample != granted || s->observationFieldName
+        || !mrk_version_source_name_state(s, sample, 0)) return EPERM;
+    s->observationNamePhase = MRK_NAME_PHASE_ENTERED;
+    int result = EPERM;
+    @try {
+        // Same original attachment recheck, not another directory getter.
+        // Refusal after phase entry is terminal; it is never an EAGAIN retry.
+        if (mrk_observation_attached(s) && mrk_version_source_name_state(s, sample, MRK_NAME_PHASE_ENTERED)) {
+            s->observationNamePhase |= MRK_NAME_PARENT_ADMITTED;
+            const char *leaf = strrchr(s->observationTarget, '/') + 1;
+            if (*leaf) s->observationFieldName = [[NSString alloc] initWithBytes:leaf length:strlen(leaf) encoding:NSUTF8StringEncoding];
+            if (s->observationFieldName && mrk_version_source_name_state(s, sample, MRK_NAME_PHASE_ENTERED | MRK_NAME_PARENT_ADMITTED)) {
+                s->observationNamePhase |= MRK_NAME_SET_ENTERED;
+                [(NSOpenPanel *)s->window setNameFieldStringValue:s->observationFieldName];
+                s->observationNamePhase |= MRK_NAME_SET_RETURNED;
+                result = 0;
+            } else result = EIO;
+        }
+    } @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
+    @try { if (s->observationFieldName) { [s->observationFieldName release]; s->observationFieldName = nil; } }
+    @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
+    // Retain known consuming cleanup even after another phase failed. It cannot
+    // erase Unknown or turn a partial/failed setter into a successful phase.
+    if (!s->observationFieldName) s->observationNamePhase |= MRK_NAME_RETIRED;
+    if (result == 0 && !mrk_version_source_name_state(s, sample, MRK_NAME_ALL)) { s->unknown = YES; result = EIO; }
+    *facts = s->observationNamePhase; return result;
 }
 
 // Main-only original proof and off-main public AX input have separate ABIs.
@@ -999,7 +1061,7 @@ static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL fr
         p->site = MRK_PROOF_ATTACHMENT;
         if (!mrk_proof_check(p, 1, mrk_observation_attached(s), MRK_OPEN_INELIGIBLE)) return p->error;
         p->site = MRK_PROOF_DIRECTORY;
-        if (!mrk_proof_check(p, 2, mrk_observation_directory_ready(s, NULL), MRK_OPEN_INELIGIBLE)) return p->error;
+        if (!mrk_proof_check(p, 2, mrk_observation_directory_ready(s, NULL, NULL), MRK_OPEN_INELIGIBLE)) return p->error;
         p->site = MRK_PROOF_PARENT_ID;
         if (!mrk_identity_tag(s->observationParentTag, "mrk-parent-")) { p->error = MRK_OPEN_INPUT; return p->error; }
         NSString *parentTag = [NSString stringWithCString:s->observationParentTag encoding:NSASCIIStringEncoding];
@@ -1023,7 +1085,7 @@ static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL fr
         p->site = MRK_PROOF_ATTACHMENT;
         if (!mrk_proof_check(p, 1, mrk_observation_attached(s), MRK_OPEN_CHANGED)) return p->error;
         p->site = MRK_PROOF_DIRECTORY;
-        if (!mrk_proof_check(p, 2, mrk_observation_directory_ready(s, NULL), MRK_OPEN_CHANGED)) return p->error;
+        if (!mrk_proof_check(p, 2, mrk_observation_directory_ready(s, NULL, NULL), MRK_OPEN_CHANGED)) return p->error;
         if (!mrk_original_topology(s, p)) return p->error;
         p->site = MRK_PROOF_PARENT_ID;
         p->parent = mrk_identity_class([s->parent accessibilityIdentifier], parentTag);

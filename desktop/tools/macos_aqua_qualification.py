@@ -950,14 +950,15 @@ def _expected_project_fields():
     rows = []
     for i, (field, kind, relative, error) in enumerate(PROJECT_FIELD_CHOICES):
         accepted = i not in (4, 5)
-        facts = 511 | 4096 | ((512 | 1024 | (2048 if kind == "version-source" else 0)) if accepted else 0)
+        facts = 511 | 4096 | ((512 | 1024) if accepted else 0)
         rows.append({"operationId": i + 2, "field": field, "kind": kind,
             "nativeResponse": "accept" if accepted else "decline",
             "initialRootAndOptions": {"result": "ok", "facts": facts},
+            "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31} if accepted and kind == "version-source" else None,
             "laterSyntheticNavigation": accepted, "exactNativeSelection": True if accepted else None,
             "sourceBookStarted": accepted and i != 6, "originalSourceChildGuiAndCoordinatorSettled": True,
             "relativePath": relative, "errorCode": error, "draftObserved": True})
-    return {"schemaVersion": 1, "oneUseOriginalDocumentRegistration": True, "normalProfileAvailable": False,
+    return {"schemaVersion": 2, "oneUseOriginalDocumentRegistration": True, "normalProfileAvailable": False,
         "selection": "original-bound-installed-macos-project-fields", "rows": rows, "originalOperations": 12,
         "allOriginalsSettled": True, "completeDraftAndBaselineMatched": True,
         "previewValidation": "invalid-retained-ios-fields", "fixtureMutationsRestored": True,
@@ -1090,7 +1091,7 @@ RESULT_LOCATION_KEYS |= frozenset((
     "invocationClosed snapshotClosed filesClosed namespaceClosed"
 ).split())
 RESULT_LOCATION_KEYS |= frozenset((
-    "projectFields normalProfileAvailable field initialRootAndOptions laterSyntheticNavigation "
+    "projectFields normalProfileAvailable field initialRootAndOptions nameFieldPreparation laterSyntheticNavigation "
     "sourceBookStarted originalSourceChildGuiAndCoordinatorSettled relativePath errorCode draftObserved "
     "completeDraftAndBaselineMatched previewValidation fixtureMutationsRestored shippingProfileEnabledByThisReceipt "
     "acceptedOpenHistories originalInputSucceeded originalBarrierRetired originalBindingMatched originalCompletionMatched"
@@ -1730,7 +1731,9 @@ def _field_preparation_context(value, case, step):
         return None
     try:
         need(case == PROJECT_FIELDS_CASE and type(value) is dict
-             and set(value) == {"operationId", "kind", "returned", "result", "facts"}, "project-field-preparation-data")
+             and set(value) in ({"operationId", "kind", "returned", "result", "facts"},
+                                {"operationId", "kind", "returned", "result", "facts", "nameFieldPreparation"}),
+             "project-field-preparation-data")
         identifier = value["operationId"]
         need(type(identifier) is int and 2 <= identifier <= 11
              and value["kind"] == PROJECT_FIELD_CHOICES[identifier - 2][1] and value["returned"] is True
@@ -1743,6 +1746,25 @@ def _field_preparation_context(value, case, step):
              and (flags == 0 or flags & 257 == 257) and (not flags & 512 or flags & 511 == 511)
              and (not flags & 1024 or flags & 512) and (not flags & 2048 or flags & 1024)
              and (value["result"] != "would-block" or flags == 0), "project-field-preparation-data")
+        if "nameFieldPreparation" in value:
+            # The new shape retains navigation and name as distinct returns.
+            # Historical five-key8191 frames stay historical; never relabel one.
+            need(flags is None or not flags & 2048, "project-field-preparation-data")
+            name = value["nameFieldPreparation"]
+            if name is not None:
+                need(value["kind"] == "version-source" and identifier != 6
+                     and value["result"] == "ok" and flags == 6143
+                     and type(name) is dict and set(name) == {"returned", "result", "facts"}
+                     and name["returned"] is True and type(name["result"]) is str
+                     and name["result"] in ("ok", "permission-denied", "io", "invalid-input",
+                                            "would-block", "already", "invalid-return"),
+                     "project-field-preparation-data")
+                name_flags = name["facts"]
+                need(name_flags is None or type(name_flags) is int and 0 <= name_flags <= 31
+                     and (name_flags == 0 or name_flags & 1)
+                     and (not name_flags & 4 or name_flags & 3 == 3)
+                     and (not name_flags & 8 or name_flags & 4), "project-field-preparation-data")
+                need(name["result"] != "would-block" or name_flags is None, "project-field-preparation-data")
         return value
     except (Refused, KeyError, TypeError):
         return None  # Diagnostic loss cannot become success or replace failure.

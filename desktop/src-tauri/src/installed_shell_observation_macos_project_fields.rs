@@ -6,7 +6,7 @@ use std::{fs::{File, OpenOptions}, os::{fd::AsFd, unix::fs::{MetadataExt, OpenOp
 use serde_json::{json, Value};
 use crate::{asset_commands::{self as input, ProjectPathField as Field, Reason},
     asset_session::{DocumentBinding, InstalledMacSessionSnapshot, OriginalWork}, error::BridgeError};
-use mrk_macos_installed_native::{PanelKind, ProjectFieldPreparation};
+use mrk_macos_installed_native::{PanelKind, ProjectFieldPreparation, VersionSourceNamePreparation};
 use super::{Case, Observation};
 
 pub(super) const NAME: &str = "project-fields";
@@ -107,10 +107,11 @@ impl Registration {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step { Navigate(u8), Section(u8), Browse(u8), Native(u8), Chosen(u8), Read(u8),
     PreviewPage, Preview, Previewed, Done }
+fn needs_name(i: u8) -> bool { kind(i) == Some(PanelKind::VersionSource) && accepts(i) }
 #[derive(Clone, Default)]
 struct Row {
     requested: bool, returned: bool, selected_returned: bool,
-    preparation: Option<ProjectFieldPreparation>, source_started: Option<bool>,
+    preparation: Option<ProjectFieldPreparation>, name_preparation: Option<VersionSourceNamePreparation>, source_started: Option<bool>,
     native_settled: bool, visible: bool,
 }
 #[derive(Clone)]
@@ -124,9 +125,28 @@ impl Record {
     fn row(&mut self, i: u8) -> Option<&mut Row> {
         (usize::from(i) == self.completed).then(|| self.rows.get_mut(usize::from(i))).flatten()
     }
-    pub(super) fn prepared(&self, i: u8) -> bool {
+    pub(super) fn navigation_prepared(&self, i: u8) -> bool {
         self.rows.get(usize::from(i)).is_some_and(|r| kind(i).is_some_and(|k|
             r.preparation.is_some_and(|p| p.succeeded(k, accepts(i)))))
+    }
+    pub(super) fn prepared(&self, i: u8) -> bool {
+        self.navigation_prepared(i) && self.rows.get(usize::from(i)).is_some_and(|r|
+            if needs_name(i) { r.name_preparation.is_some_and(|p| p.succeeded()) } else { r.name_preparation.is_none() })
+    }
+    pub(super) fn name_pending(&self, i: u8) -> bool {
+        needs_name(i) && usize::from(i) == self.completed && self.navigation_prepared(i)
+            && self.rows.get(usize::from(i)).is_some_and(|r| r.requested && !r.native_settled && r.name_preparation.is_none())
+    }
+    pub(super) fn name_preparation_sample(&self, i: u8) -> Option<VersionSourceNamePreparation> {
+        self.rows.get(usize::from(i))?.name_preparation
+    }
+    pub(super) fn name_preparation(&mut self, i: u8, value: VersionSourceNamePreparation) -> bool {
+        if !self.name_pending(i) { return false; }
+        let Some(row) = self.row(i) else { return false; };
+        // Every returned attempt occupies this separate slot, including a
+        // refused/exceptional/unknown phase. There is no retry/reset transition.
+        row.name_preparation = Some(value);
+        value.succeeded()
     }
     pub(super) fn preparation_sample(&self, i: u8) -> Option<ProjectFieldPreparation> {
         self.rows.get(usize::from(i))?.preparation
@@ -204,16 +224,17 @@ impl Record {
         let rows = self.rows.iter().enumerate().map(|(n, row)| {
             let i = n as u8; let choice = CHOICES[n]; let preparation = row.preparation?;
             if !row.requested || !row.returned || row.selected_returned != accepts(i) || !row.native_settled || !row.visible
-                || !preparation.succeeded(kind(i)?, accepts(i)) || row.source_started != Some(accepts(i) && i != 6) { return None; }
+                || !self.prepared(i) || row.source_started != Some(accepts(i) && i != 6) { return None; }
             Some(json!({"operationId":id(i)?,"field":choice.name,"kind":kind_name(i)?,
                 "nativeResponse":if accepts(i) { "accept" } else { "decline" },
                 "initialRootAndOptions":{"result":preparation.result,"facts":preparation.facts},
+                "nameFieldPreparation":row.name_preparation.map(|name| json!({"returned":true,"result":name.result,"facts":name.facts})),
                 "laterSyntheticNavigation":accepts(i),"exactNativeSelection":accepts(i).then_some(true),
                 "sourceBookStarted":row.source_started,"originalSourceChildGuiAndCoordinatorSettled":row.native_settled,
                 "relativePath":choice.relative,"errorCode":matches!(choice.reason, Reason::SourceRefused | Reason::SourceChanged)
                     .then(|| input::project_path_error(choice.reason).code),"draftObserved":row.visible}))
         }).collect::<Option<Vec<_>>>()?;
-        Some(json!({"schemaVersion":1,"oneUseOriginalDocumentRegistration":true,"normalProfileAvailable":normal,
+        Some(json!({"schemaVersion":2,"oneUseOriginalDocumentRegistration":true,"normalProfileAvailable":normal,
             "selection":"original-bound-installed-macos-project-fields","rows":rows,"originalOperations":12,
             "allOriginalsSettled":self.all_settled,"completeDraftAndBaselineMatched":self.preview_visible,
             "previewValidation":"invalid-retained-ios-fields","fixtureMutationsRestored":restored,
@@ -482,13 +503,37 @@ pub(super) fn data_checks() -> bool {
     for i in 0..COUNT as u8 {
         if id(i).and_then(index) != Some(i) || kind(i).is_none() || kind_name(i).is_none() { return false; }
         let mut record = Record::new(); record.completed = usize::from(i); record.rows[usize::from(i)].requested = true;
-        let mask = 511 | 4096 | if accepts(i) { 512 | 1024 | if CHOICES[usize::from(i)].field == Field::VersionSource { 2048 } else { 0 } } else { 0 };
-        if !record.preparation(i, ProjectFieldPreparation { result: "would-block", facts: Some(0) }) || record.prepared(i)
-            || !record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask) }) || !record.prepared(i)
+        let name = VersionSourceNamePreparation { result: "ok", facts: Some(31) };
+        let mask = 511 | 4096 | if accepts(i) { 512 | 1024 } else { 0 };
+        if record.name_preparation(i, name) || record.prepared(i) || record.name_pending(i)
+            || !record.preparation(i, ProjectFieldPreparation { result: "would-block", facts: Some(0) }) || record.navigation_prepared(i)
+            || !record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask) }) || !record.navigation_prepared(i)
             || record.preparation(i, ProjectFieldPreparation { result: "ok", facts: Some(mask) }) { return false; }
+        if needs_name(i) {
+            if record.prepared(i) || !record.name_pending(i) { return false; }
+            let mut wrong = record.clone(); wrong.completed += 1;
+            if wrong.name_preparation(i, name) || wrong.name_pending(i) { return false; }
+            let mut unrequested = record.clone(); unrequested.rows[usize::from(i)].requested = false;
+            if unrequested.name_preparation(i, name) || unrequested.name_pending(i) { return false; }
+            for flags in [None, Some(0), Some(1), Some(3), Some(7), Some(15), Some(17), Some(19), Some(23), Some(32)] {
+                let mut refused = record.clone();
+                if refused.name_preparation(i, VersionSourceNamePreparation { result: "ok", facts: flags })
+                    || refused.prepared(i) || refused.name_pending(i)
+                    || refused.name_preparation(i, name) { return false; }
+            }
+            for result in ["permission-denied", "io", "invalid-input", "already", "would-block", "invalid-return"] {
+                let mut refused = record.clone();
+                if refused.name_preparation(i, VersionSourceNamePreparation { result, facts: Some(31) })
+                    || refused.prepared(i) || refused.name_pending(i)
+                    || refused.name_preparation(i, name) { return false; }
+            }
+            if !record.name_preparation(i, name) || !record.prepared(i) || record.name_pending(i)
+                || record.name_preparation(i, name) { return false; }
+        } else if !record.prepared(i) || record.name_pending(i) || record.name_preparation(i, name) { return false; }
         for bit in [1, 2, 4, 8, 16, 32, 64, 128, 256, 4096] {
             if (ProjectFieldPreparation { result: "ok", facts: Some(mask & !bit) }).succeeded(kind(i).unwrap(), accepts(i)) { return false; }
         }
+        if (ProjectFieldPreparation { result: "ok", facts: Some(mask | 2048) }).succeeded(kind(i).unwrap(), accepts(i)) { return false; }
     }
     true
 }

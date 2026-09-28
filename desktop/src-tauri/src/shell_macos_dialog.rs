@@ -344,6 +344,26 @@ pub(super) mod observation {
             returned.map_err(|_| ObservationError::NativeAction(diagnostic))
         })
     }
+    pub(crate) fn prepare_version_source_name(id: u32, panel: ObservedPanel,
+        returned: &mut Option<native::VersionSourceNamePreparation>) -> Result<(), ObservationError> {
+        *returned = None;
+        if !native::main_thread() { return Err(ObservationError::WrongThread); }
+        if panel.id != id { return Err(ObservationError::OriginalBinding); }
+        if !panel.action_allowed || !panel.native.version_source_name_ready() { return Err(ObservationError::Ineligible); }
+        let sample = panel.native.version_source_parent_ready.ok_or(ObservationError::Ineligible)?;
+        PANEL.with(|book| {
+            let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
+            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(ObservationError::OriginalBinding)?;
+            let (call, owner) = original(entry)?;
+            if entry.open_release.is_some() || !allowed(&call, &owner)? || owner.interrupted() {
+                return Err(ObservationError::Ineligible);
+            }
+            // Consume this same returned observation, not a bool or a fresh
+            // query. No Record/GuiFacts lock spans the sole native name call.
+            entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
+                .installed_version_source_name(sample, returned).map_err(|_| ObservationError::NativeObservation)
+        })
+    }
     pub(crate) fn prepare_project_field(id: u32, kind: PanelKind, navigate: bool,
         returned: &mut Option<native::ProjectFieldPreparation>) -> Result<bool, ObservationError> {
         *returned = None;
