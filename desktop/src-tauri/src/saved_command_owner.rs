@@ -3027,6 +3027,15 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
         (Some(owner.clocks.cleanup.duration_since(owner.clocks.admitted).as_millis().try_into().ok()?),
             Some(owner.material_retired.load(Ordering::SeqCst)), Some(material.is_some()))
     } else { (None, None, None) };
+    // Finish each original join-result read in this statement so its
+    // try_lock temporary drops before the owner at the tail return.
+    let driver_joined = owner.driver_joined.load(Ordering::SeqCst) && !owner.driver_failed.load(Ordering::SeqCst)
+        && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(())));
+    let manager_joined = !owner.manager_failed.load(Ordering::SeqCst)
+        && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(())));
+    let observer_joined = matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true)));
+    let watchdog_joined = owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
+        && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true)));
     Some(Snapshot { facts: OriginalFacts {
         operation_id: owner.id.clone(), owner_generation: owner.generation.clone(),
         inspection_joined: book.inspection_started && book.inspection_joined && !book.inspection_failed
@@ -3048,13 +3057,10 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
         runtime_ledger_settled: native.runtime.settled(), tools_ledger_settled: native.tools.settled(), native_settlement_joined,
         native_integrity: native_settlement_joined && native.settled() && native.failure.is_none()
             && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true }))),
-        driver_joined: owner.driver_joined.load(Ordering::SeqCst) && !owner.driver_failed.load(Ordering::SeqCst)
-            && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
-        manager_joined: !owner.manager_failed.load(Ordering::SeqCst)
-            && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
-        observer_joined: matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
-        watchdog_joined: owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
-            && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+        driver_joined,
+        manager_joined,
+        observer_joined,
+        watchdog_joined,
         retired_before_cutoff: retired, active_retained: active.is_some(),
         resource_unknown: owner.resource_unknown.load(Ordering::SeqCst) || active.is_some_and(|a| a.unknown)
             || registry.disabled || registry.exhausted || inner.poisoned.load(Ordering::SeqCst),

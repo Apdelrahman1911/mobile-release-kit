@@ -1,4 +1,4 @@
-//! Original-STA Project/Quit dialogs. The cross-thread control transports only
+//! Original-STA project/credential/quit dialogs. Cross-thread control transports only
 //! one fixed close message; COM interfaces never cross the apartment boundary.
 use super::*;
 use std::{cell::{OnceCell, RefCell}, sync::{OnceLock, Mutex, atomic::{AtomicBool, Ordering}}};
@@ -9,6 +9,27 @@ const CLOSE_MESSAGE: u32 = W::WM_APP + 0x4a1;
 const TIMER: usize = 1;
 const CANCEL: HRESULT = HRESULT(0x800704c7u32 as i32); // HRESULT_FROM_WIN32(ERROR_CANCELLED)
 const CLASS: &[u16] = &[77,82,75,46,79,114,105,103,105,110,97,108,68,105,97,108,111,103,46,118,49,0];
+
+fn file_options(kind: DialogKind) -> UiResult<FILEOPENDIALOGOPTIONS> {
+    let choice = match kind {
+        DialogKind::Project => FOS_PICKFOLDERS,
+        DialogKind::Credential(_) => FOS_FILEMUSTEXIST,
+        DialogKind::Quit => return Err(UiError::State),
+    };
+    Ok(choice | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
+        | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS)
+}
+fn credential_filter(kind: CredentialKind) -> Common::COMDLG_FILTERSPEC {
+    // These UTF16 literals have static lifetime. The array containing their
+    // pointers lives in the original Dialog throughout native entry/settlement.
+    use windows::core::w;
+    let (name, pattern) = match kind {
+        CredentialKind::AndroidKeystore => (w!("Android signing keystore"), w!("*.jks;*.keystore")),
+        CredentialKind::AndroidFirebase => (w!("Android Firebase configuration"), w!("*.json")),
+        CredentialKind::IosFirebase => (w!("iOS Firebase configuration"), w!("*.plist")),
+    };
+    Common::COMDLG_FILTERSPEC { pszName: name, pszSpec: pattern }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogResponse { Accept, Decline }
@@ -90,6 +111,9 @@ pub struct Dialog {
     item: OnceCell<ComOriginal<IShellItem>>, path_text: RefCell<NativeText>,
     task_config: UnsafeCell<C::TASKDIALOGCONFIG>, task_button: UnsafeCell<i32>,
     title: Vec<u16>, instruction: Vec<u16>, content: Vec<u16>,
+    // Array storage is owned by this registered Dialog, not a temporary argument
+    // to SetFileTypes. Its pointed-to literal strings have static lifetime.
+    file_types: Option<[Common::COMDLG_FILTERSPEC; 1]>,
     #[cfg(feature = "windows-installed-observation")]
     folder: FolderAction,
     #[cfg(feature = "windows-installed-observation")]
@@ -108,7 +132,14 @@ impl Dialog {
             window_output: UnsafeCell::new(HWND::default()), window_query_entered: Cell::new(false), project_window: Cell::new(null_mut()),
             item: OnceCell::new(), path_text: RefCell::new(NativeText::new()),
             task_config: UnsafeCell::new(C::TASKDIALOGCONFIG::default()), task_button: UnsafeCell::new(0),
-            title: wide(if kind == DialogKind::Project { "Choose a mobile project folder" } else { "Quit Mobile Release Kit?" }),
+            title: wide(match kind {
+                DialogKind::Project => "Choose a mobile project folder",
+                DialogKind::Credential(CredentialKind::AndroidKeystore) => "Choose an Android signing keystore",
+                DialogKind::Credential(CredentialKind::AndroidFirebase) => "Choose an Android Firebase configuration",
+                DialogKind::Credential(CredentialKind::IosFirebase) => "Choose an iOS Firebase configuration",
+                DialogKind::Quit => "Quit Mobile Release Kit?",
+            }),
+            file_types: match kind { DialogKind::Credential(kind) => Some([credential_filter(kind)]), _ => None },
             instruction: wide("Quit and discard unsaved drafts?"),
             content: wide("Unsaved in-memory changes will be lost. Choose Cancel to keep working, or OK to stop this application's operations and wait for cleanup before quitting. Quitting does not undo completed file changes."),
             #[cfg(feature = "windows-installed-observation")]
@@ -139,7 +170,7 @@ impl Dialog {
         self.check()?;
         if !self.showing.get() || self.show_returned.get() { return Ok(None); }
         let window = match self.kind {
-            DialogKind::Project => {
+            DialogKind::Project | DialogKind::Credential(_) => {
                 let Some(ole) = self.ole.get() else { return Ok(None); };
                 let ole = ole.get()?;
                 if self.window_query_entered.replace(true) { return self.uncertain(); }
@@ -178,7 +209,7 @@ impl Dialog {
     fn close_on_sta(&self) {
         if self.check().is_err() || !self.showing.get() { return; }
         match self.kind {
-            DialogKind::Project => {
+            DialogKind::Project | DialogKind::Credential(_) => {
                 if self.close_entered.replace(true) { return; }
                 let result = self.file.get().and_then(|file| file.get().ok()).map(|file| unsafe { file.Close(CANCEL) });
                 if result.is_none_or(|result| result.is_err()) { self.unknown.set(true); self.event(DialogEvent::Unknown); }
@@ -223,7 +254,7 @@ impl Dialog {
             if self.window.get().is_null() && !self.timer.get() && !self.unknown.get() { return self.no_native_object(error); }
             return self.uncertain();
         }
-        let result = match self.kind { DialogKind::Project => self.project(parent), DialogKind::Quit => self.quit(parent) };
+        let result = match self.kind { DialogKind::Project | DialogKind::Credential(_) => self.choose_path(parent), DialogKind::Quit => self.quit(parent) };
         if self.unknown.get() || result == Err(UiError::CleanupUnknown) { return self.uncertain(); }
         self.release_once()?;
         result.map(|selected| DialogResult { created: self.created.get(), response: self.response.get(), selected })
@@ -235,7 +266,8 @@ impl Dialog {
         self.path_text.try_borrow_mut().map_err(|_| UiError::CleanupUnknown)?.release()?;
         self.settled.set(true); self.event(DialogEvent::Settled); Err(error)
     }
-    fn project(self: &Rc<Self>, parent: HWND) -> UiResult<Option<PathBuf>> {
+    fn choose_path(self: &Rc<Self>, parent: HWND) -> UiResult<Option<PathBuf>> {
+        let options = file_options(self.kind)?;
         let file_output = self.file_output.begin()?;
         let created = unsafe { windows_sys::Win32::System::Com::CoCreateInstance(
             (&FileOpenDialog as *const windows::core::GUID).cast(), null_mut(),
@@ -248,8 +280,10 @@ impl Dialog {
         let ole_output = self.ole_output.begin()?;
         let queried = unsafe { (file.vtable().base__.base__.base__.QueryInterface)(file.as_raw(), &IOleWindow::IID, ole_output) };
         self.ole.set(ComOriginal::new(self.ole_output.complete(queried)?)).map_err(|_| UiError::State)?;
-        hresult(unsafe { file.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
-            | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS) })?;
+        hresult(unsafe { file.SetOptions(options) })?;
+        if let Some(filters) = &self.file_types {
+            hresult(unsafe { file.SetFileTypes(filters) })?;
+        }
         hresult(unsafe { file.SetTitle(PCWSTR(self.title.as_ptr())) })?;
         let events: IFileDialogEvents = FileEvents { dialog: self.clone() }.into();
         self.events.set(ComOriginal::new(events)).map_err(|_| UiError::State)?;
@@ -278,8 +312,8 @@ impl Dialog {
                 let path = unsafe { (item.vtable().GetDisplayName)(item.as_raw(), SIGDN_FILESYSPATH, &mut text.value) };
                 text.complete(path.ok())?;
                 let path = text.read(NAME_UNITS)?;
-                // Native-selected data only. The shared project SourceBook still
-                // independently probes/registers full identity before publication.
+                // Native-selected data only. The shared SourceBook independently
+                // captures/probes full identity and source policy before publication.
                 mapped(project_path_hint(&path), UiError::NativeFailure)?;
                 Ok(Some(PathBuf::from(path)))
             }
@@ -618,6 +652,39 @@ impl IFileDialogEvents_Impl for FileEvents_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credential_choosers_require_the_live_document_and_private_single_file_policy() -> UiResult<()> {
+        for kind in [DialogKind::Project,
+            DialogKind::Credential(CredentialKind::AndroidKeystore),
+            DialogKind::Credential(CredentialKind::AndroidFirebase),
+            DialogKind::Credential(CredentialKind::IosFirebase)] {
+            assert!(kind.requires_live_document());
+            let options = file_options(kind)?;
+            let privacy = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS;
+            assert_eq!(options & privacy, privacy);
+            assert_eq!((options & FOS_ALLOWMULTISELECT).0, 0);
+            let dialog = Dialog::new(kind, Arc::new(DialogControl::new()), Box::new(|_| {}));
+            if kind == DialogKind::Project {
+                assert_ne!((options & FOS_PICKFOLDERS).0, 0);
+                assert!(dialog.file_types.is_none());
+            } else {
+                assert_eq!((options & FOS_PICKFOLDERS).0, 0);
+                assert_ne!((options & FOS_FILEMUSTEXIST).0, 0);
+                let filters = dialog.file_types.as_ref().ok_or(UiError::State)?;
+                assert_eq!(filters.len(), 1);
+                assert!(!filters[0].pszName.is_null() && !filters[0].pszSpec.is_null());
+            }
+            // Pre-creation STOP is retained in the same original control and
+            // cannot post to any native window for these newly admitted kinds.
+            dialog.control.request_stop()?;
+            assert!(dialog.control.stopped.load(Ordering::SeqCst));
+            let route = dialog.control.route.lock().map_err(|_| UiError::State)?;
+            assert!(!route.bound && !route.posted && route.window == 0);
+        }
+        assert!(!DialogKind::Quit.requires_live_document());
+        assert_eq!(file_options(DialogKind::Quit), Err(UiError::State));
+        Ok(())
+    }
     #[test]
     fn stop_before_native_construction_is_latched_without_a_foreign_window() -> UiResult<()> {
         let control = DialogControl::new();

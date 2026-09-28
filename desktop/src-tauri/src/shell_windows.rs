@@ -630,6 +630,12 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     initial_folder: Option<PathBuf>) -> Result<Option<PathBuf>, Reason> {
     let kind = match (choice, initial_folder) {
         (DialogChoice::Project, None) => native::DialogKind::Project,
+        (DialogChoice::File(crate::credential_format::FileKind::AndroidKeystore), None) =>
+            native::DialogKind::Credential(native::CredentialKind::AndroidKeystore),
+        (DialogChoice::File(crate::credential_format::FileKind::AndroidFirebase), None) =>
+            native::DialogKind::Credential(native::CredentialKind::AndroidFirebase),
+        (DialogChoice::File(crate::credential_format::FileKind::IosFirebase), None) =>
+            native::DialogKind::Credential(native::CredentialKind::IosFirebase),
         (DialogChoice::Quit, None) => native::DialogKind::Quit,
         _ => { owner.gui.not_created(Reason::UnsupportedPlatform); return Err(Reason::UnsupportedPlatform); }
     };

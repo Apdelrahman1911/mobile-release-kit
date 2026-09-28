@@ -1,5 +1,5 @@
-//! Original read-only source custody. Linux credentials and the Mac/Windows
-//! project-only probes are separate; no pathname is renderer authority.
+//! Original read-only source custody. Platform credential/project adapters
+//! are separate; no pathname is renderer authority.
 //! The operation retains SourceBook outside its worker. A panic/uncertain close
 //! therefore cannot erase its original acquisition facts or authorize a retry.
 use std::{path::{Path, PathBuf}, sync::Arc};
@@ -97,10 +97,14 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[derive(Clone, PartialEq, Eq)]
 struct OriginAlias { name: Vec<u8>, target: Vec<u8>, identity: FileIdentity }
-pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity,
+pub(crate) struct PosixOriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity,
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     alias: Option<OriginAlias>,
 }
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+pub(crate) type OriginWitness = PosixOriginWitness;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) type OriginWitness = mrk_windows_installed_native::CredentialOrigin;
 pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin: Arc<OriginWitness> }
 // A separate public-image purpose, not a credential Kind or vault record. These
 // values are native-only and deliberately have no Clone/Serialize implementation.
@@ -111,7 +115,7 @@ pub(crate) const PUBLIC_IMAGE_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const PUBLIC_IMAGE_BATCH_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) struct CapturedPublicImage {
     pub(crate) item_id: String, pub(crate) display_name: String, pub(crate) bytes: Vec<u8>, pub(crate) sha256: String,
-    origin: OriginWitness,
+    origin: PosixOriginWitness,
 }
 impl CapturedPublicImage {
     // Private native-to-core exclusion DATA only. A target which aliases this

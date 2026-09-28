@@ -30,6 +30,7 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/windows_startup.rs"] mod windows_startup;
 #[path = "../src/edit_commands.rs"] mod edit_commands;
 #[path = "../src/metadata_text_commands.rs"] mod metadata_text_commands;
+#[path = "../src/metadata_images_commands.rs"] mod metadata_images_commands;
 #[path = "../src/release_version_edit_commands.rs"] mod release_version_edit_commands;
 #[path = "../src/github_commands.rs"] mod github_commands;
 #[path = "../src/credential_assessment.rs"] mod credential_assessment;
@@ -47,6 +48,7 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
 #[path = "../src/metadata_text_edit_protocol.rs"] mod metadata_text_edit_protocol;
+#[path = "../src/metadata_images_edit_protocol.rs"] mod metadata_images_edit_protocol;
 #[path = "../src/release_version_edit_protocol.rs"] mod release_version_edit_protocol;
 #[path = "../src/github_connection_protocol.rs"] mod github_connection_protocol;
 #[path = "../src/github_connection_session.rs"] mod github_connection_session;

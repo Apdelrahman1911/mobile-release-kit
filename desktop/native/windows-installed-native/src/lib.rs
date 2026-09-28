@@ -37,6 +37,8 @@ pub mod ui_startup_data;
 pub mod ui_observer_diagnostic_data;
 mod project;
 pub use project::{ProjectBook, project_path_hint};
+mod credential_source;
+pub use credential_source::{CredentialError, CredentialOrigin, CredentialSnapshot, RegisteredProject};
 #[cfg(feature = "desktop-ui")]
 pub mod ui;
 #[cfg(all(test, feature = "desktop-ui"))]
@@ -256,6 +258,15 @@ impl<'a> Refusal<'a> {
 pub struct Original { book: Arc<()>, index: usize }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Kind { Directory, File, ProcessToken, ThreadToken }
+// A metadata-only original cannot later be reinterpreted as a content reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileReadPurpose { Content, MetadataOnly }
+impl FileReadPurpose {
+    fn additional_access(self, directory: bool) -> u32 {
+        if directory { FS::FILE_LIST_DIRECTORY | FS::FILE_TRAVERSE }
+        else if self == Self::Content { FS::FILE_READ_DATA } else { 0 }
+    }
+}
 // Metadata policy only, never an admission capability or SystemImage tag.
 // Ordinary payloads retain their existing single-link observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,6 +301,7 @@ struct Slot {
     output: UnsafeCell<F::HANDLE>,
     state: SlotState,
     kind: Kind,
+    file_purpose: FileReadPurpose,
     parent: Option<usize>,
     name: Vec<u16>,
     canonical: String,
@@ -368,6 +380,7 @@ struct Arena {
     unicode: F::UNICODE_STRING,
     attributes: OBJECT_ATTRIBUTES,
     directory: bool,
+    file_purpose: FileReadPurpose,
     bytes: UnsafeCell<Aligned>,
     count: UnsafeCell<u32>,
     iosb: UnsafeCell<IO::IO_STATUS_BLOCK>,
@@ -576,7 +589,7 @@ impl NativeBook {
         self.slots.try_reserve(1).map_err(|_| Error::Bounds)?;
         let index = self.slots.len();
         self.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
-            state: SlotState::Reserved, kind, parent, name: encoded, canonical,
+            state: SlotState::Reserved, kind, file_purpose: FileReadPurpose::Content, parent, name: encoded, canonical,
             read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted,
             system_image: None, _pin: PhantomPinned })));
         Ok(Original { book: Arc::clone(&self.identity), index })
@@ -618,7 +631,7 @@ impl NativeBook {
         let mut frame = Box::pin(Arena { call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
             completion_refusal: Cell::new(None),
             input, handle, output_handle: null_mut(), unicode: F::UNICODE_STRING::default(),
-            attributes: OBJECT_ATTRIBUTES::default(), directory: false,
+            attributes: OBJECT_ATTRIBUTES::default(), directory: false, file_purpose: FileReadPurpose::Content,
             bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
             iosb: UnsafeCell::new(IO::IO_STATUS_BLOCK { Anonymous: IO::IO_STATUS_BLOCK_0 { Status: F::STATUS_PENDING }, Information: usize::MAX }),
             _pin: PhantomPinned });
@@ -632,6 +645,7 @@ impl NativeBook {
             if matches!(call, Call::Open(_)) {
                 setup.input = slot.name.clone();
                 setup.directory = slot.kind == Kind::Directory;
+                setup.file_purpose = slot.file_purpose;
                 setup.unicode.Length = u16::try_from((setup.input.len() - 1) * 2).map_err(|_| Error::Bounds)?;
                 setup.unicode.MaximumLength = u16::try_from(setup.input.len() * 2).map_err(|_| Error::Bounds)?;
                 setup.unicode.Buffer = setup.input.as_mut_ptr();
@@ -975,7 +989,7 @@ unsafe fn invoke(a: &Arena) -> Returned {
             Call::DriveType => Returned::Scalar(FS::GetDriveTypeW(a.input.as_ptr())),
             Call::Open(_) => Returned::Nt(N::NtCreateFile(a.output_handle,
                 FS::SYNCHRONIZE | FS::READ_CONTROL | FS::FILE_READ_ATTRIBUTES |
-                    if a.directory { FS::FILE_LIST_DIRECTORY | FS::FILE_TRAVERSE } else { FS::FILE_READ_DATA },
+                    a.file_purpose.additional_access(a.directory),
                 &a.attributes, a.iosb.get(), null(), 0, FS::FILE_SHARE_READ, N::FILE_OPEN,
                 N::FILE_SYNCHRONOUS_IO_NONALERT | if a.directory { N::FILE_DIRECTORY_FILE } else { N::FILE_NON_DIRECTORY_FILE }, null(), 0)),
             Call::ProcessToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(), S::TOKEN_QUERY, a.output_handle)),
@@ -1077,6 +1091,12 @@ impl NativeBook {
         Ok(original)
     }
     pub fn open_child(&mut self, parent: &Original, name: &str, kind: FileKind) -> Result<Original> {
+        self.open_child_for(parent, name, kind, FileReadPurpose::Content)
+    }
+    pub(crate) fn open_metadata_child(&mut self, parent: &Original, name: &str) -> Result<Original> {
+        self.open_child_for(parent, name, FileKind::File, FileReadPurpose::MetadataOnly)
+    }
+    fn open_child_for(&mut self, parent: &Original, name: &str, kind: FileKind, purpose: FileReadPurpose) -> Result<Original> {
         self.clear()?;
         let index = self.index(parent)?;
         let parent = self.slot(index)?;
@@ -1085,6 +1105,7 @@ impl NativeBook {
         let canonical = format!("{}{}{}", parent.canonical, if parent.canonical.ends_with('\\') { "" } else { "\\" }, name);
         if canonical.encode_utf16().count() >= NAME_UNITS { return Err(Error::Bounds); }
         let original = self.reserve(kind.into(), Some(index), name, canonical)?;
+        self.slot_mut(original.index)?.file_purpose = purpose; // Bind before the original native call.
         self.call(Call::Open(original.index), null_mut(), Vec::new())?;
         self.noninherited(original.index)?; Ok(original)
     }
@@ -1157,6 +1178,16 @@ impl NativeBook {
             });
             security::Observed::new(trace).descriptor(result.bytes_in(result.count_in(trace)?, trace)?, kind, scope) }
     }
+    pub(crate) fn credential_security(&mut self, original: &Original) -> Result<SecurityFacts> {
+        self.clear()?; let index = self.index(original)?;
+        let slot = self.slot(index)?;
+        if slot.kind != Kind::File || slot.system_image.is_some() { return Err(Error::State); }
+        let user = self.user.as_ref().ok_or(Error::State)?.user.clone();
+        let result = self.original_call(index, Call::Security)?;
+        // This is a separate private-source policy, never immutable-runtime
+        // admission. The SID comes from this book's observed original token.
+        security::Observed::new(Refusal::none()).credential_descriptor(result.bytes(result.count()?)?, &user)
+    }
     pub fn no_alternate_streams(&mut self, original: &Original) -> Result<()> {
         self.clear()?; let index = self.index(original)?;
         let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
@@ -1218,7 +1249,8 @@ impl NativeBook {
     pub fn read_next(&mut self, original: &Original, count: usize) -> Result<Vec<u8>> {
         self.clear()?; let index = self.index(original)?;
         if count == 0 || count > BUFFER { return Err(Error::Bounds); }
-        if self.slot(index)?.kind != Kind::File || self.slot(index)?.read_ended { return Err(Error::State); }
+        if self.slot(index)?.kind != Kind::File || self.slot(index)?.file_purpose != FileReadPurpose::Content
+            || self.slot(index)?.read_ended { return Err(Error::State); }
         let prior = self.slot(index)?.read_bytes;
         if self.bytes_read > MAX_TOTAL_BYTES || prior > MAX_FILE_BYTES { return Err(Error::Bounds); }
         // One extra byte can distinguish exact-limit EOF from excess content;
@@ -1327,3 +1359,27 @@ mod ordinary_owner;
 
 #[cfg(test)]
 mod qualification_fixture;
+
+#[cfg(test)]
+mod credential_access_tests {
+    use super::*;
+    #[test]
+    fn metadata_only_original_cannot_enter_readfile() {
+        let mut book = NativeBook::new();
+        // Reserved DATA only; no file is opened, token observed or HANDLE made.
+        let original = book.reserve(Kind::File, None, "credential", String::from("inert-credential")).unwrap();
+        book.slot_mut(original.index).unwrap().file_purpose = FileReadPurpose::MetadataOnly;
+        assert_eq!(book.read_next(&original, 1), Err(Error::State));
+        assert!(book.active.is_none()); assert!(!book.started);
+        assert_eq!(book.slot(original.index).unwrap().read_bytes, 0);
+        assert_eq!(book.state(&original), Ok(SlotState::Reserved));
+        assert_eq!(book.settle_once(), CloseOutcome::Settled);
+        assert_eq!(book.state(&original), Ok(SlotState::NoHandle));
+    }
+    #[test]
+    fn metadata_only_open_omits_content_access_and_content_defaults_are_unchanged() {
+        assert_eq!(FileReadPurpose::MetadataOnly.additional_access(false), 0);
+        assert_eq!(FileReadPurpose::Content.additional_access(false), FS::FILE_READ_DATA);
+        assert_eq!(FileReadPurpose::Content.additional_access(true), FS::FILE_LIST_DIRECTORY | FS::FILE_TRAVERSE);
+    }
+}

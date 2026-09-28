@@ -1,5 +1,5 @@
-//! Point-in-time, read-only native project selection. This wrapper deliberately
-//! has no runtime-security, file-content, creation, deletion or process API.
+//! Point-in-time, read-only native project/source custody. This wrapper has
+//! no runtime-security, creation, deletion or process API.
 //! Keep the entire book in the original SourceBook outside its blocking worker.
 use super::{Call, CloseOutcome, Error, FileIdentity, FileKind, Kind, Metadata, NativeBook, Original, Result, MAX_ORIGINALS};
 use std::{collections::BTreeSet, ptr::null_mut};
@@ -9,7 +9,7 @@ const PATH_BYTES: usize = 4096;
 // current-context token checks. Never enlarge NativeBook's shared48-slot bound.
 const COMPONENTS: usize = MAX_ORIGINALS - 4;
 
-fn spelling(path: &str) -> Result<(String, Vec<String>)> {
+pub(super) fn spelling(path: &str) -> Result<(String, Vec<String>)> {
     if path.len() > PATH_BYTES { return Err(Error::Bounds); }
     let ordinary = path.strip_prefix(r"\\?\").unwrap_or(path);
     let (drive, components) = super::decode::dos_location(ordinary)?;
@@ -24,17 +24,18 @@ pub fn project_path_hint(path: &str) -> Result<()> { spelling(path).map(|_| ()) 
 struct Directory { original: Original, name: String, metadata: Option<Metadata> }
 
 pub struct ProjectBook {
-    native: NativeBook,
+    pub(super) native: NativeBook,
     directories: Vec<Directory>,
-    begun: bool,
+    pub(super) begun: bool,
+    pub(super) credential: Option<super::credential_source::Roster>,
     final_attempted: bool,
 }
 impl Default for ProjectBook { fn default() -> Self { Self::new() } }
 impl ProjectBook {
     pub fn new() -> Self {
-        Self { native: NativeBook::new(), directories: Vec::new(), begun: false, final_attempted: false }
+        Self { native: NativeBook::new(), directories: Vec::new(), begun: false, credential: None, final_attempted: false }
     }
-    pub fn never_started(&self) -> bool { !self.begun && self.directories.is_empty() && self.native.never_started() }
+    pub fn never_started(&self) -> bool { !self.begun && self.directories.is_empty() && self.credential.is_none() && self.native.never_started() }
     pub fn settled(&self) -> bool { self.final_attempted && self.native.settled() }
 
     /// The original book is retained even if this worker unwinds. A definite

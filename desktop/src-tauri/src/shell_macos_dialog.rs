@@ -1,4 +1,4 @@
-//! Native project/signing-file/Quit panel adapter for the existing OriginalWork, not rfd's
+//! Native project/private-input/Quit panel adapter for the existing OriginalWork, not rfd's
 //! compatibility future. The actual panel and completion live on the main loop.
 use super::*;
 use std::{cell::RefCell, path::PathBuf};
@@ -559,23 +559,32 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool,
     call.changed(); result
 }
 
-pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
-    initial_folder: Option<PathBuf>) -> DialogOutcome {
-    let call = owner.gui.clone();
-    let kind = match (choice, initial_folder.as_deref()) {
-        (DialogChoice::Project, None) => PanelKind::Project,
+// Pure request routing only; source suffix, capture and original native custody
+// still decide whether a chosen private file can be used.
+fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) -> Result<PanelKind, Reason> {
+    match (choice, initial_folder) {
+        (DialogChoice::Project, None) => Ok(PanelKind::Project),
         (DialogChoice::File(crate::credential_format::FileKind::AppleP12
             | crate::credential_format::FileKind::AppleProfile | crate::credential_format::FileKind::IosFirebase
-            | crate::credential_format::FileKind::AscP8), None) => PanelKind::File,
-        (DialogChoice::Quit, None) => PanelKind::Quit,
-        (DialogChoice::ProjectPath(field), Some(root)) if crate::asset_source::path_hint(root).is_ok() => match field {
+            | crate::credential_format::FileKind::AscP8 | crate::credential_format::FileKind::AndroidKeystore
+            | crate::credential_format::FileKind::AndroidFirebase), None) => Ok(PanelKind::File),
+        (DialogChoice::Quit, None) => Ok(PanelKind::Quit),
+        (DialogChoice::ProjectPath(field), Some(root)) if crate::asset_source::path_hint(root).is_ok() => Ok(match field {
             crate::asset_commands::ProjectPathField::VersionSource => PanelKind::VersionSource,
             crate::asset_commands::ProjectPathField::IosProject => PanelKind::IosProject,
             crate::asset_commands::ProjectPathField::IosWorkspace => PanelKind::IosWorkspace,
             crate::asset_commands::ProjectPathField::MetadataRoot => PanelKind::MetadataRoot,
-        },
-        (DialogChoice::ProjectPath(_), _) => { call.not_created(Reason::SourceRefused); return Err(Reason::SourceRefused); }
-        _ => { call.not_created(Reason::UnsupportedPlatform); return Err(Reason::UnsupportedPlatform); }
+        }),
+        (DialogChoice::ProjectPath(_), _) => Err(Reason::SourceRefused),
+        _ => Err(Reason::UnsupportedPlatform),
+    }
+}
+pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
+    initial_folder: Option<PathBuf>) -> DialogOutcome {
+    let call = owner.gui.clone();
+    let kind = match panel_kind(choice, initial_folder.as_deref()) {
+        Ok(kind) => kind,
+        Err(reason) => { call.not_created(reason); return Err(reason); }
     };
     if native::main_thread() { call.not_created(Reason::Unqualified); return Err(Reason::Unqualified); }
     {
@@ -658,6 +667,26 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn android_files_reuse_the_private_panel_without_initial_folder_or_image_authority() {
+        use crate::credential_format::FileKind;
+        use std::path::Path;
+        for kind in [FileKind::AndroidKeystore, FileKind::AndroidFirebase, FileKind::AppleP12,
+            FileKind::AppleProfile, FileKind::IosFirebase, FileKind::AscP8] {
+            assert!(matches!(panel_kind(DialogChoice::File(kind), None), Ok(PanelKind::File)));
+            assert!(matches!(panel_kind(DialogChoice::File(kind), Some(Path::new("/inert/private"))),
+                Err(Reason::UnsupportedPlatform)));
+        }
+        assert!(matches!(panel_kind(DialogChoice::Project, None), Ok(PanelKind::Project)));
+        assert!(matches!(panel_kind(DialogChoice::Quit, None), Ok(PanelKind::Quit)));
+        for choice in [DialogChoice::PublicImages, DialogChoice::EvidenceFolder] {
+            assert!(matches!(panel_kind(choice, None), Err(Reason::UnsupportedPlatform)));
+        }
+        let field = DialogChoice::ProjectPath(crate::asset_commands::ProjectPathField::VersionSource);
+        assert!(matches!(panel_kind(field, None), Err(Reason::SourceRefused)));
+        assert!(matches!(panel_kind(field, Some(Path::new("/inert/../project"))), Err(Reason::SourceRefused)));
+        assert!(matches!(panel_kind(field, Some(Path::new("/inert/project"))), Ok(PanelKind::VersionSource)));
+    }
     #[test]
     fn native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal() {
         for reason in [Reason::SourceRefused, Reason::UserCancelled] {

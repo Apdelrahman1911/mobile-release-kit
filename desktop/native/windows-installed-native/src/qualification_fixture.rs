@@ -1338,7 +1338,7 @@ impl Fixture {
         let call=Call::Info(FS::FileIdExtdDirectoryRestartInfo,BUFFER);
         let frame=Box::pin(Arena {call,token_length:0,phase:Cell::new(Phase::Prepared),
             returned:Cell::new(None),completion_refusal:Cell::new(None),input:Vec::new(),handle,output_handle:null_mut(),
-            unicode:F::UNICODE_STRING::default(),attributes:OBJECT_ATTRIBUTES::default(),directory:false,
+            unicode:F::UNICODE_STRING::default(),attributes:OBJECT_ATTRIBUTES::default(),directory:false,file_purpose:FileReadPurpose::Content,
             bytes:UnsafeCell::new(Aligned([0;BUFFER])),count:UnsafeCell::new(u32::MAX),
             iosb:UnsafeCell::new(IO::IO_STATUS_BLOCK {Anonymous:IO::IO_STATUS_BLOCK_0 {Status:F::STATUS_PENDING},
                 Information:usize::MAX}),_pin:PhantomPinned});

@@ -376,7 +376,8 @@ pub(crate) fn suffix(kind: FileKind, path: &Path) -> Result<(), Reason> {
         FileKind::AppleProfile => suffix.eq_ignore_ascii_case(b"mobileprovision"),
         FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
         FileKind::AscP8 => suffix.eq_ignore_ascii_case(b"p8"),
-        FileKind::AndroidKeystore | FileKind::AndroidFirebase => return Err(Reason::UnsupportedPlatform),
+        FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore"),
+        FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
     };
     if !supported || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
 }
@@ -593,15 +594,21 @@ mod tests {
         book.slots[index].state = OriginalState::Unknown; assert!(!book.close_all()); assert!(!book.settled());
     }
     #[test]
-    fn private_asset_suffixes_never_enable_android_or_bare_profile_plists() {
+    fn private_asset_suffixes_admit_android_without_broadening_apple_formats() {
         for (kind, path) in [(FileKind::AppleP12, "/inert/cert.P12"), (FileKind::AppleP12, "/inert/cert.pfx"),
             (FileKind::AppleProfile, "/inert/app.mobileprovision"), (FileKind::IosFirebase, "/inert/google.PLIST"),
-            (FileKind::AscP8, "/inert/AuthKey.P8")] {
+            (FileKind::AscP8, "/inert/AuthKey.P8"),
+            (FileKind::AndroidKeystore, "/inert/upload.production.JKS"),
+            (FileKind::AndroidKeystore, "/inert/upload.keystore"), (FileKind::AndroidKeystore, "/inert/key.jks.jks"),
+            (FileKind::AndroidFirebase, "/inert/google-services.JSON")] {
             assert!(suffix(kind, Path::new(path)).is_ok());
         }
         for (kind, path) in [(FileKind::AppleP12, "/inert/p12"), (FileKind::AppleP12, "/inert/cert.pem"),
             (FileKind::AppleProfile, "/inert/profile.plist"), (FileKind::AppleProfile, "/inert/app.mobileprovision.p12"),
-            (FileKind::AndroidKeystore, "/inert/key.jks"), (FileKind::AndroidFirebase, "/inert/config.json"),
+            (FileKind::AndroidKeystore, "/inert/key.p12"), (FileKind::AndroidKeystore, "/inert/key.pfx"),
+            (FileKind::AndroidKeystore, "/inert/key.jks.p12"), (FileKind::AndroidKeystore, "/inert/jks"),
+            (FileKind::AndroidFirebase, "/inert/config.json.bak"), (FileKind::AndroidFirebase, "/inert/config.plist"),
+            (FileKind::AndroidFirebase, "/inert/json"),
             (FileKind::AscP8, "/inert/p8"), (FileKind::AscP8, "/inert/key.pem"), (FileKind::AscP8, "/inert/key.p8.p12")] {
             assert!(suffix(kind, Path::new(path)).is_err());
         }

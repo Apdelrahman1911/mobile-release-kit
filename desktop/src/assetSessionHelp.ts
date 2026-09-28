@@ -8,7 +8,7 @@ const privateValueFormat = 'Enter the original value, at most 4,096 UTF-8 bytes.
 const noRestore = 'Starting a replacement or removal makes affected assignments unavailable. Failure or Cancel may preserve old record bytes, but never restores assignment automatically. Prepare and assign again explicitly; unknown cleanup prevents further use.';
 const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
   'android-keystore/file': {
-    where: 'Obtain the existing upload-key keystore from its authorized signing-key owner. Select the private original outside registered project folders. The app will not change its contents or permissions, move it, or generate a replacement key.',
+    where: 'Obtain the existing upload-key keystore from its authorized signing-key owner. On an admitted Linux or Apple-silicon Mac session, select the private original outside registered project folders. The app will not change its contents or permissions, move it, or generate a replacement key.',
     format: 'An original .jks or .keystore file, at most 32 MiB. This importer recognizes only the JKS header; .p12/.pfx are not supported. A filename is not proof of format or key identity.',
     failure: 'A changed, overlapping, unsupported, oversized or insufficiently private source is refused without changing the original. A recognized JKS header does not verify a password, private-key entry, digest or signing identity.',
     suffixes: ['.jks', '.keystore'],
@@ -41,7 +41,7 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
   'asc-p8/keyId': { format: 'Exactly 10 uppercase ASCII letters or digits, as judged by the core. ' + privateValueFormat },
   'asc-p8/issuerId': { format: 'UUID spelling: 8-4-4-4-12 hexadecimal characters with hyphens, as judged by the core. ' + privateValueFormat },
   'android-firebase/file': {
-    where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. Select that private original outside registered project folders. Do not use an exported service-account private key.',
+    where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. On an admitted Linux or Apple-silicon Mac session, select that private original outside registered project folders. Do not use an exported service-account private key.',
     format: 'An original UTF-8 .json file, at most 4 MiB, within this importer’s document/complexity limits. Decoded duplicate names are refused. The core checks every supported client structure and the configured application ID; CLI parsing rules are unchanged.',
     failure: 'Malformed clients or an application-ID mismatch prevent a usable review. A parser-limit refusal is not proof that the original is malformed. No Firebase service is contacted and the original is never changed.',
   },
