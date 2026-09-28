@@ -125,9 +125,9 @@ impl Material {
     } }
     fn retained_bytes(&self) -> Option<usize> { match &self.origin {
         MaterialOrigin::Selected(source) => {
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
             { source.bytes.capacity().checked_add(source.origin.retained_bytes()?) }
-            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
             { Some(source.bytes.capacity()) }
         },
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1677,18 +1677,28 @@ fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     // Private asset custody is separate from the installed project-only
     // profile. Sharing document checks must not qualify either native route.
     if !cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"))) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
     Ok(())
 }
 fn macos_session_context(platform: Platform, stage: Stage, purpose: Purpose) -> bool {
-    platform == Platform::Ios && (matches!(purpose, Purpose::Full | Purpose::Store)
-        || stage == Stage::Candidate && purpose == Purpose::Signing)
+    match platform {
+        // These are implemented input routes, not a copy of core requiredness.
+        // The core alone decides whether this stage/purpose needs the input.
+        Platform::Android | Platform::Project => true,
+        Platform::Ios => matches!(purpose, Purpose::Full | Purpose::Store)
+            || stage == Stage::Candidate && purpose == Purpose::Signing,
+    }
 }
 fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: Kind) -> bool {
     if !macos_session_context(platform, stage, purpose) { return false; }
-    match purpose {
-        Purpose::Full | Purpose::Store => kind == Kind::AscP8,
-        Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),
+    match platform {
+        Platform::Android => matches!(kind, Kind::AndroidKeystore | Kind::AndroidFirebase | Kind::GoogleWif),
+        Platform::Project => kind == Kind::ProjectReadToken,
+        Platform::Ios => match purpose {
+            Purpose::Full | Purpose::Store => kind == Kind::AscP8,
+            Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),
+        },
     }
 }
 fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
@@ -4843,6 +4853,14 @@ mod installed_macos_observation {
     pub(crate) fn selection_saved_data_checks() -> bool {
         // Synthetic stored DATA only. No document/bridge, native object, task,
         // probe, ProjectWitness or runtime is made. These are not receipts.
+        use crate::shell::installed_observation::ios::Case as InputCase;
+        if session_original_limit(false, None).is_some() || session_original_limit(true, None) != Some(12) { return false; }
+        for (case, expected) in [(InputCase::AndroidInputs, Some(18)), (InputCase::SigningInputs, Some(12)),
+            (InputCase::SignedRefusal, Some(12)), (InputCase::SignedCancel, Some(12)),
+            (InputCase::ToolchainPrerequisite, None), (InputCase::VersionStale, None), (InputCase::UnsignedArchive, None),
+            (InputCase::Cancel, None), (InputCase::Finality, None), (InputCase::RecoveryEmpty, None)] {
+            if session_original_limit(false, Some(case)) != expected || session_original_limit(true, Some(case)).is_some() { return false; }
+        }
         let owner = OriginalWork::new(2, false, Weak::new());
         let Ok(mut coordinator) = owner.coordinator.lock() else { return false; };
         coordinator.receipt = JoinReceipt::Returned; drop(coordinator);
@@ -4919,6 +4937,19 @@ mod installed_macos_observation {
         // A distinct one-use instrumented P2 admission, never an asset/iOS
         // session grant. The same existing history retains actual originals.
         pub(super) project_fields: Option<Arc<crate::shell::installed_observation::project_fields::Control>>,
+        // Historical Case returned by the original one-use registration. It
+        // does not confer native/private-input availability or a live permit.
+        input_case: Option<crate::shell::installed_observation::ios::Case>,
+    }
+    fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
+        match (project_fields, input_case) {
+            (false, Some(case)) => case.session_final_original(),
+            (true, None) => Some(12),
+            _ => None,
+        }
+    }
+    impl SessionBook {
+        fn original_limit(&self) -> Option<u32> { session_original_limit(self.project_fields.is_some(), self.input_case) }
     }
     pub(crate) struct SessionSnapshot {
         pub(crate) status: Value, pub(crate) originals: usize, pub(crate) originals_settled: bool,
@@ -5007,9 +5038,9 @@ mod installed_macos_observation {
                 || self.live_session_owner_reason().is_some() { return Err(BridgeError::invalid()); }
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
-            token.consume(&self.inner.session_identity)?;
+            let input_case = token.consume(&self.inner.session_identity)?;
             self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case) }); Ok(())
         }
         pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
         pub(crate) fn register_installed_macos_project_fields(&self,
@@ -5022,11 +5053,12 @@ mod installed_macos_observation {
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control) }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None }); Ok(())
         }
         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
             let Some(book) = book.as_mut() else { return Ok(()); };
+            let limit = book.original_limit().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
             if let Some(control) = &book.project_fields {
                 // Binding history survives observer failure for ordinary Quit
                 // cleanup. Success still requires exactly all12 originals;
@@ -5038,9 +5070,12 @@ mod installed_macos_observation {
                 };
                 if !control.bound(&self.inner.session_identity) || !expected { return Err(AssetError::new(Reason::Unqualified)); }
             }
-            // Project + ten bounded session originals + Quit. Never replace
-            // a missing/unknown predecessor with a fresh successful witness.
-            if book.originals.len() >= 12 || owner.id as usize != book.originals.len() + 1
+            // Closed original-registration bound: Android input journey18,
+            // existing input/P2 journeys12. Historical binding survives an
+            // observer failure so a known-safe early ordinary Quit can record;
+            // exact full-success finality is checked separately below. Never
+            // replace an unsettled predecessor with a new successful witness.
+            if book.originals.len() >= limit as usize || owner.id as usize != book.originals.len() + 1
                 || !original_call(&self.inner, owner)
                 || !book.originals.iter().all(|(old,_)| session_original_settled(&self.inner, old)) {
                 return Err(AssetError::new(Reason::CleanupUnknown));
@@ -5126,13 +5161,15 @@ mod installed_macos_observation {
         fn macos_session_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
             let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; };
             let Some(book) = book.as_ref() else { return false; };
-            if book.project_fields.is_some() { return false; }
+            if book.project_fields.is_some() || book.input_case.is_none() { return false; }
+            let Some(limit) = book.original_limit() else { return false; };
+            let Some(lock_id) = limit.checked_sub(1) else { return false; };
             let Some(owner) = project.owner.upgrade() else { return false; };
             same_document(&self.inner, &project.document) && self.macos_registered(project)
                 && book.originals.first().is_some_and(|(first,kind)| Arc::ptr_eq(first, &owner) && *kind == Some(Operation::ChooseProject))
-                && book.originals.len() == 12 && state.next_operation == 12
-                && book.originals.last().is_some_and(|(last,kind)| last.id == 12 && kind.is_none())
-                && state.slot.as_ref().is_some_and(|slot| slot.owner.id == 11 && slot.operation == Operation::Lock
+                && book.originals.len() == limit as usize && state.next_operation == limit
+                && book.originals.last().is_some_and(|(last,kind)| last.id == limit && kind.is_none())
+                && state.slot.as_ref().is_some_and(|slot| slot.owner.id == lock_id && slot.operation == Operation::Lock
                     && slot.reason == Reason::UserCancelled && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
                 && book.originals.iter().enumerate().all(|(i,(owner,_))| owner.id as usize == i + 1 && session_original_settled(&self.inner, owner))
                 && completed(&self.inner, &owner, NativeResponse::Accept, true, false)
@@ -5140,7 +5177,7 @@ mod installed_macos_observation {
         }
         fn macos_project_fields_selected(&self, state: &DocumentState, project: &ProjectWitness) -> bool {
             let Ok(book) = self.inner.installed_macos_session.try_lock() else { return false; };
-            let Some(book) = book.as_ref().filter(|book| book.project_fields.is_some()) else { return false; };
+            let Some(book) = book.as_ref().filter(|book| book.project_fields.is_some() && book.input_case.is_none()) else { return false; };
             let Some(owner) = project.owner.upgrade() else { return false; };
             same_document(&self.inner, &project.document) && self.macos_registered(project)
                 && book.originals.len() == 12 && state.next_operation == 12
@@ -6154,7 +6191,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
     }
     assert_eq!(reason(&ready), None);
     let platform = if cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64"))) { None } else { Some(Reason::UnsupportedPlatform) };
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { None } else { Some(Reason::UnsupportedPlatform) };
     assert_eq!(ordinary_asset_platform_gate().err().map(|error| error.reason), platform);
     assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
     assert!(idle(&ready).is_ok());
@@ -6583,14 +6621,15 @@ mod tests {
     }
 
 
-    fn ios_scope(stage: Stage, purpose: Purpose) -> Arc<NativeContext> {
-        Arc::new(NativeContext { revision: 1, project_id: "inert-ios-project".into(),
+    fn input_scope(platform: Platform, stage: Stage, purpose: Purpose) -> Arc<NativeContext> {
+        Arc::new(NativeContext { revision: 1, project_id: "inert-input-project".into(),
             project: asset_source::RegisteredRoot { path: "/inert/never-opened/project".into(),
                 identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
-            registry_generation: 1, draft: b"{}".to_vec(), platform: Platform::Ios, stage, purpose })
+            registry_generation: 1, draft: b"{}".to_vec(), platform, stage, purpose })
     }
+    fn ios_scope(stage: Stage, purpose: Purpose) -> Arc<NativeContext> { input_scope(Platform::Ios, stage, purpose) }
     #[test]
-    fn macos_asc_context_matrix_does_not_expand_old_signing_or_other_kinds() {
+    fn macos_input_context_matrix_keeps_platform_kinds_and_ios_signing_separate() {
         let kinds = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
             Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken];
         for stage in [Stage::Candidate, Stage::ExternalTesting, Stage::Production] {
@@ -6611,8 +6650,18 @@ mod tests {
             }
             for platform in [Platform::Android, Platform::Project] {
                 for purpose in [Purpose::Full, Purpose::Signing, Purpose::Store] {
-                    assert!(!macos_session_context(platform, stage, purpose));
-                    for kind in kinds { assert!(!macos_session_kind(platform, stage, purpose, kind)); }
+                    assert!(macos_session_context(platform, stage, purpose));
+                    let context = input_scope(platform, stage, purpose);
+                    for kind in kinds {
+                        let allowed = match platform {
+                            Platform::Android => [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::GoogleWif].contains(&kind),
+                            Platform::Project => kind == Kind::ProjectReadToken,
+                            Platform::Ios => unreachable!(),
+                        };
+                        assert_eq!(macos_session_kind(platform, stage, purpose, kind), allowed);
+                        assert_eq!(session_kind_gate(&context, kind).is_ok(),
+                            !cfg!(all(target_os = "macos", target_arch = "aarch64")) || allowed);
+                    }
                 }
             }
         }
@@ -6620,44 +6669,54 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn macos_cached_record_preview_publication_and_old_context_cannot_bypass_kind_gate() {
-        let tokens = || TokenBatch { selection: token('a'), record: token('b'), preview: token('c'), bind: token('d') };
-        let key = RecordKey { id: token('e'), revision: 1 };
-        // The old signing route really permits this scalar source. No source
-        // file or native owner is fabricated to make the denial test pass.
-        let payload = Arc::new(Payload { kind: Kind::ProjectReadToken, material: None, fields: None });
-        assert!(payload.usable_source());
-        let mut state = empty_state(); let signing = ios_scope(Stage::Candidate, Purpose::Signing);
-        let mut original = Slot::new(OriginalWork::new(9, false, Weak::new()), Operation::Prepare,
-            Some(signing.clone()), Some(key.clone()), Some(Instant::now() + REVIEW));
-        original.kind = Some(payload.kind); state.context = Some(signing);
-        state.records.push(Record { key: key.clone(), payload: payload.clone(), mutation_pending: false });
-        let assignment = Assignment { kind: payload.kind, record_id: key.id.clone(), record_revision: 1,
-            context_revision: 1, availability: AssignmentAvailability::Available };
-        state.assignments.push(assignment.clone());
-        assert!(record_usable(&state, &original, &key, payload.kind));
-        assert!(record_assessed(&state, &key));
-        let preview = Preview { token: token('f'), action: Action::Bind, bind_token: None, record: Some(key.clone()),
-            subject: PreviewSubject::new(payload.kind, SubjectChange::Assign, Some(&key)) };
-        assert!(preview_subject_valid(&state, &original, &preview));
-        for purpose in [Purpose::Full, Purpose::Store] {
-            let next = ios_scope(Stage::Production, purpose); state.context = Some(next.clone());
-            // Even the same numeric revision cannot make the old Arc current.
-            assert_eq!(session_slot_kind_gate(&state, &original, payload.kind).err().map(|e| e.reason), Some(Reason::ContextStale));
-            original.context = Some(next);
-            assert_eq!(session_slot_kind_gate(&state, &original, payload.kind).err().map(|e| e.reason), Some(Reason::UnsupportedFormat));
-            assert!(!record_usable(&state, &original, &key, payload.kind));
-            assert!(!record_assessed(&state, &key) && !assignment_available(&state, &assignment));
-            assert!(!preview_subject_valid(&state, &original, &preview));
-            for staged in [
-                Staged::Selected { payload: payload.clone(), tokens: tokens() },
-                Staged::Prepared { result: Err(AssetError::invalid().into()), tokens: tokens() },
-                Staged::Committed { bind: Some(token('d')) }, Staged::Bound(assignment.clone()),
-            ] { assert!(session_staged_kind_gate(&state, &original, &staged).is_err()); }
-            original.context = None;
-            let deletion = Preview { token: token('f'), action: Action::Delete, bind_token: None, record: Some(key.clone()),
-                subject: PreviewSubject::new(payload.kind, SubjectChange::Delete, Some(&key)) };
-            assert!(preview_subject_valid(&state, &original, &deletion));
-            assert!(session_staged_kind_gate(&state, &original, &Staged::Delete(tokens())).is_ok());
+        for (platform, kind, purpose, rejected) in [
+            (Platform::Ios, Kind::ProjectReadToken, Purpose::Signing,
+                [(Platform::Ios, Stage::Production, Purpose::Full), (Platform::Ios, Stage::Production, Purpose::Store)]),
+            (Platform::Android, Kind::GoogleWif, Purpose::Full,
+                [(Platform::Project, Stage::Candidate, Purpose::Full), (Platform::Ios, Stage::Candidate, Purpose::Store)]),
+            (Platform::Project, Kind::ProjectReadToken, Purpose::Signing,
+                [(Platform::Android, Stage::Candidate, Purpose::Signing), (Platform::Ios, Stage::Production, Purpose::Full)]),
+        ] {
+            let tokens = || TokenBatch { selection: token('a'), record: token('b'), preview: token('c'), bind: token('d') };
+            let key = RecordKey { id: token('e'), revision: 1 };
+            // Scalar lifecycle DATA only. No captured file, native operation or
+            // assessment receipt is invented to exercise cached-use denial.
+            let payload = Arc::new(Payload { kind, material: None, fields: None });
+            assert!(payload.usable_source());
+            let mut state = empty_state(); let source = input_scope(platform, Stage::Candidate, purpose);
+            let mut original = Slot::new(OriginalWork::new(9, false, Weak::new()), Operation::Prepare,
+                Some(source.clone()), Some(key.clone()), Some(Instant::now() + REVIEW));
+            original.kind = Some(payload.kind); state.context = Some(source.clone());
+            state.records.push(Record { key: key.clone(), payload: payload.clone(), mutation_pending: false });
+            let assignment = Assignment { kind: payload.kind, record_id: key.id.clone(), record_revision: 1,
+                context_revision: 1, availability: AssignmentAvailability::Available };
+            state.assignments.push(assignment.clone());
+            assert!(record_usable(&state, &original, &key, payload.kind));
+            assert!(record_assessed(&state, &key));
+            let preview = Preview { token: token('f'), action: Action::Bind, bind_token: None, record: Some(key.clone()),
+                subject: PreviewSubject::new(payload.kind, SubjectChange::Assign, Some(&key)) };
+            assert!(preview_subject_valid(&state, &original, &preview));
+            for (next_platform, stage, next_purpose) in rejected {
+                original.context = Some(source.clone());
+                let next = input_scope(next_platform, stage, next_purpose); state.context = Some(next.clone());
+                // Even the same numeric revision cannot make the old Arc current.
+                assert_eq!(session_slot_kind_gate(&state, &original, payload.kind).err().map(|e| e.reason), Some(Reason::ContextStale));
+                original.context = Some(next);
+                assert_eq!(session_slot_kind_gate(&state, &original, payload.kind).err().map(|e| e.reason), Some(Reason::UnsupportedFormat));
+                assert!(!record_usable(&state, &original, &key, payload.kind));
+                assert!(!record_assessed(&state, &key) && !assignment_available(&state, &assignment));
+                assert!(!preview_subject_valid(&state, &original, &preview));
+                for staged in [
+                    Staged::Selected { payload: payload.clone(), tokens: tokens() },
+                    Staged::Prepared { result: Err(AssetError::invalid().into()), tokens: tokens() },
+                    Staged::Committed { bind: Some(token('d')) }, Staged::Bound(assignment.clone()),
+                ] { assert!(session_staged_kind_gate(&state, &original, &staged).is_err()); }
+                original.context = None;
+                let deletion = Preview { token: token('f'), action: Action::Delete, bind_token: None, record: Some(key.clone()),
+                    subject: PreviewSubject::new(payload.kind, SubjectChange::Delete, Some(&key)) };
+                assert!(preview_subject_valid(&state, &original, &deletion));
+                assert!(session_staged_kind_gate(&state, &original, &Staged::Delete(tokens())).is_ok());
+            }
         }
     }
     #[test]
@@ -7218,3 +7277,9 @@ mod tests {
         assert!(!owner.dispose_keyring_storage());
     }
 }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
+    not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[path = "asset_session_windows_observation.rs"]
+pub(crate) mod windows_session_observation;

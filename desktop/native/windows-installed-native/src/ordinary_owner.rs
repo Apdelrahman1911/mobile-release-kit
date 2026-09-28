@@ -1016,6 +1016,14 @@ fn hosted_normal_ui_document_original_handle_contract() -> Result<()> {
     normal_ui::run(UiRole::DocumentLoss, tick)
 }
 
+#[cfg(feature = "desktop-ui")]
+#[test]
+#[ignore = "fixed private synthetic credential/session GUI case; reviewed ordinary owner only"]
+fn hosted_normal_ui_credential_original_handle_contract() -> Result<()> {
+    let tick = unsafe { SI::GetTickCount64() };
+    normal_ui::run(UiRole::CredentialSession, tick)
+}
+
 fn run_owner(variant: OwnerVariant, entry_tick: u64) -> Result<()> {
     let start = Instant::now();
     let mut deadline_latched = false;

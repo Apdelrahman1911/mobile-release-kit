@@ -3,6 +3,7 @@
 use super::*;
 use crate::ui_startup_data::Word as StartupWord;
 use crate::ui_observer_diagnostic_data::Projection as ObserverProjection;
+use crate::output_origin_capsule_data as origin_data;
 use std::{cell::Cell, ffi::c_void, io::Write, marker::PhantomData, path::PathBuf};
 use windows_sys::Win32::System::{Com as CO, Ole as OLE, Registry as R};
 use windows_sys::Win32::UI::WindowsAndMessaging as W;
@@ -45,8 +46,9 @@ struct ObserverCapture {
     clock: Option<Arc<ObserverDiagnosticClock>>, claimed: bool, unresolved: bool,
     binding: Option<(String, String, String, String)>, output: Option<(usize, Stamp)>,
     projection: ObserverProjection, reader: ObserverCaptureTrace,
+    origin: origin_data::Capture, // Disjoint historical context/private first-refusal DATA.
 }
-fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }
+fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss | UiRole::CredentialSession) }
 fn observer_finality(facts: crate::ui_observer_diagnostic_data::ChildFinality, trace: &ObserverCaptureTrace) -> bool {
     use ObserverCaptureCheck as C;
     // The same ordered ChildFinality conjunction; each executed scalar predicate
@@ -76,6 +78,31 @@ fn observer_capture_frame(role: UiRole, capture: &ObserverCapture, bytes: &mut [
     capture.reader.write_json(&mut output).ok()?; output.write_all(b"}\n").ok()?;
     usize::try_from(output.position()).ok().filter(|length| *length <= 4096)
 }
+
+// BEGIN OUTPUT ORIGIN CAPSULE ADAPTER
+// This is only a tap on the existing failed exact parent/name guard. It borrows
+// the same returned entry and bound metadata, not another cursor or UDF getter.
+fn observer_output_origin_refused(role: UiRole, position: u8,
+    binding: Option<&(String, String, String, String)>, output: Option<&Metadata>,
+    entry: &DirectoryEntry, capture: &mut origin_data::Capture) {
+    if role != UiRole::ProjectDraft || position != 0 || entry.kind != FileKind::Directory { return; }
+    let binding = binding.and_then(|(source, tree, run, request)| origin_data::Binding::parse(source, tree, run, request));
+    let output = output.map(|metadata| (metadata.identity.volume_serial, metadata.identity.file_id));
+    capture.record_once(binding, entry.attributes, output, entry.file_id, &entry.name);
+}
+fn observer_output_origin_returned(role: UiRole, original: Result<()>, capture: &mut ObserverCapture,
+    seal: impl FnOnce(&mut origin_data::Capture, Option<&ObserverDiagnosticClock>) -> origin_data::Reply,
+    output: &mut impl Write) -> Result<()> {
+    if role != UiRole::ProjectDraft || original != Err(Error::Unsafe) || capture.unresolved || !capture.origin.selected() { return original; }
+    let context = capture.origin.public_context();
+    let reply = seal(&mut capture.origin, capture.clock.as_deref());
+    let mut bytes = [0; origin_data::FRAME_BYTES];
+    if let Some(length) = context.and_then(|context| origin_data::frame(context, &reply, &mut bytes)) {
+        let _ = prerequisite_sink(output, &bytes[..length]);
+    }
+    original // Neither crypto nor delivery can replace the settled roster refusal.
+}
+// END OUTPUT ORIGIN CAPSULE ADAPTER
 
 // Keep application scratch out of the strict result/fixture output inventory.
 // This is the existing prepared expected profile path, not post-logon custody;
@@ -834,7 +861,7 @@ fn create_fixture_file(files: &mut Vec<OriginalFile>, path: &Path, bytes: &'stat
 impl Fixture {
     fn create(role: UiRole, output: &Path, creates: &mut Vec<Box<DirectoryCreate>>, files: &mut Vec<OriginalFile>,
         parent: &[u8], account: &[u8], clock: &mut Clock, trace: &mut InputTrace, transitions: &mut Vec<String>) -> Result<Self> {
-        need(matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss))?;
+        need(matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss | UiRole::CredentialSession))?;
         let path = output.join("project");
         let project = new_directory(creates, files, &path, clock, trace)?;
         let app = new_directory(creates, files, &path.join("app"), clock, trace)?;
@@ -852,7 +879,7 @@ impl Fixture {
         }
         let initial_config = role != UiRole::ProjectDraft;
         if initial_config {
-            original_files.push(create_fixture_file(files, &path.join("release").join("mobile-release.json"), UI_FIXTURE_CONFIG,
+            original_files.push(create_fixture_file(files, &path.join("release").join("mobile-release.json"), if role == UiRole::CredentialSession { UI_CREDENTIAL_CONFIG } else { UI_FIXTURE_CONFIG },
                 parent, account, clock, trace, transitions)?);
         }
         Ok(Self { project, app, release, original_files,
@@ -907,7 +934,7 @@ fn observer_journal_poststate(native: &mut NativeBook, parent: &Original,
         observer_read_result(trace, C::StampStable, need(observer_native(native, trace, O::JournalCursorMetadataAfter, Some(16),
             |native| native.metadata(&original))? == metadata))
     })?;
-    Ok((original, metadata, stamp, ObserverProjection::decode(&raw)))
+    Ok((original, metadata, stamp, diagnostic.project_closed_rows(&raw)))
 }
 fn observer_failure_poststate(native: &mut NativeBook, files: &mut [OriginalFile],
     diagnostic: &mut ObserverDiagnosticOriginal, output: &Path, cached: &(usize, Stamp), trace: &ObserverCaptureTrace) -> Result<ObserverProjection> {
@@ -1017,7 +1044,7 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
             predicate!(O::OutputBinding, None, VolumeSerial, entries[at].1.identity.volume_serial == output_stamp.volume)
             && predicate!(O::OutputBinding, None, FileId, entries[at].1.identity.file_id == output_stamp.id)))?;
         let mut directories = vec![(at, at - 1, 0u8)];
-        let mut children: Vec<(usize, String, Stamp, FileKind)> = Vec::with_capacity(9);
+        let mut children: Vec<(usize, String, Stamp, FileKind)> = Vec::with_capacity(if role == UiRole::CredentialSession { 14 } else { 9 });
         if let Some(result) = result_index {
             trace.at(InputRole::Output, Some(result as u8));
             children.push((at, role.name("result.private.json"), poststate_result!(O::ResultOriginal, None, OriginalStamp, files[result].stamp_traced(trace))?, FileKind::File));
@@ -1025,11 +1052,12 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
         // Share-read-only excludes append cursors before this retained parent
         // original's full EOF read. The raw tail (even partial) is PRIVATE DATA,
         // never an additional application-readiness or success predicate.
-        poststate_result!(O::OutputPoststate, None, JournalPresent, need(diagnostic.is_some() == matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss)))?;
+        poststate_result!(O::OutputPoststate, None, JournalPresent, need(diagnostic.is_some() == matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss | UiRole::CredentialSession)))?;
         if let Some(diagnostic) = diagnostic.as_mut() {
             poststate_result!(O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
             let name = diagnostic.name();
             let (original, metadata, stamp, observed) = observer_journal_poststate(native, &entries[at].0, diagnostic, false, read_trace)?;
+            if role == UiRole::ProjectDraft { capture.origin.journal_returned(observed); }
             projection = Some(observed); poststate_result!(O::OutputPoststate, None, OriginalClock, clock.effect_traced(trace))?;
             children.push((at, name, stamp, FileKind::File)); entries.push((original, metadata, (O::JournalCursorMetadataAfter, Some(16))));
         }
@@ -1094,9 +1122,34 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
             poststate_result!(O::FixtureFileRead, Some(3), HelperReturn, need(
                 predicate!(O::FixtureFileMetadata, Some(3), VolumeSerial, metadata.identity.volume_serial == stamp.volume)
                 && predicate!(O::FixtureFileMetadata, Some(3), FileId, metadata.identity.file_id == stamp.id)
-                && predicate!(O::FixtureFileRead, Some(3), BytesEqual, poststate_result!(O::FixtureFileRead, Some(3), ReadReturned, native.read_next(&original, LIMIT))? == if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER })
+                && predicate!(O::FixtureFileRead, Some(3), BytesEqual, poststate_result!(O::FixtureFileRead, Some(3), ReadReturned, native.read_next(&original, LIMIT))? == if role == UiRole::CredentialSession { UI_CREDENTIAL_CONFIG } else if fixture.initial_config { UI_FIXTURE_CONFIG } else { UI_FIXTURE_CONFIG_AFTER })
                 && predicate!(O::FixtureFileEof, Some(3), EndOfFile, poststate_result!(O::FixtureFileEof, Some(3), ReadReturned, native.read_next(&original, 1))?.is_empty())))?;
             entries.push((original, metadata, (O::FixtureFileMetadataAfter, Some(3))));
+            if role == UiRole::CredentialSession {
+                // Only after this exact child process has positively exited.
+                // These supplement the child's saved CREATE_NEW identities;
+                // they do not replace any live or uncertain child original.
+                for (offset, leaf) in qualification_result::credential_ui_fixture::INPUT_NAMES.iter().enumerate() {
+                    clock.effect_traced(trace)?;
+                    let path = output.join(leaf);
+                    let index = input(files, &path, false, FS::FILE_GENERIC_READ, clock, trace)?;
+                    let stamp = files[index].stamp()?;
+                    let original = native.open_child(&entries[at].0, leaf, FileKind::File)?;
+                    let metadata = native.metadata(&original)?;
+                    native.no_alternate_streams(&original)?;
+                    need(metadata.identity.volume_serial == stamp.volume && metadata.identity.file_id == stamp.id
+                        && metadata.links == 1 && stamp.links == 1
+                        && native.read_next(&original, LIMIT)? == qualification_result::credential_ui_fixture::input_bytes(offset, true)?
+                        && native.read_next(&original, 1)?.is_empty() && native.metadata(&original)? == metadata
+                        && files[index].stamp()? == stamp)?;
+                    children.push((at, (*leaf).into(), stamp, FileKind::File));
+                    // The historical FixtureFile* indices are project roles
+                    // 0..3. These five supplemental files stay under the
+                    // existing unindexed output-poststate family; no widened
+                    // index grammar, native slot ID or private filename DATA.
+                    entries.push((original, metadata, (O::OutputPoststate, None)));
+                }
+            }
         } else { output_result!(OutputRole, O::OutputPoststate, None, Role, need(matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke)))?; }
         trace.prerequisite_check(PrerequisiteCheck::O02);
         for (index, parent, position) in directories {
@@ -1107,7 +1160,7 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                 for entry in batch {
                     output_result!(OutputEntryAdmission, O::DirectoryEntry, Some(position), HelperReturn, need(
                         predicate!(O::DirectoryEntry, Some(position), EntryUnique, seen.insert(entry.name.clone()))
-                        && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= 6)))?;
+                        && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= if role == UiRole::CredentialSession && position == 0 { 10 } else { 6 })))?;
                     if entry.name == "." { output_result!(OutputDotIdentity, O::DirectoryEntry, Some(position), DotIdentity, need(entry.file_id == entries[index].1.identity.file_id))?; continue; }
                     if entry.name == ".." { output_result!(OutputParentIdentity, O::DirectoryEntry, Some(position), ParentIdentity, need(entry.file_id == entries[parent].1.identity.file_id))?; continue; }
                     let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, O::DirectoryEntry, Some(position), ExpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe).map_err(|error| {
@@ -1122,6 +1175,8 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                             trace.unexpected_entry_with_relation(role, &entry,
                                 children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str()), relation);
                         }
+                        observer_output_origin_refused(role, position, capture.binding.as_ref(),
+                            entries.get(index).map(|(_, metadata, _)| metadata), &entry, &mut capture.origin);
                         error
                     }))?;
                     output_result!(OutputEntryBinding, O::DirectoryEntry, Some(position), HelperReturn, need(
@@ -1210,6 +1265,7 @@ smoke_labels!(SmokeCheck {
     InitialMainState => "initial-main-acquire-state", InitialMainTail => "initial-main-returned-tail",
     InitialMainTimeoutCount => "initial-main-timeout-count",
     DashboardBindingState => "dashboard-binding-state", DashboardBindingTimeoutCount => "dashboard-binding-timeout-count",
+    DashboardWalkState => "dashboard-walk-state", DashboardWalkTimeoutCount => "dashboard-walk-timeout-count",
     AdjacentAcquireState => "adjacent-element-acquire-state", FirstChild => "first-child-element",
     NextSibling => "next-sibling-element", NameOutputState => "name-output-state",
     NameContradiction => "name-contradictory-output", CurrentName => "current-name",
@@ -1288,11 +1344,16 @@ smoke_labels!(SmokeCheck {
     ProfileSettlement => "profile-settlement", ProfileRetirement => "profile-retirement",
     AccountRetirement => "account-retirement",
 });
-smoke_labels!(DashboardStage { Bind => "bind", Walk => "walk", Names => "names", NamesEnded => "names-ended" });
+smoke_labels!(DashboardStage { Bind => "bind", Walk => "walk", WalkInvalidated => "walk-invalidated",
+    Names => "names", NamesEnded => "names-ended" });
 smoke_labels!(DashboardScanEnd { Loading => "loading", Stale => "stale", Exhausted => "exhausted" });
 smoke_labels!(DashboardScanHistory { None => "none", LoadingOnly => "loading-only", StaleSeen => "stale-seen", ExhaustedSeen => "exhausted-seen" });
 #[derive(Debug, Eq, PartialEq)]
 enum DashboardNameRead { Text(String), Invalidated }
+#[derive(Debug, Eq, PartialEq)]
+enum DashboardAdjacent { Element(usize), End, Invalidated }
+#[derive(Debug, Eq, PartialEq)]
+enum DashboardWalk { Complete(Vec<usize>), Invalidated }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DashboardPass { found: [bool; 5], end: Option<DashboardScanEnd> }
 impl DashboardPass {
@@ -1396,16 +1457,16 @@ struct QuitProgress { scan: u8, visited: u8, closed: u8, match_mask: u8, default
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SmokeFault {
     phase: SmokePhase, check: SmokeCheck, error: Error, status: Option<SmokeStatus>, dashboard: Option<DashboardProgress>,
-    main_binding_timeouts: Option<u16>, dashboard_binding_timeouts: Option<u16>, startup: StartupSample, quit: Option<QuitProgress>,
+    main_binding_timeouts: Option<u16>, dashboard_binding_timeouts: Option<u16>, dashboard_walk_timeouts: Option<u16>, startup: StartupSample, quit: Option<QuitProgress>,
 }
 struct SmokeTrace {
     phase: Cell<SmokePhase>, dashboard: Cell<Option<DashboardProgress>>, first: Cell<Option<SmokeFault>>, emitted: Cell<bool>,
-    main_binding_timeouts: Cell<u16>, dashboard_binding_timeouts: Cell<u16>, startup: Cell<StartupSample>, quit: Cell<Option<QuitProgress>>,
+    main_binding_timeouts: Cell<u16>, dashboard_binding_timeouts: Cell<u16>, dashboard_walk_timeouts: Cell<u16>, startup: Cell<StartupSample>, quit: Cell<Option<QuitProgress>>,
 }
 impl SmokeTrace {
     fn new() -> Self {
         Self { phase: Cell::new(SmokePhase::Setup), dashboard: Cell::new(None), first: Cell::new(None), emitted: Cell::new(false),
-            main_binding_timeouts: Cell::new(0), dashboard_binding_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()), quit: Cell::new(None) }
+            main_binding_timeouts: Cell::new(0), dashboard_binding_timeouts: Cell::new(0), dashboard_walk_timeouts: Cell::new(0), startup: Cell::new(StartupSample::new()), quit: Cell::new(None) }
     }
     // The real root() passes one USER32 read; scalar tests pass inert values.
     // Only original in-budget completions can update the sample. This helper
@@ -1448,9 +1509,10 @@ impl SmokeTrace {
                 let main_binding_timeouts = matches!(phase, SmokePhase::MainBinding | SmokePhase::Dashboard)
                     .then(|| self.main_binding_timeouts.get());
                 let dashboard_binding_timeouts = (phase == SmokePhase::Dashboard).then(|| self.dashboard_binding_timeouts.get());
+                let dashboard_walk_timeouts = (phase == SmokePhase::Dashboard).then(|| self.dashboard_walk_timeouts.get());
                 let quit = if matches!(phase, SmokePhase::QuitDialog | SmokePhase::QuitInvoke) { self.quit.get() } else { None };
                 self.first.set(Some(SmokeFault { phase, check, error: *error, status, dashboard,
-                    main_binding_timeouts, dashboard_binding_timeouts, startup: self.startup.get(), quit }));
+                    main_binding_timeouts, dashboard_binding_timeouts, dashboard_walk_timeouts, startup: self.startup.get(), quit }));
             }
         }
         result
@@ -1491,6 +1553,11 @@ impl SmokeTrace {
         let count = self.result(SmokeCheck::DashboardBindingTimeoutCount,
             self.dashboard_binding_timeouts.get().checked_add(1).ok_or(Error::Bounds), None)?;
         self.dashboard_binding_timeouts.set(count); Ok(())
+    }
+    fn dashboard_walk_timeout(&self) -> Result<()> {
+        let count = self.result(SmokeCheck::DashboardWalkTimeoutCount,
+            self.dashboard_walk_timeouts.get().checked_add(1).ok_or(Error::Bounds), None)?;
+        self.dashboard_walk_timeouts.set(count); Ok(())
     }
     fn admit_com(&self, unknown: bool, settled: bool, originals: usize, remaining: impl FnOnce() -> Result<u32>) -> Result<()> {
         self.need(SmokeCheck::ComReserveState, !unknown && !settled)?;
@@ -1542,6 +1609,7 @@ impl SmokeTrace {
         }
         if let Some(count) = fault.main_binding_timeouts { write!(output, ",\"mainBindingTimeouts\":{count}")?; }
         if let Some(count) = fault.dashboard_binding_timeouts { write!(output, ",\"dashboardBindingTimeouts\":{count}")?; }
+        if let Some(count) = fault.dashboard_walk_timeouts { write!(output, ",\"dashboardWalkTimeouts\":{count}")?; }
         if let Some(progress) = fault.quit {
             write!(output, ",\"quit\":{{\"scan\":{},\"visited\":{},\"closed\":{},\"matchMask\":{},\"defaultMask\":",
                 progress.scan, progress.visited, progress.closed, progress.match_mask)?;
@@ -2058,6 +2126,84 @@ impl Smoke {
         Ok(self.acquire_return(index, status, true, clock,
             if child { SmokeCheck::FirstChild } else { SmokeCheck::NextSibling })?.then_some(index))
     }
+    fn dashboard_walk_admitted(&self, element: usize, child: bool, keep: usize, end: usize) -> bool {
+        let (Some((hwnd, main, id)), Some(client), Some(walker)) =
+            (self.main.as_ref(), self.client, self.walker) else { return false; };
+        self.trace.phase.get() == SmokePhase::Dashboard
+            && self.trace.dashboard.get().is_some_and(|progress| progress.stage == DashboardStage::Walk
+                && progress.current_walk_visited.is_some() && progress.current_match_mask.is_none() && progress.current_names.is_none())
+            && !hwnd.is_null() && !id.is_empty() && *main < keep && client < keep && walker < keep
+            && client != walker && client != *main && walker != *main
+            && self.initialized && !self.uninit_entered && !self.uninit_returned
+            && self.trace.first.get().is_none() && !self.unknown && !self.settled && !self.windows.active
+            && !self.query.active && !self.query.unknown && self.query.bstr.is_null() && self.query.array.is_null()
+            && !self.dashboard_ready && !self.quit_confirmed && !self.windows.post_entered && !self.invoke_entered
+            // Exactly the original client/walker/main prefix; no stale retained
+            // descendant can masquerade as an original in a later pass.
+            && self.originals.get(..keep).is_some_and(|prefix| prefix.iter().enumerate().all(|(index, original)| {
+                let kind = if index == client { Some(ComKind::Client) } else if index == walker { Some(ComKind::Walker) }
+                    else if index == *main { Some(ComKind::Element) } else { None };
+                kind == Some(original.kind) && original.state == SlotState::Owned && !original.active
+                    && !original.pointer.is_null() && original.status == 0
+            }))
+            && self.originals.get(keep..end).is_some_and(|suffix| suffix.iter().all(|original|
+                original.kind == ComKind::Element && !original.active && original.status == 0
+                    && match original.state {
+                        SlotState::Owned => !original.pointer.is_null(),
+                        SlotState::NoHandle => original.pointer.is_null(),
+                        _ => false,
+                    }))
+            // The main's sibling is outside the adopted subtree. All other
+            // inputs were obtained by this walk's strict owned-reference path.
+            && element < end && ((child && element == *main) || element >= keep)
+            && self.originals.get(element).is_some_and(|original| original.kind == ComKind::Element
+                && original.state == SlotState::Owned && !original.active && !original.pointer.is_null() && original.status == 0)
+    }
+    fn complete_dashboard_adjacent(&mut self, element: usize, child: bool, keep: usize, index: usize, status: i32,
+        after_return_clock: impl FnOnce() -> Result<()>) -> Result<DashboardAdjacent> {
+        let check = if child { SmokeCheck::FirstChild } else { SmokeCheck::NextSibling };
+        let admitted = self.dashboard_walk_admitted(element, child, keep, index)
+            && index.checked_add(1) == Some(self.originals.len());
+        let original = self.trace.result(SmokeCheck::ComIndex, self.originals.get_mut(index).ok_or(Error::State), None)?;
+        let acquiring = original.kind == ComKind::Element && original.state == SlotState::Acquiring
+            && original.active && original.status == HRESULT_PENDING;
+        // Never overwrite a prior uncertain slot just because a later scalar
+        // return resembles completion. On the real route this is the one
+        // reserved/begun output of the synchronous adjacency call below.
+        let result = if acquiring { original.returned(status, true) }
+            else if original.active || original.state == SlotState::Unknown { Err(Error::Unknown) }
+            else { Err(Error::Unsafe) };
+        self.unknown |= matches!(result, Err(Error::Unknown));
+        let timeout = status == A::UIA_E_TIMEOUT as i32
+            || status == windows::core::HRESULT::from_win32(F::ERROR_TIMEOUT).0;
+        let invalidated = admitted && acquiring && timeout && result == Err(Error::Unsafe)
+            && original.state == SlotState::NoHandle && !original.active && original.pointer.is_null();
+        let result = if invalidated {
+            // No partial traversal is successful, and not even another query
+            // in this scan is admitted. Its entire suffix must be retired.
+            self.trace.dashboard_update(|progress| progress.stage = DashboardStage::WalkInvalidated);
+            self.trace.dashboard_walk_timeout().map(|()| DashboardAdjacent::Invalidated)
+        } else {
+            self.trace.result(check, result.and_then(|present| {
+                need(admitted && acquiring)?;
+                Ok(if present { DashboardAdjacent::Element(index) } else { DashboardAdjacent::End })
+            }), Some(SmokeStatus::Hresult(status)))
+        };
+        // Record the original result/counter before a later clock refusal;
+        // the unchanged original clock still controls whether we may proceed.
+        self.trace.result(SmokeCheck::Clock, after_return_clock(), None)?; result
+    }
+    fn dashboard_adjacent(&mut self, element: usize, child: bool, keep: usize, clock: &mut Clock) -> Result<DashboardAdjacent> {
+        self.trace.need(SmokeCheck::DashboardWalkState,
+            self.dashboard_walk_admitted(element, child, keep, self.originals.len()))?;
+        let pointer = self.pointer(element, ComKind::Element)?;
+        let walker = self.pointer(self.trace.result(SmokeCheck::WalkerMissing, self.walker.ok_or(Error::State), None)?, ComKind::Walker)?;
+        let table = unsafe { &**walker.cast::<*const A::IUIAutomationTreeWalker_Vtbl>() };
+        let index = self.reserve(ComKind::Element, clock)?;
+        let output = self.trace.result(SmokeCheck::AdjacentAcquireState, self.originals[index].begin(), None)?;
+        let status = unsafe { (if child { table.GetFirstChildElement } else { table.GetNextSiblingElement })(walker, pointer, output) }.0;
+        self.complete_dashboard_adjacent(element, child, keep, index, status, || clock.effect())
+    }
     fn query_name(&mut self, element: usize, clock: &mut Clock) -> Result<i32> {
         let pointer = self.pointer(element, ComKind::Element)?;
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
@@ -2248,23 +2394,33 @@ impl Smoke {
         self.query.returned(status, clock, &self.trace, SmokeCheck::ProcessId)?;
         self.trace.need(SmokeCheck::MainProcess, self.query.integer > 0 && self.query.integer as u32 == launch.outputs.dwProcessId)
     }
-    fn walk(&mut self, root: usize, clock: &mut Clock) -> Result<Vec<usize>> {
+    fn walk(&mut self, root: usize, keep: usize, clock: &mut Clock) -> Result<DashboardWalk> {
         self.trace.dashboard_update(DashboardProgress::begin_walk);
+        self.trace.need(SmokeCheck::DashboardWalkState, keep == self.originals.len()
+            && self.main.as_ref().is_some_and(|(_, main, _)| root == *main))?;
         let mut result = Vec::with_capacity(256); let mut stack = vec![(root, 0usize)];
         while let Some((index, depth)) = stack.pop() {
             self.trace.need(SmokeCheck::WalkBounds, depth <= 40 && result.len() < 900)?; result.push(index);
             self.trace.dashboard_update(|progress| progress.walk_visited(result.len()));
-            // Follow only this element's children; never a desktop root/sibling
-            // outside the caller's admitted main/dialog subtree.
-            if let Some(child) = self.adjacent(index, true, clock)? {
-                let mut siblings = vec![child]; let mut at = child;
-                while let Some(next) = self.adjacent(at, false, clock)? {
-                    self.trace.need(SmokeCheck::SiblingBounds, siblings.len() + result.len() < 900)?; siblings.push(next); at = next;
+            let child = match self.dashboard_adjacent(index, true, keep, clock)? {
+                DashboardAdjacent::Element(child) => child,
+                DashboardAdjacent::End => continue,
+                DashboardAdjacent::Invalidated => return Ok(DashboardWalk::Invalidated),
+            };
+            let mut siblings = vec![child]; let mut at = child;
+            loop {
+                match self.dashboard_adjacent(at, false, keep, clock)? {
+                    DashboardAdjacent::Element(next) => {
+                        self.trace.need(SmokeCheck::SiblingBounds, siblings.len() + result.len() < 900)?;
+                        siblings.push(next); at = next;
+                    },
+                    DashboardAdjacent::End => break,
+                    DashboardAdjacent::Invalidated => return Ok(DashboardWalk::Invalidated),
                 }
-                stack.extend(siblings.into_iter().rev().map(|index| (index, depth + 1)));
             }
+            stack.extend(siblings.into_iter().rev().map(|index| (index, depth + 1)));
         }
-        Ok(result)
+        Ok(DashboardWalk::Complete(result))
     }
     fn release_suffix(&mut self, from: usize) -> Result<()> {
         for original in self.originals[from..].iter_mut().rev() {
@@ -2456,7 +2612,21 @@ impl Smoke {
         loop {
             self.trace.dashboard_begin_pass();
             self.bound(launch, clock)?; let keep = self.originals.len();
-            let elements = self.walk(element, clock)?;
+            let elements = match self.walk(element, keep, clock)? {
+                DashboardWalk::Complete(elements) => elements,
+                DashboardWalk::Invalidated => {
+                    // Never name, credit or resume a partial scan. Retire
+                    // exactly its original suffix, then reobserve the same
+                    // owner/root under the existing deadline and wait cadence.
+                    self.release_suffix(keep)?;
+                    let same = self.windows.root(launch, Some(hwnd), clock, &self.trace)? == Some(hwnd);
+                    self.trace.need(SmokeCheck::RootContinuity, same)?;
+                    self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+                    std::thread::sleep(Duration::from_millis(100));
+                    self.trace.result(SmokeCheck::Clock, clock.effect(), None)?;
+                    continue; // The next pass repeats complete bound().
+                },
+            };
             self.trace.dashboard_update(DashboardProgress::walk_completed);
             let mut pass = DashboardPass::new(); let expected_version = format!("DESKTOP {version}");
             self.trace.dashboard_update(DashboardProgress::begin_names);
@@ -2768,6 +2938,13 @@ pub(super) fn run(role: UiRole, entry_tick: u64) -> Result<()> {
             let _ = prerequisite_sink(&mut std::io::stdout().lock(), &bytes[..length]);
         }
     }
+    // The original child/inventory/journal/files/profile failure path returned
+    // before CNG. The existing legacy frame above survives unknown crypto.
+    let original = if role == UiRole::ProjectDraft && original == Err(Error::Unsafe) && capture.origin.selected() {
+        observer_output_origin_returned(role, original, &mut capture, |private, clock| {
+            crate::output_origin_capsule::seal(private, || clock.is_some_and(|clock| clock.permitted(true)))
+        }, &mut std::io::stdout().lock())
+    } else { original };
     if !matches!(role, UiRole::Prerequisite | UiRole::NormalSmoke) || original.is_ok() { return original; }
     // Standard Write facade for the already-owned harness stdout. No new file,
     // HANDLE, alternate sink or close, and no additional owner-clock sample.
@@ -2928,9 +3105,12 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
             &parent, &current.sid, &mut clock, trace, &mut transitions)?;
         let after = files[artifact].stamp_traced(trace)?; selected.app_after_traced(&after.wire(), trace)?; artifact_after = Some(after.clone());
         trace.at(InputRole::AclOutput, Some(out as u8));
-        acl(&mut files, out, "normal-ui-output", FS::FILE_GENERIC_READ | FS::FILE_TRAVERSE | FS::FILE_ADD_FILE | FS::FILE_ADD_SUBDIRECTORY,
+        // Only this fixed ordinary C fixture needs the target's predeclared
+        // FILE_GENERIC_WRITE mapping for A0. No ancestor/file/other-role grant.
+        let fence_attributes = if role == UiRole::CredentialSession { FS::FILE_WRITE_EA | FS::FILE_WRITE_ATTRIBUTES } else { 0 };
+        acl(&mut files, out, "normal-ui-output", FS::FILE_GENERIC_READ | FS::FILE_TRAVERSE | FS::FILE_ADD_FILE | FS::FILE_ADD_SUBDIRECTORY | fence_attributes,
             &parent, &current.sid, &mut clock, trace, &mut transitions)?;
-        if matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) {
+        if matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss | UiRole::CredentialSession) {
             stage = "ui-synthetic-project";
             fixture = Some(Fixture::create(role, &output, &mut creates, &mut files, &parent, &current.sid,
                 &mut clock, trace, &mut transitions)?);
@@ -3142,6 +3322,10 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
     let native_sha = child_sha.map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".to_owned());
     let smoke_json = match smoke.as_ref() { Some(smoke) => smoke.json()?, None => "null".to_owned() };
     let fixture_json = match fixture.as_ref() {
+        Some(fixture) if role == UiRole::CredentialSession => {
+            need(fixture.initial_config && fixture.original_files.len() == 4)?;
+            "{\"initialFiles\":4,\"finalFiles\":9,\"immutableFilesVerified\":4,\"labelledCreateNew\":true,\"credentialSourceFiles\":5,\"credentialSourceMutations\":1,\"completeInventoryVerified\":true}".to_owned()
+        },
         Some(fixture) => format!("{{\"initialFiles\":{},\"finalFiles\":4,\"immutableFilesVerified\":{},\"labelledCreateNew\":{},\"completeInventoryVerified\":true}}",
             fixture.original_files.len(), fixture.original_files.len(), !fixture.initial_config),
         None => "null".to_owned(),
@@ -3151,7 +3335,7 @@ fn run_prerequisite_traced(role: UiRole, entry_tick: u64, trace: &mut InputTrace
         selected.app.command_sha, selected.owner.bytes, selected.owner.sha, selected.owner.command_sha, account_sha,
         role.owner(), role.entry(), original.returned, original.first_wait, original.exit_return, original.exit_output,
         original.process_close, original.thread_close, files.len(), files.len(), profile.delete_return,
-        if role == UiRole::ProjectDraft { 6 } else { 0 }, transitions.join(","));
+        role.verified_methods(), transitions.join(","));
     prerequisite_result!(trace, Z02, need(record.len() <= OWNER_LIMIT))?; clock.effect_traced(trace)?;
     trace.at(InputRole::Output, None);
     write_fixture_record_traced(&root.join(role.name("owner-result.private.json")), record.as_bytes(), OWNER_LIMIT, clock.end, trace)?;
@@ -3745,7 +3929,7 @@ mod contract_tests {
         children.get_mut(1).unwrap().3 = FileKind::File;
         let missing_directory = observer_output_source_relation(output, 5, Some(&parent), Some(&current), &children, &entry).unwrap();
         assert_eq!(missing_directory.available_mask, 23);
-        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
             let mut capture = ObserverCapture::default();
             capture.binding = Some(("a".repeat(40), "b".repeat(40), "123456".to_owned(), "c".repeat(64)));
             let original = capture.reader.scope(ObserverCaptureOperation::DirectoryEntry, Some(0), || {
@@ -3765,12 +3949,90 @@ mod contract_tests {
     }
 
     // END OUTPUT SOURCE RELATION OWNER TESTS
+    // BEGIN OUTPUT ORIGIN CAPSULE OWNER TESTS
+    fn observer_output_origin_capsule_contract() -> Result<()> {
+        struct Sink { writes: usize, flushes: usize, fail: bool, public: Vec<u8> }
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1; self.public.extend_from_slice(bytes);
+                if self.fail { Err(std::io::ErrorKind::Interrupted.into()) } else { Ok(bytes.len()) }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                if self.fail { Err(std::io::ErrorKind::Other.into()) } else { Ok(()) }
+            }
+        }
+        let metadata = Metadata { identity: FileIdentity { volume_serial: 0x1122_3344_5566_7788, file_id: [0x19; 16] },
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY, size: 0,
+            allocation_size: 0, links: 1, creation: 1, write: 1, change: 1 };
+        let binding = ("a".repeat(40), "b".repeat(40), "123456".to_owned(), "c".repeat(64));
+        let mut entry = DirectoryEntry { name: "inert-private-leaf".to_owned(), file_id: [0x27; 16],
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+        for (role, position, kind) in [(UiRole::QuitPassive, 0, FileKind::Directory),
+            (UiRole::DocumentLoss, 0, FileKind::Directory), (UiRole::NormalSmoke, 0, FileKind::Directory),
+            (UiRole::Prerequisite, 0, FileKind::Directory), (UiRole::ProjectDraft, 1, FileKind::Directory),
+            (UiRole::ProjectDraft, 2, FileKind::Directory), (UiRole::ProjectDraft, 3, FileKind::Directory),
+            (UiRole::ProjectDraft, 0, FileKind::File)] {
+            let mut capture = origin_data::Capture::default(); entry.kind = kind;
+            observer_output_origin_refused(role, position, Some(&binding), Some(&metadata), &entry, &mut capture);
+            assert!(!capture.selected());
+        }
+        entry.kind = FileKind::Directory;
+        for fail in [false, true] {
+            let mut capture = ObserverCapture::default(); capture.binding = Some(binding.clone());
+            let checked = ObserverProjection::decode(b"");
+            capture.origin.journal_returned(checked);
+            let original = capture.reader.scope(ObserverCaptureOperation::DirectoryEntry, Some(0), || {
+                observer_output_origin_refused(UiRole::ProjectDraft, 0, capture.binding.as_ref(), Some(&metadata), &entry, &mut capture.origin);
+                capture.reader.result::<()>(ObserverCaptureCheck::ExpectedChild, Err(Error::Unsafe))
+            });
+            let first = capture.reader.first();
+            let private = *capture.origin.private_buffer();
+            let other = DirectoryEntry { name: "must-not-replace-first".to_owned(), file_id: [0x38; 16],
+                kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+            observer_output_origin_refused(UiRole::ProjectDraft, 0, capture.binding.as_ref(), Some(&metadata), &other, &mut capture.origin);
+            assert!(capture.origin.private_buffer() == &private);
+            let mut sink = Sink { writes: 0, flushes: 0, fail, public: Vec::new() };
+            let mut calls = 0;
+            let returned = observer_output_origin_returned(UiRole::ProjectDraft, original, &mut capture, |private, clock| {
+                calls += 1; assert!(clock.is_none()); assert_eq!(private.begin_seal(), Ok(()));
+                origin_data::Reply::Sealed { key_id: [0x52; 32], ciphertext: [0x61; origin_data::CIPHERTEXT_BYTES] }
+            }, &mut sink);
+            assert_eq!(returned, original); assert_eq!(returned, Err(Error::Unsafe));
+            assert_eq!((calls, sink.writes, sink.flushes), (1, 1, 1));
+            assert_eq!(capture.reader.first(), first); assert_eq!(capture.projection, ObserverProjection::default());
+            let text = std::str::from_utf8(&sink.public).unwrap();
+            assert!(text.contains("\"checkedJournalContext\":{\"bytes\":0,\"records\":0,\"reason\":2"));
+            assert!(text.contains("\"inventoryComplete\":false"));
+            assert!(!text.contains("inert-private-leaf") && !text.contains("must-not-replace-first"));
+            assert!(!text.contains(&metadata.identity.volume_serial.to_string()));
+            assert!(!text.contains("1919191919191919") && !text.contains("2727272727272727"));
+        }
+        for (role, original, selected, unresolved) in [(UiRole::ProjectDraft, Ok(()), true, false),
+            (UiRole::ProjectDraft, Err(Error::Bounds), true, false), (UiRole::ProjectDraft, Err(Error::Unknown), true, false),
+            (UiRole::QuitPassive, Err(Error::Unsafe), true, false), (UiRole::ProjectDraft, Err(Error::Unsafe), false, false),
+            (UiRole::ProjectDraft, Err(Error::Unsafe), true, true)] {
+            let mut capture = ObserverCapture::default(); capture.unresolved = unresolved;
+            if selected {
+                capture.origin.journal_returned(ObserverProjection::decode(b""));
+                observer_output_origin_refused(UiRole::ProjectDraft, 0, Some(&binding), Some(&metadata), &entry, &mut capture.origin);
+            }
+            let mut sink = Sink { writes: 0, flushes: 0, fail: true, public: Vec::new() };
+            let returned = observer_output_origin_returned(role, original, &mut capture,
+                |_, _| panic!("unrelated or unresolved owner must not enter crypto"), &mut sink);
+            assert_eq!(returned, original); assert_eq!((sink.writes, sink.flushes), (0, 0));
+        }
+        Ok(())
+    }
+    // END OUTPUT ORIGIN CAPSULE OWNER TESTS
+
     fn observer_capture_failure_contract() -> Result<()> {
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
         use crate::ui_observer_diagnostic_data::ChildFinality;
         ObserverCaptureTrace::reader_contract()?;
         ObserverCaptureTrace::unexpected_entry_contract()?;
         observer_output_source_relation_contract()?;
+        observer_output_origin_capsule_contract()?;
         // Actual shared scalar decisions, not a child, clock or native fixture.
         for mask in 0..128u8 {
             let facts = ChildFinality { returned: mask & 1 != 0, created: mask & 2 != 0, signaled: mask & 4 != 0,
@@ -3852,7 +4114,7 @@ mod contract_tests {
         let original = capture.reader.scope(O::JournalOpen, Some(16), || capture.reader.native_result::<()>(Err(Error::Unavailable),
             ObserverCaptureNative::returned(Call::Open(0), Returned::Nt(0xc0000043u32 as i32)), None));
         let first = capture.reader.first(); let mut bytes = [0u8; 4096];
-        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
             let length = observer_capture_frame(role, &capture, &mut bytes).expect("bounded diagnostic");
             assert!(length <= 4096); let text = std::str::from_utf8(&bytes[..length]).expect("closed ASCII");
             assert!(text.contains("\"captureFailure\":{\"kind\":\"returned-error\",\"operation\":\"journal-open\""));
@@ -3894,7 +4156,7 @@ mod contract_tests {
                 assert_eq!(original, Err(Error::Unsafe));
             }
         }
-        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
             capture.reader = ObserverCaptureTrace::default();
             let entry = DirectoryEntry { name: "debug.log".to_owned(), file_id: [0x37; 16],
                 kind: FileKind::Directory, attributes: u32::MAX };
@@ -4178,7 +4440,7 @@ mod contract_tests {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::MainWindow);
             assert_eq!(windows(rows).select_root(bound.map(|hwnd| hwnd as F::HWND), &trace), Err(error));
             assert_eq!(trace.first.get(), Some(SmokeFault { phase: SmokePhase::MainWindow, check, error, status,
-                dashboard: None, main_binding_timeouts: None, dashboard_binding_timeouts: None, startup: StartupSample::new(), quit: None }));
+                dashboard: None, main_binding_timeouts: None, dashboard_binding_timeouts: None, dashboard_walk_timeouts: None, startup: StartupSample::new(), quit: None }));
         }
         let title = "Mobile Release Kit";
         accepts(vec![], None, None);
@@ -4379,6 +4641,140 @@ mod contract_tests {
             let count = smoke.originals.len(); assert_eq!(smoke.retire_initial_main_tail(retire), Err(Error::Unsafe));
             assert_eq!(smoke.originals.len(), count); // No release of the fake pointer or prefix.
         }
+    }
+
+    fn dashboard_walk_timeout_contract() {
+        // Inert DATA only. No invented pointer is invoked or released. The
+        // successful native traversal/release still requires the hosted owner.
+        fn fixture() -> Smoke {
+            let mut smoke = Smoke::new(); smoke.initialized = true;
+            for (index, kind) in [ComKind::Client, ComKind::Walker, ComKind::Element, ComKind::Element].into_iter().enumerate() {
+                let mut original = Box::new(ComOriginal::new(kind));
+                original.pointer = (index + 1) as *mut c_void; original.state = SlotState::Owned; original.status = 0;
+                smoke.originals.push(original);
+            }
+            smoke.client = Some(0); smoke.walker = Some(1); smoke.main = Some((5usize as F::HWND, 2, vec![42, 1]));
+            smoke.trace.phase.set(SmokePhase::Dashboard); smoke.trace.dashboard_begin_pass();
+            smoke.trace.dashboard_update(DashboardProgress::begin_walk);
+            smoke.trace.dashboard_update(|progress| progress.walk_visited(2)); smoke
+        }
+        fn begin(smoke: &mut Smoke, pointer: usize) -> usize {
+            let index = smoke.originals.len(); let mut original = Box::new(ComOriginal::new(ComKind::Element));
+            assert!(original.begin().is_ok()); original.pointer = pointer as *mut c_void;
+            smoke.originals.push(original); index
+        }
+        let timeout = A::UIA_E_TIMEOUT as i32;
+        let win32_timeout = windows::core::HRESULT::from_win32(F::ERROR_TIMEOUT).0;
+        for status in [timeout, win32_timeout] {
+            for (element, child) in [(2, true), (3, true), (3, false)] {
+                let mut smoke = fixture(); let index = begin(&mut smoke, 0); let calls = Cell::new(0);
+                let originals: Vec<_> = smoke.originals.iter().map(|original| &**original as *const ComOriginal).collect();
+                let main = smoke.main.clone();
+                assert_eq!(smoke.complete_dashboard_adjacent(element, child, 3, index, status,
+                    || { calls.set(calls.get() + 1); Ok(()) }), Ok(DashboardAdjacent::Invalidated));
+                assert_eq!(calls.get(), 1); assert_eq!(smoke.trace.dashboard_walk_timeouts.get(), 1);
+                assert_eq!(smoke.trace.dashboard.get().unwrap().stage, DashboardStage::WalkInvalidated);
+                assert!(!smoke.trace.dashboard.get().unwrap().any_walk_completed);
+                assert!(smoke.trace.dashboard.get().unwrap().current_match_mask.is_none());
+                assert_eq!(smoke.originals[index].state, SlotState::NoHandle); assert!(!smoke.originals[index].active);
+                assert_eq!(smoke.originals.iter().map(|original| &**original as *const ComOriginal).collect::<Vec<_>>(), originals);
+                assert_eq!(smoke.main, main); assert!(!smoke.passed() && !smoke.dashboard_ready);
+                assert!(!smoke.dashboard_walk_admitted(element, child, 3, smoke.originals.len()));
+            }
+        }
+        for (status, pointer, expected) in [
+            (0, 0, Ok(DashboardAdjacent::End)), (0, 8, Ok(DashboardAdjacent::Element(4))),
+            (1, 0, Err(Error::Unsafe)), (F::ERROR_TIMEOUT as i32, 0, Err(Error::Unsafe)),
+            (0x80004005u32 as i32, 0, Err(Error::Unsafe)),
+            (timeout, 8, Err(Error::Unknown)), (win32_timeout, 8, Err(Error::Unknown)),
+            (HRESULT_PENDING, 0, Err(Error::Unknown)),
+        ] {
+            let mut smoke = fixture(); let index = begin(&mut smoke, pointer);
+            assert_eq!(smoke.complete_dashboard_adjacent(3, false, 3, index, status, || Ok(())), expected);
+            assert_eq!(smoke.trace.dashboard_walk_timeouts.get(), 0);
+            assert_eq!(smoke.unknown, expected == Err(Error::Unknown));
+            assert_eq!(smoke.originals.len(), 5); assert!(!smoke.passed());
+        }
+        // Independent boundary failures, not permutations of equivalent data.
+        for denied in 0..29 {
+            let mut smoke = fixture(); let mut element = 3; let mut child = false; let mut keep = 3;
+            let index = begin(&mut smoke, 0);
+            match denied {
+                0 => smoke.trace.phase.set(SmokePhase::QuitDialog),
+                1 => smoke.trace.phase.set(SmokePhase::QuitInvoke),
+                2 => smoke.trace.dashboard_begin_pass(),
+                3 => smoke.trace.dashboard.set(None),
+                4 => smoke.dashboard_ready = true,
+                5 => smoke.windows.post_entered = true,
+                6 => smoke.invoke_entered = true,
+                7 => smoke.quit_confirmed = true,
+                8 => smoke.unknown = true,
+                9 => smoke.settled = true,
+                10 => { let _ = smoke.trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None); },
+                11 => smoke.initialized = false,
+                12 => smoke.uninit_entered = true,
+                13 => smoke.uninit_returned = true,
+                14 => smoke.windows.active = true,
+                15 => smoke.query.active = true,
+                16 => smoke.query.unknown = true,
+                17 => smoke.query.bstr = 1usize as *mut c_void,
+                18 => smoke.query.array = 1usize as *mut CO::SAFEARRAY,
+                19 => smoke.main.as_mut().unwrap().2.clear(),
+                20 => smoke.client = Some(1),
+                21 => smoke.originals[1].state = SlotState::Closed,
+                22 => { keep = 4; element = 2; child = true; }, // Extra retained original is not an adopted prefix.
+                23 => element = 2, // Sibling of main escapes the original subtree.
+                24 => element = index, // The output slot is not a query input.
+                25 => smoke.originals[3].status = 1,
+                26 => smoke.originals[3].active = true,
+                27 => smoke.originals.push(Box::new(ComOriginal::new(ComKind::Element))), // Not the output tail.
+                28 => smoke.originals[index].state = SlotState::Unknown,
+                _ => unreachable!(),
+            }
+            let first = smoke.trace.first.get(); let count = smoke.originals.len(); let calls = Cell::new(0);
+            assert!(smoke.complete_dashboard_adjacent(element, child, keep, index, timeout,
+                || { calls.set(calls.get() + 1); Ok(()) }).is_err());
+            assert_eq!(calls.get(), 1); assert_eq!(smoke.trace.dashboard_walk_timeouts.get(), 0);
+            assert_eq!(smoke.originals.len(), count); if first.is_some() { assert_eq!(smoke.trace.first.get(), first); }
+            if denied == 28 { assert_eq!(smoke.originals[index].state, SlotState::Unknown); assert!(smoke.unknown); }
+            assert!(!smoke.passed());
+        }
+        let mut late = fixture(); let index = begin(&mut late, 0);
+        assert_eq!(late.complete_dashboard_adjacent(3, false, 3, index, timeout, || Err(Error::Unsafe)), Err(Error::Unsafe));
+        let first = late.trace.first.get().unwrap(); assert_eq!(first.check, SmokeCheck::Clock);
+        assert_eq!(first.dashboard_walk_timeouts, Some(1)); assert_eq!(late.originals.len(), 5);
+        assert_eq!(first.dashboard.unwrap().stage, DashboardStage::WalkInvalidated);
+        late.trace.dashboard_walk_timeouts.set(9);
+        let _ = late.trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None);
+        assert_eq!(late.trace.first.get(), Some(first));
+        let mut overflow = fixture(); overflow.trace.dashboard_walk_timeouts.set(u16::MAX);
+        let index = begin(&mut overflow, 0); let calls = Cell::new(0);
+        assert_eq!(overflow.complete_dashboard_adjacent(3, false, 3, index, timeout,
+            || { calls.set(calls.get() + 1); Ok(()) }), Err(Error::Bounds));
+        assert_eq!(calls.get(), 1); assert_eq!(overflow.trace.dashboard_walk_timeouts.get(), u16::MAX);
+        assert_eq!(overflow.trace.first.get().unwrap().check, SmokeCheck::DashboardWalkTimeoutCount);
+        // A returned null slot may be retired, not an uncertain original.
+        let mut retirement = fixture(); retirement.originals[3].state = SlotState::NoHandle;
+        retirement.originals[3].pointer = null_mut(); assert_eq!(retirement.release_suffix(3), Ok(()));
+        assert_eq!(retirement.originals.len(), 3);
+        let mut retained = fixture(); retained.originals[3].state = SlotState::Unknown;
+        assert_eq!(retained.release_suffix(3), Err(Error::Unknown)); assert_eq!(retained.originals.len(), 4);
+        // Bind the policy DATA to its only production route; the quit/action
+        // route deliberately keeps strict acquire_return and never retries.
+        let source = include_str!("ordinary_owner_ui.rs");
+        let strict = source.split_once("    fn adjacent(").unwrap().1.split_once("    fn dashboard_walk_admitted(").unwrap().0;
+        assert!(strict.contains("self.acquire_return(index, status, true, clock,"));
+        assert!(!strict.contains("complete_dashboard_adjacent"));
+        let walk = source.split_once("    fn walk(").unwrap().1.split_once("    fn release_suffix(").unwrap().0;
+        assert_eq!(walk.matches("return Ok(DashboardWalk::Invalidated)").count(), 2);
+        assert!(!walk.contains("self.adjacent("));
+        let observe = source.split_once("    fn observe(&mut self, launch:").unwrap().1.split_once("    fn settle(&mut self)").unwrap().0;
+        let invalidation = observe.split_once("DashboardWalk::Invalidated => {").unwrap().1.split_once("continue;").unwrap().0;
+        assert!(invalidation.find("self.release_suffix(keep)?;").unwrap() < invalidation.find("self.windows.root(").unwrap());
+        assert!(invalidation.contains("Some(hwnd)") && invalidation.contains("Duration::from_millis(100)"));
+        assert_eq!(invalidation.matches("clock.effect()").count(), 2);
+        let quit = source.split_once("    fn quit_walk(").unwrap().1.split_once("    fn quit_native_container(").unwrap().0;
+        assert!(quit.contains("self.adjacent(")); assert!(!quit.contains("self.dashboard_adjacent("));
     }
 
     fn dashboard_main_handle_readiness_contract() {
@@ -4730,7 +5126,7 @@ mod contract_tests {
         assert_eq!(observe.matches("self.dashboard_name(index, keep, clock)?").count(), 1);
         let dashboard = block(observe, "        self.trace.phase.set(SmokePhase::Dashboard);",
             "        self.trace.phase.set(SmokePhase::CloseRequest);");
-        assert!(dashboard.contains("self.bound(launch, clock)?; let keep = self.originals.len();\n            let elements = self.walk(element, clock)?;"));
+        assert!(dashboard.contains("self.bound(launch, clock)?; let keep = self.originals.len();\n            let elements = match self.walk(element, keep, clock)? {"));
         assert!(dashboard.contains("let mut pass = DashboardPass::new();"));
         assert!(dashboard.contains("DashboardNameRead::Invalidated => { pass.finish(DashboardScanEnd::Stale); break; }"));
         let released = dashboard.split_once("self.release_suffix(keep)?;").unwrap().1;
@@ -5230,14 +5626,14 @@ mod contract_tests {
             assert_eq!(inventory.matches(&format!("output_result!({name},")).count(), 1, "{name}");
         }
         assert_eq!(inventory.matches("native.next_entries(&entries[index].0)").count(), 1);
-        assert_eq!(inventory.matches("clock.effect_traced(trace)").count(), 11);
-        assert_eq!(inventory.matches("native.read_next(&original, LIMIT)").count(), 2);
-        assert_eq!(inventory.matches("native.read_next(&original, 1)").count(), 2);
-        assert_eq!(inventory.matches("native.no_alternate_streams(&original)").count(), 2);
+        assert_eq!(inventory.matches("clock.effect_traced(trace)").count(), 12);
+        assert_eq!(inventory.matches("native.read_next(&original, LIMIT)").count(), 3);
+        assert_eq!(inventory.matches("native.read_next(&original, 1)").count(), 3);
+        assert_eq!(inventory.matches("native.no_alternate_streams(&original)").count(), 3);
         assert_eq!(inventory.matches("observer_journal_poststate(").count(), 1);
         for predicate in [
             "need(parts.len() < 16)",
-            "predicate!(O::DirectoryEntry, Some(position), EntryUnique, seen.insert(entry.name.clone()))\n                        && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= 6)",
+            "predicate!(O::DirectoryEntry, Some(position), EntryUnique, seen.insert(entry.name.clone()))\n                        && predicate!(O::DirectoryEntry, Some(position), EntryLimit, seen.len() <= if role == UiRole::CredentialSession && position == 0 { 10 } else { 6 })",
             "need(entry.file_id == entries[index].1.identity.file_id)",
             "need(entry.file_id == entries[parent].1.identity.file_id)",
             "children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe)",
@@ -5347,7 +5743,7 @@ mod contract_tests {
         let create = source.split_once("impl Fixture {").unwrap().1
             .split_once("// Independent post-exit full output inventory.").unwrap().0;
         assert!(create.contains("(path.join(\"app\").join(\"build.gradle.kts\"), UI_FIXTURE_SOURCE)"));
-        assert!(create.contains("&path.join(\"release\").join(\"mobile-release.json\"), UI_FIXTURE_CONFIG"));
+        assert!(create.contains("&path.join(\"release\").join(\"mobile-release.json\"), if role == UiRole::CredentialSession { UI_CREDENTIAL_CONFIG } else { UI_FIXTURE_CONFIG }"));
         let post = source.split_once("fn output_poststate(").unwrap().1
             .split_once("fn ").unwrap().0;
         assert!(post.contains("&project_path.join(\"release\").join(\"mobile-release.json\"), false, FS::FILE_GENERIC_READ"));
@@ -5364,10 +5760,10 @@ mod contract_tests {
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
-        dashboard_name_observation_contract(); dashboard_stale_name_contract();
+        dashboard_name_observation_contract(); dashboard_stale_name_contract(); dashboard_walk_timeout_contract();
         startup_diagnostic_contract();
         quit_logical_controls_contract();
-        for role in [UiRole::NormalSmoke, UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+        for role in [UiRole::NormalSmoke, UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
             normal_ui_launch_directory_contract(role).expect("closed normal-UI scratch routing");
         }
         output_inventory_diagnostic_contract();
@@ -5551,7 +5947,7 @@ mod contract_tests {
             assert_eq!(trace.result::<u8>(SmokeCheck::CurrentName, Err(error), Some(SmokeStatus::Hresult(saved.get()))), Err(error));
             let first = SmokeFault { phase: SmokePhase::Dashboard, check: SmokeCheck::CurrentName,
                 error, status: Some(SmokeStatus::Hresult(i32::MIN)), dashboard: None, main_binding_timeouts: Some(0),
-                dashboard_binding_timeouts: Some(0), startup: StartupSample::new(), quit: None };
+                dashboard_binding_timeouts: Some(0), dashboard_walk_timeouts: Some(0), startup: StartupSample::new(), quit: None };
             saved.set(0); trace.phase.set(SmokePhase::DriverSettle);
             assert_eq!(trace.result(SmokeCheck::Clock, Ok(false), None), Ok(false));
             assert_eq!(trace.result::<()>(SmokeCheck::ArrayDestroy, Err(Error::Unknown), Some(SmokeStatus::Hresult(saved.get()))), Err(Error::Unknown));
@@ -5637,7 +6033,7 @@ mod contract_tests {
             for status in [None, Some(SmokeStatus::Hresult(i32::MIN)), Some(SmokeStatus::Hresult(i32::MAX)),
                 Some(SmokeStatus::Win32(u32::MAX))] {
                 let fault = SmokeFault { phase: longest_phase, check: longest_check, error: Error::Unavailable, status, dashboard,
-                    main_binding_timeouts: Some(u16::MAX), dashboard_binding_timeouts: Some(u16::MAX), startup: StartupSample {
+                    main_binding_timeouts: Some(u16::MAX), dashboard_binding_timeouts: Some(u16::MAX), dashboard_walk_timeouts: Some(u16::MAX), startup: StartupSample {
                         availability: StartupAvailability::Missing, last: Some((widest_word, longest_phase)) }, quit: None };
                 let mut raw = [0u8; 1024]; let size = SmokeTrace::format(fault, &mut raw).unwrap();
                 let text = std::str::from_utf8(&raw[..size]).unwrap();

@@ -87,25 +87,25 @@ macro_rules! gtk_fixture {
 }
 macro_rules! installed_session_command {
     ($state:expr, $kind:ident, $observed:ident) => {
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation", not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))))]
         let $observed = $state.observation.clone();
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation", not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))))]
         if let Some(q) = &$observed { q.session_request(installed_observation::SessionCommand::$kind); }
     };
 }
 macro_rules! installed_session_result {
     ($observed:ident, Prepare, $result:expr) => {
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation", not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))))]
         if let Some(q) = &$observed { q.session_prepare_result($result); }
     };
     ($observed:ident, $kind:ident, $result:expr) => {
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation", not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))))]
         if let Some(q) = &$observed { q.session_result(installed_observation::SessionCommand::$kind,$result); }
     };
 }
 macro_rules! installed_session_input {
     ($observed:ident, $method:ident, $($arg:expr),+) => {
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation", not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))))]
         if let Some(q) = &$observed { q.$method($($arg),+); }
     };
 }

@@ -818,6 +818,10 @@ test('live session help explains actual collection and does not promise restored
   assert.match(keystore.fields.find((field) => field.id === 'storePassword').failure, /accepts the write-only value/u);
   assert.doesNotMatch(keystore.fields.find((field) => field.id === 'storePassword').failure, /No password is entered/u);
   assert.deepEqual(keystore.fields.find((field) => field.id === 'file').suffixes, ['.jks', '.keystore']);
+  assert.match(keystore.fields.find((field) => field.id === 'file').where, /admitted Linux or Apple-silicon Mac session.*private original outside registered project/);
+  const android = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'android-firebase'));
+  assert.match(android.fields[0].where, /intended Android app.*google-services\.json.*admitted Linux or Apple-silicon Mac session/);
+  assert.match(android.fields[0].failure, /application-ID mismatch.*No Firebase service is contacted/);
   assert.match(sessionControlHelp(guide, 'save').failure, /never restores assignment automatically/u);
   assert.doesNotMatch(sessionControlHelp(guide, 'save').failure, /preserves prior authority|No save is available/u);
   assert.match(sessionControlHelp(guide, 'project').format, /Submission is not validation/u);
@@ -847,7 +851,7 @@ test('live session help explains actual collection and does not promise restored
   assert.deepEqual(guide, original);
 });
 
-test('Apple and ASC UI reuse the original write-only lifetime without file-path or browser-storage collection', () => {
+test('Android, Apple and ASC UI reuse the original write-only lifetime without file-path or browser-storage collection', () => {
   const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
   assert.match(component, /type="password".*autoComplete="new-password"/);
   assert.ok(component.includes("state.selectionKind === 'apple-p12' ? { password: fields.password ?? null }"));
@@ -857,6 +861,11 @@ test('Apple and ASC UI reuse the original write-only lifetime without file-path 
   assert.match(component, /P12 envelope only: the password has not been tested/);
   assert.match(component, /CMS envelope only: this does not establish an Apple issuer/);
   assert.match(component, /P8 envelope and EC\/P-256 identifiers only: no mathematical private-key validity.*Store access has been verified/);
+  assert.match(component, /state\.selectionKind === 'android-keystore' \?\s*\{ storePassword: fields\.storePassword \?\? null, keyAlias: fields\.keyAlias \?\? null, keyPassword: fields\.keyPassword \?\? null \}/u);
+  assert.match(component, /Project dependency access<\/strong> rather than Android or iOS/);
+  assert.match(component, /Admitted Linux or Apple-silicon Mac sessions can collect supported Android inputs and ASC P8/);
+  assert.match(component, /Windows import and binary plist are unavailable/);
+  assert.doesNotMatch(component, /Windows import, ASC P8 and binary plist are unavailable/);
   assert.doesNotMatch(component, /type="file"|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b/);
 });
 

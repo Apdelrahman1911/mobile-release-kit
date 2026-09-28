@@ -1087,6 +1087,7 @@ WINDOWS_NORMAL_UI_ROLES = {
     "project-draft": ("observer-process-main", "project"),
     "quit-passive": ("observer-process-main", "quit"),
     "document-loss": ("observer-process-main", "document"),
+    "credential-session": ("observer-process-main", "credential"),
 }
 WINDOWS_NORMAL_UI_PROBE_REASONS = (
     "ordinary-context", "interactive-desktop", "managed-webview2", "webview2-overrides",
@@ -1097,6 +1098,11 @@ WINDOWS_NORMAL_UI_CASE_CHECKS = {
         "validate-suggest-preview", "refresh-draft-preserved", "source-change-observed", "only-labelled-fixture-mutation"),
     "quit-passive": ("native-quit-cancel", "native-quit-confirm", "passive-original-outstanding", "original-owner-retired"),
     "document-loss": ("native-picker-outstanding", "passive-original-outstanding", "original-document-loss", "no-late-publication", "no-rebind"),
+    "credential-session": ("native-private-source-captures", "bounded-native-source-refusals", "native-picker-core-assessment",
+        "cancel-without-material", "replace-and-remove", "stale-origin-registry-preserved", "memory-session-teardown"),
+}
+WINDOWS_NORMAL_UI_CASE_METHODS = {
+    "normal-smoke": 0, "project-draft": 6, "quit-passive": 0, "document-loss": 0, "credential-session": 1,
 }
 WINDOWS_NATIVE_DECLARED_FEATURES = {
     "qualification-result": [], "runtime-publication": [],
@@ -1135,6 +1141,7 @@ WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
     "ordinary_owner::normal_ui::contract_tests::prerequisite_diagnostic_sink_checks_one_write_one_flush_without_outcome_change",
     "ordinary_owner::normal_ui::contract_tests::prerequisite_return_guard_keeps_unknown_and_deadline_semantics",
     "ordinary_owner::normal_ui::contract_tests::prerequisite_helper_decisions_preserve_native_control_flow",
+    "qualification_result::credential_ui_contract::closed_credential_result_never_claims_six_passive_methods",
     "ui::folder_navigation::tests::initial_callbacks_cannot_arm_a_request_or_accept",
     "ui::folder_navigation::tests::request_and_navigation_hint_are_separate_from_one_accept",
     "ui::folder_navigation::tests::pre_accept_change_waits_without_spending_or_reissuing",
@@ -1148,10 +1155,39 @@ WINDOWS_NORMAL_UI_SCALAR_TESTS = (
     "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
     "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality",
 )
+WINDOWS_NORMAL_UI_CREDENTIAL_TESTS = {
+    "native": (
+        "ui::dialog::tests::credential_choosers_require_the_live_document_and_private_single_file_policy",
+        "ui::dialog::tests::credential_name_readback_is_exact_and_pending_text_keeps_its_original",
+        "vault_fs::tests::construction_and_early_stop_are_data_only_and_one_shot",
+        "vault_fs::tests::native_completion_data_distinguishes_refusal_pending_and_corroboration",
+        "vault_fs::tests::first_native_failure_survives_later_stop_and_cleanup_data",
+        "vault_fs::tests::cleanup_expiry_retains_original_reservation_without_retry",
+        "vault_fs::tests::outstanding_frame_blocks_cleanup_and_reentry_without_native_calls",
+        "vault_fs::tests::cleanup_callback_unwind_cannot_publish_finality_or_renew_the_attempt",
+        "vault_fs::tests::directory_identity_and_edge_use_all_bits_and_exact_spelling",
+        "vault_dpapi::tests::fixed_inputs_and_outputs_refuse_before_copy_or_native_entry",
+        "vault_dpapi::tests::release_attempt_and_unknown_are_monotonic_without_native_calls",
+        "vault_dpapi::tests::cleanup_unknown_drops_private_value_and_preserves_original_failure",
+        "vault_dpapi::tests::first_refusal_time_precedes_and_survives_delayed_cleanup_data",
+        "vault_dpapi::tests::first_failed_free_time_is_not_an_eventual_return_or_success_clock",
+        "vault_dpapi::tests::fixed_candidate_consumes_synchronously_and_owned_wipe_clears_bytes",
+        "vault_dpapi::tests::refusal_has_no_extractable_candidate_or_false_cleanup_refund",
+        "ui_observer_diagnostic_data::tests::directory_fence_settled_success_and_negative_rows_are_bounded",
+        "ui_observer_diagnostic_data::tests::directory_fence_unknown_presence_and_cleanup_never_publish",
+        "ui_observer_diagnostic_data::tests::directory_fence_projection_keeps_one_original_with_first_refusal",
+        "ui_observer_diagnostic_data::tests::all_distinct_records_fit_unchanged_bounds",
+    ),
+    "session": (
+        "runtime::windows_version::loader_path_tests::windows_session_assessment_needs_normal_selection_and_the_original_binding",
+        "shell::installed_observation::credential_session::tests::command_input_and_return_order_refuse_duplicates_and_stale_replacement",
+        "shell::installed_observation::credential_session::tests::dom_wait_cache_requires_same_revision_payload_and_nonrenewing_review",
+    ),
+}
 WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES = ("windows-normal-ui-setup-acquire", "windows-normal-ui-setup-compile")
 WINDOWS_NORMAL_UI_SETUP_DATA_PHASES = ("windows-normal-ui-setup-preflight", "windows-normal-ui-setup-stage-finalize",
     "windows-normal-ui-setup-publish-finalize", "windows-normal-ui-setup-publication-finalize")
-WINDOWS_NORMAL_UI_GUI_ROLES = ("normal-smoke", "project-draft", "quit-passive", "document-loss")
+WINDOWS_NORMAL_UI_GUI_ROLES = ("normal-smoke", "project-draft", "quit-passive", "document-loss", "credential-session")
 WINDOWS_NORMAL_UI_GUI_BUILD_PHASES = ("windows-normal-ui-gui-acquire", "windows-normal-ui-gui-compile")
 WINDOWS_NORMAL_UI_GUI_DATA_PHASES = tuple("windows-normal-ui-" + role + suffix
     for role in WINDOWS_NORMAL_UI_GUI_ROLES for suffix in ("-preflight", "-finalize"))
@@ -1163,9 +1199,14 @@ WINDOWS_NORMAL_UI_MATERIAL_PACKAGES = {
     "webview2-com-sys": "0.38.2", "windows": "0.61.3",
 }
 WINDOWS_NORMAL_UI_COMMON_CONTROLS_MANIFEST_SHA256 = "4636f3ba46080315ac3277d473d433b79c00863c9cdca1c93c0c83554c6a3d43"
+WINDOWS_NORMAL_UI_CASE_COVERAGE = {
+    "normal-smoke": "normal-binary-bootstrap", "project-draft": "project-snapshot-and-draft",
+    "quit-passive": "quit-with-passive-work", "document-loss": "native-document-loss",
+    "credential-session": "minimal-memory-credential-session",
+}
 WINDOWS_NORMAL_UI_NOT_VERIFIED = (
-    "normal-binary-bootstrap", "project-snapshot-and-draft", "quit-with-passive-work",
-    "native-document-loss", "configuration-save", "msi-assembly-installation-and-session",
+    *WINDOWS_NORMAL_UI_CASE_COVERAGE.values(),
+    "credential-native-refusal-matrix", "configuration-save", "msi-assembly-installation-and-session",
     "other-windows-images", "protected-main-delivery",
 )
 
@@ -1588,12 +1629,12 @@ WINDOWS_INSTALLED_APP_LOCK_LOCALS = {
     "zbus": "5.19.0",
 }
 # Fixed current Windows roles, not an allowlist derived from supplied metadata.
-# The common parsers do not enable any Apple native or signing operation.
+# Common DATA parsers and private-PEM scratch enable no Apple native/signing operation.
 WINDOWS_INSTALLED_APP_DIRECT_ROLES = frozenset({
     ("getrandom", "0.3.4"), ("serde", "1.0.228"), ("serde_json", "1.0.145"),
     ("sha2", "0.10.9"), ("tokio", "1.48.0"), ("mrk-windows-installed-native", "0.1.0"),
     ("plist", "1.10.1"), ("quick-xml", "0.42.0"), ("pkcs12", "0.1.0"),
-    ("cms", "0.2.3"), ("der", "0.7.10"),
+    ("cms", "0.2.3"), ("der", "0.7.10"), ("zeroize", "1.9.0"),
 })
 WINDOWS_INSTALLED_APP_INERT = (
     "runtime::windows_version::tests::windows_manifest_and_observed_inventory_are_exact",
@@ -2643,6 +2684,7 @@ TOOL_CHECKS = frozenset({
     "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
     "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
     "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+    "windows-normal-ui-credential-metadata", "windows-normal-ui-credential-compile-only", "windows-normal-ui-credential-regression",
     "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
     "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
     "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
@@ -2925,6 +2967,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
         "windows-normal-ui-native-metadata", "windows-normal-ui-native-compile-only",
         "windows-normal-ui-native-policy", "windows-normal-ui-scalar-metadata",
         "windows-normal-ui-scalar-compile-only", "windows-normal-ui-scalar-regression",
+        "windows-normal-ui-credential-metadata", "windows-normal-ui-credential-compile-only", "windows-normal-ui-credential-regression",
         "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
         "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
         "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
@@ -12279,8 +12322,10 @@ def windows_installed_native_graph(value: object, *, source: Path, features: lis
     return packages
 
 
-def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path, root: Path) -> dict:
-    """The one cheap locked native graph, not a permissive app-graph variant."""
+def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path, root: Path,
+                                   observer_data: bool = False) -> dict:
+    """Cheap native or separately selected observer DATA; never an app graph."""
+    require(type(observer_data) is bool, "Windows UI native graph role differs")
     registry = "registry+https://github.com/rust-lang/crates.io-index"
     require(type(lock) is dict and lock.get("version") == 4 and type(lock.get("package")) is list
             and len(lock["package"]) == len(WINDOWS_NORMAL_UI_NATIVE_PACKAGES), "Windows UI native lock differs")
@@ -12374,10 +12419,11 @@ def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path,
             edges.append(edge["pkg"])
         require(len(edges) == len(expected) and set(edges) == expected, "Windows UI native edge tables differ")
         nodes[node["id"]] = node
-    require(nodes[native]["features"] == ["desktop-ui"]
+    require(nodes[native]["features"] == (["desktop-ui", "desktop-ui-dialogs", "windows-installed-observation"]
+                if observer_data else ["desktop-ui"])
             and {(packages[item]["name"], packages[item]["version"]) for item in nodes[native]["dependencies"]}
                 == {("windows-sys", "0.61.2"), ("windows", "0.61.3"), ("webview2-com", "0.38.2"), ("windows-core", "0.61.2")},
-            "Windows UI cheap probe selected additional features or a GUI graph")
+            "Windows UI native graph differs from its exact selected feature role")
     seen, pending = set(), [native]
     while pending:
         item = pending.pop()
@@ -12676,7 +12722,8 @@ def windows_normal_ui_gui_argv(cargo: str, context: dict, *, observer: bool) -> 
         "--message-format=json"]
 
 
-def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path, root: Path) -> dict:
+def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path, root: Path,
+                                      inert_libtest: bool = False) -> dict:
     """Validate the complete original stream, including actual host/target units.
 
     Nonmaterial registry units may use a proper metadata-union subset because
@@ -12684,6 +12731,8 @@ def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path
     retained, locally closed and source/lock bound; no host/target union is
     credited as an actual compiler unit. Exact local/browser roles stay closed.
     """
+    require(type(inert_libtest) is bool and (not inert_libtest or graph.get("observer") is True),
+            "Windows GUI inert libtest requires the exact observer graph")
     require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows GUI compiler stream exceeds its bound")
     lines = raw.splitlines()
     require(0 < len(lines) <= 8192, "Windows GUI compiler message count exceeds its bound")
@@ -12725,7 +12774,7 @@ def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path
             continue
         kind = target.get("kind")
         require(kind in (["lib"], ["rlib"], ["proc-macro"], ["custom-build"])
-                or key == app and (kind == ["bin"] or graph["observer"] and kind == ["test"]),
+                or not inert_libtest and key == app and (kind == ["bin"] or graph["observer"] and kind == ["test"]),
                 "Windows GUI compiler selected an unrelated executable/test")
         features = row.get("features")
         require(type(features) is list and all(type(name) is str for name in features) and features == sorted(set(features))
@@ -12761,7 +12810,7 @@ def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path
                 "Windows GUI compiler proc-macro/build unit is not host-bound")
         if key in (app, native) and kind != ["custom-build"]:
             require(scope == "target", "Windows GUI actual app/native unit is not target-bound")
-        require(not profile["test"] or key == app and graph["observer"] and kind == ["test"],
+        require(not profile["test"] or key == app and graph["observer"] and kind == (["lib"] if inert_libtest else ["test"]),
                 "Windows GUI compiler selected an unrelated test-profile unit")
         units.append({"packageId": key, "target": target["name"], "kind": kind, "scope": scope, "features": features,
                       "testProfile": profile["test"], "filenames": filenames})
@@ -12769,7 +12818,7 @@ def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path
             scripts.add(key)
         executable = row.get("executable")
         if executable is not None:
-            if graph["observer"] and key == app and kind == ["bin"]:
+            if not inert_libtest and graph["observer"] and key == app and kind == ["bin"]:
                 # Cargo may build this intermediate solely for CARGO_BIN_EXE.
                 # It has observer features and is NEVER normal-smoke evidence.
                 require(auxiliary is None and target.get("name") == "mobile-release-kit-desktop"
@@ -12779,17 +12828,18 @@ def windows_normal_ui_gui_compiler_data(raw: bytes, graph: dict, *, source: Path
                         and executable in filenames, "Windows GUI observer auxiliary package-bin differs")
                 auxiliary = executable
                 continue
-            require(found is None and key == app and target.get("kind") == (["test"] if graph["observer"] else ["bin"])
-                    and target.get("name") == ("installed-shell-observation" if graph["observer"] else "mobile-release-kit-desktop")
+            require(found is None and key == app and target.get("kind") == (["lib"] if inert_libtest else ["test"] if graph["observer"] else ["bin"])
+                    and target.get("name") == ("mobile_release_desktop" if inert_libtest else "installed-shell-observation" if graph["observer"] else "mobile-release-kit-desktop")
                     and target.get("src_path") == str(source / WINDOWS_INSTALLED_APP /
-                        ("tests/installed_shell_observation.rs" if graph["observer"] else "src/main.rs"))
+                        ("src/lib.rs" if inert_libtest else "tests/installed_shell_observation.rs" if graph["observer"] else "src/main.rs"))
                     and profile["debug_assertions"] is True and profile["test"] is graph["observer"] and row.get("fresh") is False,
                     "Windows GUI original executable role/profile differs")
             found = windows_executable_path(executable, target_root=root / "target")
             if graph["observer"]:
                 require(found.parent == root / "target" / TARGETS["windows"] / "debug/deps"
-                        and re.fullmatch(r"installed_shell_observation-[0-9a-f]{16}\.exe", found.name) is not None,
-                        "Windows GUI observer must be its original harness=false compiler artifact")
+                        and re.fullmatch((r"mobile_release_desktop" if inert_libtest else r"installed_shell_observation")
+                            + r"-[0-9a-f]{16}\.exe", found.name) is not None,
+                        "Windows GUI observer executable differs from its exact libtest/process-main role")
             else:
                 require(found == root / "target" / TARGETS["windows"] / "debug/mobile-release-kit-desktop.exe",
                         "Windows GUI normal compiler artifact path differs")
@@ -14526,6 +14576,7 @@ WINDOWS_NORMAL_UI_OBSERVER_STEPS = {
     "project-draft": "Own one project-draft application and settle its original ordinary-account resources",
     "quit-passive": "Own one quit-passive application and settle its original ordinary-account resources",
     "document-loss": "Own one document-loss application and settle its original ordinary-account resources",
+    "credential-session": "Own one credential-session application and settle its original ordinary-account resources",
 }
 
 
@@ -14733,11 +14784,76 @@ def windows_normal_ui_observer_startup(value: object) -> tuple[int, bool]:
     return event, refused
 
 
+WINDOWS_DIRECTORY_FENCE_STAGES = (
+    "not-started", "token", "mapping", "ancestor-open", "target-open", "inheritance", "ntfs", "metadata", "streams",
+    "directory-identity", "target-identity", "ancestor-edge", "context-before-fence", "fence", "postcheck",
+    "mapping-after-fence", "context-after-fence", "complete", "cleanup",
+)
+WINDOWS_DIRECTORY_FENCE_CLASSES = ("not-run", "supported", "unavailable", "refused-before-fence", "stopped", "unknown")
+
+
+def windows_normal_ui_directory_fence(value: object) -> list:
+    """Closed actual A0 DATA, not an API invocation or durability/credential pass.
+
+    Tuple: stage, class, first failure[stage,error,stopped], requested target mask,
+    last-open index/mask/IO, fence IO, STOP, cleanup. IO is[entered,unsigned
+    NTSTATUS,unsigned IOSB status,information]. Cleanup is[attempted,expired,
+    outcome,attempts,closed,no-handle,unresolved,first-error]. Codes mirror the
+    finite Rust DATA enums; only a returned, positively settled probe publishes.
+    """
+    require(type(value) is list and len(value) == 10, "Windows directory-fence tuple differs")
+    stage, category, failure, target, index, access, opened, fence, stop, cleanup = value
+    require(type(stage) is int and stage == 18 and integer_between(category, 2, 5)
+            and type(target) is int and target == 0x1201b7 and type(stop) is bool,
+            "Windows directory-fence completed stage/class/target differs")
+
+    def completed_io(row):
+        require(type(row) is list and len(row) == 4 and type(row[0]) is bool,
+                "Windows directory-fence IO fields differ")
+        entered, status, iosb, information = row
+        require((status is None or integer_between(status, 0, 2**32 - 1))
+                and (iosb is None or integer_between(iosb, 0, 2**32 - 1))
+                and (information is None or integer_between(information, 0, 2**64 - 1)),
+                "Windows directory-fence IO scalar differs")
+        require((not entered and status is iosb is information is None)
+                or (entered and type(status) is int and
+                    ((status == 0 and type(iosb) is int and iosb == 0 and information is not None)
+                     or (status >> 30 == 3 and iosb is information is None))),
+                "Windows directory-fence IO is unreturned, unknown or contradictory")
+
+    completed_io(opened); completed_io(fence)
+    require((index is None and type(access) is int and access == 0 and opened == [False, None, None, None])
+            or (integer_between(index, 0, 44) and type(access) is int and access in (0x1200a1, 0x1201b7)),
+            "Windows directory-fence last-open identity position/mask differs")
+    require(not fence[0] or (integer_between(index, 1, 44) and access == 0x1201b7 and opened == [True, 0, 0, 1]),
+            "Windows directory-fence entered without the original opened target")
+    require(type(cleanup) is list and len(cleanup) == 8, "Windows directory-fence cleanup fields differ")
+    attempted, expired, outcome, attempts, closed, no_handle, unresolved, first_error = cleanup
+    require(attempted is True and type(expired) is bool and type(outcome) is int and outcome == 1
+            and all(integer_between(count, 0, 48) for count in (attempts, closed, no_handle, unresolved))
+            and unresolved == 0 and first_error is None and attempts <= closed and closed + no_handle <= 48
+            and (not expired or stop), "Windows directory-fence original cleanup is not known settled")
+    require(not opened[0] or (closed >= index + int(opened[1] == 0) and (opened[1] == 0 or no_handle > 0)),
+            "Windows directory-fence close counts contradict the original directory chain")
+    if failure is None:
+        require(category == 2 and fence[0] and fence[1] == fence[2] == 0 and not stop and not expired,
+                "Windows directory-fence support lacks actual timely original success")
+    else:
+        require(type(failure) is list and len(failure) == 3 and integer_between(failure[0], 1, 18)
+                and integer_between(failure[1], 1, 4) and type(failure[2]) is bool,
+                "Windows directory-fence first failure differs")
+        require((failure[2] and category == 5 and failure[1] == 1 and stop)
+                or (not failure[2] and category == (3 if fence[0] else 4)),
+                "Windows directory-fence first failure was replaced or misclassified")
+    return list(value)
+
+
 def windows_normal_ui_observer_row(value: object) -> dict:
-    closed_object(value, {"sequence", "event", "step", "pending", "pendingStep", "dispatch", "flags",
-                          "startup", "refusal", "coverageIncomplete"}, "Windows observer row fields differ")
-    for key, lower, upper in (("sequence", 1, 64), ("event", 1, 6), ("step", 1, 43), ("pending", 0, 4),
-                              ("pendingStep", 0, 43), ("dispatch", 0, 200), ("flags", 0, 65535), ("refusal", 0, 34)):
+    keys = {"sequence", "event", "step", "pending", "pendingStep", "dispatch", "flags", "startup", "refusal", "coverageIncomplete"}
+    require(type(value) is dict, "Windows observer row is not an object")
+    closed_object(value, keys | ({"directoryFence"} if value.get("event") == 7 else set()), "Windows observer row fields differ")
+    for key, lower, upper in (("sequence", 1, 64), ("event", 1, 7), ("step", 1, 44), ("pending", 0, 4),
+                              ("pendingStep", 0, 44), ("dispatch", 0, 200), ("flags", 0, 65535), ("refusal", 0, 42)):
         require(integer_between(value[key], lower, upper), "Windows observer row scalar differs")
     require(type(value["coverageIncomplete"]) is bool, "Windows observer coverage is not Boolean")
     pending = value["pending"]
@@ -14750,6 +14866,10 @@ def windows_normal_ui_observer_row(value: object) -> dict:
             "Windows observer startup event differs")
     require(value["event"] != 4 or startup is not None and startup[1], "Windows observer startup refusal differs")
     require(value["event"] != 5 or value["refusal"] > 0, "Windows observer refusal is absent")
+    if value["event"] == 7:
+        require((value["step"], value["pending"], value["pendingStep"], value["dispatch"]) == (1, 2, 1, 0),
+                "Windows directory-fence snapshot is not the original Bootstrap pending claim")
+        windows_normal_ui_directory_fence(value["directoryFence"])
     return dict(value)
 
 
@@ -14758,7 +14878,10 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
     require(type(raw) is bytes and 0 < len(raw) <= 4096 and raw.isascii() and raw.startswith(b"\n" + WINDOWS_NORMAL_UI_OBSERVER_PREFIX)
             and raw.endswith(b"\n") and raw.count(b"\n") == 2 and b"\r" not in raw,
             "Windows observer projection envelope differs")
-    frame = bounded_json(raw[1 + len(WINDOWS_NORMAL_UI_OBSERVER_PREFIX):-1], 4096, max_nodes=128)
+    # Four copies of the same bounded A0 row can occupy the historical first/
+    # last slots:177 nodes,178 with the existing optional captureFailure:null.
+    # Keep all byte/depth/global limits; this is not a generic budget increase.
+    frame = bounded_json(raw[1 + len(WINDOWS_NORMAL_UI_OBSERVER_PREFIX):-1], 4096, max_nodes=178)
     keys = {"schema", "source", "tree", "run", "attempt", "role", "request", "diagnosticOnly", "projection"}
     require(type(frame) is dict and set(frame) in (keys, keys | {"captureFailure"}), "Windows observer projection fields differ")
     require(type(frame["schema"]) is int and frame["schema"] == 1 and type(frame["attempt"]) is int and frame["attempt"] == 1
@@ -14768,14 +14891,14 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
             and type(frame["run"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", frame["run"]) is not None
             and sha256_value(frame["request"]), "Windows observer projection binding differs")
     projection = frame["projection"]
-    closed_object(projection, {"bytes", "records", "reason", "last", "observerRefusal", "startupRefusal"},
+    closed_object(projection, {"bytes", "records", "reason", "last", "observerRefusal", "startupRefusal", "directoryFence"},
                   "Windows observer summary fields differ")
-    require(integer_between(projection["bytes"], 0, 32768) and integer_between(projection["records"], 0, 55)
+    require(integer_between(projection["bytes"], 0, 32768) and integer_between(projection["records"], 0, 57)
             and integer_between(projection["reason"], 0, 6), "Windows observer summary scalar differs")
     rows = {key: windows_normal_ui_observer_row(projection[key]) if projection[key] is not None else None
-            for key in ("last", "observerRefusal", "startupRefusal")}
+            for key in ("last", "observerRefusal", "startupRefusal", "directoryFence")}
     last = rows["last"]
-    require((last is None and projection["records"] == 0 and rows["observerRefusal"] is rows["startupRefusal"] is None)
+    require((last is None and projection["records"] == 0 and all(row is None for row in rows.values()))
             or (last is not None and last["sequence"] == projection["records"] and projection["bytes"] >= projection["records"]),
             "Windows observer summary sequence differs")
     require(projection["reason"] not in (0, 6) or last is not None, "Windows observer observed prefix is empty")
@@ -14792,6 +14915,11 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
             "Windows observer startup first refusal differs")
     require(last is None or last["startup"] is None or not windows_normal_ui_observer_startup(last["startup"])[1] or first is not None,
             "Windows observer startup first refusal is missing")
+    retained_fence = rows["directoryFence"]
+    require(retained_fence is None or retained_fence["event"] == 7 and frame["role"] == "credential-session",
+            "Windows directory-fence observation belongs to another authenticated role")
+    require(all(row is None or row["event"] != 7 or row == retained_fence for row in rows.values()),
+            "Windows directory-fence first observation is missing or duplicated")
     for first in rows.values():
         require(first is None or last is not None and first["sequence"] <= last["sequence"], "Windows observer first/last order differs")
         for other in rows.values():
@@ -15151,7 +15279,7 @@ def windows_normal_ui_child_data(request_raw: bytes, child_raw: bytes, *, root: 
             **dict.fromkeys(("ordinaryContext", "interactiveDesktop", "managedRuntime", "overrideFree", "privateParent"), available),
             "runtimeVersion": version, "managedRuntimeRefusal": diagnostic, "originalsSettled": True, "noWebviewCreated": True}
     else:
-        observed = {"runtimeBindingMatched": True, "verifiedMethods": 6 if role == "project-draft" else 0,
+        observed = {"runtimeBindingMatched": True, "verifiedMethods": WINDOWS_NORMAL_UI_CASE_METHODS[role],
             "checks": list(WINDOWS_NORMAL_UI_CASE_CHECKS[role]), "finality": dict.fromkeys((
                 "dialogsSettled", "sourcesSettled", "passiveOwnersSettled", "documentHooksSettled", "relayJoined", "exitReady"), True)}
     expected = {"schemaVersion": 1, **{key: request[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "role")},
@@ -15964,17 +16092,23 @@ def windows_normal_ui_acquired(context: dict) -> tuple[dict, dict]:
     return compiler, facts
 
 
-def windows_normal_ui_inert_argv(artifact: dict, *, scalar: bool = False) -> list[str]:
-    require(type(scalar) is bool, "Windows UI inert selection role differs")
-    names = WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+def windows_normal_ui_inert_names(*, scalar: bool = False, credential: str | None = None) -> tuple[str, ...]:
+    require(type(scalar) is bool and (credential is None or type(credential) is str
+            and credential in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS and not scalar), "Windows UI inert selection role differs")
+    return (WINDOWS_NORMAL_UI_CREDENTIAL_TESTS[credential] if credential is not None else
+            WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS)
+
+
+def windows_normal_ui_inert_argv(artifact: dict, *, scalar: bool = False, credential: str | None = None) -> list[str]:
+    names = windows_normal_ui_inert_names(scalar=scalar, credential=credential)
     return [artifact["path"], *names, "--exact", "--nocapture", "--test-threads=1"]
 
 
-def windows_normal_ui_inert_output(raw: bytes, *, scalar: bool = False) -> dict:
+def windows_normal_ui_inert_output(raw: bytes, *, scalar: bool = False, credential: str | None = None) -> dict:
     """Observe the real filtered count; never infer coverage from compilation."""
     require(type(scalar) is bool and type(raw) is bytes and 0 < len(raw) <= 64 << 10 and raw.isascii(),
             "Windows UI inert output shape differs")
-    names = WINDOWS_NORMAL_UI_SCALAR_TESTS if scalar else WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS
+    names = windows_normal_ui_inert_names(scalar=scalar, credential=credential)
     lines = [line.strip() for line in raw.decode("ascii").splitlines() if line.strip()]
     match = re.fullmatch(r"test result: ok\. [0-9]+ passed; 0 failed; 0 ignored; 0 measured; "
                          r"([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1]) if lines else None
@@ -16056,10 +16190,13 @@ def windows_normal_ui_policy_failure_data(stdout: bytes | None, stderr: bytes | 
         return unavailable
 
 
-def windows_normal_ui_inert_facts(context: dict, artifact: dict, identity: str, *, scalar: bool = False) -> dict:
+def windows_normal_ui_inert_facts(context: dict, artifact: dict, identity: str, *, scalar: bool = False,
+                                credential: str | None = None) -> dict:
     require(windows_normal_ui_profile(context) and type(scalar) is bool, "Windows UI inert evidence role differs")
+    windows_normal_ui_inert_names(scalar=scalar, credential=credential)
     root = Path(context["root"])
-    prefix = "normal-ui-scalar" if scalar else "normal-ui-native-policy"
+    prefix = ("normal-ui-credential-" + credential if credential is not None else
+              "normal-ui-scalar" if scalar else "normal-ui-native-policy")
     records, blobs = {}, {}
     for role in ("stdout", "stderr"):
         path = root / (prefix + "." + role)
@@ -16071,10 +16208,10 @@ def windows_normal_ui_inert_facts(context: dict, artifact: dict, identity: str, 
                          "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
         blobs[role] = raw
     require(blobs["stderr"] == b"", "Windows UI inert original emitted unexpected diagnostics")
-    argv = windows_normal_ui_inert_argv(artifact, scalar=scalar)
+    argv = windows_normal_ui_inert_argv(artifact, scalar=scalar, credential=credential)
     return {"compiledTest": artifact, "artifactNativeIdentity": windows_ordinary_identity(identity),
         "invocation": argv, "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
-        "outputs": records, "result": windows_normal_ui_inert_output(blobs["stdout"], scalar=scalar),
+        "outputs": records, "result": windows_normal_ui_inert_output(blobs["stdout"], scalar=scalar, credential=credential),
         "originalExitCode": 0, "originalWaitReturned": True, "originalWritersClosed": True,
         "inertPolicyOnly": True, "nativeAvailabilityObserved": False, "guiNotStarted": True}
 
@@ -16131,6 +16268,8 @@ def windows_normal_ui_probe_transitions(value: object, request: dict, after_iden
     require(type(value) is list and len(value) == 7, "Windows UI probe ACL roster differs")
     identities, public = set(), []
     for row, (role, mask) in zip(value, WINDOWS_NORMAL_UI_PROBE_ACLS, strict=True):
+        if request["role"] == "credential-session" and role == "normal-ui-output":
+            mask |= 0x110 # Exact extra write-EA/write-attributes on this output only.
         row = closed_object(row, {"role", "mask", "before", "after", "securityBefore", "securityAfter", "singleExplicitNoninheritingAce"},
                             "Windows UI probe ACL fields differ")
         before, after = windows_ordinary_stamp(row["before"]), windows_ordinary_stamp(row["after"])
@@ -16381,9 +16520,16 @@ def windows_normal_ui_gui_records(context: dict, request_raw: bytes, owner_raw: 
     # Every created fixture file retains BOTH its once-closed CREATE_NEW writer
     # and its authenticated read original in the native files book. ProjectDraft
     # also adds the later config reader; lifecycle fixtures start with config.
-    count = ancestors + {"normal-smoke": 11, "project-draft": 22, "quit-passive": 23, "document-loss": 23}[role]
-    fixture = (None if role == "normal-smoke" else {"initialFiles": 3 if role == "project-draft" else 4, "finalFiles": 4,
-        "immutableFilesVerified": 3 if role == "project-draft" else 4, "labelledCreateNew": role == "project-draft",
+    # Credential sources are five child-created private files in the existing
+    # output directory; the parent retains five post-exit read originals, not
+    # invented parent CREATE_NEW writers or another directory/ACL transition.
+    count = ancestors + {"normal-smoke": 11, "project-draft": 22, "quit-passive": 23, "document-loss": 23,
+        "credential-session": 28}[role]
+    fixture = (None if role == "normal-smoke" else {"initialFiles": 3 if role == "project-draft" else 4,
+        "finalFiles": 9 if role == "credential-session" else 4,
+        "immutableFilesVerified": 3 if role == "project-draft" else 4,
+        "labelledCreateNew": role in ("project-draft", "credential-session"),
+        **({"credentialSourceFiles": 5, "credentialSourceMutations": 1} if role == "credential-session" else {}),
         "completeInventoryVerified": True})
     fixed = {**binding, "qualificationProfile": WINDOWS_NORMAL_UI_PROFILE,
         "artifactBytes": request["appArtifactBytes"], "artifactSha256": request["appArtifactSha256"], "commandSha256": request["appCommandSha256"],
@@ -16395,7 +16541,7 @@ def windows_normal_ui_gui_records(context: dict, request_raw: bytes, owner_raw: 
         "profileAbsentBefore": True, "profileOriginalBound": True, "profileHivesUnloaded": True, "profileDeleteCalls": 1,
         "profileAbsentAfter": True, "profileOriginalsSettled": True, "accountRemovedAfterProfileSettlement": True,
         "outputInventoryVerified": True, "observationCompleted": True, "prerequisitesAvailable": None,
-        "verifiedMethods": 6 if role == "project-draft" else 0, "nativeResultSha256": native_sha,
+        "verifiedMethods": WINDOWS_NORMAL_UI_CASE_METHODS[role], "nativeResultSha256": native_sha,
         "normalSmoke": observation if role == "normal-smoke" else None, "fixture": fixture,
         "ownerResult": {"createNew": True, "writeCalls": 1, "closeGate": "original-owner-exit-zero-required"}}
     returns = {"createReturn", "exitReturn", "processCloseReturn", "threadCloseReturn", "profileDeleteReturn"}
@@ -17094,12 +17240,125 @@ def windows_normal_ui_scalar_build(context: dict, cargo: str, environment: dict,
     return facts
 
 
+def windows_normal_ui_credential_argv(cargo: str, context: dict, role: str) -> list[str]:
+    require(windows_normal_ui_profile(context) and type(role) is str and role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS,
+            "Windows credential DATA compiler role differs")
+    native = role == "native"
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+        "--manifest-path", str(Path(context["source"]) / (WINDOWS_INSTALLED_CRATE if native else WINDOWS_INSTALLED_APP) / "Cargo.toml"),
+        "--target-dir", str(Path(context["root"]) / "target"), "--features",
+        "windows-installed-observation" if native else ",".join(windows_normal_ui_features("observer")),
+        "--lib", "--no-run", "--message-format=json"]
+
+
+def windows_normal_ui_credential_graph(context: dict, role: str) -> dict:
+    require(windows_normal_ui_profile(context) and type(role) is str and role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS,
+            "Windows credential DATA graph role differs")
+    if role == "session":
+        return windows_normal_ui_app_metadata(context, observer=True)
+    root, source = Path(context["root"]), Path(context["source"])
+    value = bounded_json(windows_installed_bytes(root / "normal-ui-credential-native-metadata.json", 8 << 20),
+                         8 << 20, max_nodes=200000)
+    try:
+        lock = tomllib.loads(windows_installed_bytes(source / WINDOWS_INSTALLED_CRATE / "Cargo.lock", 256 << 10).decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        raise CheckFailure("Windows credential native DATA source lock is malformed") from None
+    return windows_normal_ui_native_graph(value, lock, source=source, root=root, observer_data=True)
+
+
+def windows_normal_ui_credential_artifact(context: dict, role: str) -> dict:
+    graph = windows_normal_ui_credential_graph(context, role)
+    root, source = Path(context["root"]), Path(context["source"])
+    messages = root / ("normal-ui-credential-" + role + "-compile-messages.jsonl")
+    raw = windows_installed_bytes(messages, 16 << 20)
+    path = (windows_normal_ui_native_test_path(raw, graph, source=source, root=root) if role == "native" else
+            Path(windows_normal_ui_gui_compiler_data(raw, graph, source=source, root=root, inert_libtest=True)["path"]))
+    before = path.lstat()
+    record = windows_installed_record(path, 128 << 20 if role == "native" else 512 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()),
+            "Windows credential DATA original artifact changed")
+    # Preserve each existing original-reader contract: native uses the legacy
+    # five-field named epoch, while the app libtest uses its full file state.
+    identity = (list(windows_installed_state(before)) if role == "session" else
+                [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns])
+    return {"path": str(path), **record, "identity": identity,
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_normal_ui_credential_facts(context: dict) -> dict:
+    require(windows_normal_ui_profile(context), "Windows credential DATA requires its exact profile")
+    compiler, _ = windows_normal_ui_acquired(context)
+    regressions = {}
+    for role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS:
+        artifact = windows_normal_ui_credential_artifact(context, role)
+        identity = windows_ordinary_original(artifact, app_role=role == "session")
+        regressions[role] = {"compilerInvocationSha256": hashlib.sha256(canonical_json(
+            windows_normal_ui_credential_argv(compiler["cargo"]["path"], context, role))).hexdigest(),
+            "originalCompilerExitCode": 0,
+            **windows_normal_ui_inert_facts(context, artifact, identity, credential=role)}
+    root = Path(context["root"])
+    return {"nativeFeatures": ["desktop-ui", "desktop-ui-dialogs", "windows-installed-observation"],
+        "appFeatures": windows_normal_ui_features("observer"),
+        "nativeMetadata": windows_installed_record(root / "normal-ui-credential-native-metadata.json", 8 << 20),
+        "appMetadata": windows_installed_record(root / "observer-metadata.json", 16 << 20), "regressions": regressions}
+
+
+def windows_normal_ui_credential_build(context: dict, cargo: str, environment: dict, deadline: float) -> dict:
+    """Five selected DATA tests in two real libtests; never the harness=false main.
+
+    Reuse the already acquired exact locked graphs and original compile-phase
+    endpoint. No native UI/account/source capture is executed by these tests.
+    Both builds precede the observer/normal artifact epochs in the same target.
+    """
+    require(windows_normal_ui_profile(context), "Windows credential DATA build requires its exact profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    paths = [root / "normal-ui-credential-native-metadata.json", root / "normal-ui-credential-native-acquire.stderr"]
+    paths += [root / ("normal-ui-credential-" + role + suffix) for role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS
+              for suffix in ("-compile-messages.jsonl", "-compile.stderr", ".stdout", ".stderr")]
+    windows_normal_ui_absent((*windows_normal_ui_normal_paths(context), *paths))
+    with paths[0].open("x", encoding="utf-8", newline="\n") as output, paths[1].open("x", encoding="utf-8") as diagnostics:
+        run([cargo, "metadata", "--locked", "--offline", "--format-version", "1", "--no-default-features",
+             "--features", "windows-installed-observation", "--filter-platform", TARGETS["windows"],
+             "--manifest-path", str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")],
+            check="windows-normal-ui-credential-metadata", cwd=root, env=environment,
+            timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+    require(output.closed and diagnostics.closed, "Windows credential DATA metadata writers did not close")
+    windows_normal_ui_credential_graph(context, "native")
+    observed = {}
+    for role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS:
+        prefix = "normal-ui-credential-" + role
+        with (root / (prefix + "-compile-messages.jsonl")).open("x", encoding="utf-8", newline="\n") as output, \
+                (root / (prefix + "-compile.stderr")).open("x", encoding="utf-8") as diagnostics:
+            run(windows_normal_ui_credential_argv(cargo, context, role), check="windows-normal-ui-credential-compile-only",
+                cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 1800), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows credential DATA compiler writers did not close")
+        artifact = windows_normal_ui_credential_artifact(context, role)
+        identity = windows_ordinary_original(artifact, app_role=role == "session")
+        with (root / (prefix + ".stdout")).open("x", encoding="utf-8", newline="\n") as output, \
+                (root / (prefix + ".stderr")).open("x", encoding="utf-8") as diagnostics:
+            run(windows_normal_ui_inert_argv(artifact, credential=role), check="windows-normal-ui-credential-regression",
+                cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows credential DATA regression writers did not close")
+        require(same_compile_json(artifact, windows_normal_ui_credential_artifact(context, role))
+                and identity == windows_ordinary_original(artifact, app_role=role == "session"),
+                "Windows credential DATA regression changed its original artifact")
+        observed[role] = windows_normal_ui_inert_facts(context, artifact, identity, credential=role)
+    facts = windows_normal_ui_credential_facts(context)
+    require(all(same_compile_json(observed[role], {key: facts["regressions"][role][key] for key in observed[role]})
+                for role in WINDOWS_NORMAL_UI_CREDENTIAL_TESTS), "Windows credential DATA originals changed before their receipt")
+    windows_normal_ui_absent(windows_normal_ui_normal_paths(context))
+    return facts
+
+
 def windows_normal_ui_gui_compile_facts(context: dict, probe: dict, publication: dict, normal: dict, observer: dict,
-                                       normal_identity: str, observer_identity: str, auxiliary: dict, scalar: dict) -> dict:
+                                       normal_identity: str, observer_identity: str, auxiliary: dict, scalar: dict,
+                                       credential: dict) -> dict:
     root = Path(context["root"])
     compiler, _ = windows_normal_ui_acquired(context)
     require(same_compile_json(scalar, windows_normal_ui_scalar_facts(context)),
             "Windows GUI compilation changed the original scalar regression or its outputs")
+    require(same_compile_json(credential, windows_normal_ui_credential_facts(context)),
+            "Windows GUI compilation changed the original credential DATA regressions or their outputs")
     observations = {}
     for role, artifact in (("normal", normal), ("observer", observer)):
         graph, parsed, _ = windows_normal_ui_gui_messages(context, observer=role == "observer")
@@ -17113,10 +17372,13 @@ def windows_normal_ui_gui_compile_facts(context: dict, probe: dict, publication:
         "normalFeatures": windows_normal_ui_features("app"), "observerFeatures": windows_normal_ui_features("observer"),
         "normalApp": normal, "observer": observer, "normalNativeIdentity": windows_ordinary_identity(normal_identity),
         "observerNativeIdentity": windows_ordinary_identity(observer_identity), "compilerObservations": observations,
-        "observerAuxiliary": auxiliary, "inertScalar": scalar, "compileOrder": ["scalar", "observer", "normal"],
+        "observerAuxiliary": auxiliary, "inertScalar": scalar, "inertCredential": credential,
+        "compileOrder": ["scalar", "credential-native-data", "credential-session-data", "observer", "normal"],
         "normalInvocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=False))).hexdigest(),
         "observerInvocationSha256": hashlib.sha256(canonical_json(windows_normal_ui_gui_argv(compiler["cargo"]["path"], context, observer=True))).hexdigest(),
         "originalExitCodes": {"frontendTypecheck": 0, "frontendAssets": 0, "scalarCompiler": 0, "scalarRegression": 0,
+                              "credentialNativeCompiler": 0, "credentialNativeRegression": 0,
+                              "credentialSessionCompiler": 0, "credentialSessionRegression": 0,
                               "observer": 0, "normal": 0}, "guiNotStarted": True}
 
 
@@ -17129,7 +17391,8 @@ def windows_normal_ui_gui_compiled(context: dict) -> tuple[dict, dict, dict, dic
     saved = read_bounded_json(root / "windows-normal-ui-gui-compile-checks.json", 256 << 10)
     require(type(saved) is dict, "Windows GUI original compiler receipt is absent")
     facts = windows_normal_ui_gui_compile_facts(context, probe, record, normal, observer,
-        saved.get("normalNativeIdentity"), saved.get("observerNativeIdentity"), auxiliary, saved.get("inertScalar"))
+        saved.get("normalNativeIdentity"), saved.get("observerNativeIdentity"), auxiliary, saved.get("inertScalar"),
+        saved.get("inertCredential"))
     require(same_compile_json(read_bounded_json(root / "observer-compiled-artifact.json", 64 << 10), observer)
             and same_compile_json(saved, windows_installed_phase_receipt(context, "windows-normal-ui-gui-compile", **facts))
             and same_compile_json(read_bounded_json(root / "windows-normal-ui-gui-compile-started.json", 64 << 10),
@@ -17291,8 +17554,9 @@ def windows_normal_ui_gui_build(name: str, context: dict, deadline: float) -> No
             require(output.closed and diagnostics.closed, "Windows GUI frontend original compiler writers did not close")
         windows_normal_ui_frontend_files(context)
         scalar = windows_normal_ui_scalar_build(context, cargo, environment, deadline)
+        credential = windows_normal_ui_credential_build(context, cargo, environment, deadline)
         windows_normal_ui_absent(windows_normal_ui_normal_paths(context))
-        # Scalar -> observer -> normal share one target. The observer-feature
+        # Scalar + credential DATA -> observer -> normal share one target. The observer-feature
         # auxiliary is never normal; only Cargo replaces that recorded interim.
         for role, observer_selected in (("observer", True), ("normal-app", False)):
             if not observer_selected:
@@ -17325,7 +17589,7 @@ def windows_normal_ui_gui_build(name: str, context: dict, deadline: float) -> No
                 and observer_identity == windows_ordinary_original(observer, ui_role="observer"),
                 "Windows GUI normal compile changed the original observer")
         facts = windows_normal_ui_gui_compile_facts(context, probe, record, normal, observer,
-            windows_ordinary_original(normal, ui_role="normal"), observer_identity, auxiliary, scalar)
+            windows_ordinary_original(normal, ui_role="normal"), observer_identity, auxiliary, scalar, credential)
     require(same_compile_json((probe, publication, record), windows_normal_ui_gui_base(context)),
             "Windows GUI build changed the original cheap owner or finalized runtime publication")
     windows_installed_inputs(context)
@@ -17385,7 +17649,7 @@ def windows_normal_ui_case_data(context: dict, role: str, compiled: dict, public
 def windows_normal_ui_case_chain(context: dict, through: str | None, *, finalized: bool) -> tuple[dict, list[dict], dict]:
     """Reconstruct earlier ACL epochs from their CLOSED originals, then open latest.
 
-    The shared observer is intentionally granted to three distinct accounts.
+    The shared observer is intentionally granted to four distinct accounts.
     Earlier finalizers must not reopen it expecting stale ChangeTime. Instead,
     every original request/transition/finalizer forms one exact chain; only its
     latest admitted post-transition epoch is compared to a fresh descriptor.
@@ -17506,13 +17770,22 @@ def windows_normal_ui_retain(context: dict) -> None:
                     "normalArtifact": {key: compiled["normalApp"][key] for key in ("size", "sha256", "messages")},
                     "observerArtifact": {key: compiled["observer"][key] for key in ("size", "sha256", "messages")},
                     "compilerObservations": compiled["compilerObservations"], "normalFeatures": compiled["normalFeatures"],
-                    "observerFeatures": compiled["observerFeatures"], "compileOrder": compiled["compileOrder"]}}
+                    "observerFeatures": compiled["observerFeatures"], "compileOrder": compiled["compileOrder"],
+                    "credentialData": {"nativeFeatures": compiled["inertCredential"]["nativeFeatures"],
+                        "appFeatures": compiled["inertCredential"]["appFeatures"],
+                        "regressions": {selected: {
+                            "compiledTest": {key: regression["compiledTest"][key] for key in ("size", "sha256", "messages")},
+                            "compilerInvocationSha256": regression["compilerInvocationSha256"],
+                            "outputs": {part: {key: value[key] for key in ("size", "sha256")}
+                                        for part, value in regression["outputs"].items()},
+                            "result": regression["result"], "inertPolicyOnly": regression["inertPolicyOnly"],
+                            "nativeAvailabilityObserved": regression["nativeAvailabilityObserved"]}
+                            for selected, regression in compiled["inertCredential"]["regressions"].items()}}}}
             except (OSError, ValueError, CheckFailure, KeyError, TypeError):
-                gui = {"status": "invalid", "facts": None}
+                gui, cases = {"status": "invalid", "facts": None}, []
             break  # A failed later original is not relabeled as an earlier success.
     complete = len(cases) == len(WINDOWS_NORMAL_UI_GUI_ROLES)
-    verified_names = dict(zip(WINDOWS_NORMAL_UI_GUI_ROLES, WINDOWS_NORMAL_UI_NOT_VERIFIED[:4], strict=True))
-    completed = {verified_names[item["role"]] for item in cases}
+    completed = {WINDOWS_NORMAL_UI_CASE_COVERAGE[item["role"]] for item in cases}
     summary = {"schemaVersion": 1, "scope": WINDOWS_NORMAL_UI_PROFILE,
         **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "imageOS", "imageVersion")},
         "rust": RUST, "target": TARGETS["windows"], "nativeFeatures": ["desktop-ui"], "prerequisite": result,

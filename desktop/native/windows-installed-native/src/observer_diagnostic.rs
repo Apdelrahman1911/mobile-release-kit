@@ -531,7 +531,7 @@ impl ObserverCaptureTrace {
             });
             assert_eq!(calls.get(), 1); (original, trace)
         }
-        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
             use ObserverExpectedName as N;
             let names = [(N::Result, role.name("result.private.json")), (N::Journal, role.name(data::SUFFIX)),
                 (N::Project, "project".to_owned()), (N::App, "app".to_owned()), (N::Release, "release".to_owned()),
@@ -703,7 +703,7 @@ impl ObserverCaptureTrace {
         let relation = data::OutputDirectoryRelation { available_mask: 31, roster_mask: 4, exact_name_mask: 0, identity_mask: 8 };
         let entry = DirectoryEntry { name: "private-unlisted-directory".to_owned(), file_id: [0x37; 16],
             kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
-        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
             let trace = Self::default();
             let original = trace.scope(O::DirectoryEntry, Some(0), || {
                 trace.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(relation));
@@ -842,7 +842,7 @@ const APPEND_ACCESS: u32 = FS::FILE_APPEND_DATA | FS::FILE_READ_ATTRIBUTES | FS:
 #[repr(C, align(8))]
 struct StreamBuffer([u8; 40]);
 
-fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss) }
+fn observer_role(role: UiRole) -> bool { matches!(role, UiRole::ProjectDraft | UiRole::QuitPassive | UiRole::DocumentLoss | UiRole::CredentialSession) }
 fn fixed_leaf(role: UiRole, output: &Path) -> Result<PathBuf> {
     need(observer_role(role) && output.file_name().and_then(|name| name.to_str()) == Some(role.name("output").as_str()))?;
     fixed_path(output.to_str().ok_or(Error::Unsafe)?)?;
@@ -1056,6 +1056,9 @@ pub(crate) struct ObserverDiagnosticOriginal {
 }
 #[cfg(test)]
 impl ObserverDiagnosticOriginal {
+    pub(crate) fn project_closed_rows(&self, raw: &[u8]) -> data::Projection {
+        data::Projection::decode_for_role(raw, self.role == UiRole::CredentialSession)
+    }
     pub(crate) fn new(role: UiRole, output: &Path, parent: &[u8], account: &[u8], clock: Arc<ObserverDiagnosticClock>) -> Result<Self> {
         let path = fixed_leaf(role, output)?; let (acl, acl_size) = append_acl(parent, account)?;
         Ok(Self { file: JournalFile::new(&path, clock.ceiling())?, path, role, parent: parent.to_vec(), account: account.to_vec(),
@@ -1127,7 +1130,7 @@ impl ObserverDiagnosticOriginal {
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub struct ObserverDiagnostic {
     path: PathBuf, identity: Identity, parent: Vec<u8>, account: Vec<u8>, acl: Box<Aligned>, acl_size: usize,
-    end: Instant, order: JournalOrder, latch: Latch, startup: AtomicU64, bytes: AtomicUsize,
+    role: UiRole, end: Instant, order: JournalOrder, latch: Latch, startup: AtomicU64, bytes: AtomicUsize,
 }
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 impl ObserverDiagnostic {
@@ -1149,7 +1152,7 @@ impl ObserverDiagnostic {
         let account = unhex(&std::env::var("MRK_WINDOWS_ORDINARY_SID").map_err(|_| Error::State)?)?;
         let (acl, acl_size) = append_acl(&parent, &account)?;
         deadline(Some(end))?;
-        Ok(Self { path, identity, parent, account, acl, acl_size, end, order: JournalOrder::default(),
+        Ok(Self { path, identity, parent, account, acl, acl_size, role, end, order: JournalOrder::default(),
             latch: Latch::default(), startup: AtomicU64::new(0), bytes: AtomicUsize::new(0) })
     }
     pub fn refuse(&self, reason: Refusal) { self.latch.refuse(reason); }
@@ -1173,10 +1176,22 @@ impl ObserverDiagnostic {
         self.emit(if word.first_refusal { Event::StartupRefusal } else { Event::Startup(word.event) },
             self.latch.snapshot(), Some(raw), permitted);
     }
+    pub fn directory_fence(&self, snapshot: Snapshot, observed: crate::DirectoryFenceObservation,
+        permitted: &dyn Fn() -> bool) {
+        // The existing native owner supplies actual returned/settled scalars.
+        // This does not run/resample the probe or authorize any Store action.
+        let value = observed_directory_fence(observed);
+        if self.role != UiRole::CredentialSession || !value.publishable() { self.order.unavailable(); return; }
+        self.emit_with_fence(Event::DirectoryFence, snapshot, self.startup_word(), Some(value), permitted);
+    }
     fn emit(&self, event: Event, snapshot: Snapshot, startup: Option<u64>, permitted: &dyn Fn() -> bool) {
+        self.emit_with_fence(event, snapshot, startup, None, permitted);
+    }
+    fn emit_with_fence(&self, event: Event, snapshot: Snapshot, startup: Option<u64>,
+        directory_fence: Option<data::DirectoryFence>, permitted: &dyn Fn() -> bool) {
         let Some(permit) = self.order.begin(event) else { return; };
         let mut raw = Frame::default();
-        if permit.record(&mut raw, snapshot, startup, self.latch.first()).is_err()
+        if permit.record_with_fence(&mut raw, snapshot, startup, self.latch.first(), directory_fence).is_err()
             || self.append_original(raw.bytes(), permitted).is_err() { self.order.disable(); }
         // Permit drops only an atomic gate. No mutex spans any native operation.
     }
@@ -1208,4 +1223,40 @@ impl ObserverDiagnostic {
         }
         need(observed == R::Complete)?; file.check(permitted)?; self.bytes.store(next, Ordering::SeqCst); Ok(())
     }
+}
+
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+fn observed_directory_fence(value: crate::DirectoryFenceObservation) -> data::DirectoryFence {
+    fn stage(value: crate::DirectoryFenceStage) -> data::FenceStage {
+        use crate::DirectoryFenceStage as N; use data::FenceStage as D;
+        match value {
+            N::NotStarted => D::NotStarted, N::Token => D::Token, N::Mapping => D::Mapping,
+            N::AncestorOpen => D::AncestorOpen, N::TargetOpen => D::TargetOpen, N::Inheritance => D::Inheritance,
+            N::Ntfs => D::Ntfs, N::Metadata => D::Metadata, N::Streams => D::Streams,
+            N::DirectoryIdentity => D::DirectoryIdentity, N::TargetIdentity => D::TargetIdentity,
+            N::AncestorEdge => D::AncestorEdge, N::ContextBeforeFence => D::ContextBeforeFence, N::Fence => D::Fence,
+            N::Postcheck => D::Postcheck, N::MappingAfterFence => D::MappingAfterFence,
+            N::ContextAfterFence => D::ContextAfterFence, N::Complete => D::Complete, N::Cleanup => D::Cleanup,
+        }
+    }
+    fn error(value: Error) -> data::FenceError { match value {
+        Error::Unavailable => data::FenceError::Unavailable, Error::Unsafe => data::FenceError::Unsafe,
+        Error::Bounds => data::FenceError::Bounds, Error::State => data::FenceError::State, Error::Unknown => data::FenceError::Unknown,
+    } }
+    fn io(value: crate::DirectoryFenceIo) -> data::FenceIo {
+        data::FenceIo { entered: value.entered, ntstatus: value.ntstatus.map(|status| status as u32),
+            iosb_status: value.iosb_status.map(|status| status as u32), information: value.iosb_information }
+    }
+    let c = value.cleanup;
+    data::DirectoryFence { stage: stage(value.stage), classification: value.classification.map(|value| {
+        use crate::DirectoryFenceClass as N; use data::FenceClass as D;
+        match value { N::NotRun => D::NotRun, N::Supported => D::Supported, N::Unavailable => D::Unavailable,
+            N::RefusedBeforeFence => D::RefusedBeforeFence, N::Stopped => D::Stopped, N::Unknown => D::Unknown }
+    }), first_failure: value.first_failure.map(|value| data::FenceFailure {
+        stage: stage(value.stage), error: error(value.error), stopped: value.stopped,
+    }), target_access: value.target_requested_access, last_open_directory: value.last_open_directory,
+        last_open_access: value.last_open_requested_access, last_open: io(value.last_open), fence: io(value.fence), stop: value.stop_observed,
+        cleanup: data::FenceCleanup { attempted: c.attempted, expired: c.expired,
+            outcome: c.outcome.map(|value| match value { CloseOutcome::Settled => data::FenceClose::Settled, CloseOutcome::Unknown => data::FenceClose::Unknown }),
+            attempts: c.close_attempts, closed: c.closed, no_handle: c.no_handle, unresolved: c.unresolved, first_error: c.first_error.map(error) } }
 }

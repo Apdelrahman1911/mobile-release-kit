@@ -1164,7 +1164,7 @@ jobs:
           MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
           MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-gui-acquire'
-      - name: Run inert scalar then build observer and normal last with static loader and singleton provenance
+      - name: Run inert scalar and credential DATA, then build observer and normal last with static loader and singleton provenance
         id: ui-gui-compile
         if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-gui-acquire.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
         timeout-minutes: 42
@@ -1789,6 +1789,158 @@ jobs:
           MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
           MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-document-loss-finalize'
+      - name: Bind credential-session to its exact original compiler and preceding closed ACL epoch
+        id: ui-credential-session-preflight
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-document-loss-finalize.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE: ${{ steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable }}
+          MRK_WINDOWS_UI_PREREQUISITE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-prerequisite-preflight.outcome }}
+          MRK_WINDOWS_UI_PREREQUISITE_OWNER_STEP_OUTCOME: ${{ steps.ui-prerequisite-owner.outcome }}
+          MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-prerequisite-finalize.outcome }}
+          MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256: ${{ steps.ui-prerequisite-preflight.outputs.requestSha256 }}
+          MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256: ${{ steps.ui-prerequisite-finalize.outputs.finalizerSha256 }}
+          MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256: ${{ steps.ui-setup-preflight.outputs.precheckSha256 }}
+          MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-setup-acquire.outcome }}
+          MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME: ${{ steps.ui-setup-compile.outcome }}
+          MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-setup-preflight.outcome }}
+          MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ${{ steps.ui-setup-stage.outcome }}
+          MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_NODE_STEP_OUTCOME: ${{ steps.ui-node.outcome }}
+          MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-gui-acquire.outcome }}
+          MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ${{ steps.ui-gui-compile.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-credential-session-preflight.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_OWNER_STEP_OUTCOME: ${{ steps.ui-credential-session-owner.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-credential-session-finalize.outcome }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-credential-session-preflight'
+      - name: Own one credential-session application and settle its original ordinary-account resources
+        id: ui-credential-session-owner
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-credential-session-preflight.outcome == 'success'
+        timeout-minutes: 4
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_WINDOWS_SOURCE_TREE: ${{ steps.ui-credential-session-preflight.outputs.sourceTree }}
+          MRK_WINDOWS_UI_APP_VERSION: ${{ steps.ui-credential-session-preflight.outputs.appVersion }}
+          MRK_WINDOWS_UI_OWNER_ARTIFACT: ${{ steps.ui-credential-session-preflight.outputs.artifact }}
+          MRK_WINDOWS_UI_OWNER_ARTIFACT_SHA256: ${{ steps.ui-credential-session-preflight.outputs.artifactSha256 }}
+          MRK_WINDOWS_UI_APP_ARTIFACT_SHA256: ${{ steps.ui-credential-session-preflight.outputs.appArtifactSha256 }}
+          MRK_WINDOWS_UI_REQUEST_SHA256: ${{ steps.ui-credential-session-preflight.outputs.requestSha256 }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-credential-session-preflight.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $phase = 'binding'
+          try {
+            $expectedRoot = [System.IO.Path]::Combine($env:RUNNER_TEMP, "mrk-windows-installed-native-$($env:GITHUB_RUN_ID)-1")
+            $expectedDeps = [System.IO.Path]::Combine($expectedRoot, 'target', 'x86_64-pc-windows-msvc', 'debug', 'deps')
+            if ($env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:MRK_DESKTOP_CI_ROOT -cne $expectedRoot -or
+                $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:MRK_DESKTOP_DISPATCH_SCOPE -cne 'windows-normal-project-ui' -or
+                $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-normal-project-ui' -or
+                $env:MRK_DESKTOP_EXPECTED_SHA -cne $env:GITHUB_SHA -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or
+                $env:GITHUB_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:MRK_WINDOWS_SOURCE_TREE -cnotmatch '^[0-9a-f]{40}$' -or
+                [System.IO.Path]::GetDirectoryName($env:MRK_WINDOWS_UI_OWNER_ARTIFACT) -cne $expectedDeps -or
+                [System.IO.Path]::GetFileName($env:MRK_WINDOWS_UI_OWNER_ARTIFACT) -cnotmatch '^mrk_windows_installed_native-[0-9a-f]{16}\.exe$' -or
+                $env:MRK_WINDOWS_UI_OWNER_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_UI_APP_ARTIFACT_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_UI_REQUEST_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $env:MRK_WINDOWS_UI_APP_VERSION -cnotmatch '^[0-9]{1,10}(\.[0-9]{1,10}){1,5}$' -or
+                $env:MRK_WINDOWS_UI_CREDENTIAL_SESSION_PREFLIGHT_STEP_OUTCOME -cne 'success') { throw 'binding' }
+            Set-Location -LiteralPath $expectedRoot
+            $phase = 'original-owner'
+            # One foreground original; no second process controller or detached timeout.
+            & $env:MRK_WINDOWS_UI_OWNER_ARTIFACT ordinary_owner::hosted_normal_ui_credential_original_handle_contract --exact --ignored --nocapture --test-threads=1
+            $originalExitCode = $LASTEXITCODE
+            if ($originalExitCode -isnot [int]) { throw 'original-exit' }
+            $phase = 'exit-record'
+            $receipt = [ordered]@{
+              schemaVersion = 1; qualificationProfile = 'windows-normal-project-ui-v1'
+              sourceSha = $env:GITHUB_SHA; sourceTree = $env:MRK_WINDOWS_SOURCE_TREE
+              runId = $env:GITHUB_RUN_ID; attempt = 1; role = 'credential-session'
+              artifactSha256 = $env:MRK_WINDOWS_UI_APP_ARTIFACT_SHA256
+              ownerArtifactSha256 = $env:MRK_WINDOWS_UI_OWNER_ARTIFACT_SHA256
+              requestSha256 = $env:MRK_WINDOWS_UI_REQUEST_SHA256
+              ownerTest = 'ordinary_owner::hosted_normal_ui_credential_original_handle_contract'
+              originalWaitReturned = $true; exitCode = $originalExitCode
+              writerCloseGate = 'original-owner-step-success-required'
+            }
+            $raw = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($receipt | ConvertTo-Json -Depth 4 -Compress))
+            if ($raw.Length -eq 0 -or $raw.Length -gt 4096) { throw 'exit-bound' }
+            $path = [System.IO.Path]::Combine($expectedRoot, 'normal-ui-credential-session-owner-exit.private.json')
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try { $stream.Write($raw, 0, $raw.Length); $stream.Flush() } finally { $stream.Dispose() }
+            $phase = 'expected-exit'
+            if ($originalExitCode -ne 0) { throw 'expected-original-exit' }
+            exit 0
+          } catch {
+            [Console]::Error.WriteLine("MRK_WINDOWS_NORMAL_UI_CREDENTIAL_SESSION_REFUSED=phase=$phase")
+            exit 1
+          }
+      - name: Independently finalize credential-session only after original owner return and writer closure
+        id: ui-credential-session-finalize
+        if: success() && inputs.scope == 'windows-normal-project-ui' && steps.ui-credential-session-owner.outcome == 'success' && steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable == 'true'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_WINDOWS_UI_PREREQUISITES_AVAILABLE: ${{ steps.ui-prerequisite-finalize.outputs.prerequisitesAvailable }}
+          MRK_WINDOWS_UI_PREREQUISITE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-prerequisite-preflight.outcome }}
+          MRK_WINDOWS_UI_PREREQUISITE_OWNER_STEP_OUTCOME: ${{ steps.ui-prerequisite-owner.outcome }}
+          MRK_WINDOWS_UI_PREREQUISITE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-prerequisite-finalize.outcome }}
+          MRK_WINDOWS_UI_PREREQUISITE_REQUEST_SHA256: ${{ steps.ui-prerequisite-preflight.outputs.requestSha256 }}
+          MRK_WINDOWS_UI_PREREQUISITE_FINALIZER_SHA256: ${{ steps.ui-prerequisite-finalize.outputs.finalizerSha256 }}
+          MRK_WINDOWS_UI_SETUP_PRECHECK_SHA256: ${{ steps.ui-setup-preflight.outputs.precheckSha256 }}
+          MRK_WINDOWS_UI_SETUP_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-setup-acquire.outcome }}
+          MRK_WINDOWS_UI_SETUP_COMPILE_STEP_OUTCOME: ${{ steps.ui-setup-compile.outcome }}
+          MRK_WINDOWS_UI_SETUP_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-setup-preflight.outcome }}
+          MRK_WINDOWS_UI_SETUP_STAGE_STEP_OUTCOME: ${{ steps.ui-setup-stage.outcome }}
+          MRK_WINDOWS_UI_SETUP_STAGE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-stage-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLISH_STEP_OUTCOME: ${{ steps.ui-setup-publish.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLISH_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publish-finalize.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_STEP_OUTCOME: ${{ steps.ui-setup-publication.outcome }}
+          MRK_WINDOWS_UI_SETUP_PUBLICATION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-setup-publication-finalize.outcome }}
+          MRK_WINDOWS_UI_NODE_STEP_OUTCOME: ${{ steps.ui-node.outcome }}
+          MRK_WINDOWS_UI_GUI_ACQUIRE_STEP_OUTCOME: ${{ steps.ui-gui-acquire.outcome }}
+          MRK_WINDOWS_UI_GUI_COMPILE_STEP_OUTCOME: ${{ steps.ui-gui-compile.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-normal-smoke-preflight.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_OWNER_STEP_OUTCOME: ${{ steps.ui-normal-smoke-owner.outcome }}
+          MRK_WINDOWS_UI_NORMAL_SMOKE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-normal-smoke-finalize.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-project-draft-preflight.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_OWNER_STEP_OUTCOME: ${{ steps.ui-project-draft-owner.outcome }}
+          MRK_WINDOWS_UI_PROJECT_DRAFT_FINALIZE_STEP_OUTCOME: ${{ steps.ui-project-draft-finalize.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-quit-passive-preflight.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_OWNER_STEP_OUTCOME: ${{ steps.ui-quit-passive-owner.outcome }}
+          MRK_WINDOWS_UI_QUIT_PASSIVE_FINALIZE_STEP_OUTCOME: ${{ steps.ui-quit-passive-finalize.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
+          MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-credential-session-preflight.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_OWNER_STEP_OUTCOME: ${{ steps.ui-credential-session-owner.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-credential-session-finalize.outcome }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-normal-ui-credential-session-finalize'
       - name: Stage the fresh passive runtime input with the existing original native owner
         id: passive-stage
         if: success() && inputs.scope == 'windows-installed-passive' && steps.ordinary-preflight.outcome == 'success'
@@ -3172,6 +3324,9 @@ jobs:
           MRK_WINDOWS_UI_DOCUMENT_LOSS_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-document-loss-preflight.outcome }}
           MRK_WINDOWS_UI_DOCUMENT_LOSS_OWNER_STEP_OUTCOME: ${{ steps.ui-document-loss-owner.outcome }}
           MRK_WINDOWS_UI_DOCUMENT_LOSS_FINALIZE_STEP_OUTCOME: ${{ steps.ui-document-loss-finalize.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_PREFLIGHT_STEP_OUTCOME: ${{ steps.ui-credential-session-preflight.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_OWNER_STEP_OUTCOME: ${{ steps.ui-credential-session-owner.outcome }}
+          MRK_WINDOWS_UI_CREDENTIAL_SESSION_FINALIZE_STEP_OUTCOME: ${{ steps.ui-credential-session-finalize.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
       - name: Upload bounded original verification evidence
         if: always() && steps.retain.outcome == 'success'

@@ -16,6 +16,12 @@ pub(super) use observer_diagnostic::{ObserverDiagnosticClock, ObserverDiagnostic
 #[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
 pub use observer_diagnostic::ObserverDiagnostic;
 
+#[cfg(feature = "desktop-ui")]
+#[path = "credential_ui_fixture.rs"]
+pub(super) mod credential_ui_fixture;
+#[cfg(all(feature = "qualification-result", feature = "windows-installed-observation"))]
+pub use credential_ui_fixture::UiCredentialFixture;
+
 pub(super) const FLAGS: [&str; 4] = ["--exact", "--ignored", "--nocapture", "--test-threads=1"];
 pub(super) const LIMIT: usize = 4096;
 pub(super) const OWNER_LIMIT: usize = 65536;
@@ -1593,17 +1599,18 @@ fn write_installed_result(role: ResultRole, actual: &FullwalkFacts, passive: Opt
 // Fullwalk and intentionally poisoned Passive parsers above are not widened.
 #[cfg(feature = "desktop-ui")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UiRole { Prerequisite, NormalSmoke, ProjectDraft, QuitPassive, DocumentLoss }
+pub enum UiRole { Prerequisite, NormalSmoke, ProjectDraft, QuitPassive, DocumentLoss, CredentialSession }
 #[cfg(feature = "desktop-ui")]
 impl UiRole {
     pub fn label(self) -> &'static str { match self {
         Self::Prerequisite => "prerequisite", Self::NormalSmoke => "normal-smoke",
         Self::ProjectDraft => "project-draft", Self::QuitPassive => "quit-passive", Self::DocumentLoss => "document-loss",
+        Self::CredentialSession => "credential-session",
     } }
     pub(super) fn parse(value: &str) -> Result<Self> { match value {
         "prerequisite" => Ok(Self::Prerequisite), "normal-smoke" => Ok(Self::NormalSmoke),
         "project-draft" => Ok(Self::ProjectDraft), "quit-passive" => Ok(Self::QuitPassive),
-        "document-loss" => Ok(Self::DocumentLoss), _ => Err(Error::Unsafe),
+        "document-loss" => Ok(Self::DocumentLoss), "credential-session" => Ok(Self::CredentialSession), _ => Err(Error::Unsafe),
     } }
     pub(super) fn owner(self) -> &'static str { match self {
         Self::Prerequisite => "ordinary_owner::hosted_normal_ui_prerequisite_original_handle_contract",
@@ -1611,6 +1618,7 @@ impl UiRole {
         Self::ProjectDraft => "ordinary_owner::hosted_normal_ui_project_original_handle_contract",
         Self::QuitPassive => "ordinary_owner::hosted_normal_ui_quit_original_handle_contract",
         Self::DocumentLoss => "ordinary_owner::hosted_normal_ui_document_original_handle_contract",
+        Self::CredentialSession => "ordinary_owner::hosted_normal_ui_credential_original_handle_contract",
     } }
     pub(super) fn entry(self) -> &'static str { match self {
         Self::Prerequisite => "hosted_ui_tests::hosted_normal_ui_prerequisites_contract",
@@ -1626,11 +1634,14 @@ impl UiRole {
         Self::Prerequisite => "compile-messages.jsonl", Self::NormalSmoke => "normal-app-compile-messages.jsonl",
         _ => "observer-compile-messages.jsonl",
     } }
+    pub(super) fn verified_methods(self) -> usize { match self { Self::ProjectDraft => 6, Self::CredentialSession => 1, _ => 0 } }
     fn checks(self) -> &'static [&'static str] { match self {
         Self::ProjectDraft => &["native-picker-cancel", "native-project-selected", "draft-hydrated-edited",
             "validate-suggest-preview", "refresh-draft-preserved", "source-change-observed", "only-labelled-fixture-mutation"],
         Self::QuitPassive => &["native-quit-cancel", "native-quit-confirm", "passive-original-outstanding", "original-owner-retired"],
         Self::DocumentLoss => &["native-picker-outstanding", "passive-original-outstanding", "original-document-loss", "no-late-publication", "no-rebind"],
+        Self::CredentialSession => &["native-private-source-captures", "bounded-native-source-refusals", "native-picker-core-assessment",
+            "cancel-without-material", "replace-and-remove", "stale-origin-registry-preserved", "memory-session-teardown"],
         _ => &[],
     } }
     pub(super) fn process_args(self, artifact: &Path, owner: bool) -> Result<()> {
@@ -1784,7 +1795,7 @@ impl UiRequest {
         need(!self.role.checks().is_empty())?;
         let checks = self.role.checks().iter().map(|value| format!("\"{value}\"")).collect::<Vec<_>>().join(",");
         Ok(format!("{{\"runtimeBindingMatched\":true,\"verifiedMethods\":{},\"checks\":[{checks}],\"finality\":{{\"dialogsSettled\":true,\"sourcesSettled\":true,\"passiveOwnersSettled\":true,\"documentHooksSettled\":true,\"relayJoined\":true,\"exitReady\":true}}}}",
-            if self.role == UiRole::ProjectDraft { 6 } else { 0 }))
+            self.role.verified_methods()))
     }
     pub fn probe_result(&self, request_sha: &str, account_sha: &str, reason: Option<&str>, version: Option<&str>,
         refusal: Option<&super::ui::ManagedRuntimeRefusal>) -> Result<String> { self.probe_result_traced(request_sha, account_sha, reason, version, refusal, &mut InputTrace::default()) }
@@ -1831,6 +1842,42 @@ impl UiRequest {
 const UI_PROBE_REASONS: [&str; 7] = ["ordinary-context", "interactive-desktop", "managed-webview2", "webview2-overrides",
     "private-user-data-parent", "native-failure", "original-state"];
 
+#[cfg(all(test, feature = "desktop-ui"))]
+mod credential_ui_contract {
+    use super::*;
+    #[test]
+    fn closed_credential_result_never_claims_six_passive_methods() -> Result<()> {
+        assert_eq!(UiRole::parse("credential-session"), Ok(UiRole::CredentialSession));
+        for alias in ["credentials", "credential-session ", "CredentialSession", "credential-session-v2"] {
+            assert!(UiRole::parse(alias).is_err());
+        }
+        assert_eq!(UiRole::ProjectDraft.verified_methods(), 6);
+        assert_eq!(UiRole::CredentialSession.verified_methods(), 1);
+        assert_eq!(UiRole::CredentialSession.entry(), "observer-process-main");
+        let artifact = FullwalkArtifact { path: r"C:\fixture\owner.exe".into(), bytes: 1, sha: "a".repeat(64),
+            identity: format!("1:{}:1:1:1:32", "a".repeat(32)), command_sha: "b".repeat(64),
+            messages_bytes: 1, messages_sha: "c".repeat(64), argv_sha: "d".repeat(64) };
+        let request = UiRequest { role: UiRole::CredentialSession, source: "a".repeat(40), tree: "b".repeat(40),
+            run: "1".into(), app: artifact.clone(), owner: artifact, runtime: None, app_version: "0.1.0".into() };
+        let digest = "a".repeat(64); let account = "b".repeat(64);
+        // Pure wire-shape regression only; never call the native writer, claim
+        // an account, set VERIFIED, or make these synthetic values evidence.
+        let raw = request.envelope(&digest, &account, &request.case_observation()?)?;
+        assert_eq!(request.accept_child(raw.as_bytes(), &digest, &account), Ok(true));
+        assert!(raw.contains("\"verifiedMethods\":1"));
+        assert!(raw.contains("bounded-native-source-refusals"));
+        for (old,new) in [("\"verifiedMethods\":1","\"verifiedMethods\":6"),
+            ("bounded-native-source-refusals","all-native-source-refusals"),
+            ("\"sourcesSettled\":true","\"sourcesSettled\":false"),
+            ("\"exitReady\":true","\"exitReady\":false"),
+            ("\"role\":\"credential-session\"","\"role\":\"project-draft\"")] {
+            assert!(request.accept_child(raw.replace(old,new).as_bytes(), &digest, &account).is_err());
+        }
+        assert_eq!(UiRole::CredentialSession.checks().len(), 7);
+        Ok(())
+    }
+}
+
 /// Engineering-only DATA from the actual original runtime and GUI owners.
 /// Array order is fixed by UiRole::checks and the six named finality keys above.
 /// A result writer validates these facts but cannot acquire or settle an owner.
@@ -1863,6 +1910,8 @@ pub const UI_FIXTURE_VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n";
 pub const UI_FIXTURE_KEEP: &[u8] = b"MRK_WINDOWS_NORMAL_UI_KEEP\n";
 #[cfg(feature = "desktop-ui")]
 pub const UI_FIXTURE_CONFIG: &[u8] = b"{\"android\":{\"applicationId\":\"org.example.mrk.observed\",\"enabled\":true,\"identityStatus\":\"unverified\"},\"ios\":{\"enabled\":false},\"metadata\":{\"androidLocales\":[\"en-US\"],\"iosLocales\":[],\"root\":\"release/store\"},\"projectChecks\":{\"androidArtifact\":[],\"iosArtifact\":[],\"preflight\":[]},\"schemaVersion\":1,\"services\":{\"androidFirebase\":\"disabled\",\"iosFirebase\":\"disabled\"},\"source\":{\"candidateBranch\":\"main\",\"productionBranch\":\"main\"},\"version\":{\"buildKey\":\"BUILD_NUMBER\",\"nameKey\":\"VERSION_NAME\",\"source\":\"version.properties\"}}\n";
+#[cfg(feature = "desktop-ui")]
+pub const UI_CREDENTIAL_CONFIG: &[u8] = b"{\"android\":{\"applicationId\":\"org.example.mrk.observed\",\"enabled\":true,\"identityStatus\":\"unverified\"},\"ios\":{\"bundleId\":\"org.example.mrk.observed\",\"enabled\":true,\"identityStatus\":\"unverified\"},\"metadata\":{\"androidLocales\":[\"en-US\"],\"iosLocales\":[\"en-US\"],\"root\":\"release/store\"},\"projectChecks\":{\"androidArtifact\":[],\"iosArtifact\":[],\"preflight\":[]},\"schemaVersion\":1,\"services\":{\"androidFirebase\":\"required\",\"iosFirebase\":\"required\"},\"source\":{\"candidateBranch\":\"main\",\"productionBranch\":\"main\"},\"version\":{\"buildKey\":\"BUILD_NUMBER\",\"nameKey\":\"VERSION_NAME\",\"source\":\"version.properties\"}}\n";
 #[cfg(feature = "desktop-ui")]
 pub const UI_FIXTURE_CONFIG_AFTER: &[u8] = b"{\"android\":{\"applicationId\":\"org.example.mrk.observed\",\"enabled\":true,\"identityStatus\":\"unverified\"},\"ios\":{\"enabled\":false},\"metadata\":{\"androidLocales\":[\"en-US\"],\"iosLocales\":[],\"root\":\"release/store\"},\"projectChecks\":{\"androidArtifact\":[],\"iosArtifact\":[],\"preflight\":[]},\"schemaVersion\":1,\"services\":{\"androidFirebase\":\"disabled\",\"iosFirebase\":\"disabled\"},\"source\":{\"candidateBranch\":\"next\",\"productionBranch\":\"main\"},\"version\":{\"buildKey\":\"BUILD_NUMBER\",\"nameKey\":\"VERSION_NAME\",\"source\":\"version.properties\"}}\n";
 
@@ -1964,7 +2013,7 @@ pub fn verify_normal_ui_fixture(end: Instant) -> Result<()> {
             let metadata = native.metadata(&original)?;
             directory_indices.push(originals.len()); originals.push((original, metadata));
         }
-        let config = if role == UiRole::ProjectDraft { UI_FIXTURE_CONFIG_AFTER } else { UI_FIXTURE_CONFIG };
+        let config = if role == UiRole::ProjectDraft { UI_FIXTURE_CONFIG_AFTER } else if role == UiRole::CredentialSession { UI_CREDENTIAL_CONFIG } else { UI_FIXTURE_CONFIG };
         let mut children: Vec<(usize, &str, usize)> = vec![(project_index, "app", directory_indices[1]),
             (project_index, "release", directory_indices[2])];
         for (parent, name, bytes) in [(directory_indices[1], "build.gradle.kts", UI_FIXTURE_SOURCE),
@@ -2057,7 +2106,8 @@ pub fn write_normal_ui_result_once(actual: &UiCaseFacts, end: Instant) -> Result
     let runtime = request.runtime.as_ref().ok_or(Error::State)?;
     actual.version.validate()?;
     need(UI_FIXTURE_VERIFIED.load(std::sync::atomic::Ordering::SeqCst)
-        && actual.verified_methods == if role == UiRole::ProjectDraft { 6 } else { 0 }
+        && actual.verified_methods == role.verified_methods()
+        && (role != UiRole::CredentialSession || credential_ui_fixture::verified())
         && actual.checks.iter().enumerate().all(|(index, value)| *value == (index < role.checks().len()))
         && actual.finality == [true; 6]
         && actual.version.manifest_sha256 == runtime.manifest_sha && actual.version.protocol_sha256 == runtime.protocol_sha

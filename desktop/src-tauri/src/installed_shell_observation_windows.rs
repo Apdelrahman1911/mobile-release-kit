@@ -1,4 +1,4 @@
-//! Three fixed observations of the ordinary installed Windows application.
+//! Closed fixed observations of the ordinary installed Windows application.
 //! This is the existing harness=false process main and existing relay, not a
 //! replacement executor, document, runtime or shipping automation interface.
 //! All native actions target B's retained original STA dialog. Child result
@@ -15,21 +15,28 @@ use native::ui_observer_diagnostic_data::{PendingKind, Refusal, Snapshot, Step};
 use super::owned_windows::observation::{observed_dialog, observe_dialog_action, session_final,
     DialogAction, DialogActionSite, DialogKind, ObservedDialog};
 
+#[path = "installed_shell_observation_windows_session.rs"]
+mod credential_session;
+pub(crate) use credential_session::Command as SessionCommand;
+
 const METHODS: [&str; 6] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"];
 const APP_ID: &str = "org.example.mrk.observed";
 const DRAFT_SOURCE: &str = "draft-version.properties";
 const DOM_LIMIT: u16 = 200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Case { ProjectDraft, QuitPassive, DocumentLoss }
+enum Case { ProjectDraft, QuitPassive, DocumentLoss, CredentialSession }
 impl Case {
     fn selected_id(self) -> u32 { if self == Self::ProjectDraft { 2 } else { 1 } }
-    fn held(self) -> bool { self != Self::ProjectDraft }
+    fn held(self) -> bool { matches!(self, Self::QuitPassive | Self::DocumentLoss) }
+    fn method_count(self) -> usize { if self == Self::CredentialSession { 7 } else { 6 } }
+    fn quit_id(self) -> u32 { if self == Self::CredentialSession { 22 } else { 3 } }
+    fn dialog_count(self) -> usize { if self == Self::CredentialSession { 8 } else { 3 } }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DomDispatch { step: Step, sequence: u16 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Pending { Dom(DomDispatch), Native(Step), Close(Step), Reload }
+enum Pending { Dom(DomDispatch), Native(Step), Close(Step), Reload, Fixture, DirectoryFence }
 struct DialogWitness { id: u32, kind: DialogKind, call: Arc<GuiCall>, owner: Arc<OriginalWork> }
 impl DialogWitness {
     fn same(&self, dialog: &ObservedDialog) -> bool {
@@ -51,7 +58,7 @@ struct Record {
     attached: bool, navigation: bool, started: bool, loaded: bool,
     methods: [bool; 6], method_rows: usize, project_calls: u8,
     cancel_returned: bool, project: Option<Project>, lost_picker_returned: bool,
-    dialogs: Vec<DialogWitness>, visible: [bool; 3], actions_attempted: [bool; 5], actions_returned: [bool; 5],
+    dialogs: Vec<DialogWitness>, visible: Vec<bool>, actions_attempted: [bool; 5], actions_returned: [bool; 5],
     snapshot_requests: u8, snapshot_pending: bool, snapshots: u8, held_snapshot_refused: bool,
     suggestion_requested: bool, suggestion: Option<Value>, validation_requested: bool,
     preview_requested: bool, preview: Option<Value>, hydrated: bool, edited: bool, preserved: bool,
@@ -59,6 +66,8 @@ struct Record {
     initial: Option<WindowsPassiveWitness>, held: Option<WindowsPassiveWitness>, held_seen: bool,
     generation: Option<String>, loss_generation: Option<String>, registry_generation: Option<u32>,
     picker_pending: bool, reload_requested: bool, reload_returned: bool, reload_navigation: bool, reload_started: bool,
+    credentials: Option<credential_session::Record>,
+    directory_fence_returned: bool,
     loss_settled: bool, relay_joined: bool, actual_exit: bool, finality: [bool; 6],
 }
 impl Record {
@@ -69,6 +78,8 @@ impl Record {
             Some(Pending::Native(step)) => (PendingKind::Native, Some(step), 0),
             Some(Pending::Close(step)) => (PendingKind::Close, Some(step), 0),
             Some(Pending::Reload) => (PendingKind::Reload, None, 0),
+            Some(Pending::Fixture) => (PendingKind::Native, Some(Step::Credential), 0),
+            Some(Pending::DirectoryFence) => (PendingKind::Native, Some(Step::Bootstrap), 0),
         };
         let flags = [self.attached, self.navigation, self.started, self.loaded, self.initial.is_some(),
             self.methods[0], self.methods[1], self.snapshot_pending, self.project.is_some(), self.cancel_returned,
@@ -80,21 +91,23 @@ impl Record {
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value, changed: Value,
     draft: Value, failed: AtomicBool, reported: AtomicBool, record: Mutex<Record>,
+    credential_fixture: Mutex<Option<native::UiCredentialFixture>>,
     diagnostic: Option<Arc<native::ObserverDiagnostic>>, diagnostic_document: OnceLock<DocumentBinding>,
 }
 impl Observation {
     fn new(case: Case, end: Instant, project_path: PathBuf, diagnostic: Option<Arc<native::ObserverDiagnostic>>) -> Result<Self, ()> {
-        let base = crate::protocol::strict_json(native::UI_FIXTURE_CONFIG).map_err(|_| ())?;
+        let base = crate::protocol::strict_json(if case == Case::CredentialSession { native::UI_CREDENTIAL_CONFIG } else { native::UI_FIXTURE_CONFIG }).map_err(|_| ())?;
         let changed = crate::protocol::strict_json(native::UI_FIXTURE_CONFIG_AFTER).map_err(|_| ())?;
         let mut draft = base.clone(); draft["version"]["source"] = json!(DRAFT_SOURCE);
-        Ok(Self { case, main: std::thread::current().id(), end, project_path, base, changed, draft,
+        let credential_fixture = if case == Case::CredentialSession { Some(native::UiCredentialFixture::create(end).map_err(|_| ())?) } else { None };
+        Ok(Self { credential_fixture: Mutex::new(credential_fixture), case, main: std::thread::current().id(), end, project_path, base, changed, draft,
             diagnostic, diagnostic_document: OnceLock::new(),
             failed: AtomicBool::new(false), reported: AtomicBool::new(false), record: Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0,
                 attached: false, navigation: false, started: false, loaded: false,
                 methods: [false; 6], method_rows: 0, project_calls: 0,
                 cancel_returned: false, project: None, lost_picker_returned: false,
-                dialogs: Vec::with_capacity(3), visible: [false; 3], actions_attempted: [false; 5], actions_returned: [false; 5],
+                dialogs: Vec::with_capacity(case.dialog_count()), visible: vec![false; case.dialog_count()], actions_attempted: [false; 5], actions_returned: [false; 5],
                 snapshot_requests: 0, snapshot_pending: false, snapshots: 0, held_snapshot_refused: false,
                 suggestion_requested: false, suggestion: None, validation_requested: false,
                 preview_requested: false, preview: None, hydrated: false, edited: false, preserved: false,
@@ -102,6 +115,8 @@ impl Observation {
                 initial: None, held: None, held_seen: false,
                 generation: None, loss_generation: None, registry_generation: None,
                 picker_pending: false, reload_requested: false, reload_returned: false, reload_navigation: false, reload_started: false,
+                credentials: (case == Case::CredentialSession).then(credential_session::Record::new),
+                directory_fence_returned: false,
                 loss_settled: false, relay_joined: false, actual_exit: false, finality: [false; 6],
             }) })
     }
@@ -186,7 +201,8 @@ impl Observation {
             && info.capabilities.as_ref().is_some_and(|value| value["hostPlatform"] == "windows")
             && info.project_selection.available && info.project_selection.reason.is_none() && !info.project_path_selection.available
             && (6..=64).contains(&methods.len()) && (1..=64).contains(&actions.len())
-            && methods.iter().filter(open).count() == 6
+            && methods.iter().filter(open).count() == self.case.method_count()
+            && (self.case != Case::CredentialSession || methods.iter().filter(open).filter(|row| row["method"] == "credentials.assess").count() == 1)
             && METHODS.iter().all(|name| methods.iter().filter(open).filter(|row| row["method"].as_str() == Some(*name)).count() == 1)
             && methods.iter().all(|row| row["available"].is_boolean())
             && actions.iter().all(|row| row["available"].as_bool() == Some(false));
@@ -210,6 +226,10 @@ impl Observation {
             if r.lost_picker_returned || !r.picker_pending
                 || !matches!(result, Err(error) if error.reason == Reason::DocumentLost) { self.fail(Refusal::ProjectResult); return; }
             r.lost_picker_returned = true; return;
+        }
+        if self.case == Case::CredentialSession && r.step == Step::Credential {
+            if !r.credentials.as_mut().is_some_and(|session| session.reregister_result(result)) { self.fail(Refusal::ProjectResult); }
+            return;
         }
         if self.case == Case::ProjectDraft && matches!(r.step, Step::CancelProject | Step::CancelSettled) {
             if r.cancel_returned || !matches!(result, Ok(None)) || !r.actions_attempted[0] { self.fail(Refusal::ProjectResult); return; }
@@ -320,7 +340,7 @@ impl Observation {
         if std::thread::current().id() == self.main { self.fail(Refusal::Tick); return; }
         self.diagnostic_progress();
         let state = app.state::<super::ShellState>();
-        let step = {
+        let (step, fence_snapshot) = {
             let Some(mut r) = self.record() else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
             if r.initial.is_none() {
@@ -332,7 +352,9 @@ impl Observation {
             match r.step {
                 Step::Bootstrap => {
                     if !r.navigation || !r.methods[0] || !r.methods[1] { return; }
-                    r.step = Step::Environment;
+                    if self.case == Case::CredentialSession && !r.directory_fence_returned {
+                        r.pending = Some(Pending::DirectoryFence);
+                    } else { r.step = Step::Environment; }
                 },
                 Step::CancelSettled => {
                     if !r.cancel_returned { return; }
@@ -342,8 +364,20 @@ impl Observation {
                 },
                 Step::ProjectSettled => {
                     if r.project.is_none() { return; }
+                    let source_settled = if self.case == Case::CredentialSession {
+                        let snapshot = match state.document.windows_session_snapshot() {
+                            Ok(Some(snapshot)) => snapshot, Ok(None) => return,
+                            Err(()) => { self.fail(Refusal::Tick); return; },
+                        };
+                        if !snapshot.owner_settled { return; }
+                        let op = &snapshot.status["operation"];
+                        snapshot.owner.as_ref().is_some_and(|owner| owner.id == 1)
+                            && snapshot.source_started && snapshot.source_settled && op["operationId"] == 1
+                            && op["operation"] == "choose-project" && op["phase"] == "idle" && op["settlement"] == "known"
+                            && op["reason"] == "none" && r.credentials.as_mut().is_some_and(|session| session.observe(&snapshot).is_ok())
+                    } else { source_idle(&state.document, self.case.selected_id(), "none") };
                     if !r.dialogs.iter().find(|dialog| dialog.id == self.case.selected_id()).is_some_and(|dialog| dialog.settled(true, false) && !dialog.owner.stopped())
-                        || !source_idle(&state.document, self.case.selected_id(), "none") || state.bridge.native_generation().ok() != Some(2) { self.fail(Refusal::Tick); return; }
+                        || !source_settled || state.bridge.native_generation().ok() != Some(2) { self.fail(Refusal::Tick); return; }
                     r.registry_generation = Some(2); r.step = Step::Snapshot;
                 },
                 Step::Snapshot if r.snapshots != 1 => return,
@@ -393,9 +427,11 @@ impl Observation {
                 Step::Exit => return,
                 _ => {},
             }
-            r.step
+            (r.step, (r.pending == Some(Pending::DirectoryFence)).then(|| r.diagnostic()))
         };
         self.diagnostic_progress(); // The first-phase Record guard has ended.
+        if let Some(snapshot) = fence_snapshot { self.directory_fence_tick(&state.document, snapshot); return; }
+        if step == Step::Credential { self.credential_tick(app); return; }
         let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else { self.fail(Refusal::Tick); return; };
         if matches!(step, Step::Close | Step::CloseCancel) {
             let Some(mut r) = self.record() else { return; };
@@ -432,6 +468,51 @@ impl Observation {
         // Exactly one outstanding synchronous expression. Unknown callbacks
         // stay pending; never replay a possibly effectful click or edit.
         if window.eval_with_callback(script, move |value| q.dom(original, &value)).is_err() { self.fail(Refusal::Tick); }
+    }
+    fn directory_fence_tick(&self, document: &DocumentBinding, snapshot: Snapshot) {
+        if self.case != Case::CredentialSession || std::thread::current().id() == self.main {
+            self.fail(Refusal::CredentialFixture); return;
+        }
+        let stopped = std::cell::Cell::new(false);
+        let cleanup_end = std::cell::Cell::new(self.end);
+        let mut stop = || {
+            // An accepted Quit stops new work immediately, not at its cleanup
+            // deadline. Record/document guards never cross native entry.
+            let quit_end = document.exit_cleanup_end();
+            if let Some(quit_end) = quit_end { cleanup_end.set(cleanup_end.get().min(quit_end)); }
+            stopped.set(stopped.get() || Instant::now() >= self.end || self.failed.load(Ordering::SeqCst)
+                || quit_end.is_some());
+            stopped.get()
+        };
+        let mut cleanup_expired = || {
+            if let Some(quit_end) = document.exit_cleanup_end() {
+                cleanup_end.set(cleanup_end.get().min(quit_end));
+            }
+            Instant::now() >= cleanup_end.get() // Can contract, never renew.
+        };
+        // Existing relay, existing retained fixture. No Record/source/GUI
+        // guard is held; a returning panic/unknown stays parked inside it.
+        let result = match self.credential_fixture.try_lock() {
+            Ok(mut fixture) => fixture.as_mut().ok_or(()).and_then(|fixture|
+                fixture.directory_fence_once(&mut stop, &mut cleanup_expired).map_err(|_| ())),
+            Err(_) => Err(()),
+        };
+        // Scalar copy only, after the fixture guard has ended. Only this
+        // returned, positively settled observation may append to the original
+        // journal. Missing/failed publication is unavailable A0 evidence.
+        if let (Ok(observed), Some(diagnostic)) = (&result, &self.diagnostic) {
+            diagnostic.directory_fence(snapshot, *observed, &|| self.diagnostic_permitted());
+        }
+        let Some(mut r) = self.record() else { return; };
+        if r.pending != Some(Pending::DirectoryFence) || r.step != Step::Bootstrap || r.directory_fence_returned {
+            self.fail(Refusal::CredentialFixture); return;
+        }
+        let Ok(observed) = result else { self.fail(Refusal::CredentialFixture); return; };
+        r.pending = None; r.directory_fence_returned = true;
+        if stopped.get() || observed.stop_observed || observed.cleanup.expired || !self.timely()
+            || document.exit_cleanup_end().is_some() { self.fail(Refusal::CredentialFixture); }
+        // A known, settled A0 refusal is not a false credential failure. Only
+        // the NEXT ordinary tick may continue this still-live C journey.
     }
     fn document_sample(&self, state: &super::ShellState, r: &mut Record) -> bool {
         let Ok(status) = state.bridge.edits.status() else { self.fail(Refusal::DocumentSample); return false; };
@@ -493,6 +574,7 @@ impl Observation {
         r.pending = None; r.reload_returned = true; r.step = Step::Lost;
     }
     fn native_step(&self, step: Step, id: u32, kind: DialogKind, call: &Arc<GuiCall>) {
+        if step == Step::Credential { self.credential_native_step(id, kind, call); return; }
         if std::thread::current().id() != self.main || !self.timely() { self.fail(Refusal::NativeStep); return; }
         let returned = self.native_body(step, id, kind, call);
         if returned == Ok(None) { return; } // Record contention never consumes the pending operation.
@@ -516,7 +598,7 @@ impl Observation {
             Step::CancelProject => (1, DialogKind::Project),
             Step::SetFolder | Step::AcceptProject => (self.case.selected_id(), DialogKind::Project),
             Step::PickerPending => (2, DialogKind::Project), Step::QuitCancel => (2, DialogKind::Quit),
-            Step::QuitConfirm => (3, DialogKind::Quit), _ => return Err(Refusal::NativePrecondition),
+            Step::QuitConfirm => (self.case.quit_id(), DialogKind::Quit), _ => return Err(Refusal::NativePrecondition),
         };
         if callback_id != id || callback_kind != kind { return Err(Refusal::NativePrecondition); }
         let Some(dialog) = observed_dialog().map_err(|_| Refusal::NativePrecondition)? else { return Ok(Some(false)); };
@@ -533,17 +615,21 @@ impl Observation {
         if let Some(witness) = r.dialogs.iter().find(|witness| witness.id == id) {
             if !witness.same(&dialog) { return Err(Refusal::NativePrecondition); }
         } else {
-            if r.dialogs.len() >= 3 || id as usize != r.dialogs.len() + 1 || owner.id != id
+            let sequence_matches = if self.case == Case::CredentialSession {
+                [1, 2, 6, 10, 14, 18, 21, 22].get(r.dialogs.len()).copied() == Some(id)
+            } else { id as usize == r.dialogs.len() + 1 };
+            if r.dialogs.len() >= self.case.dialog_count() || !sequence_matches || owner.id != id
                 || !Arc::ptr_eq(&owner.gui, &dialog.call) { return Err(Refusal::NativePrecondition); }
             r.dialogs.push(DialogWitness { id, kind, call: dialog.call.clone(), owner });
         }
+        let visible_at = r.dialogs.iter().position(|witness| witness.id == id).ok_or(Refusal::NativePrecondition)?;
         if !dialog.native.created || !dialog.native.showing || !dialog.native.visible || !dialog.native.presented {
-            return if r.visible[(id - 1) as usize] { Err(Refusal::NativePrecondition) } else { Ok(Some(false)) };
+            return if r.visible[visible_at] { Err(Refusal::NativePrecondition) } else { Ok(Some(false)) };
         }
         // The one known timer is truthfully still live. A nested/foreign live
         // callback is never an admitted observer turn or a finality fact.
         if !dialog.native.callbacks_active || !dialog.native.observation_turn { return Err(Refusal::NativePrecondition); }
-        r.visible[(id - 1) as usize] = true;
+        r.visible[visible_at] = true;
         if !dialog.action_allowed || !dialog.call.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.not_created
             && facts.showing && !facts.constructing && !facts.response && !facts.accepted && !facts.declined
             && facts.selected.is_none() && facts.refusal.is_none() && !facts.destroyed && !facts.released) { return Err(Refusal::NativePrecondition); }
@@ -571,6 +657,10 @@ impl Observation {
             DialogActionSite::FolderDifferent => Refusal::NativeFolderDifferent,
             DialogActionSite::FolderInvalidated => Refusal::NativeFolderInvalidated,
             DialogActionSite::State => Refusal::NativeActionState,
+            DialogActionSite::FileNameInput => Refusal::NativeFileNameInput,
+            DialogActionSite::FileNameSet => Refusal::NativeFileNameSet,
+            DialogActionSite::FileNameRead => Refusal::NativeFileNameRead,
+            DialogActionSite::FileNameDifferent => Refusal::NativeFileNameDifferent,
         })?;
         if returned { Ok(Some(true)) } else { Err(Refusal::NativeActionState) }
     }
@@ -590,8 +680,8 @@ impl Observation {
         let step = original.step;
         let valid = match step {
             Step::ReadEnvironment => value["runtimeTitle"] == "Bundled runtime" && value["runtimeState"] == "available" && value["platform"] == "windows"
-                && value["rows"].as_u64() == Some(r.method_rows as u64) && value["available"] == 6
-                && value["unavailable"].as_u64() == Some((r.method_rows - 6) as u64),
+                && value["rows"].as_u64() == Some(r.method_rows as u64) && value["available"].as_u64() == Some(self.case.method_count() as u64)
+                && value["unavailable"].as_u64() == Some((r.method_rows - self.case.method_count()) as u64),
             Step::ReadCancelled => value["chooseEnabled"] == true && value["unselected"] == true,
             Step::Snapshot => value["name"] == "project" && value["configuration"] == if self.case == Case::ProjectDraft { "Not configured" } else { "Format-valid only" },
             Step::Suggestion => r.suggestion.as_ref() == value.get("provenance"),
@@ -605,12 +695,19 @@ impl Observation {
             _ => true,
         };
         if !valid || !self.timely() { return Err(()); }
+        if step == Step::Credential {
+            let Some(session) = r.credentials.as_mut() else { return Err(()); };
+            let project = session.step == credential_session::SessionStep::Reregister;
+            session.dom_returned()?;
+            if project { r.project_calls += 1; }
+            return Ok(());
+        }
         r.step = match step {
             Step::Environment => Step::ReadEnvironment, Step::ReadEnvironment => Step::Dashboard,
             Step::Dashboard => if self.case == Case::ProjectDraft { Step::ChooseCancel } else { Step::ChooseProject },
             Step::ChooseCancel => { r.project_calls += 1; Step::CancelProject }, Step::ReadCancelled => Step::ChooseProject,
             Step::ChooseProject => { r.project_calls += 1; Step::SetFolder },
-            Step::Snapshot => if self.case == Case::ProjectDraft { Step::Settings } else { Step::ArmHold },
+            Step::Snapshot => if self.case == Case::ProjectDraft { Step::Settings } else if self.case == Case::CredentialSession { Step::Credential } else { Step::ArmHold },
             Step::Settings => Step::Suggest, Step::Suggest => Step::Suggestion, Step::Suggestion => Step::Adopt,
             Step::Adopt => Step::Hydrated, Step::Hydrated => { r.hydrated = true; Step::EditDraft },
             Step::EditDraft => Step::Edited, Step::Edited => { r.edited = true; Step::Validate },
@@ -631,12 +728,12 @@ impl Observation {
     pub(super) fn actual_exit(&self, ready: bool, document: &DocumentBinding, edits: &EditOwner) {
         let Some(mut r) = self.record() else { return; };
         if !self.timely() || std::thread::current().id() != self.main || !ready || r.actual_exit || !r.relay_joined
-            || r.pending.is_some() || r.step != Step::Exit || r.dialogs.len() != 3 || !r.visible.iter().all(|seen| *seen)
+            || r.pending.is_some() || r.step != Step::Exit || r.dialogs.len() != self.case.dialog_count() || !r.visible.iter().all(|seen| *seen)
             || !document.can_exit() || !document.assets_can_exit() || edits.disabled() || !edits.can_exit()
             || !matches!(session_final(), Ok(true)) { self.fail(Refusal::ActualExit); return; }
         // Exit can remain possible after late cleanup becomes known. This
         // qualification cannot upgrade a prior document Unknown into success.
-        if !source_idle(document, if self.case == Case::DocumentLoss { 2 } else { self.case.selected_id() },
+        if self.case != Case::CredentialSession && !source_idle(document, if self.case == Case::DocumentLoss { 2 } else { self.case.selected_id() },
             if self.case == Case::DocumentLoss { "document-lost" } else { "shutdown" }) { self.fail(Refusal::ActualExit); return; }
         let Ok(status) = edits.status() else { self.fail(Refusal::ActualExit); return; };
         // Native normal teardown intentionally invalidates the same original
@@ -647,15 +744,17 @@ impl Observation {
             || if self.case == Case::DocumentLoss { r.loss_generation.as_ref() != Some(&status.window_generation) }
                 else { r.generation.as_ref() == Some(&status.window_generation) } { self.fail(Refusal::ActualExit); return; }
         let dialogs = r.dialogs.iter().all(|dialog| {
-            let accepted = dialog.id == self.case.selected_id() || dialog.id == 3;
+            let accepted = if self.case == Case::CredentialSession { dialog.id != 18 }
+                else { dialog.id == self.case.selected_id() || dialog.id == 3 };
             let quit_cancel = self.case == Case::QuitPassive && dialog.id == 2;
             // The loss case replaced its already-settled first selection with
             // the second picker. That retired original never receives STOP;
             // every Cancel, pending lost picker and current Quit original does.
             let stopped = !(self.case == Case::DocumentLoss && dialog.id == 1);
-            dialog.settled(accepted, quit_cancel) && dialog.owner.stopped() == stopped
+            dialog.settled(accepted, quit_cancel) && (self.case == Case::CredentialSession || dialog.owner.stopped() == stopped)
         });
-        if !dialogs { self.fail(Refusal::ActualExit); return; }
+        if !dialogs || self.case == Case::CredentialSession && !r.credentials.as_ref().is_some_and(|session|
+            r.dialogs.last().is_some_and(|quit| quit.id == 22 && session.complete(document, &quit.owner))) { self.fail(Refusal::ActualExit); return; }
         r.finality[0] = true; r.finality[1] = true; r.finality[3] = true; r.finality[5] = true;
         r.actual_exit = true;
     }
@@ -664,7 +763,8 @@ impl Observation {
         let (mut initial, mut held) = {
             let mut r = self.record()?;
             if !r.actual_exit || !r.relay_joined || r.pending.is_some() || r.step != Step::Exit
-                || r.snapshot_pending || r.snapshot_requests != 2 || !r.methods[..3].iter().all(|done| *done) { return None; }
+                || self.case == Case::CredentialSession && !r.directory_fence_returned
+                || r.snapshot_pending || r.snapshot_requests != if self.case == Case::CredentialSession { 1 } else { 2 } || !r.methods[..3].iter().all(|done| *done) { return None; }
             (r.initial.take()?, r.held.take())
         };
         // Only after actual run_return, on process main and on the EXISTING
@@ -678,8 +778,15 @@ impl Observation {
         // original handle settlement, then latches its independent writer gate.
         // A child boolean alone cannot claim the labelled-only fixture change.
         native::verify_normal_ui_fixture(self.end).ok()?;
+        if self.case == Case::CredentialSession { self.credential_fixture.lock().ok()?.as_mut()?.verify_once().ok()?; }
         let mut r = self.record()?;
         let checks = match self.case {
+            Case::CredentialSession => {
+                if held.is_some() || r.snapshots != 1 || r.project_calls != 2 || r.close_count != 1
+                    || r.actions_returned != [false, true, true, false, true] || r.credentials.is_none()
+                    || r.reload_requested || r.mutation_returned { return None; }
+                [true; 7]
+            },
             Case::ProjectDraft => {
                 if held.is_some() || !r.methods.iter().all(|done| *done) || r.snapshots != 2 || r.project_calls != 2
                     || !r.cancel_returned || !r.hydrated || !r.edited || !r.preserved || !r.mutation_returned
@@ -706,7 +813,7 @@ impl Observation {
         if !r.finality.iter().all(|settled| *settled) || !self.timely() { return None; }
         // Lifecycle roles did bootstrap/select/snapshot. Zero is deliberately
         // verifiedMethods (no six-method feature credit), NOT zero invocations.
-        Some(UiCaseFacts { version, verified_methods: if self.case == Case::ProjectDraft { 6 } else { 0 }, checks, finality: r.finality })
+        Some(UiCaseFacts { version, verified_methods: if self.case == Case::ProjectDraft { 6 } else if self.case == Case::CredentialSession { 1 } else { 0 }, checks, finality: r.finality })
     }
 }
 
@@ -822,7 +929,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         let end = native::normal_ui_deadline().ok()?;
         let case = match native::require_normal_ui_qualification().ok()? {
             UiRole::ProjectDraft => Case::ProjectDraft, UiRole::QuitPassive => Case::QuitPassive,
-            UiRole::DocumentLoss => Case::DocumentLoss, _ => return None,
+            UiRole::DocumentLoss => Case::DocumentLoss, UiRole::CredentialSession => Case::CredentialSession, _ => return None,
         };
         let project = native::normal_ui_project().ok()?;
         // A known diagnostic-channel refusal is not an application refusal.

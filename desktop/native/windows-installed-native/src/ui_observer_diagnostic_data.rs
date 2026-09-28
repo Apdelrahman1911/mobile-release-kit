@@ -78,7 +78,7 @@ codes!(Step {
     Validate=21, Validated=22, Preview=23, Previewed=24, MutateFixture=25, ReturnDashboard=26,
     Refresh=27, Refreshed=28, ReturnSettings=29, Preserved=30, ArmHold=31, HeldRefresh=32, Held=33,
     ChoosePending=34, PickerPending=35, Reload=36, Lost=37, CloseCancel=38, QuitCancel=39,
-    QuitCancelled=40, Close=41, QuitConfirm=42, Exit=43,
+    QuitCancelled=40, Close=41, QuitConfirm=42, Exit=43, Credential=44,
 });
 codes!(Refusal {
     Record=1, Deadline=2, Attach=3, Navigation=4, PageLoad=5, AppInfo=6, Catalog=7,
@@ -89,8 +89,152 @@ codes!(Refusal {
     NativePrecondition=26, NativeActionBinding=27, NativeFolderInput=28, NativeFolderSet=29,
     NativeFolderRead=30, NativeFolderCompare=31, NativeFolderDifferent=32,
     NativeFolderInvalidated=33, NativeActionState=34,
+    NativeFileNameInput=35, NativeFileNameSet=36, NativeFileNameRead=37, NativeFileNameDifferent=38,
+    CredentialRequest=39, CredentialResult=40, CredentialTick=41, CredentialFixture=42,
 });
 codes!(PendingKind { None=0, Dom=1, Native=2, Close=3, Reload=4 });
+
+// A0 journal DATA only. These codes mirror the closed native enums; native
+// conversion is separate. No value is a storage/durability/finality permit.
+codes!(FenceStage {
+    NotStarted=0, Token=1, Mapping=2, AncestorOpen=3, TargetOpen=4, Inheritance=5,
+    Ntfs=6, Metadata=7, Streams=8, DirectoryIdentity=9, TargetIdentity=10,
+    AncestorEdge=11, ContextBeforeFence=12, Fence=13, Postcheck=14,
+    MappingAfterFence=15, ContextAfterFence=16, Complete=17, Cleanup=18,
+});
+codes!(FenceClass { NotRun=1, Supported=2, Unavailable=3, RefusedBeforeFence=4, Stopped=5, Unknown=6 });
+codes!(FenceError { Unavailable=1, Unsafe=2, Bounds=3, State=4, Unknown=5 });
+codes!(FenceClose { Settled=1, Unknown=2 });
+pub const FENCE_INSPECT_ACCESS: u32 = 0x1200a1;
+pub const FENCE_TARGET_ACCESS: u32 = 0x1201b7; // Not the output ACE's0x1201bf.
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FenceFailure { pub stage: FenceStage, pub error: FenceError, pub stopped: bool }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FenceIo {
+    pub entered: bool, pub ntstatus: Option<u32>, pub iosb_status: Option<u32>, pub information: Option<u64>,
+}
+impl FenceIo {
+    fn valid(self) -> bool {
+        if !self.entered { return self.ntstatus.is_none() && self.iosb_status.is_none() && self.information.is_none(); }
+        match self.ntstatus {
+            Some(0) => self.iosb_status.is_some() && self.information.is_some(),
+            _ => self.iosb_status.is_none() && self.information.is_none(),
+        }
+    }
+    fn completed(self) -> bool {
+        self.valid() && (!self.entered || self.ntstatus.is_some_and(|status|
+            status == 0 && self.iosb_status == Some(0) || status >> 30 == 3))
+    }
+    fn write_json(self, output: &mut impl Write) -> io::Result<()> {
+        write!(output, "[{},", self.entered)?;
+        optional_number(output, self.ntstatus.map(u64::from))?; output.write_all(b",")?;
+        optional_number(output, self.iosb_status.map(u64::from))?; output.write_all(b",")?;
+        optional_number(output, self.information)?; output.write_all(b"]")
+    }
+    fn decode(input: &mut Fields<'_>) -> Option<Self> {
+        input.take(b"[")?; let entered = input.boolean()?; input.take(b",")?;
+        let ntstatus = input.optional_number()?.map(u32::try_from).transpose().ok()?; input.take(b",")?;
+        let iosb_status = input.optional_number()?.map(u32::try_from).transpose().ok()?; input.take(b",")?;
+        let information = input.optional_number()?; input.take(b"]")?;
+        let value = Self { entered, ntstatus, iosb_status, information }; value.valid().then_some(value)
+    }
+}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FenceCleanup {
+    pub attempted: bool, pub expired: bool, pub outcome: Option<FenceClose>,
+    pub attempts: u16, pub closed: u16, pub no_handle: u16, pub unresolved: u16, pub first_error: Option<FenceError>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryFence {
+    pub stage: FenceStage, pub classification: Option<FenceClass>, pub first_failure: Option<FenceFailure>,
+    pub target_access: u32, pub last_open_directory: Option<u16>, pub last_open_access: u32,
+    pub last_open: FenceIo, pub fence: FenceIo, pub stop: bool, pub cleanup: FenceCleanup,
+}
+impl DirectoryFence {
+    /// Only completed, original-settled observations enter the journal. Unknown
+    /// and NotRun are distinct DATA states, but neither may be published here.
+    pub fn publishable(self) -> bool {
+        let c = self.cleanup;
+        if self.stage != FenceStage::Cleanup || self.target_access != FENCE_TARGET_ACCESS
+            || !self.last_open.completed() || !self.fence.completed()
+            || !c.attempted || c.outcome != Some(FenceClose::Settled) || c.first_error.is_some()
+            || c.unresolved != 0 || c.attempts > c.closed || u32::from(c.closed) + u32::from(c.no_handle) > 48
+            || c.expired && !self.stop { return false; }
+        match self.last_open_directory {
+            None if self.last_open_access != 0 || self.last_open != FenceIo::default() => return false,
+            Some(index) if index > 44 || !matches!(self.last_open_access, FENCE_INSPECT_ACCESS | FENCE_TARGET_ACCESS) => return false,
+            _ => (),
+        }
+        if let Some(index) = self.last_open_directory {
+            if self.last_open.entered && (c.closed < index + u16::from(self.last_open.ntstatus == Some(0))
+                || self.last_open.ntstatus != Some(0) && c.no_handle == 0) { return false; }
+        }
+        if self.fence.entered && (self.last_open_directory.is_none_or(|index| index == 0)
+            || self.last_open_access != FENCE_TARGET_ACCESS || !self.last_open.entered
+            || self.last_open.ntstatus != Some(0) || self.last_open.iosb_status != Some(0)
+            || self.last_open.information != Some(1)) { return false; }
+        match self.first_failure {
+            None => self.classification == Some(FenceClass::Supported) && self.fence.entered
+                && self.fence.ntstatus == Some(0) && self.fence.iosb_status == Some(0) && !self.stop && !c.expired,
+            Some(failure) => failure.stage != FenceStage::NotStarted && failure.error != FenceError::Unknown
+                && if failure.stopped {
+                    self.classification == Some(FenceClass::Stopped) && failure.error == FenceError::Unavailable && self.stop
+                } else {
+                    self.classification == Some(if self.fence.entered { FenceClass::Unavailable } else { FenceClass::RefusedBeforeFence })
+                },
+        }
+    }
+    fn write_json(self, output: &mut impl Write) -> io::Result<()> {
+        if !self.publishable() { return Err(io::ErrorKind::InvalidData.into()); }
+        write!(output, "[{},", self.stage as u8)?;
+        optional_number(output, self.classification.map(|value| value as u64))?; output.write_all(b",")?;
+        match self.first_failure {
+            Some(failure) => write!(output, "[{},{},{}]", failure.stage as u8, failure.error as u8, failure.stopped)?,
+            None => output.write_all(b"null")?,
+        }
+        write!(output, ",{},", self.target_access)?;
+        optional_number(output, self.last_open_directory.map(u64::from))?;
+        write!(output, ",{},", self.last_open_access)?; self.last_open.write_json(output)?; output.write_all(b",")?;
+        self.fence.write_json(output)?; let c = self.cleanup;
+        write!(output, ",{},[{},{},", self.stop, c.attempted, c.expired)?;
+        optional_number(output, c.outcome.map(|value| value as u64))?;
+        write!(output, ",{},{},{},{},", c.attempts, c.closed, c.no_handle, c.unresolved)?;
+        optional_number(output, c.first_error.map(|value| value as u64))?; output.write_all(b"]]")
+    }
+    fn decode(input: &mut Fields<'_>) -> Option<Self> {
+        input.take(b"[")?; let stage = FenceStage::from_code(input.byte()?)?; input.take(b",")?;
+        let classification = match input.optional_number()? {
+            Some(code) => Some(FenceClass::from_code(code.try_into().ok()?)?), None => None,
+        }; input.take(b",")?;
+        let first_failure = if input.0.starts_with(b"null") { input.take(b"null")?; None } else {
+            input.take(b"[")?; let stage = FenceStage::from_code(input.byte()?)?; input.take(b",")?;
+            let error = FenceError::from_code(input.byte()?)?; input.take(b",")?;
+            let stopped = input.boolean()?; input.take(b"]")?; Some(FenceFailure { stage, error, stopped })
+        };
+        input.take(b",")?; let target_access = input.number()?.try_into().ok()?; input.take(b",")?;
+        let last_open_directory = input.optional_number()?.map(u16::try_from).transpose().ok()?; input.take(b",")?;
+        let last_open_access = input.number()?.try_into().ok()?; input.take(b",")?;
+        let last_open = FenceIo::decode(input)?; input.take(b",")?; let fence = FenceIo::decode(input)?;
+        input.take(b",")?; let stop = input.boolean()?; input.take(b",[")?;
+        let attempted = input.boolean()?; input.take(b",")?; let expired = input.boolean()?; input.take(b",")?;
+        let outcome = match input.optional_number()? {
+            Some(code) => Some(FenceClose::from_code(code.try_into().ok()?)?), None => None,
+        }; input.take(b",")?; let attempts = input.number()?.try_into().ok()?; input.take(b",")?;
+        let closed = input.number()?.try_into().ok()?; input.take(b",")?;
+        let no_handle = input.number()?.try_into().ok()?; input.take(b",")?;
+        let unresolved = input.number()?.try_into().ok()?; input.take(b",")?;
+        let first_error = match input.optional_number()? {
+            Some(code) => Some(FenceError::from_code(code.try_into().ok()?)?), None => None,
+        }; input.take(b"]]")?;
+        let value = Self { stage, classification, first_failure, target_access, last_open_directory, last_open_access,
+            last_open, fence, stop, cleanup: FenceCleanup { attempted, expired, outcome, attempts, closed, no_handle, unresolved, first_error } };
+        value.publishable().then_some(value)
+    }
+}
+fn optional_number(output: &mut impl Write, value: Option<u64>) -> io::Result<()> {
+    match value { Some(value) => write!(output, "{value}"), None => output.write_all(b"null") }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Snapshot {
@@ -124,20 +268,22 @@ impl Snapshot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Event { MainAdmitted, Step(Step), Startup(StartupEvent), StartupRefusal, ObserverRefusal, BuilderReturned }
+pub enum Event { MainAdmitted, Step(Step), Startup(StartupEvent), StartupRefusal, ObserverRefusal, BuilderReturned, DirectoryFence }
 impl Event {
-    // The only publication keys: 1 + 43 + 8 + 2 + 1 = 55. No heartbeat.
+    // Historical keys0..55 stay stable; one A0 observation uses56. No heartbeat.
     fn key(self) -> Option<u8> { Some(match self {
-        Self::MainAdmitted => 0, Self::Step(step) => step as u8,
+        Self::MainAdmitted => 0, Self::Step(Step::Credential) => 55, Self::Step(step) => step as u8,
         Self::Startup(event) => 44 + match event {
             StartupEvent::Context => 0, StartupEvent::Window => 1, StartupEvent::Registered => 2,
             StartupEvent::HookAccepted => 3, StartupEvent::ReplyReturn => 4, StartupEvent::NavigateReturn => 5,
             StartupEvent::Finished => 6, StartupEvent::Stop => 7, _ => return None,
         },
         Self::StartupRefusal => 52, Self::ObserverRefusal => 53, Self::BuilderReturned => 54,
+        Self::DirectoryFence => 56,
     }) }
     fn code(self) -> u8 { match self { Self::MainAdmitted => 1, Self::Step(_) => 2,
-        Self::Startup(_) => 3, Self::StartupRefusal => 4, Self::ObserverRefusal => 5, Self::BuilderReturned => 6 } }
+        Self::Startup(_) => 3, Self::StartupRefusal => 4, Self::ObserverRefusal => 5, Self::BuilderReturned => 6,
+        Self::DirectoryFence => 7 } }
 }
 
 /// Scalar first refusal and last copied observation, independent of Record's
@@ -184,13 +330,20 @@ impl JournalOrder {
 impl Permit<'_> {
     pub fn record(&self, output: &mut impl Write, snapshot: Snapshot,
         startup: Option<u64>, refusal: Option<Refusal>) -> io::Result<()> {
+        self.record_with_fence(output, snapshot, startup, refusal, None)
+    }
+    pub fn record_with_fence(&self, output: &mut impl Write, snapshot: Snapshot,
+        startup: Option<u64>, refusal: Option<Refusal>, directory_fence: Option<DirectoryFence>) -> io::Result<()> {
         let event = self.event;
         let invalid = || io::Error::from(io::ErrorKind::InvalidData);
         if snapshot.encode().is_none() || event.key().is_none()
             || matches!(event, Event::Step(step) if step != snapshot.step)
             || startup.is_some_and(|word| Word::decode(word).is_none())
             || matches!(event, Event::Startup(_) | Event::StartupRefusal) && startup.is_none()
-            || matches!(event, Event::ObserverRefusal) && refusal.is_none() { return Err(invalid()); }
+            || matches!(event, Event::ObserverRefusal) && refusal.is_none()
+            || matches!(event, Event::DirectoryFence) != directory_fence.is_some()
+            || directory_fence.is_some_and(|value| !value.publishable() || snapshot.step != Step::Bootstrap
+                || snapshot.pending != PendingKind::Native || snapshot.pending_step != Some(Step::Bootstrap)) { return Err(invalid()); }
         if let Some(word) = startup.and_then(Word::decode) {
             if matches!(event, Event::StartupRefusal) && !word.first_refusal
                 || matches!(event, Event::Startup(selected) if word.event != selected || word.first_refusal) { return Err(invalid()); }
@@ -199,8 +352,10 @@ impl Permit<'_> {
             self.sequence, event.code(), snapshot.step as u8, snapshot.pending as u8,
             snapshot.pending_step.map_or(0, |step| step as u8), snapshot.dispatch, snapshot.flags)?;
         match startup { Some(word) => write!(output, "{word}")?, None => output.write_all(b"null")? }
-        write!(output, ",\"refusal\":{},\"coverageIncomplete\":{}}}\n", refusal.map_or(0, |reason| reason as u8),
-            self.owner.incomplete.load(Ordering::SeqCst))
+        write!(output, ",\"refusal\":{},\"coverageIncomplete\":{}", refusal.map_or(0, |reason| reason as u8),
+            self.owner.incomplete.load(Ordering::SeqCst))?;
+        if let Some(value) = directory_fence { output.write_all(b",\"directoryFence\":")?; value.write_json(output)?; }
+        output.write_all(b"}\n")
     }
 }
 
@@ -223,7 +378,7 @@ impl Write for Frame {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Row {
     pub sequence: u8, pub event: Event, pub snapshot: Snapshot, pub startup: Option<u64>,
-    pub refusal: Option<Refusal>, pub coverage_incomplete: bool,
+    pub refusal: Option<Refusal>, pub coverage_incomplete: bool, pub directory_fence: Option<DirectoryFence>,
 }
 struct Fields<'a>(&'a [u8]);
 impl Fields<'_> {
@@ -236,6 +391,9 @@ impl Fields<'_> {
         self.0 = &self.0[length..]; Some(value)
     }
     fn byte(&mut self) -> Option<u8> { self.number()?.try_into().ok() }
+    fn optional_number(&mut self) -> Option<Option<u64>> {
+        if self.0.starts_with(b"null") { self.take(b"null")?; Some(None) } else { Some(Some(self.number()?)) }
+    }
     fn boolean(&mut self) -> Option<bool> {
         if self.0.starts_with(b"true") { self.take(b"true")?; Some(true) }
         else { self.take(b"false")?; Some(false) }
@@ -263,15 +421,21 @@ impl Row {
         input.take(b",\"refusal\":")?; let refusal = input.byte()?;
         let refusal = if refusal == 0 { None } else { Some(Refusal::from_code(refusal)?) };
         input.take(b",\"coverageIncomplete\":")?; let coverage_incomplete = input.boolean()?;
+        let directory_fence = if input.0.starts_with(b",\"directoryFence\":") {
+            input.take(b",\"directoryFence\":")?; Some(DirectoryFence::decode(&mut input)?)
+        } else { None };
         input.take(b"}\n")?; if !input.0.is_empty() { return None; }
         let event = match code {
             1 => Event::MainAdmitted, 2 => Event::Step(step),
             3 => { let word = word?; if word.first_refusal { return None; } Event::Startup(word.event) },
             4 => { if !word?.first_refusal { return None; } Event::StartupRefusal },
-            5 => { refusal?; Event::ObserverRefusal }, 6 => Event::BuilderReturned, _ => return None,
+            5 => { refusal?; Event::ObserverRefusal }, 6 => Event::BuilderReturned, 7 => Event::DirectoryFence, _ => return None,
         };
         event.key()?;
-        Some(Self { sequence, event, snapshot, startup, refusal, coverage_incomplete })
+        if (event == Event::DirectoryFence) != directory_fence.is_some()
+            || directory_fence.is_some() && (snapshot.step != Step::Bootstrap || snapshot.pending != PendingKind::Native
+                || snapshot.pending_step != Some(Step::Bootstrap)) { return None; }
+        Some(Self { sequence, event, snapshot, startup, refusal, coverage_incomplete, directory_fence })
     }
     pub fn write_json(self, output: &mut impl Write) -> io::Result<()> {
         let snapshot = self.snapshot;
@@ -279,7 +443,9 @@ impl Row {
             self.sequence, self.event.code(), snapshot.step as u8, snapshot.pending as u8,
             snapshot.pending_step.map_or(0, |value| value as u8), snapshot.dispatch, snapshot.flags)?;
         match self.startup { Some(word) => write!(output, "{word}")?, None => output.write_all(b"null")? }
-        write!(output, ",\"refusal\":{},\"coverageIncomplete\":{}}}", self.refusal.map_or(0, |value| value as u8), self.coverage_incomplete)
+        write!(output, ",\"refusal\":{},\"coverageIncomplete\":{}", self.refusal.map_or(0, |value| value as u8), self.coverage_incomplete)?;
+        if let Some(value) = self.directory_fence { output.write_all(b",\"directoryFence\":")?; value.write_json(output)?; }
+        output.write_all(b"}")
     }
 }
 
@@ -289,12 +455,18 @@ impl Row {
 pub struct Projection {
     pub bytes: u32, pub records: u8, pub reason: u8,
     pub last: Option<Row>, pub observer_refusal: Option<Row>, pub startup_refusal: Option<Row>,
+    pub directory_fence: Option<Row>,
 }
 impl Default for Projection {
-    fn default() -> Self { Self { bytes: 0, records: 0, reason: 1, last: None, observer_refusal: None, startup_refusal: None } }
+    fn default() -> Self { Self { bytes: 0, records: 0, reason: 1, last: None, observer_refusal: None, startup_refusal: None, directory_fence: None } }
 }
 impl Projection {
     pub fn decode(raw: &[u8]) -> Self {
+        Self::decode_for_role(raw, false)
+    }
+    /// The native parent passes its original authenticated fixed role. This
+    /// Boolean is DATA context, never permission to run the probe or read files.
+    pub fn decode_for_role(raw: &[u8], credential_session: bool) -> Self {
         let mut value = Self::default();
         if raw.len() > BYTE_LIMIT { value.reason = 5; return value; }
         value.bytes = raw.len() as u32;
@@ -304,12 +476,14 @@ impl Projection {
             if value.records >= RECORDS || line.len() > RECORD_LIMIT { value.reason = 5; break; }
             if !line.ends_with(b"\n") { value.reason = 3; break; }
             let Some(row) = Row::decode(line) else { value.reason = 4; break; };
+            if row.directory_fence.is_some() && !credential_session { value.reason = 4; break; }
             let key = row.event.key().expect("decoded finite event"); let mask = 1u64 << key;
             if row.sequence != value.records + 1 || seen & mask != 0
                 || value.observer_refusal.is_some_and(|first| first.refusal != row.refusal) {
                 value.reason = 4; break;
             }
             seen |= mask; value.records += 1; value.last = Some(row);
+            if row.directory_fence.is_some() { value.directory_fence = Some(row); }
             if row.refusal.is_some() && value.observer_refusal.is_none() { value.observer_refusal = Some(row); }
             if row.startup.and_then(Word::decode).is_some_and(|word| word.first_refusal) && value.startup_refusal.is_none() {
                 value.startup_refusal = Some(row);
@@ -327,6 +501,8 @@ impl Projection {
         match self.observer_refusal { Some(row) => row.write_json(output)?, None => output.write_all(b"null")? }
         output.write_all(b",\"startupRefusal\":")?;
         match self.startup_refusal { Some(row) => row.write_json(output)?, None => output.write_all(b"null")? }
+        output.write_all(b",\"directoryFence\":")?;
+        match self.directory_fence { Some(row) => row.write_json(output)?, None => output.write_all(b"null")? }
         output.write_all(b"}")
     }
 }
@@ -380,8 +556,8 @@ mod tests {
         assert_eq!((row.sequence, row.event, row.snapshot), (1, Event::MainAdmitted, Snapshot::default()));
         assert_eq!((Projection::decode(ROW.as_bytes()).records, Projection::decode(ROW.as_bytes()).reason), (1, 0));
         for (from, to) in [("\"schema\":1", "\"schema\":true"), ("\"sequence\":1", "\"sequence\":01"),
-            ("\"event\":1", "\"event\":7"), ("\"step\":1", "\"step\":44"), ("\"flags\":0", "\"flags\":65536"),
-            ("\"flags\":0", "\"flags\":-1"), ("\"pending\":0", "\"pending\":1"), ("\"refusal\":0", "\"refusal\":35"),
+            ("\"event\":1", "\"event\":7"), ("\"step\":1", "\"step\":45"), ("\"flags\":0", "\"flags\":65536"),
+            ("\"flags\":0", "\"flags\":-1"), ("\"pending\":0", "\"pending\":1"), ("\"refusal\":0", "\"refusal\":43"),
             ("\"startup\":null", "\"startup\":18446744073709551616"), ("\"startup\":null", "\"startup\":1"),
             ("\"schema\":1", "\"schema\":1,\"schema\":1"), ("}\n", ",\"path\":\"private\"}\n"),
             ("}\n", "}\r\n")] {
@@ -447,15 +623,15 @@ mod tests {
     }
     #[test]
     fn snapshots_are_closed_and_round_trip() {
-        for step in 1..=43 { for pending in [PendingKind::None, PendingKind::Dom, PendingKind::Native, PendingKind::Close, PendingKind::Reload] {
+        for step in 1..=44 { for pending in [PendingKind::None, PendingKind::Dom, PendingKind::Native, PendingKind::Close, PendingKind::Reload] {
             let snapshot = Snapshot { step: Step::from_code(step).unwrap(), pending,
                 pending_step: matches!(pending, PendingKind::Dom | PendingKind::Native | PendingKind::Close).then_some(Step::Exit),
                 dispatch: if pending == PendingKind::Dom { 200 } else { 0 }, flags: u16::MAX };
             assert_eq!(Snapshot::decode(snapshot.encode().unwrap()), Some(snapshot));
         } }
         assert!(Snapshot::decode(u64::MAX).is_none());
-        assert!((0..=255).filter_map(Step::from_code).count() == 43);
-        assert!((0..=255).filter_map(Refusal::from_code).count() == 34);
+        assert!((0..=255).filter_map(Step::from_code).count() == 44);
+        assert!((0..=255).filter_map(Refusal::from_code).count() == 42);
         assert!(Snapshot { pending: PendingKind::Dom, ..Snapshot::default() }.encode().is_none());
     }
     #[test]
@@ -468,14 +644,17 @@ mod tests {
     fn native_action_sites_are_closed_first_only_and_bounded() {
         let reasons = [Refusal::NativePrecondition, Refusal::NativeActionBinding, Refusal::NativeFolderInput,
             Refusal::NativeFolderSet, Refusal::NativeFolderRead, Refusal::NativeFolderCompare,
-            Refusal::NativeFolderDifferent, Refusal::NativeFolderInvalidated, Refusal::NativeActionState];
+            Refusal::NativeFolderDifferent, Refusal::NativeFolderInvalidated, Refusal::NativeActionState,
+            Refusal::NativeFileNameInput, Refusal::NativeFileNameSet, Refusal::NativeFileNameRead,
+            Refusal::NativeFileNameDifferent, Refusal::CredentialRequest, Refusal::CredentialResult,
+            Refusal::CredentialTick, Refusal::CredentialFixture];
         for (index, reason) in reasons.into_iter().enumerate() {
             assert_eq!(Refusal::from_code(26 + index as u8), Some(reason));
             let latch = Latch::default(); let snapshot = Snapshot { step: Step::AcceptProject, ..Snapshot::default() };
             latch.observe(snapshot); latch.refuse(reason); latch.refuse(Refusal::NativeStep); latch.refuse(Refusal::Deadline);
             assert_eq!(latch.first(), Some(reason)); assert_eq!(latch.snapshot(), snapshot);
             let row = Row { sequence: 1, event: Event::ObserverRefusal, snapshot, startup: None,
-                refusal: latch.first(), coverage_incomplete: false };
+                refusal: latch.first(), coverage_incomplete: false, directory_fence: None };
             let order = JournalOrder::default(); let permit = order.begin(Event::ObserverRefusal).unwrap();
             let mut frame = Frame::default(); permit.record(&mut frame, snapshot, None, latch.first()).unwrap();
             assert!(frame.bytes().len() <= RECORD_LIMIT);
@@ -484,7 +663,7 @@ mod tests {
             assert_eq!(projection.reason, 0); assert_eq!(projection.observer_refusal, Some(row));
         }
         assert!(Refusal::from_code(0).is_none());
-        for code in 35..=u8::MAX { assert!(Refusal::from_code(code).is_none()); }
+        for code in 43..=u8::MAX { assert!(Refusal::from_code(code).is_none()); }
     }
     #[test]
     fn reentry_duplicate_and_failure_cannot_replay() {
@@ -500,23 +679,123 @@ mod tests {
     #[test]
     fn all_distinct_records_fit_unchanged_bounds() {
         let order = JournalOrder::default(); let mut events = vec![Event::MainAdmitted];
-        events.extend((1..=43).map(|code| Event::Step(Step::from_code(code).unwrap())));
+        events.extend((1..=44).map(|code| Event::Step(Step::from_code(code).unwrap())));
         events.extend([StartupEvent::Context, StartupEvent::Window, StartupEvent::Registered,
             StartupEvent::HookAccepted, StartupEvent::ReplyReturn, StartupEvent::NavigateReturn,
             StartupEvent::Finished, StartupEvent::Stop].map(Event::Startup));
-        events.extend([Event::StartupRefusal, Event::ObserverRefusal, Event::BuilderReturned]);
-        assert_eq!(events.len(), 55); let mut total = 0;
+        events.extend([Event::StartupRefusal, Event::ObserverRefusal, Event::BuilderReturned, Event::DirectoryFence]);
+        assert_eq!(events.len(), 57); let mut total = 0;
         for event in events {
             let mut word = Word::default();
             if let Event::Startup(event) = event { word.event = event; if event == StartupEvent::Finished { word.detail = 2; } }
             if event == Event::StartupRefusal { word.event = StartupEvent::ExternalUnknown; word.first_refusal = true; }
-            let snapshot = Snapshot { step: if let Event::Step(step) = event { step } else { Step::Exit },
+            let mut snapshot = Snapshot { step: if let Event::Step(step) = event { step } else { Step::Exit },
                 pending: PendingKind::Dom, pending_step: Some(Step::Exit), dispatch: 200, flags: u16::MAX };
+            let fence = if event == Event::DirectoryFence { snapshot = fence_snapshot(); Some(fence_supported()) } else { None };
             let permit = order.begin(event).unwrap(); let mut raw = Frame::default();
-            permit.record(&mut raw, snapshot, Some(word.encode().unwrap()), Some(Refusal::MainReturn)).unwrap();
+            permit.record_with_fence(&mut raw, snapshot, Some(word.encode().unwrap()), Some(Refusal::MainReturn), fence).unwrap();
             assert!(raw.bytes().len() <= RECORD_LIMIT); total += raw.bytes().len();
         }
-        assert!(total <= BYTE_LIMIT); assert_eq!(order.count.load(Ordering::SeqCst), 55);
+        assert!(total <= BYTE_LIMIT); assert_eq!(order.count.load(Ordering::SeqCst), 57);
+    }
+    fn fence_snapshot() -> Snapshot {
+        Snapshot { step: Step::Bootstrap, pending: PendingKind::Native, pending_step: Some(Step::Bootstrap), dispatch: 0, flags: u16::MAX }
+    }
+    fn fence_supported() -> DirectoryFence {
+        // Synthetic closed codec DATA, never a native/qualification receipt.
+        DirectoryFence { stage: FenceStage::Cleanup, classification: Some(FenceClass::Supported), first_failure: None,
+            target_access: FENCE_TARGET_ACCESS, last_open_directory: Some(4), last_open_access: FENCE_TARGET_ACCESS,
+            last_open: FenceIo { entered: true, ntstatus: Some(0), iosb_status: Some(0), information: Some(1) },
+            fence: FenceIo { entered: true, ntstatus: Some(0), iosb_status: Some(0), information: Some(0) }, stop: false,
+            cleanup: FenceCleanup { attempted: true, expired: false, outcome: Some(FenceClose::Settled),
+                attempts: 6, closed: 6, no_handle: 0, unresolved: 0, first_error: None } }
+    }
+    fn fence_unavailable() -> DirectoryFence {
+        DirectoryFence { classification: Some(FenceClass::Unavailable),
+            first_failure: Some(FenceFailure { stage: FenceStage::Fence, error: FenceError::Unavailable, stopped: false }),
+            fence: FenceIo { entered: true, ntstatus: Some(0xc00000bb), iosb_status: None, information: None }, ..fence_supported() }
+    }
+    #[test]
+    fn directory_fence_settled_success_and_negative_rows_are_bounded() {
+        let positive = fence_supported();
+        let refused = DirectoryFence { classification: Some(FenceClass::RefusedBeforeFence),
+            first_failure: Some(FenceFailure { stage: FenceStage::TargetOpen, error: FenceError::Unavailable, stopped: false }),
+            last_open: FenceIo { entered: true, ntstatus: Some(0xc0000022), iosb_status: None, information: None },
+            fence: FenceIo::default(), cleanup: FenceCleanup { no_handle: 1, ..positive.cleanup }, ..positive };
+        let stopped = DirectoryFence { classification: Some(FenceClass::Stopped),
+            first_failure: Some(FenceFailure { stage: FenceStage::Token, error: FenceError::Unavailable, stopped: true }),
+            last_open_directory: None, last_open_access: 0, last_open: FenceIo::default(), fence: FenceIo::default(), stop: true,
+            cleanup: FenceCleanup { attempts: 0, closed: 0, ..positive.cleanup }, ..positive };
+        let late_refusal = DirectoryFence { stop: true, cleanup: FenceCleanup { expired: true, ..refused.cleanup }, ..refused };
+        for value in [positive, fence_unavailable(), refused, stopped, late_refusal] {
+            assert!(value.publishable()); let order = JournalOrder::default(); let mut frame = Frame::default();
+            order.begin(Event::DirectoryFence).unwrap().record_with_fence(&mut frame, fence_snapshot(), None, None, Some(value)).unwrap();
+            assert!(frame.bytes().len() <= RECORD_LIMIT);
+            let row = Row::decode(frame.bytes()).unwrap(); assert_eq!(row.directory_fence, Some(value));
+            let projection = Projection::decode_for_role(frame.bytes(), true);
+            assert_eq!((projection.records, projection.reason, projection.directory_fence), (1, 0, Some(row)));
+            assert!(order.begin(Event::DirectoryFence).is_none());
+        }
+        let order = JournalOrder::default(); let mut old = Frame::default();
+        order.begin(Event::MainAdmitted).unwrap().record(&mut old, Snapshot::default(), None, None).unwrap();
+        assert_eq!(old.bytes(), ROW.as_bytes()); // Historical row bytes unchanged.
+        assert_eq!((0..=255).filter_map(FenceStage::from_code).count(), 19);
+        assert_eq!((0..=255).filter_map(FenceClass::from_code).count(), 6);
+        assert_eq!((0..=255).filter_map(FenceError::from_code).count(), 5);
+        assert_eq!((0..=255).filter_map(FenceClose::from_code).count(), 2);
+    }
+    #[test]
+    fn directory_fence_unknown_presence_and_cleanup_never_publish() {
+        let good = fence_supported();
+        for bad in [DirectoryFence { classification: None, ..good },
+            DirectoryFence { classification: Some(FenceClass::NotRun), ..good },
+            DirectoryFence { classification: Some(FenceClass::Unknown), ..good },
+            DirectoryFence { stage: FenceStage::Complete, ..good }, DirectoryFence { target_access: 0x1201bf, ..good },
+            DirectoryFence { last_open_directory: Some(45), ..good }, DirectoryFence { stop: true, ..good },
+            DirectoryFence { fence: FenceIo { entered: false, ..good.fence }, ..good },
+            DirectoryFence { fence: FenceIo { ntstatus: None, ..good.fence }, ..good },
+            DirectoryFence { fence: FenceIo { ntstatus: Some(259), iosb_status: None, information: None, ..good.fence }, ..good },
+            DirectoryFence { fence: FenceIo { iosb_status: None, ..good.fence }, ..good },
+            DirectoryFence { fence: FenceIo { information: None, ..good.fence }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { outcome: Some(FenceClose::Unknown), ..good.cleanup }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { expired: true, ..good.cleanup }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { unresolved: 1, ..good.cleanup }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { closed: 48, no_handle: 1, ..good.cleanup }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { attempts: 7, ..good.cleanup }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { attempts: 0, closed: 0, ..good.cleanup }, ..good },
+            DirectoryFence { cleanup: FenceCleanup { first_error: Some(FenceError::Unavailable), ..good.cleanup }, ..good }] {
+            assert!(!bad.publishable());
+            let order = JournalOrder::default(); let mut frame = Frame::default();
+            assert!(order.begin(Event::DirectoryFence).unwrap().record_with_fence(&mut frame, fence_snapshot(), None, None, Some(bad)).is_err());
+            assert!(frame.bytes().is_empty());
+        }
+        let order = JournalOrder::default(); let mut frame = Frame::default();
+        order.begin(Event::DirectoryFence).unwrap().record_with_fence(&mut frame, fence_snapshot(), None, None, Some(good)).unwrap();
+        let text = std::str::from_utf8(frame.bytes()).unwrap();
+        for (from, to) in [("\"event\":7", "\"event\":6"), ("[18,2,null,", "[19,2,null,"),
+            ("[18,2,null,", "[18,true,null,"), ("[true,0,0,0]", "[true,4294967296,null,null]"),
+            ("}\n", ",\"foreign\":null}\n"), ("\"directoryFence\":", "\"directoryFence\":null,\"directoryFence\":")] {
+            assert!(Row::decode(text.replace(from, to).as_bytes()).is_none());
+        }
+    }
+    #[test]
+    fn directory_fence_projection_keeps_one_original_with_first_refusal() {
+        let mut word = Word::default(); word.event = StartupEvent::ExternalUnknown; word.first_refusal = true;
+        let word = Some(word.encode().unwrap()); let refusal = Some(Refusal::CredentialFixture);
+        let order = JournalOrder::default(); let mut first = Frame::default();
+        order.begin(Event::DirectoryFence).unwrap().record_with_fence(&mut first, fence_snapshot(), word, refusal, Some(fence_unavailable())).unwrap();
+        let row = Row::decode(first.bytes()).unwrap(); let projection = Projection::decode_for_role(first.bytes(), true);
+        assert_eq!((projection.last, projection.observer_refusal, projection.startup_refusal, projection.directory_fence), (Some(row), Some(row), Some(row), Some(row)));
+        let mut output = Vec::new(); projection.write_json(&mut output).unwrap(); assert!(output.len() < 4096);
+        assert_eq!((Projection::decode(first.bytes()).records, Projection::decode(first.bytes()).reason), (0, 4));
+        let duplicate = [first.bytes(), first.bytes()].concat();
+        let duplicate = Projection::decode_for_role(&duplicate, true);
+        assert_eq!((duplicate.records, duplicate.reason, duplicate.directory_fence), (1, 4, Some(row)));
+        let mut second = Frame::default(); let next = Snapshot { step: Step::Environment, ..Snapshot::default() };
+        order.begin(Event::Step(Step::Environment)).unwrap().record(&mut second, next, word, refusal).unwrap();
+        let joined = [first.bytes(), second.bytes()].concat(); let later = Projection::decode_for_role(&joined, true);
+        assert_eq!((later.records, later.reason, later.directory_fence), (2, 0, Some(row)));
+        assert_eq!(later.last.unwrap().event, Event::Step(Step::Environment));
     }
     #[test]
     fn invalid_scalar_records_are_not_formatted() {

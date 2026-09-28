@@ -11,22 +11,28 @@ use super::{Case as ShellCase, Observation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case { ToolchainPrerequisite, VersionStale, UnsignedArchive, Cancel, Finality,
-    SigningInputs, SignedRefusal, SignedCancel, RecoveryEmpty }
+    SigningInputs, SignedRefusal, SignedCancel, RecoveryEmpty, AndroidInputs }
 impl Case {
-    pub(super) const ALL: [Self; 9] = [Self::ToolchainPrerequisite, Self::VersionStale,
+    pub(super) const ALL: [Self; 10] = [Self::ToolchainPrerequisite, Self::VersionStale,
         Self::UnsignedArchive, Self::Cancel, Self::Finality, Self::SigningInputs, Self::SignedRefusal,
-        Self::SignedCancel, Self::RecoveryEmpty];
+        Self::SignedCancel, Self::RecoveryEmpty, Self::AndroidInputs];
     pub(super) fn name(self) -> &'static str { match self {
         Self::ToolchainPrerequisite => "ios-toolchain-prerequisite", Self::VersionStale => "ios-version-stale",
         Self::UnsignedArchive => "ios-unsigned-archive", Self::Cancel => "ios-cancel", Self::Finality => "ios-finality",
         Self::SigningInputs => "ios-signing-inputs", Self::SignedRefusal => "ios-signed-refusal",
-        Self::SignedCancel => "ios-signed-cancel", Self::RecoveryEmpty => "ios-recovery-empty",
+        Self::SignedCancel => "ios-signed-cancel", Self::RecoveryEmpty => "ios-recovery-empty", Self::AndroidInputs => "android-inputs",
     } }
     pub(super) fn parse(value: &OsStr) -> Option<Self> { Self::ALL.into_iter().find(|case| value == OsStr::new(case.name())) }
-    pub(super) fn inputs(self) -> bool { matches!(self, Self::SigningInputs | Self::SignedRefusal | Self::SignedCancel) }
+    pub(crate) fn session_final_original(self) -> Option<u32> { match self {
+        Self::AndroidInputs => Some(18),
+        Self::SigningInputs | Self::SignedRefusal | Self::SignedCancel => Some(12),
+        _ => None,
+    } }
+    pub(super) fn input_only(self) -> bool { matches!(self, Self::SigningInputs | Self::AndroidInputs) }
+    pub(super) fn inputs(self) -> bool { self.input_only() || self.signed() }
     pub(super) fn signed(self) -> bool { matches!(self, Self::SignedRefusal | Self::SignedCancel) }
     pub(super) fn operation(self) -> Option<wire::Operation> { match self {
-        Self::SigningInputs => None, Self::SignedRefusal | Self::SignedCancel => Some(wire::Operation::IOSSignedExport),
+        Self::SigningInputs | Self::AndroidInputs => None, Self::SignedRefusal | Self::SignedCancel => Some(wire::Operation::IOSSignedExport),
         Self::RecoveryEmpty => Some(wire::Operation::IOSLocalRecovery), _ => Some(wire::Operation::IOSUnsignedArchive),
     } }
     pub(super) fn holds_finality(self) -> bool { matches!(self, Self::Finality | Self::SignedRefusal) }
@@ -66,7 +72,7 @@ impl OriginalFacts {
     fn clocks_for(&self, case: Case) -> bool {
         if case.signed() || case == Case::RecoveryEmpty {
             (self.work_ms, self.hard_ms, self.cleanup_ms) == (120_000, 250_000, Some(240_000))
-        } else { case != Case::SigningInputs && (self.work_ms, self.hard_ms, self.cleanup_ms) == (300_000, 310_000, None)
+        } else { !case.input_only() && (self.work_ms, self.hard_ms, self.cleanup_ms) == (300_000, 310_000, None)
             && self.material_loan_present.is_none() && self.material_loan_retired.is_none() }
     }
     fn held(&self, case: Case) -> bool { self.settled_body() && self.clocks_for(case) && case.holds_finality()
@@ -90,14 +96,16 @@ impl SessionRegistration {
         self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
             && self.control.session_registered.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
-    pub(crate) fn consume(self, original: &Arc<()>) -> Result<(), BridgeError> {
+    pub(crate) fn consume(self, original: &Arc<()>) -> Result<Case, BridgeError> {
         let q = self.control.original.get().and_then(Weak::upgrade).ok_or_else(BridgeError::invalid)?;
         let r = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
         if !self.control.case.inputs() || !self.control.permits() || !r.attached || r.started || r.loaded
             || !self.claim_original(original) {
             return Err(BridgeError::invalid());
         }
-        Ok(())
+        // Return this consumed token's own validated Case, never a caller-
+        // supplied count/case. The document independently checks availability.
+        Ok(self.control.case)
     }
 }
 impl Admission {
@@ -308,6 +316,43 @@ const CONFIG_SIGNED: &[u8] = br#"{
   "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
   "source": {"candidateBranch": "main", "productionBranch": "main"},
   "version": {"buildKey": "BUILD_NUMBER", "nameKey": "VERSION_NAME", "source": "version.properties"}
+}
+"#;
+const CONFIG_ANDROID_INPUTS: &[u8] = br#"{
+  "android": {
+    "applicationId": "org.example.mrk.observed",
+    "enabled": true,
+    "identityStatus": "unverified"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": []
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "required",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "version.properties"
+  }
 }
 "#;
 const CONFIG_INPUTS: &[u8] = br#"{
@@ -521,7 +566,8 @@ const WORKSPACE: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 pub(super) fn config(case: Case) -> &'static [u8] { match case {
     Case::ToolchainPrerequisite => CONFIG_PREREQUISITE, Case::Cancel => CONFIG_CANCEL,
-    Case::SignedRefusal | Case::SignedCancel => CONFIG_SIGNED, Case::SigningInputs => CONFIG_INPUTS, _ => CONFIG,
+    Case::SignedRefusal | Case::SignedCancel => CONFIG_SIGNED, Case::SigningInputs => CONFIG_INPUTS,
+    Case::AndroidInputs => CONFIG_ANDROID_INPUTS, _ => CONFIG,
 } }
 
 const STALE_VERSION: &[u8] = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=8\n";
@@ -534,10 +580,19 @@ const DIRS: &[(&str, u32, &[&str])] = &[
     ("ios/MRKObserved.xcodeproj/xcshareddata/xcschemes", 0o700, &["MRKObserved.xcscheme"]),
     ("release", 0o755, &["mobile-release.json"]),
 ];
+const ANDROID_DIRS: &[(&str, u32, &[&str])] = &[
+    ("app", 0o700, &["build.gradle.kts"]), ("release", 0o755, &["mobile-release.json"]),
+];
+fn directories(case: Case) -> &'static [(&'static str, u32, &'static [&'static str])] {
+    if case == Case::RecoveryEmpty { &[] } else if case == Case::AndroidInputs { ANDROID_DIRS } else { DIRS }
+}
 fn files(case: Case, stale: bool) -> Vec<(&'static str, &'static [u8])> {
     let ignore = b"# MRK Mac Aqua user ignore\nuser-output/\n.mobile-release/\n".as_slice();
     if case == Case::RecoveryEmpty { return vec![(".gitignore", ignore), ("keep.txt", super::KEEP)]; }
-    let mut files = vec![
+    if case == Case::AndroidInputs { return vec![(".gitignore", ignore), ("keep.txt", super::KEEP),
+        ("version.properties", super::VERSION), ("release/mobile-release.json", config(case)),
+        ("app/build.gradle.kts", super::SOURCE), ("overlap.jks", super::session::JKS)]; }
+    let mut files: Vec<(&'static str, &'static [u8])> = vec![
     (".gitignore", b"# MRK Mac Aqua user ignore\nuser-output/\n.mobile-release/\n"),
     ("keep.txt", super::KEEP), ("version.properties", if stale { STALE_VERSION } else { super::VERSION }),
     ("release/mobile-release.json", config(case)), ("ios/MRKObserved.xcodeproj/project.pbxproj", PROJECT),
@@ -560,7 +615,7 @@ impl Fixture {
     pub(super) fn capture(root: &std::path::Path, uid: u32, case: Case) -> Result<Self, ()> {
         let files = files(case, false).into_iter().map(|(path, body)| super::file_fact(&root.join(path), body, uid))
             .collect::<Result<Vec<_>, _>>()?;
-        let dirs = if case == Case::RecoveryEmpty { &[][..] } else { DIRS };
+        let dirs = directories(case);
         let directories = dirs.iter().map(|(path, mode, entries)| super::directory(&root.join(path), uid, *mode, entries))
             .collect::<Result<Vec<_>, _>>()?;
         let inputs = if case.inputs() { Some(super::session::Fixture::capture(root, uid, case)?) } else { None };
@@ -568,19 +623,20 @@ impl Fixture {
     }
     pub(super) fn root_entries(&self) -> Vec<&str> {
         let mut entries = if self.case == Case::RecoveryEmpty { vec![".gitignore", "keep.txt"] }
+            else if self.case == Case::AndroidInputs { vec![".gitignore", "app", "keep.txt", "overlap.jks", "release", "version.properties"] }
             else { vec![".gitignore", "ios", "keep.txt", "release", "version.properties"] };
         if self.case == Case::SigningInputs { entries.push("overlap.p12"); }
         if self.output.is_some() { entries.push(".mobile-release"); } entries
     }
     pub(super) fn source_identity(&self) -> Option<[u64; 6]> { self.directories.first().copied() }
-    pub(super) fn release_identity(&self) -> Option<[u64; 6]> { self.directories.get(6).copied() }
+    pub(super) fn release_identity(&self) -> Option<[u64; 6]> { self.directories.get(if self.case == Case::AndroidInputs { 1 } else { 6 }).copied() }
     pub(super) fn ignore(&self) -> super::FileFact { self.files[0].clone() }
     pub(super) fn config(&self) -> Option<super::FileFact> { self.files.get(3).cloned() }
     pub(super) fn verify(&self, root: &std::path::Path, uid: u32) -> Result<(), ()> {
         for ((path, bytes), original) in files(self.case, self.stale).into_iter().zip(&self.files) {
             if &super::file_fact(&root.join(path), bytes, uid)? != original { return Err(()); }
         }
-        let dirs = if self.case == Case::RecoveryEmpty { &[][..] } else { DIRS };
+        let dirs = directories(self.case);
         for ((path, mode, entries), original) in dirs.iter().zip(&self.directories) {
             if &super::directory(&root.join(path), uid, *mode, entries)? != original { return Err(()); }
         }
@@ -744,7 +800,7 @@ fn terminal_for(case: Case, snapshot: &Snapshot) -> bool {
             && commands.prepare.outcome == C::NotConfigured && commands.prepare.exit_code.is_none()
             && activity.selection.as_ref().is_some_and(|s| s.symbols_policy == wire::SymbolsPolicy::Required)
             && t.result.is_some() && disposition.output == D::RetainedLocalResult,
-        Case::SigningInputs | Case::SignedRefusal | Case::SignedCancel | Case::RecoveryEmpty => false,
+        Case::SigningInputs | Case::AndroidInputs | Case::SignedRefusal | Case::SignedCancel | Case::RecoveryEmpty => false,
     }
 }
 impl Record {
@@ -1084,7 +1140,18 @@ fn current_data_checks(unsigned: &Snapshot) -> bool {
     }
     // Exercise the actual one-use identity transition without a native owner,
     // original Observation, availability marker or permission to consume it.
-    let control = Control::new(Case::SigningInputs); let wrong = Arc::new(());
+    let wrong = Arc::new(());
+    for case in [Case::AndroidInputs, Case::SigningInputs, Case::SignedRefusal, Case::SignedCancel] {
+        let control = Control::new(case);
+        let registration = SessionRegistration { control: control.clone(), document: Arc::downgrade(&document) };
+        if registration.control.case != case || registration.claim_original(&wrong)
+            || control.session_registered.load(Ordering::SeqCst) || !registration.claim_original(&document)
+            || registration.claim_original(&document) || control.permits() { return false; }
+        // Even a correct already-claimed identity is not authority without
+        // the actual original observation and every unchanged consume gate.
+        if registration.consume(&document).is_ok() { return false; }
+    }
+    let control = Control::new(Case::SigningInputs);
     let registration = SessionRegistration { control: control.clone(), document: Arc::downgrade(&document) };
     if registration.claim_original(&wrong) || control.session_registered.load(Ordering::SeqCst)
         || !registration.claim_original(&document) || registration.claim_original(&document)
@@ -1107,6 +1174,7 @@ fn current_data_checks(unsigned: &Snapshot) -> bool {
 }
 
 pub(super) fn snapshot_failure(value: &Value, root: &std::path::Path, case: Case, base: &Value) -> Option<&'static str> {
+    if case == Case::AndroidInputs { return super::snapshot_value_failure_bytes(value, root, true, base, config(case)); }
     let config_value = &value["config"]; let hints = &value["discovery"]["hints"];
     if value["root"].as_str() != root.to_str() { return Some("snapshot-value-root"); }
     if value["observationScope"] != "single-request-non-atomic" { return Some("snapshot-value-scope"); }
@@ -1168,7 +1236,7 @@ impl Observation {
     }
     pub(crate) fn ios_request(&self, command: Command, value: &Value) {
         let Some(control) = &self.ios else { return; };
-        if control.case == Case::SigningInputs {
+        if control.case.input_only() {
             if !self.timely() || command != Command::Status || wire::status_request(value).is_err() { self.fail_with("ios-request-contract"); }
             return;
         }
@@ -1182,7 +1250,7 @@ impl Observation {
     }
     pub(crate) fn ios_result(&self, command: Command, result: &Result<wire::Status, BridgeError>) {
         if self.ios.is_none() { return; }
-        if self.ios.as_ref().is_some_and(|c| c.case == Case::SigningInputs) {
+        if self.ios.as_ref().is_some_and(|c| c.case.input_only()) {
             if !self.timely() || command != Command::Status || !result.as_ref().is_ok_and(|s| s.operation.is_none() && wire::status_bytes(s).is_ok()) {
                 self.fail_with("ios-status-contract");
             }
@@ -1195,7 +1263,7 @@ impl Observation {
     }
     pub(crate) fn ios_status(&self, status: &wire::Status, owner: &IOSArchiveOwner) {
         let Some(control) = &self.ios else { return; };
-        if control.case == Case::SigningInputs {
+        if control.case.input_only() {
             if !self.timely() || status.operation.is_some() || wire::status_bytes(status).is_err() { self.fail_with("ios-status-contract"); }
             return;
         }

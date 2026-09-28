@@ -27,8 +27,11 @@ IOS_SIGNED_CASES = ("ios-signed-refusal", "ios-signed-cancel")
 IOS_SESSION_CASES = ("ios-signing-inputs", *IOS_SIGNED_CASES)
 IOS_INPUT_IDS = {"ios-signing-inputs": (2, 4, 6, 8, 9, 10, 11),
                  "ios-signed-refusal": (2, 7), "ios-signed-cancel": (2, 7)}
+ANDROID_INPUT_CASE = "android-inputs"
+SESSION_CASES = IOS_SESSION_CASES + (ANDROID_INPUT_CASE,)
+INPUT_IDS = {**IOS_INPUT_IDS, ANDROID_INPUT_CASE: (2, 7, 12, 14, 15, 16, 17)}
 FILE_NATIVE_PANELS = {case: {f"Session(Native({index}))": identifier for index, identifier in enumerate(ids)}
-                      for case, ids in IOS_INPUT_IDS.items()}
+                      for case, ids in INPUT_IDS.items()}
 IOS_CURRENT_CASES = IOS_CASES + ("ios-signing-inputs", *IOS_SIGNED_CASES, "ios-recovery-empty")
 IOS_OPERATION_CASES = IOS_CASES + IOS_SIGNED_CASES + ("ios-recovery-empty",)
 PROJECT_FIELDS_CASE = "project-fields"
@@ -46,7 +49,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE,)
+ALL_CASES = CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE)
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -70,7 +73,7 @@ FAILURE_STEPS |= frozenset(f"Ios({name})" for name in (
     "Navigate SignedMode ReadVersion VersionRead Prepare Review Acknowledge Acknowledged MutateVersion Start Running Cancel Hold ReleaseHold Final"
 ).split())
 FAILURE_STEPS |= frozenset(f"Session({name})" for name in (
-    "Navigate Platform Purpose Open Ready Archive LockPage Lock ConfirmLock Locked Done"
+    "Navigate Platform Purpose Open Ready ChangeStage StageChanged Archive LockPage Lock ConfirmLock Locked Done"
 ).split()) | frozenset(f"Session({name}({number}))" for name in (
     "Kind Choose Native Chosen Fields Prepare Prepared Keep Kept Reassess Reassessed Bind Bound"
 ).split() for number in range(7)) | frozenset(
@@ -582,9 +585,9 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE), "scope-not-supported")
-    if scope == PROJECT_FIELDS_CASE:
-        return (PROJECT_FIELDS_CASE,)
+    need(scope in (None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE), "scope-not-supported")
+    if scope in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE):
+        return (scope,)
     if scope == "ios-current-synthetic":
         return IOS_CURRENT_CASES
     return IOS_CASES if scope == "ios-unsigned-archive" else CASES
@@ -594,7 +597,8 @@ def argument_scope(argv):
     # Closed scopes only; no executable/path/env/timeout passthrough.
     need(type(argv) is list and (argv == [] or argv == ["--scope", "ios-unsigned-archive"]
                                or argv == ["--scope", "ios-current-synthetic"]
-                               or argv == ["--scope", PROJECT_FIELDS_CASE]), "arguments-not-supported")
+                               or argv == ["--scope", PROJECT_FIELDS_CASE]
+                               or argv == ["--scope", ANDROID_INPUT_CASE]), "arguments-not-supported")
     return argv[1] if argv else None
 
 
@@ -624,21 +628,34 @@ def _ios_version_observation(case):
 
 def _expected_signing_inputs(case):
     """Literal parser-test DATA; never substitutes for original native inputs."""
-    need(case in IOS_SESSION_CASES, "signing-inputs-case")
-    signed = case in IOS_SIGNED_CASES
-    roles = ("p12", "profile") if signed else ("p12", "profile", "firebase", "overlap", "link", "public", "cancel")
-    ids = IOS_INPUT_IDS[case]
+    need(case in SESSION_CASES, "signing-inputs-case")
+    signed, android = case in IOS_SIGNED_CASES, case == ANDROID_INPUT_CASE
+    roles = ("p12", "profile") if signed else (("keystore", "firebase", "firebase-mismatch", "overlap", "link", "public", "cancel")
+            if android else ("p12", "profile", "firebase", "overlap", "link", "public", "cancel"))
+    ids = INPUT_IDS[case]
     rows = []
     for index, (role, operation) in enumerate(zip(roles, ids)):
-        assessment = None if index >= 3 else {
-            "state": "format-valid" if index == 2 else "configured",
-            "identity": "match" if index == 2 else "not-applicable",
-            "fieldScopes": (("pfx-envelope", "value-admission"), ("cms-signed-data-envelope",),
-                            ("plist-document", "firebase-shape", "application-identity"))[index]}
-        if assessment is not None:
-            assessment["fieldScopes"] = list(assessment["fieldScopes"])
-        rows.append({"role": role, "kind": "apple-profile" if index == 1 else "ios-firebase" if index == 2 else "apple-p12",
-                     "operationId": operation, "nativeResponse": "decline" if index == 6 else "accept",
+        keep = (signed or android) and index < 2
+        if android:
+            assessment = None if index >= 3 else {
+                "state": ("configured", "format-valid", "invalid")[index],
+                "identity": ("not-applicable", "match", "mismatch")[index],
+                "fieldScopes": list((("jks-header", "value-admission", "value-admission", "identifier-format", "value-admission"),
+                                     ("json-document", "firebase-shape", "application-identity"),
+                                     ("json-document", "firebase-shape", "application-identity"))[index]),
+                "fieldOutcomes": list((("asserted-pass", "passed", "passed", "passed", "passed"),
+                                       ("asserted-pass", "passed", "passed"), ("asserted-pass", "passed", "failed"))[index]),
+                "issues": ["identity-mismatch"] if index == 2 else []}
+            kind = "android-firebase" if index in (1, 2) else "android-keystore"
+        else:
+            assessment = None if index >= 3 else {
+                "state": "format-valid" if index == 2 else "configured",
+                "identity": "match" if index == 2 else "not-applicable",
+                "fieldScopes": list((("pfx-envelope", "value-admission"), ("cms-signed-data-envelope",),
+                                     ("plist-document", "firebase-shape", "application-identity"))[index])}
+            kind = "apple-profile" if index == 1 else "ios-firebase" if index == 2 else "apple-p12"
+        rows.append({"role": role, "kind": kind, "operationId": operation,
+                     "nativeResponse": "decline" if index == 6 else "accept",
                      "exactNativeSelection": None if index == 6 else True,
                      "source": "captured" if index < 3 else "pending" if index == 6 else "refused",
                      "reason": "none" if index < 3 else "project-overlap" if index == 3
@@ -646,27 +663,34 @@ def _expected_signing_inputs(case):
                      "originalWorkerAndNativeSettled": True,
                      "openIdentityMatched": None if index == 6 else True,
                      "openInputJoined": None if index == 6 else True,
-                     "assessment": assessment, "recordId": ("d" if index == 0 else "e") * 32 if signed else None,
-                     "keptRevision": 1 if signed else None, "assignedContextRevision": 1 if signed else None})
-    return {"schemaVersion": 2, "oneUseOriginalDocumentRegistration": True,
-            "selection": "ordinary-installed-macos-session", "mode": "session",
-            "context": {"platform": "ios", "stage": "candidate", "purpose": "signing"}, "rows": rows,
-            "originalOperations": 12, "allOriginalsSettled": True, "memorySessionLocked": True,
-            "originalProjectAndQuitSettled": True, "observationMs": 315000 if signed else 45000,
-            "outerInvocationMs": 325000 if signed else 60000}
+                     "assessment": assessment, "recordId": ("d" if index == 0 else "e") * 32 if keep else None,
+                     "keptRevision": 1 if keep else None, "assignedContextRevision": 1 if keep else None})
+    value = {"schemaVersion": 2, "oneUseOriginalDocumentRegistration": True,
+             "selection": "ordinary-installed-macos-session", "mode": "session",
+             "context": {"platform": "android" if android else "ios", "stage": "production" if android else "candidate",
+                         "purpose": "full" if android else "signing"}, "rows": rows,
+             "originalOperations": 18 if android else 12, "allOriginalsSettled": True, "memorySessionLocked": True,
+             "originalProjectAndQuitSettled": True, "observationMs": 315000 if signed else 45000,
+             "outerInvocationMs": 325000 if signed else 60000}
+    if android:
+        value["contextTransition"] = {"previous": {"platform": "android", "stage": "candidate", "purpose": "full"},
+            "current": {"platform": "android", "stage": "production", "purpose": "full"},
+            "previousRevision": 1, "currentRevision": 2, "preservedRecords": 2, "assignmentsUnavailable": 2,
+            "oldPreviewRetired": True, "oldSelectionRetired": True, "originalsSettled": True}
+    return value
 
 
 def _signing_inputs(value, case):
     need(type(value) is dict, "signing-inputs-report")
     expected = _expected_signing_inputs(case)
-    if case in IOS_SIGNED_CASES:
+    if case in IOS_SIGNED_CASES or case == ANDROID_INPUT_CASE:
         try:
             rows = value["rows"]
-            need(type(rows) is list and len(rows) == 2, "signing-inputs-rows")
-            ids = [row["recordId"] for row in rows]
+            need(type(rows) is list and len(rows) == (7 if case == ANDROID_INPUT_CASE else 2), "signing-inputs-rows")
+            ids = [row["recordId"] for row in rows[:2]]
             need(all(type(v) is str and re.fullmatch(r"[0-9a-f]{32}", v) for v in ids)
                  and len(set(ids)) == 2, "signing-inputs-records")
-            for expected_row, record_id in zip(expected["rows"], ids):
+            for expected_row, record_id in zip(expected["rows"][:2], ids):
                 expected_row["recordId"] = record_id
         except (KeyError, TypeError, AttributeError) as error:
             raise Refused("signing-inputs-shape") from error
@@ -948,12 +972,12 @@ def _expected_project_fields():
 def expected_result(binding, case):
     binding.checked()
     need(case in ALL_CASES, "case-binding")
-    if case in IOS_CURRENT_CASES or case == PROJECT_FIELDS_CASE:
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE):
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case in IOS_OPERATION_CASES:
             value["iosArchive"] = _expected_ios_report(case)
-        if case in IOS_SESSION_CASES:
+        if case in SESSION_CASES:
             value["signingInputs"] = _expected_signing_inputs(case)
         if case == PROJECT_FIELDS_CASE:
             value["projectFields"] = _expected_project_fields()
@@ -1078,7 +1102,9 @@ RESULT_LOCATION_KEYS |= frozenset((
     "originalProjectAndQuitSettled signing teamId distributionCertificateSha256 assignments recordRevision "
     "contextRevision purpose cleanupMs materialLoanPresent materialLoanRetired trigger boundary originalTypedFrame "
     "signingClosed buildInputsClosed materialRetired export recovery recoveryActions idleRowsVisible "
-    "ordinaryButtonsDisabled foreignMutationAttempted recoveryMutationClaimed report account project session next"
+    "ordinaryButtonsDisabled foreignMutationAttempted recoveryMutationClaimed report account project session next "
+    "contextTransition previous current previousRevision currentRevision preservedRecords assignmentsUnavailable "
+    "oldPreviewRetired oldSelectionRetired originalsSettled fieldOutcomes issues"
 ).split())
 
 
@@ -1138,7 +1164,7 @@ def parse_result(stdout, stderr, binding, case):
     if case in IOS_OPERATION_CASES:
         need(type(value) is dict and "iosArchive" in value, "ios-report")
         expected["iosArchive"] = _ios_report(value["iosArchive"], case)
-    if case in IOS_SESSION_CASES:
+    if case in SESSION_CASES:
         need(type(value) is dict and "signingInputs" in value, "signing-inputs-report")
         expected["signingInputs"] = _signing_inputs(value["signingInputs"], case)
         if case in IOS_SIGNED_CASES:
@@ -1257,10 +1283,10 @@ def _native_action_context(value, native, panel, *, case=None):
         need(all(type(value[key]) is str for key in ("step", "action", "domain", "site", "error"))
              and type(value["id"]) is int, "native-action-data")
         spec = NATIVE_ACTION_STEPS.get(value["step"])
-        if value["step"] == "Quit" and type(case) is str and (case in IOS_SESSION_CASES or case == PROJECT_FIELDS_CASE):
-            spec = ("quit-confirm", "quit", (12,), 16)
-        elif value["step"] == "Session(Native(6))" and case == "ios-signing-inputs":
-            spec = ("file-cancel", "file", (11,), 32)
+        if value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
+            spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
+        elif value["step"] == "Session(Native(6))" and case in ("ios-signing-inputs", ANDROID_INPUT_CASE):
+            spec = ("file-cancel", "file", (INPUT_IDS[case][6],), 32)
         elif value["step"] == "ProjectFields(Native(4))" and case == PROJECT_FIELDS_CASE:
             spec = ("file-cancel", "version-source", (6,), 32)
         elif value["step"] == "ProjectFields(Native(5))" and case == PROJECT_FIELDS_CASE:
@@ -1775,8 +1801,8 @@ def failure_context(stdout, stderr, case=None):
             elif panel["kind"] == "file" or panel["step"] in file_panels:
                 need(panel["kind"] == "file" and panel["step"] in file_panels
                      and panel["id"] == file_panels[panel["step"]], "failure-context")
-            elif panel["step"] == "Quit" and type(case) is str and (case in IOS_SESSION_CASES or case == PROJECT_FIELDS_CASE):
-                need(panel["kind"] == "quit" and panel["id"] == 12, "failure-context")
+            elif panel["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
+                need(panel["kind"] == "quit" and panel["id"] == (18 if case == ANDROID_INPUT_CASE else 12), "failure-context")
             else:
                 need(1 <= panel["id"] <= 4 and panel["kind"] in ("project", "quit"), "failure-context")
             both = panel["parentPresent"] and panel["panelPresent"]
@@ -1908,6 +1934,12 @@ def fixture_data(case, final, *, ios_output_created=None):
     if case in IOS_CURRENT_CASES:
         return ios_fixture_data(case, final, output_created=ios_output_created)
     need(ios_output_created is None, "fixture-output-kind")
+    if case == ANDROID_INPUT_CASE:
+        return {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
+                ".gitignore": IGNORE_PREFIX + b".mobile-release/\n", "release/mobile-release.json": ANDROID_INPUT_CONFIG,
+                "overlap.jks": ANDROID_SYNTHETIC_JKS}, {
+                ".": (0o700, (".gitignore", "app", "keep.txt", "overlap.jks", "release", "version.properties")),
+                "app": (0o700, ("build.gradle.kts",)), "release": (0o755, ("mobile-release.json",))}
     if case == PROJECT_FIELDS_CASE:
         return {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
             ".gitignore": IGNORE_PREFIX + IGNORE_RULES, "release/mobile-release.json": CONFIG,
@@ -2018,9 +2050,19 @@ def app_environment(state, uid, username):
             "USER": username, "LOGNAME": username, "__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"}
 
 
+# Exact public fixture DATA, matching the existing native observer literals.
+ANDROID_INPUT_CONFIG = b'{\n  "android": {\n    "applicationId": "org.example.mrk.observed",\n    "enabled": true,\n    "identityStatus": "unverified"\n  },\n  "ios": {\n    "enabled": false\n  },\n  "metadata": {\n    "androidLocales": [\n      "en-US"\n    ],\n    "iosLocales": [],\n    "root": "release/store"\n  },\n  "projectChecks": {\n    "androidArtifact": [],\n    "iosArtifact": [],\n    "preflight": []\n  },\n  "schemaVersion": 1,\n  "services": {\n    "androidFirebase": "required",\n    "iosFirebase": "disabled"\n  },\n  "source": {\n    "candidateBranch": "main",\n    "productionBranch": "main"\n  },\n  "version": {\n    "buildKey": "BUILD_NUMBER",\n    "nameKey": "VERSION_NAME",\n    "source": "version.properties"\n  }\n}\n'
+ANDROID_SYNTHETIC_JKS = b"\xfe\xed\xfe\xed\x00\x00\x00\x02\x00\x00\x00\x00\xff\x00\x80\xfe"
+ANDROID_SYNTHETIC_FIREBASE = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.example.mrk.observed"}}}]}'
+ANDROID_SYNTHETIC_MISMATCH = b'{"client":[{"client_info":{"android_client_info":{"package_name":"org.example.mrk.other"}}}]}'
+
+
 def signing_fixture_inputs(case):
     """Closed synthetic files outside the selected project; no real credential."""
-    need(case in IOS_SESSION_CASES, "signing-fixture-case")
+    need(case in SESSION_CASES, "signing-fixture-case")
+    if case == ANDROID_INPUT_CASE:
+        return {"synthetic.jks": (ANDROID_SYNTHETIC_JKS, 0o600), "google-services.json": (ANDROID_SYNTHETIC_FIREBASE, 0o600),
+                "wrong-google-services.json": (ANDROID_SYNTHETIC_MISMATCH, 0o600), "public.jks": (ANDROID_SYNTHETIC_JKS, 0o644)}, {"linked.jks": "synthetic.jks"}
     files = {"synthetic.p12": (IOS_SYNTHETIC_P12, 0o600),
              "synthetic.mobileprovision": (IOS_SYNTHETIC_PROFILE, 0o600)}
     if case == "ios-signing-inputs":
@@ -2155,7 +2197,7 @@ class Fixtures:
             for child in ("home", "tmp"):
                 with self._temporary(self._mkdir(state, child)):
                     pass
-            if case in IOS_SESSION_CASES:
+            if case in SESSION_CASES:
                 with self._temporary(self._mkdir(state, "inputs")) as inputs:
                     external_files, links = signing_fixture_inputs(case)
                     for name, (body, mode) in external_files.items():
@@ -2254,7 +2296,7 @@ class Fixtures:
         return result
 
     def _inputs_unchanged(self, case):
-        if case in IOS_SESSION_CASES:
+        if case in SESSION_CASES:
             need(self._capture_inputs(case) == self.input_originals[case], "signing-fixture-original-changed")
         if case == PROJECT_FIELDS_CASE:
             need(self._capture_field_outside(case) == self.field_outside_originals[case], "project-field-outside-original-changed")
@@ -2304,7 +2346,7 @@ class Fixtures:
         self._namespace()
         validate_snapshot(self.originals[case], self._capture(case, False), case, False, self.uid, self.gid)
         state = self.states[case]
-        self._roster(state, ("home", "tmp", "inputs") if case in IOS_SESSION_CASES
+        self._roster(state, ("home", "tmp", "inputs") if case in SESSION_CASES
                      else ("home", "tmp", "outside") if case == PROJECT_FIELDS_CASE else ("home", "tmp"), "fresh-state-roster")
         self._inputs_unchanged(case)
         for name in ("home", "tmp"):

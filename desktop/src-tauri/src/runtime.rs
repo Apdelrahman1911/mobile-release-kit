@@ -55,7 +55,7 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
     diagnostics_owner_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     passive_installed: PassiveInstalledSelection,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     installed_session: InstalledSessionSelection,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -162,30 +162,35 @@ enum PassiveInstalledSelection {
 // profile, one Supervisor claim and original document binding remain mandatory;
 // the selection bit alone cannot authorize collection or an assessment borrower.
 pub(crate) const INSTALLED_SESSION_INPUTS_QUALIFIED: bool = true;
-// Ordinary fixed Mac selection. This does not replace installed-runtime,
-// original-document, four-kind input or native custody qualification.
+// Ordinary fixed Mac session selection. This does not replace installed-runtime,
+// original-document, exact context/kind or native source-custody qualification.
 pub(crate) const INSTALLED_IOS_SESSION_INPUTS_QUALIFIED: bool = true;
 // Project registration and signing-file selection do not qualify the separate
 // project-relative field picker. Actual AppKit/APFS acceptance remains owed.
 pub(crate) const INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED: bool = false;
+// Windows original session/source/dialog qualification is separate from Linux
+// and Mac acceptance. Keep closed until its actual native evidence is accepted.
+pub(crate) const INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED: bool = true;
 fn session_inputs_qualified() -> bool {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) { INSTALLED_IOS_SESSION_INPUTS_QUALIFIED }
-    else { INSTALLED_SESSION_INPUTS_QUALIFIED }
+    if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { INSTALLED_SESSION_INPUTS_QUALIFIED }
+    else if cfg!(all(target_os = "macos", target_arch = "aarch64")) { INSTALLED_IOS_SESSION_INPUTS_QUALIFIED }
+    else if cfg!(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")) { INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED }
+    else { false }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 struct InstalledSessionOriginal {
     supervisor_claimed: std::sync::atomic::AtomicBool,
     document: std::sync::Mutex<Option<std::sync::Weak<()>>>,
     enabled: std::sync::atomic::AtomicBool,
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 #[derive(Clone)]
 struct InstalledSessionSelection {
     original: std::sync::Arc<InstalledSessionOriginal>,
     supervisor: bool,
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl InstalledSessionSelection {
     fn new() -> Self {
         use std::sync::{Arc, Mutex, atomic::AtomicBool};
@@ -216,7 +221,7 @@ impl InstalledSessionSelection {
 }
 
 #[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-    all(target_os = "macos", target_arch = "aarch64"))))]
+    all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) fn assert_installed_session_selection_contract() {
     use std::sync::{Arc, atomic::Ordering};
     // Pure shared-selection bookkeeping only. No installed runtime is opened.
@@ -224,7 +229,9 @@ pub(crate) fn assert_installed_session_selection_contract() {
     let mut other = first.clone();
     let normal = session_inputs_qualified();
     let original = Arc::new(()); let replacement = Arc::new(());
-    assert!(normal); // Both ordinary constructors, never an observer grant.
+    if cfg!(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")) {
+        assert_eq!(normal, INSTALLED_WINDOWS_SESSION_INPUTS_QUALIFIED);
+    } else { assert!(normal); } // Existing Linux/Mac acceptance; never an observer grant.
     assert_eq!(first.original.enabled.load(Ordering::SeqCst), normal);
     assert!(!first.matches(None) && !other.matches(None));
     first.bind_document(&original); // An unclaimed copy cannot bind a document.
@@ -965,7 +972,7 @@ impl RuntimeConfig {
             #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
             { PassiveInstalledSelection::Closed }
         },
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
         installed_session: InstalledSessionSelection::new(),
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -1004,30 +1011,38 @@ impl RuntimeConfig {
         { false }
     }
     pub(crate) fn claim_original_supervisor(&mut self) {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
         self.installed_session.claim_supervisor();
     }
     pub(crate) fn bind_original_session_document(&self, identity: &std::sync::Arc<()>) {
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
         self.installed_session.bind_document(identity);
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
         let _ = identity;
     }
     fn installed_session_profile(&self, identity: Option<&std::sync::Arc<()>>) -> bool {
         #[cfg(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
-        { self.passive_installed_profile().is_ok() && self.installed_session.matches(identity) }
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+        {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            if self.windows_passive != windows_version::Selection::Normal || cfg!(feature = "windows-runtime-publisher") { return false; }
+            self.passive_installed_profile().is_ok() && self.installed_session.matches(identity)
+        }
         #[cfg(not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))))]
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
         { let _ = identity; false }
     }
     pub(crate) fn installed_session_available(&self, identity: &std::sync::Arc<()>) -> bool {
         self.installed_session_profile(Some(identity))
     }
     fn installed_method_available(&self, name: &str) -> bool {
-        installed_passive_method(name) || name == "credentials.assess" && self.installed_session_profile(None)
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        { self.windows_passive.permits_with_original_session(name,
+            name == "credentials.assess" && self.installed_session_profile(None)) }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+        { installed_passive_method(name) || name == "credentials.assess" && self.installed_session_profile(None) }
     }
     /// Fixed no-argument candidate DATA. No environment/path/permit can select
     /// it. Feature-off packaged configurations remain Closed.
@@ -1069,7 +1084,7 @@ impl RuntimeConfig {
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "macos", target_arch = "aarch64"))]
         { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-        { self.passive_installed_profile().is_ok_and(|profile| profile.permits(name)) }
+        { self.installed_method_available(name) && self.passive_installed_profile().is_ok() }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))))]
         { let _ = name; false }
     }
@@ -1166,8 +1181,8 @@ impl RuntimeConfig {
         originals: &mut crate::installed_runtime_windows::PassiveRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
-        if !profile.permits(method.name()) {
-            return Err(BridgeError::unavailable("This Windows profile admits only its compiled passive methods; the headless candidate excludes project snapshots, and both profiles exclude external and mutating operations."));
+        if !self.installed_method_available(method.name()) {
+            return Err(BridgeError::unavailable("This Windows method is outside its compiled passive profile or normal original-document signing-input assessment profile; external and mutating operations remain unavailable."));
         }
         originals.inspect_once(profile, end, stop)
     }
@@ -2565,6 +2580,11 @@ pub(crate) mod windows_version {
                 Self::Normal => passive_method(name),
             }
         }
+        // Derived selection DATA only. RuntimeConfig supplies its actual live
+        // original-session match; native per-request inspection remains mandatory.
+        pub(crate) fn permits_with_original_session(self, name: &str, original_session: bool) -> bool {
+            self.permits(name) || self == Self::Normal && name == "credentials.assess" && original_session
+        }
     }
 
     // CPython dynload_win.c passes512 wchar_t to GetModuleFileNameW and
@@ -2637,6 +2657,27 @@ pub(crate) mod windows_version {
     #[cfg(test)]
     mod loader_path_tests {
         use super::*;
+        #[test]
+        fn windows_session_assessment_needs_normal_selection_and_the_original_binding() {
+            // Selection and original-book DATA only: no Windows/native entry,
+            // runtime verification, synthetic identity or qualification receipt.
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "macos", target_arch = "aarch64"),
+                all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+            assert_installed_session_selection_contract();
+            for selection in [Selection::Closed, Selection::HeadlessCandidate, Selection::Normal] {
+                for original_session in [false, true] {
+                    assert_eq!(selection.permits_with_original_session("credentials.assess", original_session),
+                        selection == Selection::Normal && original_session);
+                    for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
+                        assert_eq!(selection.permits_with_original_session(name, original_session), selection.permits(name));
+                    }
+                    for name in ["credentials", "credentials.assess.extra", "github.release", "store.release", ""] {
+                        assert!(!selection.permits_with_original_session(name, original_session));
+                    }
+                }
+            }
+        }
         #[test]
         fn windows_python_capacity_counts_utf16_nul_and_verbatim_prefix_before_creation() {
             assert!(python_path_fits(&"a".repeat(507)));

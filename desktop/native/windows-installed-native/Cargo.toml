@@ -36,7 +36,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_UI_Input_KeyboardAndMouse",
 ] }
 windows = { version = "=0.61.3", optional = true, features = [
-  "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Accessibility",
+  "Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Accessibility",
 ] }
 # The implement macro emits absolute ::windows_core paths in its consumer.
 windows-core = { version = "=0.61.2", optional = true, default-features = false }
