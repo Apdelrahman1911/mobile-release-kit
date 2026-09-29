@@ -248,5 +248,31 @@ class MetadataImagesEditTests(unittest.TestCase):
             self.assertTrue(_journal_absent(root))
 
 
+class ImageIdentityProjectionFilesystemTests(unittest.TestCase):
+    def test_both_original_custody_comparisons_fail_closed_and_actual_absence_stays_absent(self):
+        from mobile_release import metadata_images as images
+        from mobile_release import metadata_images_custody as custody
+        with _project(empty=True) as root:
+            batch = _batch()
+            with _live_lease(root, restoring=False) as (lease, _):
+                checkout = _capture(lease, root, batch)
+                targets = checkout._targets
+                dependency = targets.dependency_observations[0]
+                absent = targets._capture_workspace._captured[targets.paths[0]]
+                self.assertIsNone(absent.before)
+                self.assertEqual(lease.image_identity_family, "posix")
+                with patch.object(custody, "image_observation_key", side_effect=images.MetadataImagesInputError()):
+                    # Actual original absent target does not pretend an existing
+                    # object had a missing/unsupported identity.
+                    self.assertIsNone(targets._observed_object(absent))
+                    targets.check_payloads([(absent, None)])
+                    with self.assertRaises(tx.InitOperationFailure):
+                        targets.protected_target_paths(())
+                    with self.assertRaises(tx.InitOperationFailure):
+                        targets.check_payloads([(dependency, None)])
+                self.assertNotIn("protectedObjects", targets.journal_context())
+                self.assertTrue(_journal_absent(root))
+
+
 if __name__ == "__main__":
     unittest.main()

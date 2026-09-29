@@ -26,6 +26,8 @@ from .github_workflow_edit import (WorkflowConflict, apply_github_workflow_edit,
                                    prepare_github_workflow_edit)
 from .init_transaction import InitOperationFailure, TypedEditProfile
 from .init_workspace_custody import InitRootLease
+from .metadata_images import (ImageRootIdentity, MetadataImagesInputError,
+                              admit_image_root, image_registered_identity)
 from .metadata_text_edit import (apply_metadata_text_edit, capture_metadata_text_edit,
                                  discard_metadata_text_edit, prepare_metadata_text_edit)
 from .release_version_edit import (apply_release_version_edit, capture_release_version_edit,
@@ -50,6 +52,19 @@ def _root(value: str) -> Path:
     if not valid:
         raise ConfigEditFailure(CoreEditOutcome("not_started", "not_created", "settled", "invalid_params"))
     return Path(value)
+
+
+def _admit_image_backend(root: object, value: object) -> ImageRootIdentity:
+    """Closed image-only dispatch, before POSIX Path/root/lease/lock/journal IO."""
+    try:
+        identity = image_registered_identity(value)
+        admit_image_root(root, identity)
+    except MetadataImagesInputError:
+        raise ConfigEditFailure(CoreEditOutcome("not_started", "not_created", "settled", "invalid_params")) from None
+    if identity.family != "posix":
+        # Read-only snapshot/capture handles are not a Windows transaction backend.
+        raise ConfigEditFailure(CoreEditOutcome("not_started", "not_created", "settled", "unsupported_platform"))
+    return identity
 
 
 class _Engine:
@@ -169,6 +184,8 @@ class _Engine:
         request = self.input.request(0, None)
         self.last_request = request
         self.guard.check()
+        image_identity = (_admit_image_backend(request.params["root"], request.params["registeredIdentity"])
+                          if self.domain == "metadata_images" else None)
         root = _root(request.params["root"])
         if self.domain == "github_workflows":
             # The closed lease compares all five facts to raw original fstat on
@@ -188,7 +205,7 @@ class _Engine:
             self.image_intent = request.params["intent"]
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.METADATA_IMAGES,
-                registered_identity=registered_identity(request.params["registeredIdentity"]),
+                registered_identity=image_identity.posix_values(),
                 image_recovery=self.image_intent == "recover")
         elif self.domain == "configuration":
             self.lease = InitRootLease(root, cancellation=self.guard)

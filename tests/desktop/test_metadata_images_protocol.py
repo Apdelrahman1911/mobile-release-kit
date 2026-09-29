@@ -138,5 +138,41 @@ class MetadataImagesProtocolTests(unittest.TestCase):
                 wire.parse_request(raw, sequence=0, session="f" * 32)
 
 
+class WindowsImageProtocolDataTests(unittest.TestCase):
+    def test_full128_other_volume_import_and_recovery_are_closed_cross_platform_data(self):
+        identity = {"volumeSerial": "9", "fileId": "07" * 16}
+        params = {**opening(), "root": r"c:\project", "registeredIdentity": identity,
+                  "protectedObjects": [{"volumeSerial": "10", "fileId": "80" * 16}]}
+        with no_io(), patch.object(images, "_types", return_value=(PHONE,)):
+            admitted = decode(0, "open", params)
+            self.assertEqual(admitted.params["root"], params["root"])
+            self.assertEqual(admitted.params["images"][0].data, png())
+            self.assertEqual(admitted.params["protectedObjects"], params["protectedObjects"])
+            for root in (r"C:\project", r"\\?\c:\project"):
+                recovery = {"root": root, "registeredIdentity": identity, "intent": "recover"}
+                self.assertEqual(decode(0, "open", recovery).params, recovery)
+            for root in ("/posix", "C:\\", r"C:\project\.", "C:/project"):
+                with self.assertRaises(edit.ProtocolError):
+                    decode(0, "open", {"root": root, "registeredIdentity": identity, "intent": "recover"})
+
+    def test_root_identity_and_object_family_refuse_before_any_body_decode(self):
+        identity = {"volumeSerial": "9", "fileId": "07" * 16}
+        params = {**opening(), "root": r"C:\project", "registeredIdentity": identity,
+                  "protectedObjects": [{"volumeSerial": "10", "fileId": "80" * 16}]}
+        bad = (
+            {**params, "root": "/posix"},
+            {**params, "registeredIdentity": {**identity, "inode": "2"}},
+            {**params, "registeredIdentity": {**identity, "fileId": "A0" * 16}},
+            {**params, "protectedObjects": [{"device": "1", "inode": "2"}]},
+            {**opening(), "protectedObjects": params["protectedObjects"]},
+            {**params, "protectedObjects": [{"volumeSerial": "010", "fileId": "80" * 16}]},
+        )
+        with no_io(), patch.object(images, "_types", return_value=(PHONE,)), \
+                patch.object(wire, "decode_native_images", side_effect=AssertionError("body decode before identity admission")):
+            for value in bad:
+                with self.subTest(keys=tuple(value)), self.assertRaises(edit.ProtocolError):
+                    decode(0, "open", value)
+
+
 if __name__ == "__main__":
     unittest.main()

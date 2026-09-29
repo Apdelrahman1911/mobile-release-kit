@@ -6,13 +6,13 @@ const REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const PLAN: &str = "cccccccccccccccccccccccccccccccc";
 const PATH: &str = "public/store/android/en-US/images/phoneScreenshots/01.png";
 
-fn identity() -> RegisteredIdentity {
-    RegisteredIdentity::deserialize(json!({"device":"1","inode":"2","mode":16832,"uid":1000,"gid":1000})).unwrap()
+fn identity() -> ImageRegisteredIdentity {
+    ImageRegisteredIdentity::deserialize(json!({"device":"1","inode":"2","mode":16832,"uid":1000,"gid":1000})).unwrap()
 }
 fn original() -> ImportData {
     ImportData { context: Context { platform:Platform::Android,locale:"en-US".into(),asset_type:"phoneScreenshots".into() },
         images:vec![SelectedImageData { item_id:SESSION.into(),display_name:"01.png".into(),bytes:b"M".to_vec(),sha256:digest(b"M") }],
-        protected_sources:Vec::new(),protected_objects:vec![SourceObject { device:"1".into(),inode:"7".into() }] }
+        protected_sources:Vec::new(),protected_objects:vec![SourceObject::Posix(PosixSourceObject { device:"1".into(),inode:"7".into() })] }
 }
 fn baseline() -> Baseline {
     Baseline { config:ContentDigest { byte_length:2,sha256:"1".repeat(64) },ignore:ContentDigest { byte_length:0,sha256:"2".repeat(64) },inventory_sha256:"3".repeat(64) }
@@ -70,7 +70,7 @@ fn private_original_roster_and_canonical_base64_are_consumed_into_only_the_initi
     }
     let mut duplicate = original();
     duplicate.images.push(SelectedImageData { item_id:REVISION.into(),display_name:"02.png".into(),bytes:b"N".to_vec(),sha256:digest(b"N") });
-    duplicate.protected_objects.push(SourceObject { device:"1".into(),inode:"7".into() });
+    duplicate.protected_objects.push(SourceObject::Posix(PosixSourceObject { device:"1".into(),inode:"7".into() }));
     assert!(!duplicate.valid());
     assert!(request(SESSION,1,"prepare",params).is_err());
 }
@@ -189,4 +189,89 @@ fn strict_response_domain_session_sequence_and_unknown_fields_are_not_accepted()
         let mut bad = body.clone(); bad[key] = value; assert!(decode(&frame_exact(&bad,RESPONSE_LIMIT).unwrap(),SESSION).is_err());
     }
     let mut bad = body; bad["result"]["raw"] = json!("must-not-be-retained"); assert!(decode(&frame_exact(&bad,RESPONSE_LIMIT).unwrap(),SESSION).is_err());
+}
+
+
+#[test]
+fn image_identity_preserves_posix_wire_and_every_windows_id_byte_in_original_order() {
+    assert_eq!(serde_json::to_value(identity()).unwrap(),
+        json!({"device":"1","inode":"2","mode":16832,"uid":1000,"gid":1000}));
+    let zero = SourceObject::deserialize(json!({"device":"0","inode":"0"})).unwrap();
+    assert!(zero.valid()); // Legacy selected-object rule, unlike registered root inode.
+    let root_zero = ImageRegisteredIdentity::deserialize(json!({"device":"0","inode":"0","mode":16832,"uid":0,"gid":0})).unwrap();
+    assert!(!root_zero.valid());
+    let original_id = [0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x80,0x81,0x82,0x83,0xfc,0xfd,0xfe,0xff];
+    assert_eq!(file_id_hex(original_id), "000102030405060780818283fcfdfeff");
+    let make = |volume, file_id| SourceObject::from(crate::asset_source::ImageSourceObject::Windows { volume_serial: volume, file_id });
+    let original = make(9, original_id);
+    assert_eq!(serde_json::to_value(&original).unwrap(),
+        json!({"volumeSerial":"9","fileId":"000102030405060780818283fcfdfeff"}));
+    for index in 0..16 {
+        let mut changed = original_id; changed[index] ^= 0x80;
+        assert!(original != make(9, changed));
+    }
+    assert!(original != make(10, original_id));
+    for bad in [
+        json!({"volumeSerial":"09","fileId":"000102030405060780818283fcfdfeff"}),
+        json!({"volumeSerial":"18446744073709551616","fileId":"0".repeat(32)}),
+        json!({"volumeSerial":"9","fileId":"000102030405060780818283FCFDFEFF"}),
+        json!({"volumeSerial":"9","fileId":"0".repeat(31)}),
+        json!({"volumeSerial":9,"fileId":"0".repeat(32)}),
+        json!({"volumeSerial":"9","fileId":"0".repeat(32),"inode":"0"}),
+        json!({"device":"1","inode":"7","fileId":"0".repeat(32)}),
+        json!({"fileId":"0".repeat(32)}),
+    ] {
+        assert!(!SourceObject::deserialize(&bad).is_ok_and(|value| value.valid()));
+        assert!(!ImageRegisteredIdentity::deserialize(&bad).is_ok_and(|value| value.valid()));
+    }
+}
+
+#[test]
+fn image_windows_root_grammar_is_cross_platform_data_without_path_normalization() {
+    let identity = ImageRegisteredIdentity::Windows(WindowsImageIdentity::native(9, [7;16]));
+    for root in [r"C:\project", r"c:\project", r"\\?\C:\project\metadata", r"C:\CONish.png", r"C:\COM0"] {
+        assert!(identity.valid_root(root), "{root}");
+    }
+    for root in [r"C:\", "C:/project", r"C:project", r"\\server\share\project", r"\\.\C:\project",
+        r"C:\project\.", r"C:\project\\child", r"C:\project\child ", r"C:\project\child.",
+        r"C:\CON.txt", r"C:\COM¹.log", r"C:\LPT9", r"C:\CONIN$", r"C:\CLOCK$", r"C:\project:ads", "/posix"] {
+        assert!(!identity.valid_root(root), "{root}");
+    }
+    assert!(identity.valid_root(&format!("C:\\{}", vec!["a";44].join("\\"))));
+    assert!(!identity.valid_root(&format!("C:\\{}", vec!["a";45].join("\\"))));
+    assert!(identity.valid_root(&format!("C:\\{}", "é".repeat(127))));
+    assert!(!identity.valid_root(&format!("C:\\{}", "é".repeat(128))));
+    assert!(identity.valid_root(&format!("C:\\{}", "a".repeat(255))));
+    assert!(!identity.valid_root(&format!("C:\\{}", "a".repeat(256))));
+}
+
+#[test]
+fn image_windows_import_and_recovery_share_family_validation_but_allow_other_volumes() {
+    let identity = || ImageRegisteredIdentity::Windows(WindowsImageIdentity::native(9,[7;16]));
+    let data = || {
+        let mut value = original();
+        value.protected_objects = vec![SourceObject::Windows(WindowsImageIdentity::native(10,[0x80;16]))];
+        value
+    };
+    let params = import_params(r"c:\project", identity(), data()).unwrap();
+    assert_eq!(params["root"], r"c:\project");
+    assert!(request(SESSION,0,"open",params.clone()).is_ok());
+    let private_view = serde_json::to_value(data().details()).unwrap().to_string();
+    for forbidden in ["volumeSerial", "fileId", "protectedObjects", "protectedSources"] { assert!(!private_view.contains(forbidden)); }
+    let mut mixed = params.clone(); mixed["protectedObjects"] = json!([{"device":"1","inode":"7"}]);
+    assert!(request(SESSION,0,"open",mixed).is_err());
+    assert!(import_params(r"C:\project",identity(),original()).is_err());
+    assert!(import_params("/posix",identity(),data()).is_err());
+    for root in [r"C:\project",r"\\?\c:\project"] {
+        let recovery = json!({"root":root,"registeredIdentity":identity(),"intent":"recover"});
+        assert!(request(SESSION,0,"open",recovery).is_ok());
+    }
+    for root in ["/posix",r"C:\",r"C:\project\."] {
+        let recovery = json!({"root":root,"registeredIdentity":identity(),"intent":"recover"});
+        assert!(request(SESSION,0,"open",recovery).is_err());
+    }
+    let mut duplicate = data();
+    duplicate.images.push(SelectedImageData { item_id:REVISION.into(),display_name:"02.png".into(),bytes:b"N".to_vec(),sha256:digest(b"N") });
+    duplicate.protected_objects.push(SourceObject::Windows(WindowsImageIdentity::native(10,[0x80;16])));
+    assert!(!duplicate.valid());
 }

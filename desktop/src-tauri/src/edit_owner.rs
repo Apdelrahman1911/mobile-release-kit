@@ -1386,9 +1386,9 @@ impl EditOwner {
             (EditDomain::MetadataText, Some(binding), Some(context), None) if context.valid() => json!({"root":root,
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"platform":context.platform,"locale":context.locale}),
             (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Import(data))) =>
-                images_wire::import_params(root, binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(), data)?,
+                images_wire::import_params(root, images_wire::ImageRegisteredIdentity::from_project(binding.root.identity), data)?,
             (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Recover)) => json!({"root":root,
-                "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"intent":"recover"}),
+                "registeredIdentity":images_wire::ImageRegisteredIdentity::from_project(binding.root.identity),"intent":"recover"}),
             _ => return Err(invalid_owner()),
         };
         let bytes = request_bytes(domain, &id, 0, "open", params)?;

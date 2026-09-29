@@ -17,7 +17,8 @@ from .init_transaction import (IMAGE_STATE_NAMES, MAX_FILES, MAX_TOTAL_BYTES, In
                                ObservedFile, TypedEditProfile, validate_paths)
 from .metadata_images import (DEPENDENCY_LIMITS, DEPENDENCY_PATHS, MAX_IMAGE_BYTES,
                               MAX_SIBLINGS, MetadataImagesInputError, PublicImageSelection,
-                              SelectedImage, admit_selected_images, content_digest,
+                              ImageObjectKey, SelectedImage, admit_image_object_keys, admit_selected_images, content_digest,
+                              image_observation_key,
                               name_key, protected_project_sources, public_image_selection,
                               safe_name, target_names)
 
@@ -95,7 +96,7 @@ class ImageTargets(_PrivateAuthority):
 
     __slots__ = ("_identity", "_lease", "_capture_workspace", "_selection", "_names",
                  "_dependencies", "_dependency_observations", "_raw", "_parents", "_parent_facts",
-                 "_inventory", "_relevant_names", "_protected_sources", "_protected_objects")
+                 "_inventory", "_relevant_names", "_protected_sources", "_protected_objects", "_identity_family")
 
     def __repr__(self) -> str:
         return "<ImageTargets>"
@@ -202,6 +203,16 @@ class ImageTargets(_PrivateAuthority):
             rows.append((name, value.data))
         return tuple(rows)
 
+    def _observed_object(self, item: ObservedFile) -> ImageObjectKey | None:
+        if type(item) is not ObservedFile:
+            raise _failure("invalid_params")
+        if item.before is None:  # Existing trusted original absent observation.
+            return None
+        try:
+            return image_observation_key(item.before, family=self._identity_family)
+        except MetadataImagesInputError as error:
+            raise _failure(error.reason) from None
+
     def protected_target_paths(self, originals: tuple[ObservedFile, ...]) -> tuple[str, ...]:
         """Compare private original exclusions to the actual captured roster.
 
@@ -212,17 +223,18 @@ class ImageTargets(_PrivateAuthority):
         protected = {name_key(path) for path in self.protected_sources}
         objects = set(self._protected_objects)
         for item in (*self.dependency_observations, *originals):
-            if item.before is not None and (item.before["device"], item.before["inode"]) in objects:
+            if self._observed_object(item) in objects:
                 protected.add(name_key(item.path))
         return tuple(path for path in self.paths if name_key(path) in protected)
 
     def check_payloads(self, changes: list[tuple[ObservedFile, bytes | None]]) -> None:
         protected = {name_key(path) for path in self.protected_sources}
         objects = set(self._protected_objects)
-        if any(payload is not None and (name_key(item.path) in protected
-                or item.before is not None and (item.before["device"], item.before["inode"]) in objects)
-                for item, payload in changes):
-            raise _failure("invalid_params")
+        for item, payload in changes:
+            # Validate every existing observation, even no-op/name-matched rows.
+            key = self._observed_object(item)
+            if payload is not None and (name_key(item.path) in protected or key in objects):
+                raise _failure("invalid_params")
         dependencies = sum(len(raw) for _, _, raw in self._dependencies)
         if dependencies + sum((item.before or {}).get("size", 0) + len(payload or b"")
                               for item, payload in changes) > MAX_TOTAL_BYTES:
@@ -248,14 +260,14 @@ def bind_image_targets(lease: InitRootLease, workspace: InitWorkspace,
                        dependencies: tuple[ObservedFile, ...], platform: object, locale: object,
                        asset_type: object, images: tuple[SelectedImage, ...],
                        protected_sources: tuple[str, ...],
-                       protected_objects: tuple[tuple[int, int], ...]) -> ImageTargets:
+                       protected_objects: tuple[ImageObjectKey, ...], *, identity_family: str) -> ImageTargets:
     """Called only by the original lease's closed image-domain method."""
     from .config_payloads import sufficient_ignore_rules
     from .init_transaction import IGNORE_LINES
     from .init_workspace_custody import InitRootLease
     from .metadata import check_metadata_text
 
-    if type(lease) is not InitRootLease:
+    if type(lease) is not InitRootLease or type(identity_family) is not str or identity_family != lease.image_identity_family:
         raise _failure("invalid_params")
     lease.check()
     scope = lease._active
@@ -274,12 +286,7 @@ def bind_image_targets(lease: InitRootLease, workspace: InitWorkspace,
     try:
         admit_selected_images(images)
         admitted_sources = protected_project_sources(list(protected_sources))
-        if (type(protected_objects) is not tuple or len(protected_objects) != len(images)
-                or any(type(pair) is not tuple or len(pair) != 2
-                       or any(type(value) is not int or not 0 <= value < 2**64 for value in pair)
-                       for pair in protected_objects)
-                or len(set(protected_objects)) != len(protected_objects)):
-            raise MetadataImagesInputError()
+        admit_image_object_keys(protected_objects, len(images), family=identity_family)
     except (MetadataImagesInputError, TypeError):
         raise _failure("invalid_params") from None
     config, ignore = dependencies
@@ -320,7 +327,7 @@ def bind_image_targets(lease: InitRootLease, workspace: InitWorkspace,
         ("_identity", targets), ("_lease", lease), ("_capture_workspace", workspace),
         ("_selection", selection), ("_names", names), ("_inventory", inventory),
         ("_relevant_names", relevant), ("_protected_sources", admitted_sources),
-        ("_protected_objects", protected_objects),
+        ("_protected_objects", protected_objects), ("_identity_family", identity_family),
         ("_dependency_observations", all_dependencies),
         ("_dependencies", tuple((item.path, tuple(sorted(item.before.items())), item.data) for item in all_dependencies)),
         ("_raw", tuple(sorted(workspace._raw_observations.items()))),

@@ -84,15 +84,96 @@ impl SelectedImageData {
 }
 // Private native→core exclusion DATA only. Never a renderer projection or
 // destination/cleanup authority, and never persisted in an image journal.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SourceObject { pub device: String, pub inode: String }
-impl SourceObject {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageIdentityFamily { Posix, Windows }
+
+fn canonical_u64(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 20 && value.bytes().all(|b| b.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0')) && value.parse::<u64>().is_ok()
+}
+fn file_id_hex(bytes: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(32);
+    for byte in bytes { result.push(HEX[(byte >> 4) as usize] as char); result.push(HEX[(byte & 15) as usize] as char); }
+    result
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WindowsImageIdentity { volume_serial: String, file_id: String }
+impl WindowsImageIdentity {
+    fn native(volume: u64, file_id: [u8; 16]) -> Self { Self { volume_serial: volume.to_string(), file_id: file_id_hex(file_id) } }
     fn valid(&self) -> bool {
-        [&self.device, &self.inode].iter().all(|value| !value.is_empty() && value.len() <= 20
-            && value.bytes().all(|b| b.is_ascii_digit()) && (*value == "0" || !value.starts_with('0'))
-            && value.parse::<u64>().is_ok())
+        canonical_u64(&self.volume_serial) && self.file_id.len() == 32
+            && self.file_id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
+}
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PosixSourceObject { pub device: String, pub inode: String }
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(untagged)]
+pub(crate) enum SourceObject { Posix(PosixSourceObject), Windows(WindowsImageIdentity) }
+impl SourceObject {
+    fn family(&self) -> ImageIdentityFamily {
+        match self { Self::Posix(_) => ImageIdentityFamily::Posix, Self::Windows(_) => ImageIdentityFamily::Windows }
+    }
+    fn valid(&self) -> bool {
+        match self {
+            Self::Posix(value) => canonical_u64(&value.device) && canonical_u64(&value.inode),
+            Self::Windows(value) => value.valid(),
+        }
+    }
+}
+impl From<crate::asset_source::ImageSourceObject> for SourceObject {
+    fn from(value: crate::asset_source::ImageSourceObject) -> Self {
+        use crate::asset_source::ImageSourceObject;
+        match value {
+            ImageSourceObject::Posix { device, inode } => Self::Posix(PosixSourceObject { device: device.to_string(), inode: inode.to_string() }),
+            ImageSourceObject::Windows { volume_serial, file_id } => Self::Windows(WindowsImageIdentity::native(volume_serial, file_id)),
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ImageRegisteredIdentity { Posix(RegisteredIdentity), Windows(WindowsImageIdentity) }
+impl ImageRegisteredIdentity {
+    pub(crate) fn from_project(value: crate::asset_source::ProjectIdentity) -> Self {
+        use crate::asset_source::ProjectIdentity;
+        match value {
+            ProjectIdentity::Posix(identity) => Self::Posix(identity.workflow_identity()),
+            ProjectIdentity::Windows { volume, file_id } => Self::Windows(WindowsImageIdentity::native(volume, file_id)),
+        }
+    }
+    fn family(&self) -> ImageIdentityFamily {
+        match self { Self::Posix(_) => ImageIdentityFamily::Posix, Self::Windows(_) => ImageIdentityFamily::Windows }
+    }
+    fn valid(&self) -> bool {
+        match self { Self::Posix(identity) => identity.valid(), Self::Windows(identity) => identity.valid() }
+    }
+    fn valid_root(&self, root: &str) -> bool {
+        self.valid() && safe_text(root, 4096) && match self {
+            Self::Posix(_) => root.starts_with('/'),
+            Self::Windows(_) => windows_image_root(root),
+        }
+    }
+}
+fn windows_image_component(value: &str) -> bool {
+    // Kept in lockstep with original native decode::component, on every target.
+    if value.is_empty() || matches!(value, "." | "..") || value.len() > 255
+        || value.encode_utf16().count() > 255 || value.ends_with(['.', ' '])
+        || value.chars().any(|c| c < ' ' || c == '\u{7f}' || "<>:\"/\\|?*".contains(c)) { return false; }
+    let stem = value.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$") { return false; }
+    !["COM", "LPT"].iter().any(|prefix| stem.strip_prefix(*prefix).is_some_and(|tail|
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(&tail)))
+}
+fn windows_image_root(value: &str) -> bool {
+    if !safe_text(value, 4096) { return false; }
+    let ordinary = value.strip_prefix(r"\\?\").unwrap_or(value);
+    let bytes = ordinary.as_bytes();
+    if bytes.len() <= 3 || !bytes[0].is_ascii_alphabetic() || bytes[1..3] != *b":\\" { return false; }
+    let mut count = 0usize;
+    ordinary[3..].split('\\').all(|part| { count += 1; count <= 44 && windows_image_component(part) })
 }
 pub(crate) struct ImportData {
     pub context: Context, pub images: Vec<SelectedImageData>, pub protected_sources: Vec<String>,
@@ -107,7 +188,8 @@ impl ImportData {
             && self.protected_sources.len() <= MAX_FILES && self.protected_sources.iter().all(|path| protected_source(path))
             && self.protected_sources.iter().collect::<BTreeSet<_>>().len() == self.protected_sources.len()
             && self.protected_objects.len() == self.images.len() && self.protected_objects.iter().all(SourceObject::valid)
-            && self.protected_objects.iter().map(|row| (&row.device, &row.inode)).collect::<BTreeSet<_>>().len() == self.images.len()
+            && self.protected_objects.iter().collect::<BTreeSet<_>>().len() == self.images.len()
+            && self.protected_objects.first().is_some_and(|first| self.protected_objects.iter().all(|row| row.family() == first.family()))
     }
     pub(crate) fn details(&self) -> Details {
         Details { intent: Intent::Import, checkout: None, prepared: None,
@@ -504,7 +586,7 @@ fn canonical_base64(encoded: &str, size: usize) -> bool {
     bytes[..end].iter().all(|byte| value(*byte).is_some()) && bytes[end..].iter().all(|byte| *byte == b'=')
         && (padding == 0 || value(bytes[end - 1]).is_some_and(|v| (v & (if padding == 2 { 15 } else { 3 })) == 0))
 }
-fn import_wire_valid(params: &Value) -> bool {
+fn import_wire_valid(params: &Value, family: ImageIdentityFamily) -> bool {
     let Ok(context) = Context::deserialize(json!({"platform":params["platform"],"locale":params["locale"],"assetType":params["assetType"]})) else { return false; };
     let (Some(images), Some(paths), Some(objects)) = (params["images"].as_array(), params["protectedSources"].as_array(),
         params["protectedObjects"].as_array()) else { return false; };
@@ -512,7 +594,7 @@ fn import_wire_valid(params: &Value) -> bool {
     let mut ids = BTreeSet::new(); let mut total = 0usize; let mut original_paths = BTreeSet::new(); let mut original_objects = BTreeSet::new();
     paths.iter().all(|path| path.as_str().is_some_and(|path| protected_source(path) && original_paths.insert(path)))
         && objects.iter().all(|row| SourceObject::deserialize(row).is_ok_and(|object| object.valid()
-            && original_objects.insert((object.device, object.inode))))
+            && object.family() == family && original_objects.insert(object)))
         && images.iter().all(|row| {
             if !keys(row, &["itemId", "displayName", "byteLength", "sha256", "base64"])
                 || !row["itemId"].as_str().is_some_and(|id| token(id) && ids.insert(id))
@@ -544,8 +626,9 @@ fn frame_exact(value: &Value, limit: usize) -> Result<Vec<u8>, BridgeError> {
     if bytes.len() != count.length { return Err(BridgeError::invalid()); }
     bytes.push(b'\n'); Ok(bytes)
 }
-pub(crate) fn import_params(root: &str, registered: RegisteredIdentity, data: ImportData) -> Result<Value, BridgeError> {
-    if !data.valid() || !registered.valid() || !safe_text(root, 4096) || !root.starts_with('/') { return Err(BridgeError::invalid()); }
+pub(crate) fn import_params(root: &str, registered: ImageRegisteredIdentity, data: ImportData) -> Result<Value, BridgeError> {
+    if !registered.valid_root(root) || !data.valid()
+        || data.protected_objects.iter().any(|object| object.family() != registered.family()) { return Err(BridgeError::invalid()); }
     let mut images = Vec::new(); images.try_reserve_exact(data.images.len()).map_err(|_| BridgeError::invalid())?;
     for image in data.images {
         let encoded = base64(&image.bytes)?;
@@ -569,9 +652,9 @@ pub(crate) fn request(session: &str, seq: u32, op: &str, params: Value) -> Resul
             let roster = if import { &["root", "registeredIdentity", "intent", "platform", "locale", "assetType", "images", "protectedSources", "protectedObjects"][..] }
                 else { &["root", "registeredIdentity", "intent"][..] };
             keys(&params, roster) && (import || params["intent"] == "recover")
-                && params["root"].as_str().is_some_and(|root| root.starts_with('/') && safe_text(root, 4096))
-                && RegisteredIdentity::deserialize(&params["registeredIdentity"]).is_ok_and(|identity| identity.valid())
-                && (!import || import_wire_valid(&params))
+                && ImageRegisteredIdentity::deserialize(&params["registeredIdentity"]).is_ok_and(|identity|
+                    params["root"].as_str().is_some_and(|root| identity.valid_root(root))
+                        && (!import || import_wire_valid(&params, identity.family())))
         },
         (1, "prepare") => keys(&params, &["revision", "expectedBaseline", "choices"])
             && params["revision"].as_str().is_some_and(token)

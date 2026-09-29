@@ -1701,9 +1701,9 @@ fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
     matches!(choice, DialogChoice::File(_) | DialogChoice::PublicImages | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
 }
 
-// Public-image selection is separately qualified. The existing macOS/Windows
-// credential/project chooser capability is never an image adapter receipt.
-#[cfg(not(target_os = "linux"))]
+// Public-image support is purpose-specific and separately qualified. macOS
+// remains unsupported; credential/project support is never an image receipt.
+#[cfg(not(any(target_os = "linux", all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) async fn run_owned_images_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<std::path::PathBuf>>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
@@ -1723,7 +1723,7 @@ pub(crate) use owned_macos::run_owned_dialog;
 #[path = "shell_windows.rs"]
 mod owned_windows;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-pub(crate) use owned_windows::run_owned_dialog;
+pub(crate) use owned_windows::{run_owned_dialog, run_owned_images_dialog};
 
 #[cfg(target_os = "linux")]
 pub(crate) use owned_gtk::{run_owned_dialog, run_owned_images_dialog};

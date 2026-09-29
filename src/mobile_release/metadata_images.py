@@ -323,31 +323,137 @@ def protected_project_sources(value: object) -> tuple[str, ...]:
     return tuple(result)
 
 
-def protected_source_objects(value: object, count: int) -> tuple[tuple[int, int], ...]:
-    """Native original-file exclusions, not target or recovery authority.
 
-    Relative names alone cannot identify a single-file bind-mount alias. These
-    private decimal device/inode observations additionally prohibit changing
-    an already-captured destination referring to any selected original object.
-    They are never included in renderer views or persisted image journals.
-    """
+ImageObjectKey = tuple[str, int, int | bytes]
+
+
+def _image_u64(value: object) -> int:
+    _require(type(value) is str and 1 <= len(value) <= 20
+             and value.isascii() and value.isdecimal()
+             and (value == "0" or not value.startswith("0")))
+    number = int(value)
+    _require(number < 2**64)
+    return number
+
+
+def _image_object(value: object, family: str) -> ImageObjectKey:
+    _require(type(family) is str and family in {"posix", "windows"} and type(value) is dict)
+    if family == "posix":
+        _require(set(value) == {"device", "inode"})
+        return ("posix", _image_u64(value["device"]), _image_u64(value["inode"]))
+    _require(set(value) == {"volumeSerial", "fileId"})
+    serial = _image_u64(value["volumeSerial"])
+    file_id = value["fileId"]
+    _require(type(file_id) is str and re.fullmatch(r"[0-9a-f]{32}", file_id) is not None)
+    # Native FILE_ID_128 bytes, in array order; never an integer/endian conversion.
+    return ("windows", serial, bytes.fromhex(file_id))
+
+
+@dataclass(frozen=True, slots=True)
+class ImageRootIdentity:
+    """Image-only immutable comparison DATA, never a root-open capability."""
+
+    family: str
+    object_key: ImageObjectKey
+    directory_facts: tuple[int, int, int, int, int] | None
+
+    def posix_values(self) -> dict[str, int]:
+        _require(self.family == "posix" and self.directory_facts is not None)
+        return dict(zip(("device", "inode", "mode", "uid", "gid"), self.directory_facts))
+
+
+def image_registered_identity(value: object) -> ImageRootIdentity:
+    _require(type(value) is dict)
+    if set(value) == {"volumeSerial", "fileId"}:
+        return ImageRootIdentity("windows", _image_object(value, "windows"), None)
+    _require(set(value) == {"device", "inode", "mode", "uid", "gid"})
+    device, inode = _image_u64(value["device"]), _image_u64(value["inode"])
+    _require(inode != 0)
+    for name in ("mode", "uid", "gid"):
+        _require(type(value[name]) is int and 0 <= value[name] < 2**32)
+    _require(value["mode"] & 0o170000 == 0o040000)
+    return ImageRootIdentity("posix", ("posix", device, inode),
+                             (device, inode, value["mode"], value["uid"], value["gid"]))
+
+
+_ASCII_UPPER = str.maketrans("abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def _windows_image_component(value: str) -> bool:
+    # Same refusal predicate as the original native decode::component, not
+    # accepted-path normalization (in particular, not Unicode case folding).
+    if (not value or value in {".", ".."} or len(value.encode("utf-8")) > 255
+            or len(value.encode("utf-16-le")) // 2 > 255 or value.endswith((".", " "))
+            or any(ord(c) < 32 or ord(c) == 127 or c in '<>:"/\\|?*' for c in value)):
+        return False
+    stem = value.split(".", 1)[0].rstrip(" ").translate(_ASCII_UPPER)
+    if stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"}:
+        return False
+    return not any(stem.startswith(prefix)
+                   and stem[len(prefix):] in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"}
+                   for prefix in ("COM", "LPT"))
+
+
+def admit_image_root(value: object, identity: ImageRootIdentity) -> str:
+    _require(type(identity) is ImageRootIdentity and type(value) is str and bool(value))
+    try:
+        _require(len(value.encode("utf-8")) <= 4096
+                 and not any(ord(c) < 32 or ord(c) == 127 for c in value))
+        if identity.family == "posix":
+            # Preserve the existing wire rule. Original backend root admission
+            # performs its stricter no-normalization checks before Path/IO.
+            _require(value.startswith("/"))
+        else:
+            _require(identity.family == "windows")
+            ordinary = value[4:] if value.startswith("\\\\?\\") else value
+            _require(len(ordinary) > 3 and ordinary[0].isascii()
+                     and ordinary[0].isalpha() and ordinary[1:3] == ":\\")
+            parts = ordinary[3:].split("\\")
+            _require(1 <= len(parts) <= 44 and all(_windows_image_component(part) for part in parts))
+    except UnicodeError:
+        raise MetadataImagesInputError() from None
+    return value
+
+
+def protected_source_objects(value: object, count: int, *, family: str) -> tuple[ImageObjectKey, ...]:
+    """Private original restrictions, never target/recovery or recapture authority."""
     _require(type(count) is int and 1 <= count <= MAX_IMAGES
              and type(value) is list and len(value) == count)
-    result = []
-    for row in value:
-        _require(type(row) is dict and set(row) == {"device", "inode"})
-        pair = []
-        for key in ("device", "inode"):
-            item = row[key]
-            _require(type(item) is str and 1 <= len(item) <= 20
-                     and item.isascii() and item.isdecimal()
-                     and (item == "0" or not item.startswith("0")))
-            number = int(item)
-            _require(number <= 2**64 - 1)
-            pair.append(number)
-        result.append(tuple(pair))
+    result = tuple(_image_object(row, family) for row in value)
     _require(len(set(result)) == count)
-    return tuple(result)
+    return result
+
+
+def admit_image_object_keys(value: object, count: int, *, family: str) -> tuple[ImageObjectKey, ...]:
+    """Recheck native-only immutable keys at the original image lease boundary."""
+    _require(type(family) is str and family in {"posix", "windows"}
+             and type(count) is int and 1 <= count <= MAX_IMAGES
+             and type(value) is tuple and len(value) == count)
+    for key in value:
+        _require(type(key) is tuple and len(key) == 3 and type(key[0]) is str and key[0] == family
+                 and type(key[1]) is int and 0 <= key[1] < 2**64)
+        if family == "posix":
+            _require(type(key[2]) is int and 0 <= key[2] < 2**64)
+        else:
+            _require(type(key[2]) is bytes and len(key[2]) == 16)
+    _require(len(set(value)) == count)
+    return value
+
+
+def image_observation_key(before: object, *, family: str) -> ImageObjectKey:
+    """Project an actual existing backend observation; missing is never unprotected.
+
+    Trusted absence is handled by the original ImageTargets caller, not here.
+    No Windows writer exists; its full128 source DATA cannot impersonate stat.
+    """
+    _require(type(family) is str and family in {"posix", "windows"})
+    if family == "windows":
+        raise MetadataImagesInputError("unsupported_platform")
+    _require(type(before) is dict and {"device", "inode"} <= set(before))
+    device, inode = before["device"], before["inode"]
+    _require(type(device) is int and 0 <= device < 2**64
+             and type(inode) is int and 0 <= inode < 2**64)
+    return ("posix", device, inode)
 
 
 def _native_name(name: object) -> str:

@@ -197,6 +197,15 @@ pub(crate) fn statistics(self, raw: &[u8]) -> Result<TokenIdentity> {
 pub struct GroupFact { pub sid: Sid, pub attributes: u32 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenFacts { pub identity: TokenIdentity, pub user: Sid, pub elevation_type: u32, pub groups: Vec<GroupFact>, pub privileges: Vec<(u64, u32)> }
+impl TokenFacts {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.user.bytes.capacity()
+            .checked_add(self.groups.capacity().checked_mul(size_of::<GroupFact>())?)?
+            .checked_add(self.privileges.capacity().checked_mul(size_of::<(u64, u32)>())?)?;
+        for group in &self.groups { bytes = bytes.checked_add(group.sid.bytes.capacity())?; }
+        Some(bytes)
+    }
+}
 fn pointed_sid(raw: &[u8], field: usize, minimum: usize) -> Result<Sid> {
     let pointer = usize::try_from(u64_at(raw, field)?).map_err(|_| Error::Unsafe)?;
     let offset = pointer.checked_sub(raw.as_ptr() as usize).ok_or(Error::Unsafe)?;
@@ -339,5 +348,22 @@ mod credential_tests {
         let facts = private(&descriptor_bytes(&user, &[(true, 0, FS::FILE_ALL_ACCESS, user.clone())]), &user).unwrap();
         assert_eq!(facts.retained_heap_bytes(), Some(facts.owner.bytes.capacity()
             + facts.aces.capacity() * size_of::<AceFact>() + facts.aces[0].sid.bytes.capacity()));
+    }
+}
+
+#[cfg(test)]
+mod token_retained_capacity_data_tests {
+    use super::*;
+    #[test]
+    fn token_retention_charges_actual_group_privilege_and_private_sid_capacities() {
+        // Allocation DATA only. No token acquisition or admission is fabricated.
+        let mut groups = Vec::with_capacity(4);
+        groups.push(GroupFact { sid: Sid { bytes: Vec::with_capacity(64) }, attributes: 0 });
+        let facts = TokenFacts { identity: TokenIdentity { token_id: 0, authentication_id: 0, modified_id: 0, groups: 0, privileges: 0 },
+            user: Sid { bytes: Vec::with_capacity(32) }, elevation_type: 0, groups, privileges: Vec::with_capacity(8) };
+        assert_eq!(facts.retained_heap_bytes(), Some(facts.user.bytes.capacity()
+            + facts.groups.capacity() * size_of::<GroupFact>()
+            + facts.privileges.capacity() * size_of::<(u64, u32)>()
+            + facts.groups[0].sid.bytes.capacity()));
     }
 }

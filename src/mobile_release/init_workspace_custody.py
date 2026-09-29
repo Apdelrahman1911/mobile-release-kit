@@ -26,7 +26,7 @@ from .init_transaction import (InitApplyOutcome, InitConflict, InitOperationFail
 if TYPE_CHECKING:
     from .metadata_text import PublicTextSelection
     from .version_text import VersionSelection
-    from .metadata_images import SelectedImage
+    from .metadata_images import ImageObjectKey, SelectedImage
     from .metadata_images_custody import ImageTargets
 
 
@@ -578,16 +578,25 @@ class InitRootLease:
         workspace._version_targets = targets
         return targets
 
+    @property
+    def image_identity_family(self) -> str:
+        # This original lease has only the existing POSIX backend and five-fact
+        # constructor. A Windows wire identity is refused before construction.
+        if self._profile is not TypedEditProfile.METADATA_IMAGES:
+            raise _failure("invalid_params")
+        return "posix"
+
     def bind_image_targets(self, workspace: InitWorkspace,
                            dependencies: tuple[ObservedFile, ...], platform: object, locale: object,
                            asset_type: object, images: tuple[SelectedImage, ...],
                            protected_sources: tuple[str, ...],
-                           protected_objects: tuple[tuple[int, int], ...]) -> ImageTargets:
+                           protected_objects: tuple[ImageObjectKey, ...], *, identity_family: str) -> ImageTargets:
         from .metadata_images_custody import bind_image_targets
-        if self._image_recovery_mode:
+        if self._image_recovery_mode or identity_family != self.image_identity_family:
             raise _failure("invalid_params")
         return bind_image_targets(self, workspace, dependencies, platform, locale,
-                                  asset_type, images, protected_sources, protected_objects)
+                                  asset_type, images, protected_sources, protected_objects,
+                                  identity_family=identity_family)
 
     def _observation_roster(self, workspace: InitWorkspace) -> tuple[tuple[str, ...], tuple[int, ...], set[str]]:
         if self._profile is TypedEditProfile.METADATA_TEXT:

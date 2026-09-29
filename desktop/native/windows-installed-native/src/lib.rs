@@ -46,7 +46,8 @@ mod output_origin_capsule;
 mod project;
 pub use project::{ProjectBook, project_path_hint};
 mod credential_source;
-pub use credential_source::{CredentialError, CredentialOrigin, CredentialSnapshot, RegisteredProject};
+pub use credential_source::{CredentialError, CredentialOrigin, CredentialSnapshot, RegisteredProject,
+    PublicImageError, PublicImageOrigin, PublicImageSnapshot, PublicImageBatchSnapshot};
 mod vault_fs;
 pub use vault_fs::{DirectoryFenceProbe, DirectoryFenceObservation, DirectoryFenceClass, DirectoryFenceStage, DirectoryFenceFailure, DirectoryFenceIo, DirectoryFenceCleanup};
 #[cfg(feature = "desktop-ui")]
@@ -270,11 +271,17 @@ pub struct Original { book: Arc<()>, index: usize }
 enum Kind { Directory, File, ProcessToken, ThreadToken }
 // A metadata-only original cannot later be reinterpreted as a content reader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FileReadPurpose { Content, MetadataOnly }
+enum FileReadPurpose { Content, MetadataOnly, PublicImage }
 impl FileReadPurpose {
+    fn access(self, directory: bool) -> u32 {
+        // Public image leaves need ordinary read-data/metadata access, never the
+        // credential-only DACL read right. Existing Content/MetadataOnly is exact.
+        FS::SYNCHRONIZE | FS::FILE_READ_ATTRIBUTES | self.additional_access(directory)
+            | if self == Self::PublicImage { 0 } else { FS::READ_CONTROL }
+    }
     fn additional_access(self, directory: bool) -> u32 {
         if directory { FS::FILE_LIST_DIRECTORY | FS::FILE_TRAVERSE }
-        else if self == Self::Content { FS::FILE_READ_DATA } else { 0 }
+        else if matches!(self, Self::Content | Self::PublicImage) { FS::FILE_READ_DATA } else { 0 }
     }
 }
 // Metadata policy only, never an admission capability or SystemImage tag.
@@ -478,6 +485,49 @@ pub struct NativeBook {
 unsafe impl Send for NativeBook {}
 impl Default for NativeBook { fn default() -> Self { Self::new() } }
 impl NativeBook {
+
+    fn prepare_public_image_records(&mut self) -> Result<()> {
+        if !self.never_started() { return Err(Error::State); }
+        // Existing 45 roster nodes plus the original primary token and four
+        // before/after no-thread-token records. MAX_LIVE/MAX_ORIGINALS is unchanged.
+        self.slots.try_reserve_exact(MAX_ORIGINALS + 2).map_err(|_| Error::Bounds)
+    }
+    fn public_image_retained_heap_bytes(&self) -> Option<usize> {
+        // The identity Arc allocation is shared by keys, charged once in its book.
+        let mut bytes = (2 * size_of::<usize>())
+            .checked_add(self.slots.capacity().checked_mul(size_of::<Held<Slot>>())?)?;
+        for slot in &self.slots {
+            bytes = bytes.checked_add(size_of::<Slot>())?
+                .checked_add(slot.name.capacity().checked_mul(size_of::<u16>())?)?
+                .checked_add(slot.canonical.capacity())?;
+            match &slot.directory_mode {
+                DirectoryMode::Ancestor(name) => bytes = bytes.checked_add(name.capacity())?,
+                DirectoryMode::Selected(names) => {
+                    bytes = bytes.checked_add(names.capacity().checked_mul(size_of::<String>())?)?;
+                    for name in names { bytes = bytes.checked_add(name.capacity())?; }
+                },
+                DirectoryMode::Unstarted | DirectoryMode::Strict => {},
+            }
+        }
+        if let Some(arena) = &self.active {
+            bytes = bytes.checked_add(size_of::<Arena>())?
+                .checked_add(arena.input.capacity().checked_mul(size_of::<u16>())?)?;
+        }
+        if let Some(user) = &self.user { bytes = bytes.checked_add(user.retained_heap_bytes()?)?; }
+        Some(bytes)
+    }
+    fn public_image_transient_bytes(&self, initial: bool) -> Option<usize> {
+        // Complete owns its arena until the whole helper returns: observe_user
+        // can simultaneously retain nine and the global POST seven. These are
+        // bounded transient reservations, NOT a claim that active holds them all.
+        // Two native buffers cover token/SID/decoded-directory/read-chunk DATA;
+        // the two future thread-token slots and name buffers are charged too.
+        // Actual persistent capacities are separately counted above, and actual
+        // decoded directory rows are charged by the public roster before use.
+        let arenas = if initial { 9usize } else { 7usize };
+        arenas.checked_mul(size_of::<Arena>())?.checked_add(2 * BUFFER)?
+            .checked_add(2 * size_of::<Slot>())?.checked_add(2 * NAME_UNITS * size_of::<u16>())
+    }
     pub fn new() -> Self {
         Self { admission: AdmissionTrace::new(), identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
             retiring: false, entries: 0, bytes_read: 0, process_token: None,
@@ -998,8 +1048,7 @@ unsafe fn invoke(a: &Arena) -> Returned {
             Call::Mapping => counted(FS::QueryDosDeviceW(a.input.as_ptr(), a.buffer().cast(), MAP_UNITS as u32)),
             Call::DriveType => Returned::Scalar(FS::GetDriveTypeW(a.input.as_ptr())),
             Call::Open(_) => Returned::Nt(N::NtCreateFile(a.output_handle,
-                FS::SYNCHRONIZE | FS::READ_CONTROL | FS::FILE_READ_ATTRIBUTES |
-                    a.file_purpose.additional_access(a.directory),
+                a.file_purpose.access(a.directory),
                 &a.attributes, a.iosb.get(), null(), 0, FS::FILE_SHARE_READ, N::FILE_OPEN,
                 N::FILE_SYNCHRONOUS_IO_NONALERT | if a.directory { N::FILE_DIRECTORY_FILE } else { N::FILE_NON_DIRECTORY_FILE }, null(), 0)),
             Call::ProcessToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(), S::TOKEN_QUERY, a.output_handle)),
@@ -1105,6 +1154,9 @@ impl NativeBook {
     }
     pub(crate) fn open_metadata_child(&mut self, parent: &Original, name: &str) -> Result<Original> {
         self.open_child_for(parent, name, FileKind::File, FileReadPurpose::MetadataOnly)
+    }
+    pub(crate) fn open_public_image_child(&mut self, parent: &Original, name: &str) -> Result<Original> {
+        self.open_child_for(parent, name, FileKind::File, FileReadPurpose::PublicImage)
     }
     fn open_child_for(&mut self, parent: &Original, name: &str, kind: FileKind, purpose: FileReadPurpose) -> Result<Original> {
         self.clear()?;
@@ -1259,7 +1311,7 @@ impl NativeBook {
     pub fn read_next(&mut self, original: &Original, count: usize) -> Result<Vec<u8>> {
         self.clear()?; let index = self.index(original)?;
         if count == 0 || count > BUFFER { return Err(Error::Bounds); }
-        if self.slot(index)?.kind != Kind::File || self.slot(index)?.file_purpose != FileReadPurpose::Content
+        if self.slot(index)?.kind != Kind::File || !matches!(self.slot(index)?.file_purpose, FileReadPurpose::Content | FileReadPurpose::PublicImage)
             || self.slot(index)?.read_ended { return Err(Error::State); }
         let prior = self.slot(index)?.read_bytes;
         if self.bytes_read > MAX_TOTAL_BYTES || prior > MAX_FILE_BYTES { return Err(Error::Bounds); }
@@ -1391,5 +1443,22 @@ mod credential_access_tests {
         assert_eq!(FileReadPurpose::MetadataOnly.additional_access(false), 0);
         assert_eq!(FileReadPurpose::Content.additional_access(false), FS::FILE_READ_DATA);
         assert_eq!(FileReadPurpose::Content.additional_access(true), FS::FILE_LIST_DIRECTORY | FS::FILE_TRAVERSE);
+    }
+}
+
+#[cfg(test)]
+mod public_image_access_data_tests {
+    use super::*;
+    #[test]
+    fn public_read_purpose_preserves_private_masks_without_read_control() {
+        let common = FS::SYNCHRONIZE | FS::FILE_READ_ATTRIBUTES;
+        assert_eq!(FileReadPurpose::Content.access(false), common | FS::READ_CONTROL | FS::FILE_READ_DATA);
+        assert_eq!(FileReadPurpose::MetadataOnly.access(false), common | FS::READ_CONTROL);
+        assert_eq!(FileReadPurpose::PublicImage.access(false), common | FS::FILE_READ_DATA);
+        assert_eq!(FileReadPurpose::PublicImage.access(false) & FS::READ_CONTROL, 0);
+        let book = NativeBook::new();
+        assert!(book.public_image_retained_heap_bytes().is_some());
+        assert!(book.public_image_transient_bytes(true).unwrap() > book.public_image_transient_bytes(false).unwrap());
+        assert!(book.never_started());
     }
 }

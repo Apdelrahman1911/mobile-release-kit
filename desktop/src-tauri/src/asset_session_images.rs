@@ -80,6 +80,13 @@ pub(super) struct Binding {
     selection_token: Token, pub(super) byte_limit: usize,
 }
 impl Binding {
+    pub(super) fn source_budget(&self) -> asset_source::PublicImageBudget {
+        // Both halves were charged by persistent_bytes BEFORE this reservation:
+        // one half for source/batch material, the other for GUI/status/owner cells.
+        // No extra raw bytes and no independent budget owner are created here.
+        asset_source::PublicImageBudget { payload_bytes: self.byte_limit,
+            retained_bytes: self.byte_limit.checked_add(CONTROL_RESERVE / 2).unwrap_or(0) }
+    }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?
             .checked_add(self.operation_id.capacity())?.checked_add(self.project_id.capacity())?
@@ -315,7 +322,7 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
         let (generation, root) = document.registry_result(state, selected, Some(&slot.owner)).map_err(|error| error.reason)?;
         if !binding.matches(generation, &root) { return Err(Reason::SourceChanged); }
         if !(1..=wire::MAX_FILES).contains(&batch.images.len())
-            || batch.retained_bytes().is_none_or(|bytes| bytes > binding.byte_limit.saturating_add(CONTROL_RESERVE / 2))
+            || batch.retained_bytes().is_none_or(|bytes| bytes > binding.source_budget().retained_bytes)
             || batch.images.iter().any(|item| item.item_id == binding.operation_id || item.item_id == binding.selection_token.0) {
             return Err(Reason::MaterialLimit);
         }
@@ -475,8 +482,7 @@ impl DocumentBinding {
             let mut protected_objects = Vec::new(); protected_objects.try_reserve_exact(count).map_err(|_| refused(ImageReason::SelectionLimit))?;
             let batch = slot.image_batch.take().ok_or_else(BridgeError::invalid)?;
             for image in batch.images {
-                let (device, inode) = image.source_object();
-                protected_objects.push(wire::SourceObject { device: device.to_string(), inode: inode.to_string() });
+                protected_objects.push(wire::SourceObject::from(image.source_object()));
                 selected.push(wire::SelectedImageData { item_id: image.item_id, display_name: image.display_name,
                     bytes: image.bytes, sha256: image.sha256 });
             }

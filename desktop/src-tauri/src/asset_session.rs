@@ -3331,7 +3331,7 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
         },
         ChildJob::Images { paths, binding } => {
             let captured = match owner.source.lock() {
-                Ok(mut book) => asset_source::capture_public_images(&mut book, paths, &binding.root, binding.byte_limit,
+                Ok(mut book) => asset_source::capture_public_images(&mut book, paths, &binding.root, binding.source_budget(),
                     &mut stop, &mut |reason| images::source_failure(owner, reason)),
                 Err(_) => Err(Reason::CleanupUnknown),
             };

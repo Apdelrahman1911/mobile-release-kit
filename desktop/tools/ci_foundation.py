@@ -1154,6 +1154,12 @@ WINDOWS_NORMAL_UI_SCALAR_TESTS = (
     "windows_startup::tests::real_reply_return_and_ordered_events_precede_one_packaged_navigation",
     "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
     "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality",
+    "asset_source::windows::public_image_adapter_data_tests::public_image_admission_and_failure_categories_are_pure_data",
+    "asset_source::windows::public_image_adapter_data_tests::public_image_display_and_extensions_are_not_credential_policy",
+    "asset_source::windows::tests::windows_metadata_root_invalid_utf16_refuses_before_acquisition",
+    "asset_source::windows::tests::windows_metadata_root_scope_refuses_before_acquisition",
+    "asset_source::windows::tests::windows_metadata_root_spelling_and_display_refuse_before_acquisition",
+    "asset_source::windows::tests::windows_metadata_root_stop_consumes_original_without_native_acquisition",
 )
 WINDOWS_NORMAL_UI_CREDENTIAL_TESTS = {
     "native": (
@@ -1177,6 +1183,18 @@ WINDOWS_NORMAL_UI_CREDENTIAL_TESTS = {
         "ui_observer_diagnostic_data::tests::directory_fence_unknown_presence_and_cleanup_never_publish",
         "ui_observer_diagnostic_data::tests::directory_fence_projection_keeps_one_original_with_first_refusal",
         "ui_observer_diagnostic_data::tests::all_distinct_records_fit_unchanged_bounds",
+        "credential_source::tests::public_image_roster_is_one_bounded_purpose_without_private_security_data",
+        "credential_source::tests::public_original_failure_precedes_independent_unknown_cleanup",
+        "credential_source::tests::public_source_protection_requires_full_physical_and_exact_lexical_agreement",
+        "public_image_access_data_tests::public_read_purpose_preserves_private_masks_without_read_control",
+        "project::tests::metadata_root_completion_keeps_unknown_above_stop",
+        "project::tests::metadata_root_identity_uses_volume_and_every_file_id_bit",
+        "project::tests::metadata_root_refusal_and_stop_do_not_acquire_or_reuse",
+        "project::tests::metadata_root_spelling_is_exact_strict_and_bounded",
+        "project::tests::metadata_root_unknown_precedes_validation_and_stop",
+        "security::token_retained_capacity_data_tests::token_retention_charges_actual_group_privilege_and_private_sid_capacities",
+        "ui::dialog::public_image_dialog_data_tests::an_unreturned_public_item_keeps_its_original_out_cell_and_poisons_the_batch",
+        "ui::dialog::public_image_dialog_data_tests::public_images_share_privacy_flags_but_have_their_own_bounded_output_roster",
     ),
     "session": (
         "runtime::windows_version::loader_path_tests::windows_session_assessment_needs_normal_selection_and_the_original_binding",

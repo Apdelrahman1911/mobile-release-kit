@@ -16518,7 +16518,17 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
             "windows_startup::tests::real_reply_return_and_ordered_events_precede_one_packaged_navigation",
             "windows_startup::tests::late_blank_replacement_or_unordered_callbacks_cannot_rearm",
             "windows_startup::tests::original_reply_and_window_custody_gate_shutdown_finality")
-        scalar_names = (scalar_name, *startup)
+        image_scalar = (
+            "asset_source::windows::public_image_adapter_data_tests::public_image_admission_and_failure_categories_are_pure_data",
+            "asset_source::windows::public_image_adapter_data_tests::public_image_display_and_extensions_are_not_credential_policy",
+            "asset_source::windows::tests::windows_metadata_root_invalid_utf16_refuses_before_acquisition",
+            "asset_source::windows::tests::windows_metadata_root_scope_refuses_before_acquisition",
+            "asset_source::windows::tests::windows_metadata_root_spelling_and_display_refuse_before_acquisition",
+            "asset_source::windows::tests::windows_metadata_root_stop_consumes_original_without_native_acquisition",
+        )
+        scalar_names = (scalar_name, *startup, *image_scalar)
+        self.assertEqual((len(image_scalar), len(set(image_scalar))), (6, 6))
+        self.assertEqual((len(scalar_names), len(set(scalar_names))), (11, 11))
         self.assertEqual(helper.WINDOWS_NORMAL_UI_SCALAR_TESTS, scalar_names)
         crate = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"
         library = (crate / "lib.rs").read_text()
@@ -16547,6 +16557,23 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
         self.assertIn("StartupOrder", (app / "shell_windows.rs").read_text())
         for name in startup:
             self.assertIn("fn " + name.rsplit("::", 1)[-1] + "()", startup_source)
+        # Bind all six selectors to their actual headless Windows/MSVC module and test declarations.
+        self.assertIn("mod asset_source;", (app / "lib.rs").read_text())
+        self.assertIn('#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]\n'
+                      '#[path = "asset_source_windows.rs"]\nmod windows;', (app / "asset_source.rs").read_text())
+        image_source = (app / "asset_source_windows.rs").read_text()
+        for name in image_scalar:
+            prefix, short = name.rsplit("::", 1)
+            module = {"asset_source::windows::public_image_adapter_data_tests": "public_image_adapter_data_tests",
+                      "asset_source::windows::tests": "tests"}[prefix]
+            marker = "#[cfg(test)]\nmod " + module + " {\n"
+            self.assertEqual(image_source.count(marker), 1)
+            module_source = image_source.split(marker, 1)[1].split("\n}\n", 1)[0]
+            pattern = (r"(?m)((?:^    #\[[^\n]+\]\n)+)^    fn " + re.escape(short)
+                       + r"\(\)(?:\s*->\s*(?:Result|UiResult)<\(\)>)?\s*\{")
+            declarations = list(re.finditer(pattern, module_source))
+            self.assertEqual(len(declarations), 1, name)
+            self.assertEqual(declarations[0].group(1).strip(), "#[test]", name)
         legacy_scalar = ("\nrunning 1 test\ntest " + scalar_name + " ... ok\n"
             + "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.01s\n\n").encode("ascii")
         with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_inert_output(legacy_scalar, scalar=True)
@@ -16573,6 +16600,21 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
             for index,bad in enumerate(malformed):
                 with self.subTest(scalar=scalar,mutation=index),self.assertRaises(helper.CheckFailure):
                     helper.windows_normal_ui_inert_output(bad,scalar=scalar)
+        # Every new ID is obligatory, even when a smaller transcript is internally consistent.
+        image_raw = self.output(True)
+        for name in image_scalar:
+            row = ("test " + name + " ... ok\n").encode("ascii")
+            self.assertEqual(image_raw.count(row), 1)
+            missing = image_raw.replace(row, b"")
+            short = missing.replace(f"running {len(scalar_names)} tests".encode("ascii"),
+                f"running {len(scalar_names) - 1} tests".encode("ascii")).replace(
+                f"{len(scalar_names)} passed;".encode("ascii"), f"{len(scalar_names) - 1} passed;".encode("ascii"))
+            ignored = image_raw.replace(row, ("test " + name + " ... ignored\n").encode("ascii")).replace(
+                f"{len(scalar_names)} passed;".encode("ascii"), f"{len(scalar_names) - 1} passed;".encode("ascii")).replace(
+                b"0 ignored;", b"1 ignored;")
+            for mutation, bad in (("missing-row", missing), ("smaller-selection", short), ("ignored-ID", ignored)):
+                with self.subTest(image=name, mutation=mutation), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_inert_output(bad, scalar=True)
 
     def test_inert_receipt_binds_original_outputs_and_does_not_claim_native_availability(self):
         data=WindowsNormalUiPrerequisiteTests.probe_data()
@@ -16720,6 +16762,22 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                 "runtime::windows_version::loader_path_tests::windows_session_assessment_needs_normal_selection_and_the_original_binding",
                 "shell::installed_observation::credential_session::tests::command_input_and_return_order_refuse_duplicates_and_stale_replacement",
                 "shell::installed_observation::credential_session::tests::dom_wait_cache_requires_same_revision_payload_and_nonrenewing_review")}
+        image_native = (
+            "credential_source::tests::public_image_roster_is_one_bounded_purpose_without_private_security_data",
+            "credential_source::tests::public_original_failure_precedes_independent_unknown_cleanup",
+            "credential_source::tests::public_source_protection_requires_full_physical_and_exact_lexical_agreement",
+            "public_image_access_data_tests::public_read_purpose_preserves_private_masks_without_read_control",
+            "project::tests::metadata_root_completion_keeps_unknown_above_stop",
+            "project::tests::metadata_root_identity_uses_volume_and_every_file_id_bit",
+            "project::tests::metadata_root_refusal_and_stop_do_not_acquire_or_reuse",
+            "project::tests::metadata_root_spelling_is_exact_strict_and_bounded",
+            "project::tests::metadata_root_unknown_precedes_validation_and_stop",
+            "security::token_retained_capacity_data_tests::token_retention_charges_actual_group_privilege_and_private_sid_capacities",
+            "ui::dialog::public_image_dialog_data_tests::an_unreturned_public_item_keeps_its_original_out_cell_and_poisons_the_batch",
+            "ui::dialog::public_image_dialog_data_tests::public_images_share_privacy_flags_but_have_their_own_bounded_output_roster",
+        )
+        expected["native"] += image_native
+        self.assertEqual((len(image_native), len(set(image_native))), (12, 12))
         self.assertEqual(helper.WINDOWS_NORMAL_UI_CREDENTIAL_TESTS,expected)
         for role,names in expected.items():
             argv=helper.windows_normal_ui_credential_argv("/inert/cargo",context,role)
@@ -16746,7 +16804,7 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
             with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_credential_argv("/inert/cargo",context,role)
         crate=SOURCE/helper.WINDOWS_INSTALLED_CRATE/"src";app=SOURCE/helper.WINDOWS_INSTALLED_APP/"src"
         self.assertIn('#[path = "ui_dialog.rs"]\nmod dialog;', (crate/"ui.rs").read_text())
-        self.assertEqual(len(expected["native"]), 20)
+        self.assertEqual((len(expected["native"]), len(set(expected["native"]))), (32, 32))
         # Keep the actual caught-unwind case: capture is not a coverage exclusion.
         cleanup_source=(crate/"vault_fs.rs").read_text()
         self.assertIn("std::panic::catch_unwind",cleanup_source)
@@ -16757,11 +16815,48 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
                  "--exact","--nocapture","--test-threads=1"])
         for name in expected["native"]:
             module = name.split("::", 1)[0]
-            filename = "ui_dialog.rs" if module == "ui" else module + ".rs"
+            filename = {"ui": "ui_dialog.rs", "public_image_access_data_tests": "lib.rs"}.get(module, module + ".rs")
             source = (crate / filename).read_text()
             pattern = r"(?m)^[ \t]*fn " + re.escape(name.rsplit("::", 1)[-1]) + r"\(\)(?:\s*->\s*(?:Result|UiResult)<\(\)>)?\s*\{"
             self.assertIsNotNone(re.search(pattern, source),
                 f"missing fixed libtest declaration: {filename}:{name.rsplit('::', 1)[-1]}")
+        # The native crate's target and the dialog feature path must reach these exact #[test] modules.
+        library = (crate / "lib.rs").read_text()
+        self.assertIn('#![cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]', library)
+        for declaration in ("mod credential_source;", "mod project;", "mod security;"):
+            self.assertIn(declaration, library)
+        self.assertIn('#[cfg(feature = "desktop-ui")]\npub mod ui;', library)
+        self.assertIn('#[cfg(feature = "desktop-ui-dialogs")]\n#[path = "ui_dialog.rs"]\nmod dialog;',
+                      (crate / "ui.rs").read_text())
+        image_modules = {
+            "credential_source::tests": ("credential_source.rs", "tests"),
+            "public_image_access_data_tests": ("lib.rs", "public_image_access_data_tests"),
+            "project::tests": ("project.rs", "tests"),
+            "security::token_retained_capacity_data_tests": ("security.rs", "token_retained_capacity_data_tests"),
+            "ui::dialog::public_image_dialog_data_tests": ("ui_dialog.rs", "public_image_dialog_data_tests"),
+        }
+        for name in image_native:
+            prefix, short = name.rsplit("::", 1)
+            filename, module = image_modules[prefix]
+            image_source = (crate / filename).read_text()
+            marker = "#[cfg(test)]\nmod " + module + " {\n"
+            self.assertEqual(image_source.count(marker), 1)
+            module_source = image_source.split(marker, 1)[1].split("\n}\n", 1)[0]
+            pattern = (r"(?m)((?:^    #\[[^\n]+\]\n)+)^    fn " + re.escape(short)
+                       + r"\(\)(?:\s*->\s*(?:Result|UiResult)<\(\)>)?\s*\{")
+            declarations = list(re.finditer(pattern, module_source))
+            self.assertEqual(len(declarations), 1, name)
+            self.assertEqual(declarations[0].group(1).strip(), "#[test]", name)
+        # The original credential observer readbacks must not widen to the new multi-select kind.
+        dialog_source = (crate / "ui_dialog.rs").read_text()
+        self.assertIn('#[cfg(any(test, feature = "windows-installed-observation"))]\n'
+                      'fn observed_path_readback_required(kind: DialogKind) -> bool {\n'
+                      '    matches!(kind, DialogKind::Project | DialogKind::Credential(_))\n}', dialog_source)
+        self.assertEqual(dialog_source.count("if accept && observed_path_readback_required(self.kind) {"), 2)
+        self.assertNotIn("if accept && self.kind != DialogKind::Quit {", dialog_source)
+        self.assertIn("assert!(observed_path_readback_required(kind));", dialog_source)
+        for kind in ("Quit", "PublicImages"):
+            self.assertIn("assert!(!observed_path_readback_required(DialogKind::" + kind + "));", dialog_source)
         self.assertIn("mod windows_version {",(app/"runtime.rs").read_text())
         self.assertIn("mod loader_path_tests {",(app/"runtime.rs").read_text())
         self.assertIn("fn "+expected["session"][0].rsplit("::",1)[-1]+"()",(app/"runtime.rs").read_text())
@@ -16782,6 +16877,21 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
             node["features"]=features
             with self.assertRaises(helper.CheckFailure):
                 helper.windows_normal_ui_native_graph(value,lock,source=source,root=root,observer_data=True)
+        # Every new ID is obligatory, even when a smaller transcript is internally consistent.
+        image_raw = self.output(credential="native")
+        for name in image_native:
+            row = ("test " + name + " ... ok\n").encode("ascii")
+            self.assertEqual(image_raw.count(row), 1)
+            missing = image_raw.replace(row, b"")
+            short = missing.replace(f"running {len(expected['native'])} tests".encode("ascii"),
+                f"running {len(expected['native']) - 1} tests".encode("ascii")).replace(
+                f"{len(expected['native'])} passed;".encode("ascii"), f"{len(expected['native']) - 1} passed;".encode("ascii"))
+            ignored = image_raw.replace(row, ("test " + name + " ... ignored\n").encode("ascii")).replace(
+                f"{len(expected['native'])} passed;".encode("ascii"), f"{len(expected['native']) - 1} passed;".encode("ascii")).replace(
+                b"0 ignored;", b"1 ignored;")
+            for mutation, bad in (("missing-row", missing), ("smaller-selection", short), ("ignored-ID", ignored)):
+                with self.subTest(image=name, mutation=mutation), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_inert_output(bad, credential="native")
 
     def test_credential_app_compiler_cannot_substitute_process_main_or_auxiliary_for_libtest(self):
         graph,original,source,root,_=WindowsNormalUiGuiTests.compiler_fixture(observer=True)

@@ -279,7 +279,7 @@ impl QuitAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialKind { AndroidKeystore, AndroidFirebase, IosFirebase }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DialogKind { Project, Credential(CredentialKind), Quit }
+pub enum DialogKind { Project, Credential(CredentialKind), PublicImages, Quit }
 impl DialogKind {
     fn requires_live_document(self) -> bool { self != Self::Quit }
 }

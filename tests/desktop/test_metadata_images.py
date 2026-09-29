@@ -218,5 +218,83 @@ class SelectionPreviewTests(unittest.TestCase):
                 images.admit_baseline({**base, "root": "/other"})
 
 
+class ImageIdentityFamilyTests(unittest.TestCase):
+    """Pure private identity DATA, never Windows filesystem qualification."""
+
+    def test_legacy_posix_root_and_selected_zero_rules_are_unchanged(self):
+        value = {"device": "0", "inode": "2", "mode": 0o40700, "uid": 1000, "gid": 1001}
+        admitted = images.image_registered_identity(value)
+        self.assertEqual(admitted.posix_values(), {"device": 0, "inode": 2, "mode": 0o40700, "uid": 1000, "gid": 1001})
+        self.assertEqual(images.protected_source_objects([{"device": "0", "inode": "0"}], 1, family="posix"),
+                         (("posix", 0, 0),))
+        for bad in ({**value, "inode": "0"}, {**value, "mode": True}, {**value, "uid": -1},
+                    {**value, "gid": 2**32}, {**value, "mode": 0o100600}, {**value, "device": "00"}):
+            with self.assertRaises(images.MetadataImagesInputError):
+                images.image_registered_identity(bad)
+
+    def test_windows_full128_is_original_array_order_and_every_byte_and_volume_participates(self):
+        native = bytes.fromhex("000102030405060780818283fcfdfeff")
+        value = {"volumeSerial": "9", "fileId": native.hex()}
+        key = images.protected_source_objects([value], 1, family="windows")[0]
+        self.assertEqual(key, ("windows", 9, native))
+        self.assertEqual(images.image_registered_identity(value).object_key, key)
+        for index in range(16):
+            changed = bytearray(native); changed[index] ^= 0x80
+            other = images.protected_source_objects([{**value, "fileId": bytes(changed).hex()}], 1, family="windows")[0]
+            self.assertNotEqual(key, other)
+        self.assertNotEqual(key, images.protected_source_objects([{**value, "volumeSerial": "10"}], 1, family="windows")[0])
+        for bad in ({"volumeSerial": "09", "fileId": native.hex()},
+                    {"volumeSerial": str(2**64), "fileId": native.hex()},
+                    {"volumeSerial": 9, "fileId": native.hex()},
+                    {"volumeSerial": "9", "fileId": native.hex().upper()},
+                    {"volumeSerial": "9", "fileId": native.hex()[:-1]},
+                    {"volumeSerial": "9", "fileId": native.hex(), "inode": "7"},
+                    {"device": "1", "inode": "7", "fileId": native.hex()}):
+            with self.subTest(keys=tuple(bad)), self.assertRaises(images.MetadataImagesInputError):
+                images.protected_source_objects([bad], 1, family="windows")
+
+    def test_explicit_family_and_duplicates_are_revalidated_without_stat_surrogates(self):
+        windows = {"volumeSerial": "10", "fileId": "80" * 16}
+        for value, family in ((windows, "posix"), ({"device": "1", "inode": "2"}, "windows")):
+            with self.assertRaises(images.MetadataImagesInputError):
+                images.protected_source_objects([value], 1, family=family)
+        with self.assertRaises(images.MetadataImagesInputError):
+            images.protected_source_objects([windows, windows], 2, family="windows")
+        key = images.protected_source_objects([windows], 1, family="windows")
+        self.assertIs(images.admit_image_object_keys(key, 1, family="windows"), key)
+        for bad in ((("windows", 10, b"\x80" * 8),), (("posix", 10, b"\x80" * 16),),
+                    (("windows", True, b"\x80" * 16),), (("windows", 10, bytearray(16)),)):
+            with self.assertRaises(images.MetadataImagesInputError):
+                images.admit_image_object_keys(bad, 1, family="windows")
+
+    def test_windows_root_spelling_matches_native_grammar_without_normalization(self):
+        identity = images.image_registered_identity({"volumeSerial": "9", "fileId": "07" * 16})
+        good = (r"C:\project", r"c:\project", r"\\?\C:\project\metadata", r"C:\CONish.png", r"C:\COM0",
+                "C:\\" + "\\".join(["a"] * 44), "C:\\" + "é" * 127, "C:\\" + "a" * 255)
+        bad = ("C:\\", "C:/project", "C:project", r"\\server\share\project", r"\\.\C:\project",
+               r"C:\project\.", r"C:\project\\child", "C:\\project\\child ", "C:\\project\\child.",
+               r"C:\CON.txt", r"C:\COM¹.log", r"C:\LPT9", r"C:\CONIN$", r"C:\CLOCK$", r"C:\project:ads",
+               "/posix", "C:\\" + "\\".join(["a"] * 45), "C:\\" + "é" * 128, "C:\\" + "a" * 256,
+               "C:\\\ud800", "C:\\project\x00", "C:\\" + "\\".join(["a" * 255] * 17))
+        with no_io():
+            for root in good:
+                self.assertEqual(images.admit_image_root(root, identity), root)
+            for root in bad:
+                with self.subTest(root=repr(root)), self.assertRaises(images.MetadataImagesInputError):
+                    images.admit_image_root(root, identity)
+
+    def test_existing_observation_missing_identity_never_becomes_unprotected(self):
+        self.assertEqual(images.image_observation_key({"device": 1, "inode": 2, "size": 3}, family="posix"),
+                         ("posix", 1, 2))
+        for before in (None, {}, {"device": 1}, {"device": True, "inode": 2},
+                       {"device": 1, "inode": -1}, {"device": 2**64, "inode": 2},
+                       {"volumeSerial": "1", "fileId": "00" * 16}):
+            with self.assertRaises(images.MetadataImagesInputError):
+                images.image_observation_key(before, family="posix")
+        with self.assertRaises(images.MetadataImagesInputError) as failure:
+            images.image_observation_key({"volumeSerial": "1", "fileId": "00" * 16}, family="windows")
+        self.assertEqual(failure.exception.reason, "unsupported_platform")
+
+
 if __name__ == "__main__":
     unittest.main()

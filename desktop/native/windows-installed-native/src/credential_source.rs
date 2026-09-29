@@ -1,4 +1,4 @@
-//! Bounded read-only credential capture through the EXISTING ProjectBook.
+//! Bounded read-only credential and public-image purposes in the EXISTING ProjectBook.
 //! No worker, path capability, writer, retry or replacement native book lives here.
 use super::{Call, CloseOutcome, Error, FileIdentity, FileKind, Kind, Metadata, NativeBook, Original,
     ProjectBook, Result, SecurityFacts, MAX_ORIGINALS};
@@ -45,6 +45,70 @@ impl CredentialOrigin {
 }
 pub struct CredentialSnapshot { pub bytes: Vec<u8>, pub origin: CredentialOrigin }
 
+
+const PUBLIC_FILES: usize = 10;
+const PUBLIC_FILE_BYTES: usize = 10 * 1024 * 1024;
+const PUBLIC_BATCH_BYTES: usize = 24 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicImageError { Native(Error), SourceChanged, MaterialLimit }
+impl From<Error> for PublicImageError { fn from(error: Error) -> Self { Self::Native(error) } }
+impl From<CredentialError> for PublicImageError {
+    fn from(error: CredentialError) -> Self {
+        match error {
+            CredentialError::Native(error) => Self::Native(error),
+            CredentialError::SourceChanged => Self::SourceChanged,
+            CredentialError::MaterialLimit => Self::MaterialLimit,
+            // These private-credential predicates cannot authorize public images.
+            CredentialError::ProjectOverlap | CredentialError::ExclusionUnconfirmed => Self::Native(Error::State),
+        }
+    }
+}
+type PublicResult<T> = std::result::Result<T, PublicImageError>;
+
+/// Private settled point-in-time restriction DATA. No recapture or writer API.
+pub struct PublicImageOrigin { path: String, ancestry: Vec<DirectoryFacts>, leaf: Metadata }
+impl PublicImageOrigin {
+    pub fn identity(&self) -> FileIdentity { self.leaf.identity }
+    // Heap only: enclosing snapshots/application vectors already charge inline
+    // storage. Neither a credential origin nor invented SecurityFacts is present.
+    pub fn retained_heap_bytes(&self) -> Option<usize> {
+        self.path.capacity().checked_add(self.ancestry.capacity().checked_mul(size_of::<DirectoryFacts>())?)
+    }
+}
+pub struct PublicImageSnapshot { pub bytes: Vec<u8>, pub origin: PublicImageOrigin }
+pub struct PublicImageBatchSnapshot { pub images: Vec<PublicImageSnapshot>, pub protected_sources: Vec<String> }
+impl PublicImageBatchSnapshot {
+    pub fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = size_of::<Self>()
+            .checked_add(self.images.capacity().checked_mul(size_of::<PublicImageSnapshot>())?)?
+            .checked_add(self.protected_sources.capacity().checked_mul(size_of::<String>())?)?;
+        for image in &self.images {
+            bytes = bytes.checked_add(image.bytes.capacity())?.checked_add(image.origin.retained_heap_bytes()?)?;
+        }
+        for path in &self.protected_sources { bytes = bytes.checked_add(path.capacity())?; }
+        Some(bytes)
+    }
+}
+struct PublicSelection { path: String, chain: Vec<usize> }
+fn public_size(total: usize, size: u64, payload_limit: usize) -> SourceResult<(usize, usize)> {
+    let size = usize::try_from(size).map_err(|_| CredentialError::MaterialLimit)?;
+    let total = total.checked_add(size).ok_or(CredentialError::MaterialLimit)?;
+    if size == 0 || size > PUBLIC_FILE_BYTES || total > PUBLIC_BATCH_BYTES || total > payload_limit {
+        return Err(CredentialError::MaterialLimit);
+    }
+    Ok((size, total))
+}
+fn public_suffix(path: &str) -> Result<()> {
+    let (_, components) = super::project::spelling(path)?;
+    let name = components.last().ok_or(Error::Unsafe)?;
+    let (stem, extension) = name.rsplit_once('.').ok_or(Error::Unsafe)?;
+    if stem.is_empty() || !["png", "jpg", "jpeg"].iter().any(|value| extension.eq_ignore_ascii_case(value)) {
+        return Err(Error::Unsafe);
+    }
+    Ok(())
+}
+
 enum Expected { Directory(DirectoryFacts), File(Metadata, SecurityFacts) }
 struct Node {
     parent: Option<usize>, drive: usize, name: String, kind: FileKind,
@@ -56,6 +120,8 @@ struct Root { node: usize, identity: FileIdentity }
 enum Purpose {
     Capture { path: String, chain: Vec<usize>, limit: usize },
     Probe { project: usize, origins: Vec<Vec<usize>> },
+    PublicImages { project: usize, project_path: String, images: Vec<PublicSelection>,
+        payload_limit: usize, retained_limit: usize, project_backing: usize },
 }
 pub(super) struct Roster { drives: Vec<Drive>, nodes: Vec<Node>, roots: Vec<Root>, purpose: Purpose }
 
@@ -89,6 +155,212 @@ fn retained_path(path: &str) -> Result<String> {
 }
 
 impl Roster {
+
+    fn public_images(project: RegisteredProject<'_>, paths: &[&str], payload_limit: usize,
+        retained_limit: usize, project_backing: usize) -> SourceResult<Self> {
+        if !(1..=PUBLIC_FILES).contains(&paths.len()) || payload_limit == 0 || payload_limit > PUBLIC_BATCH_BYTES
+            || retained_limit <= payload_limit { return Err(CredentialError::MaterialLimit); }
+        let project_path = retained_path(project.path)?;
+        let mut roster = Self::new(Purpose::PublicImages {
+            project: 0, project_path, images: Vec::new(), payload_limit, retained_limit, project_backing,
+        })?;
+        let chain = roster.path(project.path, FileKind::Directory)?;
+        if chain.len() < 2 { return Err(Error::Unsafe.into()); }
+        let root = *chain.last().ok_or(Error::State)?;
+        roster.roots.push(Root { node: root, identity: project.identity });
+        let mut images = Vec::new(); images.try_reserve_exact(paths.len()).map_err(|_| Error::Bounds)?;
+        for path in paths {
+            public_suffix(path)?;
+            let path = retained_path(path)?;
+            let chain = roster.path(&path, FileKind::File)?;
+            if chain.len() < 2 || images.iter().any(|prior: &PublicSelection| prior.chain == chain) {
+                return Err(Error::Unsafe.into());
+            }
+            images.push(PublicSelection { path, chain });
+        }
+        match &mut roster.purpose {
+            Purpose::PublicImages { project, images: selected, .. } => { *project = root; *selected = images; },
+            _ => return Err(Error::State.into()),
+        }
+        roster.freeze()?; Ok(roster)
+    }
+    fn public_retained_heap_bytes(&self) -> Option<usize> {
+        let (project_path, images) = match &self.purpose {
+            Purpose::PublicImages { project_path, images, .. } => (project_path, images),
+            _ => return None,
+        };
+        let mut bytes = self.drives.capacity().checked_mul(size_of::<Drive>())?
+            .checked_add(self.nodes.capacity().checked_mul(size_of::<Node>())?)?
+            .checked_add(self.roots.capacity().checked_mul(size_of::<Root>())?)?
+            .checked_add(project_path.capacity())?
+            .checked_add(images.capacity().checked_mul(size_of::<PublicSelection>())?)?;
+        for drive in &self.drives {
+            bytes = bytes.checked_add(drive.name.capacity())?.checked_add(drive.device.as_ref().map_or(0, String::capacity))?;
+        }
+        for node in &self.nodes {
+            // This purpose never owns credential security or expected-origin DATA.
+            if node.security.is_some() || node.expected.is_some() { return None; }
+            bytes = bytes.checked_add(node.name.capacity())?
+                .checked_add(node.children.capacity().checked_mul(size_of::<usize>())?)?
+                .checked_add(node.names.capacity().checked_mul(size_of::<String>())?)?;
+            for name in &node.names { bytes = bytes.checked_add(name.capacity())?; }
+        }
+        for image in images {
+            bytes = bytes.checked_add(image.path.capacity())?
+                .checked_add(image.chain.capacity().checked_mul(size_of::<usize>())?)?;
+        }
+        Some(bytes)
+    }
+    fn public_working_bytes(&self, native: &NativeBook) -> Option<usize> {
+        let backing = match &self.purpose {
+            Purpose::PublicImages { project_backing, .. } => *project_backing, _ => return None,
+        };
+        size_of::<ProjectBook>().checked_add(backing)?
+            .checked_add(native.public_image_retained_heap_bytes()?)?.checked_add(self.public_retained_heap_bytes()?)
+    }
+    fn public_allow(&self, native: &NativeBook, material: Option<usize>, initial: bool) -> SourceResult<()> {
+        let limit = match &self.purpose {
+            Purpose::PublicImages { retained_limit, .. } => *retained_limit, _ => return Ok(()),
+        };
+        let accepted = self.public_working_bytes(native)
+            .and_then(|n| n.checked_add(material?))
+            .and_then(|n| n.checked_add(native.public_image_transient_bytes(initial)?));
+        if accepted.is_some_and(|n| n <= limit) { Ok(()) } else { Err(CredentialError::MaterialLimit) }
+    }
+    fn public_protected(&self, image: &PublicSelection) -> SourceResult<Option<String>> {
+        let (project, root_path) = match &self.purpose {
+            Purpose::PublicImages { project, project_path, .. } => (*project, project_path),
+            _ => return Err(Error::State.into()),
+        };
+        let root = self.metadata(project)?.identity;
+        let mut physical = None;
+        for (depth, &index) in image.chain.iter().take(image.chain.len().saturating_sub(1)).enumerate() {
+            if self.metadata(index)?.identity == root {
+                if physical.replace((depth, index)).is_some() { return Err(Error::Unsafe.into()); }
+            }
+        }
+        let ordinary_root = root_path.strip_prefix(r"\\?\").unwrap_or(root_path);
+        let ordinary = image.path.strip_prefix(r"\\?\").unwrap_or(&image.path);
+        let lexical = ordinary.strip_prefix(ordinary_root).and_then(|suffix| suffix.strip_prefix('\\'));
+        match (physical, lexical) {
+            (None, None) => Ok(None), // A genuine different volume is legal.
+            (Some((depth, node)), Some(relative)) if node == project
+                && depth == ordinary_root.split('\\').count().saturating_sub(1)
+                && !relative.is_empty() => {
+                let mut protected = String::new();
+                protected.try_reserve_exact(relative.len()).map_err(|_| Error::Bounds)?;
+                for ch in relative.chars() { protected.push(if ch == '\\' { '/' } else { ch }); }
+                Ok(Some(protected))
+            },
+            _ => Err(Error::Unsafe.into()), // Never hide a physical/lexical alias.
+        }
+    }
+    fn public_same_parent(&self, native: &mut NativeBook, parent: usize,
+        stop: &mut dyn FnMut() -> bool) -> SourceResult<()> {
+        let children = &self.nodes[parent].children;
+        let names = &self.nodes[parent].names;
+        // Bounded actual Vec/String backing, not a guessed BTree allocator size.
+        // Private capture/probe keeps its original separate BTreeSet path.
+        let mut seen = Vec::<String>::new();
+        seen.try_reserve_exact(super::MAX_ENTRIES).map_err(|_| Error::Bounds)?;
+        let mut found = [false; CHILDREN];
+        let mut retained = seen.capacity().checked_mul(size_of::<String>()).ok_or(Error::Bounds)?;
+        loop {
+            self.public_allow(native, Some(retained), true)?;
+            checkpoint(stop)?;
+            let entries = native.next_selected_entries(self.original(parent)?, names)?;
+            checkpoint(stop)?;
+            let Some(entries) = entries else { break };
+            let mut entry_bytes = entries.capacity().checked_mul(size_of::<super::DirectoryEntry>()).ok_or(Error::Bounds)?;
+            for entry in &entries { entry_bytes = entry_bytes.checked_add(entry.name.capacity()).ok_or(Error::Bounds)?; }
+            self.public_allow(native, retained.checked_add(entry_bytes), true)?;
+            for entry in entries {
+                checkpoint(stop)?;
+                if seen.len() >= super::MAX_ENTRIES || seen.iter().any(|name| name.eq_ignore_ascii_case(&entry.name)) {
+                    return Err(Error::Unsafe.into());
+                }
+                if entry.name == "." || entry.name == ".." {
+                    let expected = if entry.name == "." { parent } else { self.nodes[parent].parent.unwrap_or(parent) };
+                    if entry.kind != FileKind::Directory || entry.file_id != self.metadata(expected)?.identity.file_id {
+                        return Err(Error::Unsafe.into());
+                    }
+                } else {
+                    for (offset, &child) in children.iter().enumerate() {
+                        if entry.name.eq_ignore_ascii_case(&names[offset]) {
+                            if found[offset] || !selected_edge(&entry, &names[offset], self.metadata(child)?) {
+                                return Err(Error::Unsafe.into());
+                            }
+                            found[offset] = true;
+                        }
+                    }
+                }
+                retained = retained.checked_add(entry.name.capacity()).ok_or(Error::Bounds)?;
+                seen.push(entry.name); // Move the actual returning spelling; no copy.
+            }
+        }
+        if found[..children.len()].iter().any(|found| !found) { return Err(Error::Unsafe.into()); }
+        Ok(())
+    }
+    fn public_result(&self, native: &mut NativeBook, stop: &mut dyn FnMut() -> bool) -> SourceResult<PublicImageBatchSnapshot> {
+        let (selected, payload_limit) = match &self.purpose {
+            Purpose::PublicImages { images, payload_limit, .. } => (images, *payload_limit),
+            _ => return Err(Error::State.into()),
+        };
+        let mut total = 0usize;
+        // ALL original leaf facts and aggregate sizes precede ANY payload reserve.
+        for (offset, image) in selected.iter().enumerate() {
+            let leaf = self.metadata(*image.chain.last().ok_or(Error::State)?)?;
+            if leaf.kind != FileKind::File || leaf.links != 1
+                || selected[..offset].iter().any(|prior| prior.chain.last()
+                    .and_then(|index| self.metadata(*index).ok()).is_some_and(|prior| prior.identity == leaf.identity)) {
+                return Err(Error::Unsafe.into());
+            }
+            total = public_size(total, leaf.size, payload_limit)?.1;
+        }
+        let mut images = Vec::new(); images.try_reserve_exact(selected.len()).map_err(|_| Error::Bounds)?;
+        let mut protected_sources = Vec::new(); protected_sources.try_reserve_exact(selected.len()).map_err(|_| Error::Bounds)?;
+        for image in selected {
+            let mut ancestry = Vec::new();
+            ancestry.try_reserve_exact(image.chain.len().saturating_sub(1)).map_err(|_| Error::Bounds)?;
+            for &index in image.chain.iter().take(image.chain.len().saturating_sub(1)) {
+                ancestry.push(DirectoryFacts::of(self.metadata(index)?)?);
+            }
+            if let Some(relative) = self.public_protected(image)? { protected_sources.push(relative); }
+            let leaf = self.metadata(*image.chain.last().ok_or(Error::State)?)?.clone();
+            images.push(PublicImageSnapshot { bytes: Vec::new(),
+                origin: PublicImageOrigin { path: retained_path(&image.path)?, ancestry, leaf } });
+        }
+        let mut batch = PublicImageBatchSnapshot { images, protected_sources };
+        let requested = total.checked_add(selected.len()).ok_or(CredentialError::MaterialLimit)?;
+        self.public_allow(native, batch.retained_bytes().and_then(|n| n.checked_add(requested)), false)?;
+        // Each capacity is remeasured. Allocation failure/over-allocation cannot
+        // turn into smaller reported memory or a read on a second original.
+        for image in &mut batch.images {
+            let (size, _) = public_size(0, image.origin.leaf.size, payload_limit)?;
+            image.bytes.try_reserve_exact(size.checked_add(1).ok_or(Error::Bounds)?).map_err(|_| Error::Bounds)?;
+        }
+        self.public_allow(native, batch.retained_bytes(), false)?;
+        for (image, source) in batch.images.iter_mut().zip(selected) {
+            let leaf = *source.chain.last().ok_or(Error::State)?;
+            let (size, _) = public_size(0, image.origin.leaf.size, payload_limit)?;
+            let capacity = size.checked_add(1).ok_or(Error::Bounds)?;
+            loop {
+                checkpoint(stop)?;
+                let remaining = capacity.checked_sub(image.bytes.len()).ok_or(CredentialError::SourceChanged)?;
+                if remaining == 0 { return Err(CredentialError::SourceChanged); }
+                let part = native.read_next(self.original(leaf)?, remaining.min(super::BUFFER))?;
+                checkpoint(stop)?;
+                if accepted_read(size, image.bytes.len(), part.len())? { break; }
+                image.bytes.extend_from_slice(&part);
+            }
+        }
+        // All originals remain held through global metadata/name, drive and user
+        // POST. Original directory cursors already reached definite complete EOF.
+        self.public_allow(native, batch.retained_bytes(), false)?;
+        self.postcheck(native, stop)?;
+        self.public_allow(native, batch.retained_bytes(), false)?;
+        Ok(batch)
+    }
     fn new(purpose: Purpose) -> Result<Self> {
         let mut nodes = Vec::new(); nodes.try_reserve_exact(NODES).map_err(|_| Error::Bounds)?;
         let mut drives = Vec::new(); drives.try_reserve_exact(NODES).map_err(|_| Error::Bounds)?;
@@ -213,7 +485,7 @@ impl Roster {
         checkpoint(stop)?; let metadata = native.metadata(original)?;
         checkpoint(stop)?; native.no_alternate_streams(original)?;
         checkpoint(stop)?;
-        let security = if self.nodes[index].kind == FileKind::File {
+        let security = if self.nodes[index].kind == FileKind::File && !matches!(self.purpose, Purpose::PublicImages { .. }) {
             // Original current-user binding, not a caller-provided owner SID.
             let security = native.credential_security(original)?; checkpoint(stop)?; Some(security)
         } else { None };
@@ -229,17 +501,22 @@ impl Roster {
         if duplicate { Err(Error::Unsafe) } else { Ok(()) }
     }
     fn acquire(&mut self, native: &mut NativeBook, stop: &mut dyn FnMut() -> bool) -> SourceResult<()> {
+        self.public_allow(native, Some(0), true)?;
         checkpoint(stop)?; native.observe_user_once()?; checkpoint(stop)?;
         for index in 0..self.drives.len() {
+            self.public_allow(native, Some(0), true)?;
             let device = native.mapping(&self.drives[index].name)?;
             self.record_mapping(index, device)?; checkpoint(stop)?;
         }
         for index in 0..self.nodes.len() {
+            self.public_allow(native, Some(0), true)?;
             checkpoint(stop)?;
             if let Some(parent) = self.nodes[index].parent {
                 let original = match (self.nodes[index].kind, &self.purpose) {
                     (FileKind::File, Purpose::Probe { .. }) =>
                         native.open_metadata_child(self.original(parent)?, &self.nodes[index].name)?,
+                    (FileKind::File, Purpose::PublicImages { .. }) =>
+                        native.open_public_image_child(self.original(parent)?, &self.nodes[index].name)?,
                     (kind, _) => native.open_child(self.original(parent)?, &self.nodes[index].name, kind)?,
                 };
                 self.nodes[index].original = Some(original);
@@ -271,7 +548,10 @@ impl Roster {
         }
         self.exclusion()?;
         for index in 0..self.nodes.len() {
-            if !self.nodes[index].children.is_empty() { self.same_parent(native, index, stop)?; }
+            if !self.nodes[index].children.is_empty() {
+                if matches!(self.purpose, Purpose::PublicImages { .. }) { self.public_same_parent(native, index, stop)?; }
+                else { self.same_parent(native, index, stop)?; }
+            }
         }
         Ok(())
     }
@@ -285,6 +565,7 @@ impl Roster {
     }
     fn exclusion(&self) -> SourceResult<()> {
         match &self.purpose {
+            Purpose::PublicImages { .. } => {}, // Public images inside the project are legal.
             Purpose::Capture { chain, .. } => {
                 for &index in chain.iter().take(chain.len().saturating_sub(1)) {
                     let actual = self.metadata(index)?.identity;
@@ -387,6 +668,56 @@ impl Roster {
 }
 
 impl ProjectBook {
+
+    /// Actual original retained backing, including settled slots and roster DATA.
+    /// No native call, serialization or reset/continuation authority is provided.
+    pub fn public_image_retained_bytes(&self) -> Option<usize> {
+        let roster = match &self.credential { Some(roster) => roster.public_retained_heap_bytes()?, None => 0 };
+        size_of::<Self>().checked_add(self.directory_backing_bytes()?)?
+            .checked_add(self.native.public_image_retained_heap_bytes()?)?.checked_add(roster)
+    }
+    fn finish_public_images<T>(&mut self, result: PublicResult<T>, stop: &mut dyn FnMut() -> bool,
+        failed: &mut dyn FnMut(PublicImageError)) -> PublicResult<T> {
+        // Report the actual source refusal BEFORE independent consuming cleanup.
+        if let Err(error) = &result { failed(*error); }
+        let settled = self.settle_once();
+        if settled != CloseOutcome::Settled
+            || matches!(result, Err(PublicImageError::Native(Error::Unknown | Error::State))) {
+            let unknown = PublicImageError::Native(Error::Unknown);
+            failed(unknown); return Err(unknown);
+        }
+        match result {
+            Err(error) => Err(error),
+            Ok(value) => match checkpoint(stop) {
+                Ok(()) => Ok(value),
+                Err(error) => { let error = PublicImageError::from(error); failed(error); Err(error) },
+            },
+        }
+    }
+    pub fn capture_public_images_once(&mut self, project: RegisteredProject<'_>, paths: &[&str],
+        payload_limit: usize, retained_limit: usize, stop: &mut dyn FnMut() -> bool,
+        failed: &mut dyn FnMut(PublicImageError)) -> PublicResult<PublicImageBatchSnapshot> {
+        let prepared = (|| -> SourceResult<Roster> {
+            if !self.never_started() { return Err(if self.native.is_unknown() { Error::Unknown } else { Error::State }.into()); }
+            Roster::public_images(project, paths, payload_limit, retained_limit,
+                self.directory_backing_bytes().ok_or(Error::Bounds)?)
+        })();
+        let roster = match prepared {
+            Ok(roster) => roster,
+            Err(error) => { let error = PublicImageError::from(error); failed(error); return Err(error); },
+        };
+        if let Err(error) = self.begin_credentials(roster) {
+            let error = PublicImageError::from(error); failed(error); return Err(error);
+        }
+        let result = (|| -> SourceResult<PublicImageBatchSnapshot> {
+            self.native.prepare_public_image_records()?;
+            let roster = self.credential.as_mut().ok_or(Error::State)?;
+            roster.public_allow(&self.native, Some(0), true)?;
+            roster.acquire(&mut self.native, stop)?;
+            roster.public_result(&mut self.native, stop)
+        })().map_err(PublicImageError::from);
+        self.finish_public_images(result, stop, failed)
+    }
     fn begin_credentials(&mut self, roster: Roster) -> SourceResult<()> {
         if !self.never_started() {
             return Err(if self.native.is_unknown() { Error::Unknown } else { Error::State }.into());
@@ -441,6 +772,66 @@ mod tests {
             size: if kind == FileKind::File { 3 } else { 0 }, allocation_size: 4096, links: 1,
             creation: 1, write: 2, change: 3 }
     }
+
+    #[test]
+    fn public_image_roster_is_one_bounded_purpose_without_private_security_data() {
+        let project = || RegisteredProject { path: r"C:\project", identity: metadata(FileKind::Directory, 3).identity };
+        let roster = Roster::public_images(project(), &[r"C:\project\a.png", r"D:\images\b.JPEG"],
+            PUBLIC_BATCH_BYTES, PUBLIC_BATCH_BYTES + 512 * 1024, 0).unwrap();
+        assert!(matches!(roster.purpose, Purpose::PublicImages { .. }));
+        assert!(roster.nodes.iter().all(|node| node.original.is_none() && node.security.is_none() && node.expected.is_none()));
+        assert!(roster.public_retained_heap_bytes().is_some());
+        assert!(roster.nodes.len() <= NODES);
+        assert!(Roster::public_images(project(), &[r"C:\project\a.png", r"C:\project\a.png"], 10, 20, 0).is_err());
+        assert!(Roster::public_images(project(), &[r"C:\project\a.p12"], 10, 20, 0).is_err());
+        assert!(Roster::public_images(project(), &[], 10, 20, 0).is_err());
+        assert!(Roster::public_images(project(), &[r"C:\project\a.png"; 11], 10, 20, 0).is_err());
+        let deep = format!("C:\\{}a.png", "a\\".repeat(NODES));
+        assert!(Roster::public_images(project(), &[&deep], 10, 20, 0).is_err());
+    }
+    #[test]
+    fn public_source_protection_requires_full_physical_and_exact_lexical_agreement() {
+        // Pure predicate DATA; no native acquisition or successful source receipt.
+        let identity = metadata(FileKind::Directory, 3).identity;
+        let mut roster = Roster::public_images(RegisteredProject { path: r"C:\project", identity },
+            &[r"\\?\C:\project\a.png", r"D:\other\b.jpg"], 10, 20, 0).unwrap();
+        for (index, node) in roster.nodes.iter_mut().enumerate() {
+            let mut facts = metadata(node.kind, (index + 1) as u8);
+            if node.drive != 0 { facts.identity.volume_serial -= 1; }
+            node.metadata = Some(facts);
+        }
+        let (project, selected) = match &roster.purpose {
+            Purpose::PublicImages { project, images, .. } => (*project, images), _ => unreachable!(),
+        };
+        assert_eq!(roster.public_protected(&selected[0]).unwrap().as_deref(), Some("a.png"));
+        assert_eq!(roster.public_protected(&selected[1]).unwrap(), None);
+        assert!(roster.exclusion().is_ok()); // Public source within project is legal.
+        let root_id = roster.nodes[project].metadata.as_ref().unwrap().identity;
+        let external_parent = selected[1].chain[selected[1].chain.len() - 2];
+        roster.nodes[external_parent].metadata.as_mut().unwrap().identity = root_id;
+        let selected = match &roster.purpose { Purpose::PublicImages { images, .. } => images, _ => unreachable!() };
+        assert!(roster.public_protected(&selected[1]).is_err());
+        assert_eq!(public_size(0, 0, 10), Err(CredentialError::MaterialLimit));
+        assert_eq!(public_size(8, 3, 10), Err(CredentialError::MaterialLimit));
+        assert_eq!(public_size(0, PUBLIC_FILE_BYTES as u64 + 1, PUBLIC_BATCH_BYTES), Err(CredentialError::MaterialLimit));
+    }
+    #[test]
+    fn public_original_failure_precedes_independent_unknown_cleanup() {
+        // Unknown original DATA only, never a fake positive source qualification.
+        let mut book = ProjectBook::new(); book.native.mark_interrupted();
+        let mut reported = Vec::new();
+        let result = book.finish_public_images::<()>(Err(PublicImageError::SourceChanged), &mut || true,
+            &mut |error| reported.push(error));
+        assert_eq!(reported, [PublicImageError::SourceChanged, PublicImageError::Native(Error::Unknown)]);
+        assert_eq!(result, Err(PublicImageError::Native(Error::Unknown))); assert!(!book.settled());
+        let mut fresh = ProjectBook::new(); let mut failures = Vec::new();
+        let result = fresh.capture_public_images_once(RegisteredProject { path: r"C:\project",
+            identity: metadata(FileKind::Directory, 1).identity }, &[r"C:\image.png"], 1, 2, &mut || false,
+            &mut |error| failures.push(error));
+        assert!(matches!(result, Err(PublicImageError::MaterialLimit)));
+        assert_eq!(failures, [PublicImageError::MaterialLimit]); assert!(fresh.native.slots.is_empty());
+    }
+
     #[test]
     fn source_roster_shares_only_exact_parents_and_bounds_the_complete_selection() {
         let projects = [RegisteredProject { path: r"C:\Users\owner\project", identity: metadata(FileKind::Directory, 1).identity }];

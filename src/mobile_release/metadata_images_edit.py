@@ -112,16 +112,17 @@ def capture_metadata_images_edit(lease: InitRootLease, platform: object, locale:
                                  protected_sources: object, protected_objects: object) -> MetadataImagesCheckout:
     """The caller is the private native protocol after one-use batch transfer."""
     try:
-        images = admit_selected_images(images)
-        protected = protected_project_sources(protected_sources)
-        objects = protected_source_objects(protected_objects, len(images))
-    except MetadataImagesInputError:
-        _shared._reject("invalid_params")
-    try:
         native = _shared._native_contract()
     except BaseException as error:
         raise ConfigEditFailure(_shared._pure_failure(error)) from None
     if not _lease_matches(native, lease):
+        _shared._reject("invalid_params")
+    family = lease.image_identity_family
+    try:
+        images = admit_selected_images(images)
+        protected = protected_project_sources(protected_sources)
+        objects = protected_source_objects(protected_objects, len(images), family=family)
+    except MetadataImagesInputError:
         _shared._reject("invalid_params")
     try:
         with lease.workspace_scope() as workspace:
@@ -130,7 +131,7 @@ def capture_metadata_images_edit(lease: InitRootLease, platform: object, locale:
             dependencies = tuple(workspace.observe(path, limit=limit)
                                  for path, limit in zip(DEPENDENCY_PATHS, DEPENDENCY_LIMITS))
             targets = lease.bind_image_targets(workspace, dependencies, platform, locale,
-                                                asset_type, images, protected, objects)
+                                                asset_type, images, protected, objects, identity_family=family)
             originals = tuple(workspace.observe(path, limit=MAX_IMAGE_BYTES) for path in targets.paths)
             targets.check_roster(workspace, initial=True)
             revision = lease.bind_revision(workspace, (*targets.dependency_observations, *originals))

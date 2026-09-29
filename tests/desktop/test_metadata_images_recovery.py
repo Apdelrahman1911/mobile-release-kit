@@ -504,5 +504,37 @@ class MetadataImagesRecoveryFilesystemTests(unittest.TestCase):
             self.assertEqual((root / FOLDER / "01.png").read_bytes(), png(pixel=9))
 
 
+class WindowsImageBackendAdmissionDataTests(unittest.TestCase):
+    """Pure negative preflight, not a Windows mutation/lease qualification."""
+
+    def test_import_and_recovery_root_data_refuse_before_posix_path_or_writer_use(self):
+        from mobile_release import _desktop_edit_engine as engine
+        from mobile_release import _desktop_images_protocol as wire
+        from test_metadata_images_protocol import decode
+        from test_metadata_images import no_io
+        identity = {"volumeSerial": "9", "fileId": "008102830485068708890a8b0c8d0e8f"}
+        with no_io(), patch.object(engine, "Path", side_effect=AssertionError("POSIX normalization before admission")), \
+                patch.object(engine, "_root", side_effect=AssertionError("POSIX root before admission")), \
+                patch.object(engine, "InitRootLease", side_effect=AssertionError("writer before admission")):
+            request = decode(0, "open", {"root": r"C:\project", "registeredIdentity": identity, "intent": "recover"})
+            self.assertEqual(request.protocol, wire.PROTOCOL)
+            for root in (r"C:\project", r"\\?\c:\project"):
+                with self.assertRaises(shared.ConfigEditFailure) as failure:
+                    engine._admit_image_backend(root, identity)
+                self.assertEqual(failure.exception.outcome.reason, "unsupported_platform")
+            with self.assertRaises(shared.ConfigEditFailure) as failure:
+                engine._admit_image_backend("/posix", identity)
+            self.assertEqual(failure.exception.outcome.reason, "invalid_params")
+
+    def test_existing_posix_backend_receives_unchanged_five_root_facts(self):
+        from mobile_release import _desktop_edit_engine as engine
+        from test_metadata_images import no_io
+        identity = {"device": "1", "inode": "2", "mode": 0o40700, "uid": 1000, "gid": 1001}
+        with no_io():
+            accepted = engine._admit_image_backend("/inert/project", identity)
+            self.assertEqual(accepted.family, "posix")
+            self.assertEqual(accepted.posix_values(), {"device": 1, "inode": 2, "mode": 0o40700, "uid": 1000, "gid": 1001})
+
+
 if __name__ == "__main__":
     unittest.main()

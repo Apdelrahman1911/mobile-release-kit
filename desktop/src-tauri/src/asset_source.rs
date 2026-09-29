@@ -113,15 +113,77 @@ pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin:
 pub(crate) const PUBLIC_IMAGE_FILES: usize = 10;
 pub(crate) const PUBLIC_IMAGE_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const PUBLIC_IMAGE_BATCH_BYTES: usize = 24 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageSourceObject {
+    Posix { device: u64, inode: u64 },
+    Windows { volume_serial: u64, file_id: [u8; 16] },
+}
+pub(crate) enum PublicImageOriginWitness {
+    Posix(PosixOriginWitness),
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    Windows(mrk_windows_installed_native::PublicImageOrigin),
+}
+impl PublicImageOriginWitness {
+    fn source_object(&self) -> ImageSourceObject {
+        match self {
+            Self::Posix(origin) => ImageSourceObject::Posix { device: origin.leaf.common.dev, inode: origin.leaf.common.ino },
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            Self::Windows(origin) => {
+                let identity = origin.identity();
+                ImageSourceObject::Windows { volume_serial: identity.volume_serial, file_id: identity.file_id }
+            },
+        }
+    }
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Posix(origin) => {
+                let bytes = origin.path.capacity()
+                    .checked_add(origin.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                let bytes = match &origin.alias {
+                    Some(alias) => bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?,
+                    None => bytes,
+                };
+                Some(bytes)
+            },
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            Self::Windows(origin) => origin.retained_heap_bytes(),
+        }
+    }
+}
+// Reservation DATA from the existing document owner, not another quota owner.
+// payload_bytes retains the old byte_limit; retained_bytes includes that payload
+// plus only the already charged image-control allowance, never additional credit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PublicImageBudget { pub(crate) payload_bytes: usize, pub(crate) retained_bytes: usize }
+impl PublicImageBudget {
+    fn valid(self) -> bool {
+        (1..=PUBLIC_IMAGE_BATCH_BYTES).contains(&self.payload_bytes) && self.retained_bytes > self.payload_bytes
+    }
+    fn admit(self, retained: Option<usize>) -> Result<usize, Reason> {
+        retained.filter(|bytes| *bytes <= self.retained_bytes).ok_or(Reason::MaterialLimit)
+    }
+}
+fn public_image_token(stop: &mut dyn FnMut() -> bool) -> Result<String, Reason> {
+    if stop() { return Err(Reason::UserCancelled); }
+    let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| Reason::SourceRefused)?;
+    if stop() { return Err(Reason::UserCancelled); }
+    let mut token = String::new(); token.try_reserve_exact(32).map_err(|_| Reason::Capacity)?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes { token.push(char::from(HEX[usize::from(byte >> 4)])); token.push(char::from(HEX[usize::from(byte & 15)])); }
+    Ok(token)
+}
+
 pub(crate) struct CapturedPublicImage {
     pub(crate) item_id: String, pub(crate) display_name: String, pub(crate) bytes: Vec<u8>, pub(crate) sha256: String,
-    origin: PosixOriginWitness,
+    origin: PublicImageOriginWitness,
 }
 impl CapturedPublicImage {
     // Private native-to-core exclusion DATA only. A target which aliases this
     // original object must not be replaced even via an alternate mount path.
     // These identifiers never enter a renderer DTO, log or public evidence.
-    pub(crate) fn source_object(&self) -> (u64, u64) { (self.origin.leaf.common.dev, self.origin.leaf.common.ino) }
+    pub(crate) fn source_object(&self) -> ImageSourceObject { self.origin.source_object() }
 }
 pub(crate) struct CapturedPublicImageBatch {
     pub(crate) images: Vec<CapturedPublicImage>, pub(crate) protected_sources: Vec<String>,
@@ -134,12 +196,7 @@ impl CapturedPublicImageBatch {
         for image in &self.images {
             bytes = bytes.checked_add(image.item_id.capacity())?.checked_add(image.display_name.capacity())?
                 .checked_add(image.bytes.capacity())?.checked_add(image.sha256.capacity())?
-                .checked_add(image.origin.path.capacity())?
-                .checked_add(image.origin.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)?;
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            if let Some(alias) = &image.origin.alias {
-                bytes = bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?;
-            }
+                .checked_add(image.origin.retained_heap_bytes()?)?;
         }
         for path in &self.protected_sources { bytes = bytes.checked_add(path.capacity())?; }
         Some(bytes)
@@ -646,15 +703,6 @@ mod linux {
         if size == 0 || size > PUBLIC_IMAGE_FILE_BYTES || total > PUBLIC_IMAGE_BATCH_BYTES { return Err(Reason::MaterialLimit); }
         Ok((size, total))
     }
-    fn public_image_token(stop: &mut dyn FnMut() -> bool) -> Result<String, Reason> {
-        checkpoint(stop)?;
-        let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| Reason::SourceRefused)?;
-        checkpoint(stop)?;
-        let mut token = String::new(); token.try_reserve_exact(32).map_err(|_| Reason::Capacity)?;
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for byte in bytes { token.push(char::from(HEX[usize::from(byte >> 4)])); token.push(char::from(HEX[usize::from(byte & 15)])); }
-        Ok(token)
-    }
     fn public_protected_source(path: &Path, root: &RegisteredRoot, root_depth: usize,
         ancestry: &[DirectoryIdentity], root_id: DirectoryIdentity) -> Result<Option<String>, Reason> {
         let physical = ancestry.iter().position(|identity| identity.same_object(root_id));
@@ -673,12 +721,12 @@ mod linux {
             _ => Err(Reason::SourceRefused),
         }
     }
-    pub(crate) fn capture_public_images(book: &mut SourceBook, paths: Vec<PathBuf>, root: &RegisteredRoot, byte_limit: usize,
+    pub(crate) fn capture_public_images(book: &mut SourceBook, paths: Vec<PathBuf>, root: &RegisteredRoot, budget: PublicImageBudget,
         stop: &mut dyn FnMut() -> bool, failed: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> {
         use sha2::{Digest, Sha256};
         if !(1..=PUBLIC_IMAGE_FILES).contains(&paths.len()) || paths.capacity() > PUBLIC_IMAGE_FILES
             || paths.iter().any(|path| path.capacity() > PATH_LIMIT)
-            || !(1..=PUBLIC_IMAGE_BATCH_BYTES).contains(&byte_limit) { return Err(Reason::MaterialLimit); }
+            || !budget.valid() { return Err(Reason::MaterialLimit); }
         let expected_root = root.identity.posix()?;
         let root_parts = parts(&root.path)?;
         let mut spellings = Vec::new(); spellings.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
@@ -691,6 +739,8 @@ mod linux {
         }
         let capacity = roster_limit(std::iter::once(root_parts.len())
             .chain(spellings.iter().map(|parts| parts.len() - 1)), paths.len())?;
+        // End preflight borrows before the closure takes ownership of paths.
+        drop(spellings);
         // The complete finite roster is checked before the first syscall. One
         // book owns all files, so terminal checks cover the complete batch while
         // all original parents/leaves remain held; capture is never repeated.
@@ -703,7 +753,8 @@ mod linux {
             let mut originals = Vec::new(); originals.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
             let mut protected_sources = Vec::new(); protected_sources.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
             let mut total = 0;
-            for (path, spelling) in paths.iter().zip(&spellings) {
+            for path in &paths {
+                let spelling = parts(path)?;
                 let (name, parents) = spelling.split_last().ok_or(Reason::SourceRefused)?;
                 let chain = book.chain(parents, stop)?;
                 let mut ancestry = Vec::new(); ancestry.try_reserve_exact(chain.len()).map_err(|_| Reason::Capacity)?;
@@ -714,37 +765,66 @@ mod linux {
                 if originals.iter().any(|(_, previous, _): &(usize, FileIdentity, Vec<DirectoryIdentity>)|
                     previous.common.same_object(file.common)) { return Err(Reason::SourceRefused); }
                 let (_, next) = public_image_size(total, file.size)?; total = next;
-                if total > byte_limit { return Err(Reason::MaterialLimit); }
+                if total > budget.payload_bytes { return Err(Reason::MaterialLimit); }
                 if let Some(relative) = public_protected_source(path, root, root_parts.len(), &ancestry, root_id)? {
                     protected_sources.push(relative);
                 }
                 originals.push((leaf, file, ancestry));
             }
             let mut images = Vec::new(); images.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
-            // All selected sizes/identities are admitted before allocating any
-            // payload. Aggregate buffers retain at most 24MiB + ten EOF bytes.
-            for ((path, display_name), (leaf, file, ancestry)) in paths.iter().zip(names).zip(originals) {
-                let (size, _) = public_image_size(0, file.size)?;
+            let mut leaves = Vec::new(); leaves.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+            // All selected identities/sizes were admitted above. Move originals'
+            // restriction DATA, never their descriptors, without a payload copy.
+            for ((path, display_name), (leaf, file, ancestry)) in paths.into_iter().zip(names).zip(originals) {
+                let item_id = public_image_token(stop)?;
+                if images.iter().any(|image: &CapturedPublicImage| image.item_id == item_id) { return Err(Reason::SourceRefused); }
+                let mut sha256 = String::new(); sha256.try_reserve_exact(64).map_err(|_| Reason::Capacity)?;
+                images.push(CapturedPublicImage { item_id, display_name, bytes: Vec::new(), sha256,
+                    origin: PublicImageOriginWitness::Posix(PosixOriginWitness { path, ancestry, leaf: file }) });
+                leaves.push(leaf);
+            }
+            drop(root_parts); drop(root_chain);
+            let mut batch = CapturedPublicImageBatch { images, protected_sources };
+            // Count the same retained source book, return controls, and the
+            // bounded transient name copies used by the original POSIX checks.
+            let controls = std::mem::size_of::<SourceBook>().checked_add(book.retained_bytes().ok_or(Reason::Capacity)?)
+                .and_then(|bytes| leaves.capacity().checked_mul(std::mem::size_of::<usize>()).and_then(|n| bytes.checked_add(n)))
+                .and_then(|bytes| bytes.checked_add(2 * PATH_LIMIT)).ok_or(Reason::Capacity)?;
+            let requested = total.checked_add(batch.images.len()).ok_or(Reason::MaterialLimit)?;
+            budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)).and_then(|n| n.checked_add(requested)))?;
+            // Reserve/check ALL actual capacities before the first original read.
+            let mut actual_payload = 0usize;
+            for image in &mut batch.images {
+                let PublicImageOriginWitness::Posix(origin) = &image.origin;
+                let (size, _) = public_image_size(0, origin.leaf.size)?;
                 let capacity = size.checked_add(1).ok_or(Reason::MaterialLimit)?;
-                let mut bytes = Vec::new(); bytes.try_reserve_exact(capacity).map_err(|_| Reason::Capacity)?; bytes.resize(capacity, 0);
+                image.bytes.try_reserve_exact(capacity).map_err(|_| Reason::Capacity)?;
+                actual_payload = actual_payload.checked_add(image.bytes.capacity()).ok_or(Reason::MaterialLimit)?;
+            }
+            budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)))?;
+            if actual_payload < requested { return Err(Reason::Capacity); }
+            for (image, leaf) in batch.images.iter_mut().zip(leaves) {
+                let PublicImageOriginWitness::Posix(origin) = &image.origin;
+                let (size, _) = public_image_size(0, origin.leaf.size)?;
+                let capacity = size.checked_add(1).ok_or(Reason::MaterialLimit)?;
+                image.bytes.resize(capacity, 0);
                 let mut used = 0usize; let mut hash = Sha256::new();
                 loop {
                     checkpoint(stop)?;
                     let end = capacity.min(used.saturating_add(1024 * 1024));
-                    let read = unistd::read(book.fd(leaf)?, &mut bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
+                    let read = unistd::read(book.fd(leaf)?, &mut image.bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
                     checkpoint(stop)?;
                     if read == 0 { if used != size { return Err(Reason::SourceChanged); } break; }
                     let next = used.checked_add(read).ok_or(Reason::SourceChanged)?;
                     if next > size { return Err(Reason::SourceChanged); }
-                    hash.update(&bytes[used..next]); used = next;
+                    hash.update(&image.bytes[used..next]); used = next;
                 }
-                bytes.truncate(size);
-                let item_id = public_image_token(stop)?;
-                if images.iter().any(|image: &CapturedPublicImage| image.item_id == item_id) { return Err(Reason::SourceRefused); }
-                images.push(CapturedPublicImage { item_id, display_name, bytes, sha256: format!("{:x}", hash.finalize()),
-                    origin: OriginWitness { path: path.clone(), ancestry, leaf: file } });
+                image.bytes.truncate(size);
+                use std::fmt::Write;
+                write!(&mut image.sha256, "{:x}", hash.finalize()).map_err(|_| Reason::Capacity)?;
             }
-            Ok(CapturedPublicImageBatch { images, protected_sources })
+            budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)))?;
+            Ok(batch)
         })();
         book.finish_public_images(result, stop, failed)
     }
@@ -1014,7 +1094,7 @@ mod linux {
             for paths in [Vec::new(), vec![PathBuf::from("/inert/a.png"); PUBLIC_IMAGE_FILES + 1],
                 vec![PathBuf::from("/inert/file.p12")], overallocated, vec![retained_path]] {
                 let mut book = SourceBook::new();
-                assert!(capture_public_images(&mut book, paths, &root, PUBLIC_IMAGE_BATCH_BYTES, &mut || true, &mut |_| {}).is_err());
+                assert!(capture_public_images(&mut book, paths, &root, PublicImageBudget { payload_bytes: PUBLIC_IMAGE_BATCH_BYTES, retained_bytes: PUBLIC_IMAGE_BATCH_BYTES + 512 * 1024 }, &mut || true, &mut |_| {}).is_err());
                 assert!(book.not_started()); assert!(!book.settled());
             }
         }
@@ -1107,7 +1187,7 @@ pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, s
 #[path = "asset_source_windows.rs"]
 mod windows;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-pub(crate) use windows::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+pub(crate) use windows::{SourceBook, capture, capture_public_images, probe_project, probe_project_path, suffix, path_hint};
 
 #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
@@ -1125,10 +1205,11 @@ mod unsupported {
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
-// Public-image platform adapters are purpose-specific. A Mac/Windows project
-// probe or a credential picker never qualifies this new multi-file operation.
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-pub(crate) fn capture_public_images(_: &mut SourceBook, _: Vec<PathBuf>, _: &RegisteredRoot, _: usize,
+// Purpose-specific source support never opens the capability/qualification gate.
+// macOS public-image acquisition remains unsupported, not borrowed from credentials.
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+pub(crate) fn capture_public_images(_: &mut SourceBook, _: Vec<PathBuf>, _: &RegisteredRoot, _: PublicImageBudget,
     _: &mut dyn FnMut() -> bool, _: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> { Err(Reason::UnsupportedPlatform) }
 
 #[cfg(test)]
@@ -1187,5 +1268,26 @@ mod tests {
         assert!(crate::candidate_evidence_protocol::params(&root).is_ok());
         root.identity = original;
         assert!(crate::candidate_evidence_protocol::params(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod public_image_identity_budget_data_tests {
+    use super::*;
+    #[test]
+    fn full_native_image_identity_and_existing_reservation_remain_separate_data() {
+        let a = ImageSourceObject::Windows { volume_serial: u64::MAX, file_id: [1; 16] };
+        for index in 0..16 {
+            let mut id = [1; 16]; id[index] = 2;
+            assert_ne!(a, ImageSourceObject::Windows { volume_serial: u64::MAX, file_id: id });
+        }
+        assert_ne!(a, ImageSourceObject::Windows { volume_serial: 1, file_id: [1; 16] });
+        assert_ne!(a, ImageSourceObject::Posix { device: u64::MAX, inode: 1 });
+        let budget = PublicImageBudget { payload_bytes: 10, retained_bytes: 20 };
+        assert!(budget.valid()); assert_eq!(budget.admit(Some(20)), Ok(20));
+        assert_eq!(budget.admit(Some(21)), Err(Reason::MaterialLimit));
+        assert_eq!(budget.admit(None), Err(Reason::MaterialLimit));
+        assert!(!PublicImageBudget { payload_bytes: 0, retained_bytes: 20 }.valid());
+        assert!(!PublicImageBudget { payload_bytes: 10, retained_bytes: 10 }.valid());
     }
 }

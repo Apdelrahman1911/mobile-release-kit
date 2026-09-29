@@ -13,7 +13,8 @@ from typing import Any
 from ._desktop_engine import ProtocolError, _check_values, _constant, _pairs
 from .metadata_images import (MAX_IMAGES, MAX_PREPARED_BYTES, MAX_REQUEST_BYTES,
                               MAX_RESULT_BYTES, MetadataImagesInputError,
-                              admit_baseline, decode_native_images, image_type,
+                              admit_baseline, admit_image_root, decode_native_images, image_type,
+                              image_registered_identity,
                               protected_project_sources, protected_source_objects)
 from .metadata_text import MetadataTextInputError, locale_value, platform_value
 
@@ -22,14 +23,11 @@ SMALL_REQUEST_LIMIT = 64 * 1024
 TOKEN = re.compile(r"[0-9a-f]{32}\Z")
 
 
-def _root(value: object) -> bool:
-    # Match the native writer's bounded private root, not a renderer field.
-    if type(value) is not str or not value.startswith("/") or len(value) > 4096:
-        return False
+def _root(value: object, identity) -> bool:
     try:
-        return (len(value.encode("utf-8")) <= 4096
-                and not any(ord(char) < 32 or ord(char) == 127 for char in value))
-    except UnicodeError:
+        admit_image_root(value, identity)
+        return True
+    except MetadataImagesInputError:
         return False
 
 
@@ -73,7 +71,7 @@ def _scan(text: str) -> None:
 
 
 def parse_request(raw: bytes, *, sequence: int, session: str | None):
-    from ._desktop_edit_protocol import EditRequest, registered_identity
+    from ._desktop_edit_protocol import EditRequest
     if (type(sequence) is not int or sequence not in {0, 1, 2}
             or type(raw) is not bytes or not 2 <= len(raw) <= request_limit(sequence)
             or not raw.endswith(b"\n") or raw[:1] != b"{" or raw[-2:-1] != b"}"
@@ -108,10 +106,12 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None):
             names = {"root", "registeredIdentity", "intent"}
             if intent == "import":
                 names |= {"platform", "locale", "assetType", "images", "protectedSources", "protectedObjects"}
-            valid = (op == "open" and set(params) == names and _root(params["root"])
+            valid = (op == "open" and set(params) == names
                      and type(intent) is str and intent in {"import", "recover"})
             if valid:
-                registered_identity(params["registeredIdentity"])
+                identity = image_registered_identity(params["registeredIdentity"])
+                if not _root(params["root"], identity):
+                    raise MetadataImagesInputError()
                 if intent == "import":
                     platform_value(params["platform"])
                     locale_value(params["locale"])
@@ -119,7 +119,7 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None):
                     protected_project_sources(params["protectedSources"])
                     if type(params["images"]) is not list:
                         raise MetadataImagesInputError()
-                    protected_source_objects(params["protectedObjects"], len(params["images"]))
+                    protected_source_objects(params["protectedObjects"], len(params["images"]), family=identity.family)
                     # Remove all encoded bodies from retained request DATA.
                     # Decoder validates exact lengths, canonical base64 and
                     # native digests before allocating each bounded body.
