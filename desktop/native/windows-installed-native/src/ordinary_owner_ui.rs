@@ -6166,7 +6166,7 @@ mod contract_tests {
         assert_eq!(prefix.dashboard.get().unwrap().current_match_mask, Some(31));
         assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_match_mask, Some(15));
         assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_names,
-            Some(DashboardNames { returned: 1, empty: 0, text_mask: 128, choice: DashboardChoice::new() }));
+            Some(DashboardNames { returned: 1, empty: 0, text_mask: 128, choice: DashboardChoice { names: 1, types: 0, enabled: 0, reasons: 0 } }));
         for phase in SmokePhase::ALL.iter().copied().filter(|phase| *phase != SmokePhase::Dashboard) {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::Dashboard); trace.dashboard_begin_pass();
             trace.dashboard_update(|progress| *progress = loading); trace.main_binding_timeouts.set(7); trace.phase.set(phase);
