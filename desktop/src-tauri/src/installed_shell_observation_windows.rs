@@ -15,11 +15,13 @@ use native::ui_observer_diagnostic_data::{PendingKind, Refusal, Snapshot, Step};
 use super::owned_windows::observation::{observed_dialog, observe_dialog_action, session_final,
     DialogAction, DialogActionSite, DialogKind, ObservedDialog};
 
+#[path = "windows_normal_app_info_policy.rs"]
+mod app_info_policy;
+
 #[path = "installed_shell_observation_windows_session.rs"]
 mod credential_session;
 pub(crate) use credential_session::Command as SessionCommand;
 
-const METHODS: [&str; 6] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"];
 const APP_ID: &str = "org.example.mrk.observed";
 const DRAFT_SOURCE: &str = "draft-version.properties";
 const DOM_LIMIT: u16 = 200;
@@ -29,7 +31,6 @@ enum Case { ProjectDraft, QuitPassive, DocumentLoss, CredentialSession }
 impl Case {
     fn selected_id(self) -> u32 { if self == Self::ProjectDraft { 2 } else { 1 } }
     fn held(self) -> bool { matches!(self, Self::QuitPassive | Self::DocumentLoss) }
-    fn method_count(self) -> usize { if self == Self::CredentialSession { 7 } else { 6 } }
     fn quit_id(self) -> u32 { if self == Self::CredentialSession { 22 } else { 3 } }
     fn dialog_count(self) -> usize { if self == Self::CredentialSession { 8 } else { 3 } }
 }
@@ -195,16 +196,13 @@ impl Observation {
     pub(super) fn app_info(&self, info: &AppInfo) {
         let Some(methods) = info.capabilities.as_ref().and_then(|value| value["methods"].as_array()) else { self.fail(Refusal::AppInfo); return; };
         let Some(actions) = info.capabilities.as_ref().and_then(|value| value["actions"].as_array()) else { self.fail(Refusal::AppInfo); return; };
-        let open = |row: &&Value| row["available"].as_bool() == Some(true);
         let valid = info.runtime.state == "available" && info.runtime.mode == "bundled" && info.runtime.reason.is_none()
             && info.app_name == "Mobile Release Kit" && info.app_version == env!("CARGO_PKG_VERSION")
             && info.capabilities.as_ref().is_some_and(|value| value["hostPlatform"] == "windows")
             && info.project_selection.available && info.project_selection.reason.is_none() && !info.project_path_selection.available
-            && (6..=64).contains(&methods.len()) && (1..=64).contains(&actions.len())
-            && methods.iter().filter(open).count() == self.case.method_count()
-            && (self.case != Case::CredentialSession || methods.iter().filter(open).filter(|row| row["method"] == "credentials.assess").count() == 1)
-            && METHODS.iter().all(|name| methods.iter().filter(open).filter(|row| row["method"].as_str() == Some(*name)).count() == 1)
-            && methods.iter().all(|row| row["available"].is_boolean())
+            && (1..=64).contains(&actions.len())
+            && app_info_policy::available_method_set(methods.iter().map(|row|
+                (row["method"].as_str(), row["available"].as_bool())))
             && actions.iter().all(|row| row["available"].as_bool() == Some(false));
         let Some(mut r) = self.record() else { return; };
         if !self.timely() || !valid || r.methods[0] || r.reload_requested || r.step != Step::Bootstrap { self.fail(Refusal::AppInfo); return; }
@@ -680,8 +678,9 @@ impl Observation {
         let step = original.step;
         let valid = match step {
             Step::ReadEnvironment => value["runtimeTitle"] == "Bundled runtime" && value["runtimeState"] == "available" && value["platform"] == "windows"
-                && value["rows"].as_u64() == Some(r.method_rows as u64) && value["available"].as_u64() == Some(self.case.method_count() as u64)
-                && value["unavailable"].as_u64() == Some((r.method_rows - self.case.method_count()) as u64),
+                && app_info_policy::environment_counts_match(
+                    r.method_rows, value["rows"].as_u64(),
+                    value["available"].as_u64(), value["unavailable"].as_u64()),
             Step::ReadCancelled => value["chooseEnabled"] == true && value["unselected"] == true,
             Step::Snapshot => value["name"] == "project" && value["configuration"] == if self.case == Case::ProjectDraft { "Not configured" } else { "Format-valid only" },
             Step::Suggestion => r.suggestion.as_ref() == value.get("provenance"),
