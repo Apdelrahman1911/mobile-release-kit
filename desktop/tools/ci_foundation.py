@@ -1710,6 +1710,7 @@ WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     ".github/workflows/desktop-foundation.yml", "desktop/tools/ci_foundation.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
     "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
+    "desktop/src-tauri/src/windows_normal_source_idle_policy.rs",
     "desktop/src-tauri/src/installed_windows_passive_tests.rs", "tests/native_desktop_installed_windows_probe.py",
     "desktop/src-tauri/src/installed_runtime_windows.rs", "tests/desktop/test_ci_foundation_contract.py",
     "desktop/src-tauri/src/runtime_publication_windows.rs", "desktop/src-tauri/src/bin/windows_runtime_publish.rs",

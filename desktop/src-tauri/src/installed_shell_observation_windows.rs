@@ -18,6 +18,10 @@ use super::owned_windows::observation::{observed_dialog, observe_dialog_action, 
 #[path = "windows_normal_app_info_policy.rs"]
 mod app_info_policy;
 
+#[path = "windows_normal_source_idle_policy.rs"]
+mod source_idle_policy;
+use source_idle_policy::Lifecycle as SourceLifecycle;
+
 #[path = "installed_shell_observation_windows_session.rs"]
 mod credential_session;
 pub(crate) use credential_session::Command as SessionCommand;
@@ -357,7 +361,7 @@ impl Observation {
                 Step::CancelSettled => {
                     if !r.cancel_returned { return; }
                     if !r.dialogs.first().is_some_and(|dialog| dialog.settled(false, false))
-                        || !source_idle(&state.document, 1, "user-cancelled") || state.bridge.native_generation().ok() != Some(1) { self.fail(Refusal::Tick); return; }
+                        || !source_idle(&state.document, 1, "user-cancelled", SourceLifecycle::Active) || state.bridge.native_generation().ok() != Some(1) { self.fail(Refusal::Tick); return; }
                     r.step = Step::ReadCancelled;
                 },
                 Step::ProjectSettled => {
@@ -373,7 +377,7 @@ impl Observation {
                             && snapshot.source_started && snapshot.source_settled && op["operationId"] == 1
                             && op["operation"] == "choose-project" && op["phase"] == "idle" && op["settlement"] == "known"
                             && op["reason"] == "none" && r.credentials.as_mut().is_some_and(|session| session.observe(&snapshot).is_ok())
-                    } else { source_idle(&state.document, self.case.selected_id(), "none") };
+                    } else { source_idle(&state.document, self.case.selected_id(), "none", SourceLifecycle::Active) };
                     if !r.dialogs.iter().find(|dialog| dialog.id == self.case.selected_id()).is_some_and(|dialog| dialog.settled(true, false) && !dialog.owner.stopped())
                         || !source_settled || state.bridge.native_generation().ok() != Some(2) { self.fail(Refusal::Tick); return; }
                     r.registry_generation = Some(2); r.step = Step::Snapshot;
@@ -417,7 +421,7 @@ impl Observation {
                 Step::Lost => {
                     if !r.reload_returned || !(r.reload_navigation || r.reload_started) || r.loss_generation.is_none()
                         || !r.lost_picker_returned { return; }
-                    if !source_idle(&state.document, 2, "document-lost")
+                    if !source_idle(&state.document, 2, "document-lost", SourceLifecycle::Lost)
                         || !r.dialogs.iter().find(|dialog| dialog.id == 2).is_some_and(|dialog| dialog.settled(false, false))
                         || !r.held.as_ref().is_some_and(|witness| witness.outstanding().is_ok()) { self.fail(Refusal::Tick); return; }
                     r.loss_settled = true; r.step = Step::Close;
@@ -733,7 +737,7 @@ impl Observation {
         // Exit can remain possible after late cleanup becomes known. This
         // qualification cannot upgrade a prior document Unknown into success.
         if self.case != Case::CredentialSession && !source_idle(document, if self.case == Case::DocumentLoss { 2 } else { self.case.selected_id() },
-            if self.case == Case::DocumentLoss { "document-lost" } else { "shutdown" }) { self.fail(Refusal::ActualExit); return; }
+            if self.case == Case::DocumentLoss { "document-lost" } else { "shutdown" }, SourceLifecycle::Final) { self.fail(Refusal::ActualExit); return; }
         let Ok(status) = edits.status() else { self.fail(Refusal::ActualExit); return; };
         // Native normal teardown intentionally invalidates the same original
         // after relay join. The loss case must retain its already-observed
@@ -826,19 +830,12 @@ fn format_valid(value: &Value) -> bool {
         && value["requirements"].as_array().is_some_and(|rows| rows.len() <= 128 && rows.iter().all(|row| row["state"] == "unknown"))
         && assurance(value, "schema-policy")
 }
-fn source_idle(document: &DocumentBinding, id: u32, reason: &str) -> bool {
+fn source_idle(document: &DocumentBinding, id: u32, reason: &str, lifecycle: SourceLifecycle) -> bool {
     let status = document.status();
     if edit::bounded(&status, 16 * 1024).is_err() { return false; }
     let Ok(value) = serde_json::to_value(status) else { return false; };
-    let operation = &value["operation"];
-    value["schemaVersion"] == 2 && value["mode"] == "closed" && value["capability"]["available"] == false
-        && value["capability"]["reason"].as_str().is_some_and(|reason| matches!(reason, "unsupported-platform" | "document-lost" | "shutdown"))
-        && value["context"].is_null() && value["records"].as_array().is_some_and(Vec::is_empty)
-        && value["assignments"].as_array().is_some_and(Vec::is_empty)
-        && operation["operationId"] == id && operation["operation"] == "choose-project"
-        && operation["phase"] == "idle" && operation["settlement"] == "known" && operation["reason"] == reason
-        && operation["source"] == "not-run" && operation["selectionToken"].is_null()
-        && operation["assessment"].is_null() && operation["preview"].is_null() && document.assets_can_exit()
+    source_idle_policy::matches(&value, id, reason, lifecycle)
+        && document.assets_can_exit()
 }
 
 // Synchronous expressions act only on visible production controls. No direct
