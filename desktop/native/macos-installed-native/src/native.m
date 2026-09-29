@@ -1235,7 +1235,7 @@ done:
 }
 
 enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8,
-    MRK_SELECT_NODES = 49, MRK_SELECT_ROWS = 32 };
+    MRK_SELECT_NODES = 128, MRK_SELECT_ROWS = 32 };
 enum { MRK_SELECT_COLUMN = 10, MRK_SELECT_LIST, MRK_SELECT_ROW, MRK_SELECT_CELL,
     MRK_SELECT_IMAGE, MRK_SELECT_TEXT, MRK_SELECT_FIELD };
 enum { MRK_SELECT_LIMIT_NONE, MRK_SELECT_LIMIT_LABEL, MRK_SELECT_LIMIT_CHILD_COUNT,
@@ -1270,6 +1270,8 @@ typedef struct {
 // recycled; Cancel does not consume a Press original.
 enum { MRK_PROMPT_ORIGINALS = 9 };
 static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];
+_Static_assert(sizeof(mrk_prompt_originals) <= 64u * 1024u,
+    "bounded original prompt arenas");
 static atomic_uint mrk_prompt_next = 0;
 static atomic_flag mrk_prompt_active = ATOMIC_FLAG_INIT;
 static atomic_bool mrk_prompt_unknown = false;

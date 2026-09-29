@@ -4633,6 +4633,12 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             child = deepcopy(good)
             child["projectFields"]["acceptedOpenHistories"][index]["selectionInput"]["selection"].update(attribute="SelectedChildren")
             self.assertEqual(M.parse_result(captured(child), b"", BINDING, case), child)
+        # Synthetic current-source DATA only; not a native observation or promised pass.
+        for nodes in (49, 50, 64, 127):
+            widened = deepcopy(good)
+            widened["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=nodes)
+            with self.subTest(retained_nonroot_nodes=nodes):
+                self.assertEqual(M.parse_result(captured(widened), b"", BINDING, case), widened)
         for mutation in (
             lambda v: v.update(schemaVersion=1),
             lambda v: v.update(normalProfileAvailable=True),
@@ -4682,7 +4688,9 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selectionParentProof"].pop("purpose"),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["initialOriginalProof"].update(purpose="selection-parent"),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(originalProof=None),
-            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=49),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=128),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=True),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=127.0),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(matches=0),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(matches=2),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(attribute="Value"),
@@ -4858,9 +4866,9 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             ("child-count", 33, 32, 25, None, "Table", 4),
             ("child-copy-count", 17, 16, 25, None, "Group", 4),
             ("child-copy-count", -(1 << 63), 32, 25, None, "List", 4),
-            ("queue-capacity", 49, 49, 49, 1, "Row", 4),
-            ("queue-capacity", 40, 49, 40, 10, "Row", 4),
-            ("depth", 8, 8, 49, 16, "Row", 8),  # Depth is FIRST even if both bounds refuse.
+            ("queue-capacity", 128, 128, 128, 1, "Row", 4),
+            ("queue-capacity", 119, 128, 119, 10, "Row", 4),
+            ("depth", 8, 8, 128, 16, "Row", 8),  # Depth is FIRST even if both bounds refuse.
             ("ax-call-budget", 512, 512, 25, None, "not-read", 4),
             ("cf-slot-budget", 256, 256, 25, None, "not-read", 4),
         ]
@@ -4895,13 +4903,15 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for patch_data in (
             {"predicate": "INERT_PRIVATE"}, {"observed": 512}, {"observed": True}, {"observed": 513.0},
             {"observed": 1 << 63}, {"observed": -(1 << 63) - 1}, {"cap": True}, {"cap": 0}, {"cap": 513},
-            {"queued": None}, {"queued": 0}, {"queued": 24}, {"queued": 50}, {"queued": True},
+            {"queued": None}, {"queued": 0}, {"queued": 24}, {"queued": 129}, {"queued": True},
             {"children": 0}, {"children": 1}, {"private": "INERT_PRIVATE"},
             {"predicate": "child-count", "observed": 16, "cap": 16},
             {"predicate": "child-count", "observed": 33, "cap": 32},
             {"predicate": "child-copy-count", "observed": 0, "cap": 16},
-            {"predicate": "queue-capacity", "observed": 48, "cap": 49, "queued": 48, "children": 1},
-            {"predicate": "queue-capacity", "observed": 49, "cap": 49, "queued": 49, "children": 17},
+            {"predicate": "queue-capacity", "observed": 127, "cap": 128, "queued": 127, "children": 1},
+            {"predicate": "queue-capacity", "observed": 128, "cap": 128, "queued": 128, "children": 17},
+            # Historical cap-49 refusal DATA is not a current-source wire.
+            {"predicate": "queue-capacity", "observed": 49, "cap": 49, "queued": 49, "children": 1},
             {"predicate": "depth", "observed": 8, "cap": 8, "children": 1},
             {"predicate": "ax-call-budget", "observed": 510, "cap": 512},
             {"predicate": "cf-slot-budget", "observed": 255, "cap": 256},
@@ -4942,9 +4952,19 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertNotIn(forbidden, helper)
         self.assertIn("if (!s->result.error) s->result.error = error;", native)
         self.assertIn("s->result.site == MRK_OPEN_SELECTION_PROJECTION ? s->selection_queued : 0", helper)
-        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_SELECT_NODES = 49",
+        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_SELECT_NODES = 128",
                       "MRK_CONTROL_DEPTH = 8", "MRK_SELECT_ROWS = 32", "MRK_PROMPT_ORIGINALS = 9"):
             self.assertIn(bound, native)
+        arenas = native.split("enum { MRK_PROMPT_CALLS =", 1)[1].split("static atomic_uint mrk_prompt_next", 1)[0]
+        for retained in (
+            "AXUIElementRef nodes[MRK_SELECT_NODES];",
+            "unsigned parents[MRK_SELECT_NODES], depths[MRK_SELECT_NODES], roles[MRK_SELECT_NODES], entries[MRK_SELECT_NODES];",
+            "BOOL matches[MRK_SELECT_NODES]; unsigned candidate, label;",
+            "MRKSelectionPass selection;",
+            "static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];",
+            "_Static_assert(sizeof(mrk_prompt_originals) <= 64u * 1024u,",
+        ):
+            self.assertIn(retained, arenas)
         label = native.split("static BOOL mrk_ax_selection_label(", 1)[1].split("static BOOL mrk_ax_selection_roster(", 1)[0]
         self.assertEqual(label.count("CFStringGetLength(value)"), 1)
         self.assertIn("if (length > 512)", label)
@@ -4954,6 +4974,15 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                         roster.index("if ((unsigned)count > MRK_SELECT_NODES - queued)"))
         self.assertEqual(roster.count("CFArrayGetCount(children)"), 1)
         self.assertIn("rows || list ? MRK_SELECT_ROWS : 16", roster)
+        self.assertIn("p->nodes[0] = sheet; unsigned queued = 1;", roster)
+        self.assertIn("for (unsigned other = 0; other < queued; ++other)", roster)
+        self.assertIn("p->nodes[queued] = (AXUIElementRef)CFArrayGetValueAtIndex(children, child);", roster)
+        self.assertIn("p->parents[queued] = at; p->depths[queued] = p->depths[at] + 1;", roster)
+        self.assertIn("p->entries[queued] = rows || list ? queued : entry; queued++;", roster)
+        self.assertEqual(M.re.findall(r"\bqueued\s*(?:\+\+|--|[+-]?=(?!=))", roster),
+                         ["queued =", "queued++"])
+        for recycled in ("--queued", "memmove(", "memset(", "p->nodes[at] = NULL", "% MRK_SELECT_NODES"):
+            self.assertNotIn(recycled, roster)
         decoder = rust.split("fn selection_limit_return(", 1)[1].split("/// The actual selecting", 1)[0]
         labels = M.re.findall(r'"([a-z-]+)"', decoder.split("predicate: *[", 1)[1].split("]", 1)[0])
         self.assertEqual(tuple(labels), M.ACCESSIBILITY_SELECTION_LIMITS)
@@ -5026,7 +5055,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("*flags == 0x5f00fu || *flags == 0x7f01fu", observe)
         self.assertIn("mrk_version_source_name_state(s, s->observationSample, MRK_NAME_ALL)", observe)
         self.assertIn("*flags |= MRK_VERSION_SOURCE_SELECTION_READY", observe)
-        self.assertIn("MRK_SELECT_NODES = 49, MRK_SELECT_ROWS = 32", native)
+        self.assertIn("MRK_SELECT_NODES = 128, MRK_SELECT_ROWS = 32", native)
         self.assertIn("MRKSelectionPass selection;", native)
         for forbidden in ("kAXURLAttribute", "kAXFilenameAttribute", "kAXPressAction", "setNameFieldStringValue", "setDirectoryURL",
                           "CGEvent", "NSPasteboard", "sleep(", "dispatch_", "pthread_create", "CFRelease("):
@@ -6469,6 +6498,8 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
             "owned command produced incomplete output": "incomplete-output",
             "owned command output exceeds its bound": "output-bound",
             "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+            "owned command exceeded its original deadline": "owner-deadline",
+            "owned command protocol or original ownership is incomplete": "owner-protocol-incomplete",
             "owned command failed, timed out, or produced incomplete output": "owner-failure-unknown",
         }
         unknown = {"dispatched": None, "contained": None, "cleanupComplete": None,
@@ -6486,9 +6517,11 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
             @property
             def args(self): return TupleChild((known,))
         alien = ValueError(known); alien.dispatched = alien.contained = alien.cleanup_complete = True
-        errors = (ProcessError(sentinel), ProcessError(known + " " + sentinel), ProcessError(sentinel + " " + known),
-                  ProcessError(known, sentinel), ProcessError(), ProcessError(known.encode()),
-                  ProcessError(StringChild(known)), ProcessError(object()), ListArguments(), TupleChildArguments(), alien)
+        errors = (ProcessError(sentinel), ProcessError(), ProcessError(object()),
+                  ListArguments(), TupleChildArguments(), alien)
+        for message in categories:
+            errors += (ProcessError(message + " " + sentinel), ProcessError(sentinel + " " + message),
+                       ProcessError(message, sentinel), ProcessError(message.encode()), ProcessError(StringChild(message)))
         for index, error in enumerate(errors):
             with self.subTest(case=index):
                 actual = project(error, owner)

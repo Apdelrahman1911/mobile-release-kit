@@ -1043,6 +1043,8 @@ jobs:
                           "owned command produced incomplete output": "incomplete-output",
                           "owned command output exceeds its bound": "output-bound",
                           "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+                          "owned command exceeded its original deadline": "owner-deadline",
+                          "owned command protocol or original ownership is incomplete": "owner-protocol-incomplete",
                           "owned command failed, timed out, or produced incomplete output": "owner-failure-unknown",
                       }.get(arguments[0], "owner-failure-unknown")
               return facts

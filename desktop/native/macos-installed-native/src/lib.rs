@@ -1014,7 +1014,7 @@ mod observation {
             || !matches!(w.site, 21 | 22 | 23 | 25) { return None; }
         let projection = w.site == 21;
         if projection {
-            if w.selection_checks != 0 || !(1..=49).contains(&w.selection_limit_queued)
+            if w.selection_checks != 0 || !(1..=128).contains(&w.selection_limit_queued)
                 || w.selection_limit_queued <= w.selection_nodes { return None; }
         } else if w.selection_limit_queued != 0 { return None; }
         let count = w.selection_limit_observed; let cap = w.selection_limit_cap;
@@ -1025,8 +1025,8 @@ mod observation {
                 && w.selection_nodes > 0 && w.selection_depth > 0 && matches!(w.selection_last_role, 2 | 12..=16),
             2 | 3 => (projection && child_cap != 0 && cap == child_cap || w.site == 25 && cap == 32)
                 && children == 0 && (count > i64::from(cap) || w.selection_limit == 3 && count < 0),
-            4 => projection && cap == 49 && count == i64::from(w.selection_limit_queued)
-                && child_cap != 0 && (1..=child_cap).contains(&children) && children > 49 - w.selection_limit_queued
+            4 => projection && cap == 128 && count == i64::from(w.selection_limit_queued)
+                && child_cap != 0 && (1..=child_cap).contains(&children) && children > 128 - w.selection_limit_queued
                 && w.selection_depth < 8,
             5 => projection && cap == 8 && count == 8 && w.selection_depth == 8
                 && child_cap != 0 && (1..=child_cap).contains(&children),
@@ -1054,14 +1054,14 @@ mod observation {
     impl VersionSourceSelection {
         pub fn matched(self) -> bool {
             self.limit.is_none() && self.checks == [true; 5] && self.attempted && self.returned && self.selected == Some(true)
-                && (1..=48).contains(&self.nodes) && self.matches == 1
+                && (1..=127).contains(&self.nodes) && self.matches == 1
                 && matches!(self.attribute, "SelectedRows" | "SelectedChildren") && self.last_role != "not-read"
                 && (1..=8).contains(&self.depth) && self.depth <= self.nodes
         }
     }
     fn selection_return(w: OpenWire) -> Option<VersionSourceSelection> {
         if w.selection_checks > 31 || w.selection_checks & (w.selection_checks + 1) != 0
-            || !matches!(w.selection_flags, 0 | 1 | 3 | 7) || w.selection_nodes > 48 || w.selection_matches > 2
+            || !matches!(w.selection_flags, 0 | 1 | 3 | 7) || w.selection_nodes > 127 || w.selection_matches > 2
             || w.selection_depth > 8 || w.selection_depth > w.selection_nodes || w.selection_matches > w.selection_nodes
             || w.selection_checks != 0 && (w.selection_nodes == 0 || w.selection_last_role == 0 || w.selection_depth == 0)
             || (w.selection_attribute != 0) != (w.selection_checks & 4 != 0)
@@ -1378,12 +1378,17 @@ mod observation {
         if !open_return(full, rechecks, true, true).is_some_and(OpenReport::succeeded)
             || !open_return(OpenWire { selection_attribute: 2, ..full }, rechecks, true, true).is_some_and(OpenReport::succeeded)
             || open_return(full, rechecks, true, false).is_some() { return false; }
+        // Synthetic widened-arena DATA only, not a native observation or promised pass.
+        for nodes in [49, 50, 64, 127] {
+            if !open_return(OpenWire { selection_nodes: nodes, ..full }, rechecks, true, true)
+                .is_some_and(OpenReport::succeeded) { return false; }
+        }
         for bit in 0..5 {
             if open_return(OpenWire { selection_checks: full.selection_checks & !(1 << bit), ..full }, rechecks, true, true).is_some() { return false; }
         }
         for bad in [OpenWire { selection_mode: 0, ..full }, OpenWire { selection_mode: 2, ..full },
             OpenWire { selection_flags: 0, ..full }, OpenWire { selection_flags: 1, ..full }, OpenWire { selection_flags: 3, ..full },
-            OpenWire { selection_nodes: 0, ..full }, OpenWire { selection_nodes: 49, ..full },
+            OpenWire { selection_nodes: 0, ..full }, OpenWire { selection_nodes: 128, ..full },
             OpenWire { selection_matches: 0, ..full }, OpenWire { selection_matches: 2, ..full },
             OpenWire { selection_attribute: 0, ..full }, OpenWire { selection_attribute: 3, ..full },
             OpenWire { selection_last_role: 0, ..full }, OpenWire { selection_last_role: 17, ..full },
@@ -1418,14 +1423,14 @@ mod observation {
         }
         if !open_return(OpenWire { flags: 0, released: 0, ..limit }, admitted, false, true).is_some_and(|r|
             !r.custody_known && !r.succeeded() && r.selection.is_some_and(|s| s.limit.is_some())) { return false; }
-        let queue = OpenWire { selection_limit: 4, selection_limit_cap: 49, selection_limit_observed: 49,
-            selection_limit_queued: 49, selection_limit_children: 1, ..limit };
+        let queue = OpenWire { selection_limit: 4, selection_limit_cap: 128, selection_limit_observed: 128,
+            selection_limit_queued: 128, selection_limit_children: 1, ..limit };
         for refused in [limit, OpenWire { selection_limit_observed: i64::MAX, ..limit },
             OpenWire { selection_limit: 2, selection_limit_cap: 16, selection_limit_observed: 17, ..limit },
             OpenWire { selection_limit: 2, selection_limit_cap: 32, selection_limit_observed: 33, selection_last_role: 6, ..limit },
             OpenWire { selection_limit: 3, selection_limit_cap: 16, selection_limit_observed: 17, ..limit },
             OpenWire { selection_limit: 3, selection_limit_cap: 32, selection_limit_observed: i64::MIN, selection_last_role: 11, ..limit },
-            queue, OpenWire { selection_limit_observed: 40, selection_limit_queued: 40, selection_limit_children: 10, ..queue },
+            queue, OpenWire { selection_limit_observed: 119, selection_limit_queued: 119, selection_limit_children: 10, ..queue },
             OpenWire { selection_limit: 5, selection_limit_cap: 8, selection_limit_observed: 8,
                 selection_depth: 8, selection_limit_children: 16, ..queue },
             OpenWire { selection_limit: 6, selection_limit_cap: 512, selection_limit_observed: 512, calls: 512, ..limit },
@@ -1441,11 +1446,14 @@ mod observation {
         for bad in [OpenWire { selection_limit: 0, ..limit }, OpenWire { selection_limit: 8, ..limit },
             OpenWire { selection_limit_cap: 513, ..limit }, OpenWire { selection_limit_observed: 512, ..limit },
             OpenWire { selection_limit_queued: 0, ..limit }, OpenWire { selection_limit_queued: 24, ..limit },
-            OpenWire { selection_limit_queued: 50, ..limit }, OpenWire { selection_limit_children: 1, ..limit },
+            OpenWire { selection_limit_queued: 129, ..limit }, OpenWire { selection_limit_children: 1, ..limit },
             OpenWire { error: 8, ..limit }, OpenWire { ax_error: -25204, ax_failure_operation: 2, ax_failure_attribute: 1, ..limit }, OpenWire { site: 24, ..limit },
             OpenWire { selection_limit: 2, selection_limit_cap: 32, selection_limit_observed: 33, ..limit },
             OpenWire { selection_limit: 3, selection_limit_cap: 16, selection_limit_observed: 0, ..limit },
-            OpenWire { selection_limit_observed: 48, selection_limit_queued: 48, selection_limit_children: 1, ..queue },
+            OpenWire { selection_limit_observed: 127, selection_limit_queued: 127, selection_limit_children: 1, ..queue },
+            // Historical cap-49 refusal DATA is not a current-source wire.
+            OpenWire { selection_limit_cap: 49, selection_limit_observed: 49,
+                selection_limit_queued: 49, selection_limit_children: 1, ..queue },
             OpenWire { selection_limit_children: 0, ..queue }, OpenWire { selection_limit_children: 17, ..queue },
             OpenWire { selection_depth: 8, ..queue },
             OpenWire { selection_limit: 5, selection_limit_cap: 8, selection_limit_observed: 8, ..queue },

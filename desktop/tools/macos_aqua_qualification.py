@@ -1453,7 +1453,7 @@ def _accessibility_prompt_button(value):
 def _selection_succeeded(value):
     return (value is not None and value["limit"] is None and all(value["checks"].values()) and value["attempted"] is True
             and value["returned"] is True and value["selected"] is True and value["matches"] == 1
-            and 1 <= value["nodes"] <= 48 and value["attribute"] in ("SelectedRows", "SelectedChildren")
+            and 1 <= value["nodes"] <= 127 and value["attribute"] in ("SelectedRows", "SelectedChildren")
             and value["lastRole"] != "not-read" and 1 <= value["depth"] <= min(8, value["nodes"]))
 
 
@@ -1472,7 +1472,7 @@ def _accessibility_selection_limit(value, selection, button, site, error):
          and button is not None and button["axError"] == 0, label)
     projection = site == "selection-projection"
     if projection:
-        need(type(queued) is int and 1 <= queued <= 49 and queued > selection["nodes"]
+        need(type(queued) is int and 1 <= queued <= 128 and queued > selection["nodes"]
              and not any(selection["checks"].values()), label)
     else:
         need(queued is None, label)
@@ -1487,8 +1487,8 @@ def _accessibility_selection_limit(value, selection, button, site, error):
         valid = ((projection and child_cap != 0 and cap == child_cap or site == "selection-readback" and cap == 32)
                  and children is None and (count > cap or predicate == "child-copy-count" and count < 0))
     elif predicate == "queue-capacity":
-        valid = (projection and cap == 49 and count == queued and child_cap != 0 and children is not None
-                 and children <= child_cap and children > 49 - queued and selection["depth"] < 8)
+        valid = (projection and cap == 128 and count == queued and child_cap != 0 and children is not None
+                 and children <= child_cap and children > 128 - queued and selection["depth"] < 8)
     elif predicate == "depth":
         valid = (projection and cap == 8 and count == 8 and selection["depth"] == 8
                  and child_cap != 0 and children is not None and children <= child_cap)
@@ -1512,7 +1512,7 @@ def _accessibility_selection(value, button, site, error):
     need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
     need(all(type(value[key]) is bool for key in ("attempted", "returned"))
          and (value["selected"] is None or type(value["selected"]) is bool), label)
-    for key, limit in (("nodes", 48), ("matches", 2), ("depth", 8)):
+    for key, limit in (("nodes", 127), ("matches", 2), ("depth", 8)):
         need(type(value[key]) is int and 0 <= value[key] <= limit, label)
     need(value["depth"] <= value["nodes"] and type(value["lastRole"]) is str
          and value["lastRole"] in ACCESSIBILITY_SELECTION_ROLES
