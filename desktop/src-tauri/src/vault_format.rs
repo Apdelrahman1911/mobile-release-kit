@@ -19,11 +19,23 @@ pub(crate) const SCALAR_LIMIT: usize = 128 * 1024;
 pub(crate) const FILE_LIMIT: usize = 32 * 1024 * 1024;
 pub(crate) const PAYLOAD_LIMIT: usize = 8 + SCALAR_LIMIT + FILE_LIMIT;
 pub(crate) const RECORD_LIMIT: usize = RECORD_OVERHEAD + DESCRIPTOR_LIMIT + PAYLOAD_LIMIT;
+// Shared fixed codec/store bounds; moving the owner does not raise an allowance.
+pub(crate) const DESCRIPTOR_COUNT: usize = 128;
+pub(crate) const WORKING_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const DOMAIN: &[u8] = b"dev.mobile-release-kit.desktop/vault/v1\0";
 pub(crate) const RESERVATION_NAME: &str = "initialization-reservation";
 pub(crate) const HEADER_NAME: &str = "vault-header";
 pub(crate) const LOCK_NAME: &str = "vault-lock";
 pub(crate) const INTENT_NAME: &str = ".mutation-intent";
+
+// A compile-target profile, never a renderer/configuration-selected backend.
+// Identity alone does not qualify a provider or enable durable storage.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) const BACKEND: u16 = 1;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) const BACKEND: u16 = 2;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) const BACKEND: u16 = 3;
 
 const RESERVATION_MAGIC: &[u8; 8] = b"MRKVRS01";
 const HEADER_MAGIC: &[u8; 8] = b"MRKVHD01";
@@ -73,7 +85,7 @@ impl Identity {
     pub(crate) fn reservation(self) -> [u8; RESERVATION_BYTES] {
         let mut out = [0; RESERVATION_BYTES];
         out[..8].copy_from_slice(RESERVATION_MAGIC);
-        put16(&mut out, 8, 1); put16(&mut out, 10, 1); put16(&mut out, 12, 1);
+        put16(&mut out, 8, 1); put16(&mut out, 10, 1); put16(&mut out, 12, BACKEND);
         out[16..32].copy_from_slice(self.vault.bytes());
         out[32..48].copy_from_slice(self.generation.bytes());
         out
@@ -291,7 +303,7 @@ impl IntentPrefix {
 }
 
 fn identity_prefix(bytes: &[u8]) -> Result<Identity> {
-    if read16(bytes, 8)? != 1 || read16(bytes, 10)? != 1 || read16(bytes, 12)? != 1 || read16(bytes, 14)? != 0 { return Err(Error::Shape); }
+    if read16(bytes, 8)? != 1 || read16(bytes, 10)? != 1 || read16(bytes, 12)? != BACKEND || read16(bytes, 14)? != 0 { return Err(Error::Shape); }
     Identity::new(id_at(bytes, 16)?, id_at(bytes, 32)?)
 }
 fn optional_revision(bytes: &[u8], offset: usize, counter: usize) -> Result<Option<Revision>> {
@@ -340,6 +352,32 @@ mod tests {
     }
 
     #[test]
+    fn backend_identity_is_compile_target_bound_without_changing_other_wire_bytes() {
+        let current = identity();
+        let reservation = current.reservation();
+        let mut expected = [0; RESERVATION_BYTES];
+        expected[..8].copy_from_slice(b"MRKVRS01");
+        expected[8..12].copy_from_slice(&[1, 0, 1, 0]);
+        expected[12..14].copy_from_slice(&BACKEND.to_le_bytes());
+        expected[16..32].copy_from_slice(&[1; 16]);
+        expected[32..48].copy_from_slice(&[2; 16]);
+        assert_eq!(reservation, expected);
+        let prefix = current.header_prefix();
+        assert_eq!(&prefix[..8], b"MRKVHD01");
+        assert_eq!(&prefix[8..48], &reservation[8..]);
+        assert_eq!(&prefix[48..], &[0; 16]);
+        for backend in [0u16, 1, 2, 3, 4, u16::MAX] {
+            let mut other = reservation; other[12..14].copy_from_slice(&backend.to_le_bytes());
+            assert_eq!(Identity::parse_reservation(&other).is_ok(), backend == BACKEND);
+            let mut header = [0; HEADER_BYTES]; header[..64].copy_from_slice(&prefix);
+            header[12..14].copy_from_slice(&backend.to_le_bytes());
+            assert_eq!(Header::parse(&header, current).is_ok(), backend == BACKEND);
+        }
+        // The record's reserved offset12 remains zero on every profile.
+        assert_eq!(&record().bytes()[12..16], &[0; 4]);
+    }
+
+    #[test]
     fn record_lengths_sections_revisions_and_nonce_roles_are_exact() {
         let prefix = record(); assert_eq!(prefix.total_length().unwrap(), 360);
         let mut bytes = vec![0; 360]; bytes[..168].copy_from_slice(prefix.bytes());
@@ -365,6 +403,11 @@ mod tests {
     #[test]
     fn descriptor_requires_every_exact_typed_key_and_current_kind_presence() {
         for kind in [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::IosFirebase, Kind::AscP8, Kind::GoogleWif, Kind::ProjectReadToken] {
+            if !kind.enabled() {
+                // Backend availability never broadens target credential kinds.
+                assert!(Descriptor::new(kind, None, vec![false; commands::field_names(kind).len()], kind.file().is_some()).is_err());
+                continue;
+            }
             let original = Descriptor::new(kind, Some("Personal development".into()), vec![false; commands::field_names(kind).len()], kind.file().is_some()).unwrap();
             let raw = original.encode().unwrap(); let decoded = Descriptor::decode(&raw).unwrap();
             assert!(decoded.kind == kind); assert_eq!(decoded.label.as_deref(), Some("Personal development"));
@@ -386,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn asc_descriptor_has_exact_two_presence_cells_and_no_persisted_approval() {
         for presence in [vec![false, false], vec![true, false], vec![false, true], vec![true, true]] {
             let descriptor = Descriptor::new(Kind::AscP8, None, presence.clone(), true).unwrap();
@@ -412,6 +456,17 @@ mod tests {
             good.replace(r#""filePresent":true"#, r#""filePresent":false"#),
             good.replace(r#""filePresent":true"#, r#""filePresent":true,"approval":{"algorithm":"ec","curve":"p256"}"#),
         ] { assert!(Descriptor::decode(wrong.as_bytes()).is_err()); }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    fn windows_backend_does_not_adopt_unsupported_apple_records() {
+        for kind in [Kind::AscP8, Kind::AppleP12, Kind::AppleProfile] {
+            assert!(!kind.enabled());
+            let raw = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"kind":kind.name(),"label":null,
+                "fieldPresence":vec![false; commands::field_names(kind).len()],"filePresent":true})).unwrap();
+            assert!(Descriptor::decode(&raw).is_err());
+        }
     }
 
     #[test]

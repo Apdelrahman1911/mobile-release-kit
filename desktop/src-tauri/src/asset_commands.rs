@@ -204,10 +204,10 @@ pub(crate) fn project_path_error(reason: Reason) -> crate::error::BridgeError {
 // No Debug/Deserialize or renderer readback. Immutable record backing is shared
 // by Arc in the owner, rather than cloning these write-only strings for leases.
 pub(crate) struct Fields { kind: Kind, values: Vec<Option<String>> }
-// The Linux durable lane reuses these exact scalar semantics. Wipe the strings
+// The target-selected durable codec reuses these exact scalar semantics. Wipe the strings
 // actually owned here on retirement, including copies made during bounded
 // authenticated decoding. This does not claim erasure of renderer/OS copies.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 impl Drop for Fields {
     fn drop(&mut self) {
         use zeroize::Zeroize;
@@ -236,11 +236,11 @@ impl Fields {
         }
         Value::Object(object)
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     pub(crate) fn vault_kind(&self) -> Kind { self.kind }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     pub(crate) fn vault_presence(&self) -> Vec<bool> { self.values.iter().map(Option::is_some).collect() }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     pub(crate) fn write_vault_scalars(&self, writer: impl io::Write) -> Result<(), serde_json::Error> {
         // Borrow original field strings; do not allocate another secret Value
         // tree merely to serialize the fixed scalar map.

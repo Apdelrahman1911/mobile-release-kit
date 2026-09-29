@@ -11,6 +11,13 @@ use sha2::{Digest, Sha256};
 use std::{fmt, io::{self, Write}, ops::Range};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+type WrappingKeyCandidate = mrk_macos_installed_native::wrapping_keychain::WrappingKeyCandidate;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+type WrappingKeyCandidate = mrk_windows_installed_native::vault_dpapi::KeyCandidate;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error { Format, Authentication, Random, Bounds, Allocation }
 type Result<T> = std::result::Result<T, Error>;
@@ -26,7 +33,7 @@ impl From<format::Error> for Error {
 pub(crate) const CONTROL_BYTES: usize = 512 * 1024;
 const AAD_BYTES: usize = format::DOMAIN.len() + format::RECORD_PREFIX_BYTES + 11;
 fn capacity(owned: usize, allowance: usize) -> Result<()> {
-    if allowance > crate::vault_store::WORKING_BYTES
+    if allowance > format::WORKING_BYTES
         || owned.checked_add(CONTROL_BYTES).is_none_or(|value| value > allowance) { Err(Error::Bounds) } else { Ok(()) }
 }
 fn buffer(length: usize, allowance: usize) -> Result<Zeroizing<Vec<u8>>> {
@@ -123,7 +130,11 @@ pub(crate) fn lifecycle_data_key(identity: Identity) -> VaultKey {
     VaultKey::authenticate(&[73; 32], identity, &header).expect("fixed test authentication")
 }
 impl VaultKey {
-    pub(crate) fn authenticate_candidate(candidate: secret_service::checked_lookup::WrappingKeyCandidate,
+    /// The caller keeps the full transport/native-frame charge reserved together
+    /// with any produced cipher charge until the original child is actually joined.
+    /// Consuming/retiring the private key cell here is neither a charge refund nor
+    /// permission to publish availability. The candidate has no raw-key getter.
+    pub(crate) fn authenticate_candidate(candidate: WrappingKeyCandidate,
         identity: Identity, bytes: &[u8; format::HEADER_BYTES]) -> Result<Self> {
         candidate.consume(|key| Self::authenticate(key, identity, bytes))
     }
@@ -135,7 +146,7 @@ impl VaultKey {
     pub(crate) fn identity(&self) -> Identity { self.identity }
     pub(crate) fn retained_bytes(&self) -> usize { std::mem::size_of::<Self>() }
     pub(crate) fn new_record_id(&self, existing: &[Id]) -> Result<Id> {
-        if existing.len() > crate::vault_store::DESCRIPTOR_COUNT { return Err(Error::Bounds); }
+        if existing.len() > format::DESCRIPTOR_COUNT { return Err(Error::Bounds); }
         let id = fresh_id(&mut OsEntropy)?;
         if existing.contains(&id) || [self.identity.vault, self.identity.generation].contains(&id) { return Err(Error::Random); } Ok(id)
     }
@@ -364,7 +375,7 @@ fn decode_payload(descriptor: &Descriptor, payload: &[u8]) -> Result<(Fields, Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    const ALLOWANCE: usize = crate::vault_store::WORKING_BYTES;
+    const ALLOWANCE: usize = format::WORKING_BYTES;
     fn id(byte: u8) -> Id { Id::from_bytes([byte; 16]).unwrap() }
     fn identity() -> Identity { Identity::new(id(1), id(2)).unwrap() }
     fn key() -> VaultKey { VaultKey::authenticate(&[9; 32], identity(), &make_header(identity(), &[9; 32], [5; 24]).unwrap()).unwrap() }
@@ -418,6 +429,21 @@ mod tests {
             let mut changed = original; changed[offset] ^= 1;
             assert!(VaultKey::authenticate(&[9; 32], identity(), &changed).is_err());
         }
+        // A valid AEAD tag cannot authorize a different platform identity.
+        // Rewriting only that identity back also cannot retain the foreign tag.
+        let cipher = cipher(&[9; 32]).unwrap();
+        for backend in [0u16, 1, 2, 3, 4, u16::MAX] {
+            if backend == format::BACKEND { continue; }
+            let mut prefix = identity().header_prefix();
+            prefix[12..14].copy_from_slice(&backend.to_le_bytes());
+            let mut foreign = original; foreign[..64].copy_from_slice(&prefix);
+            foreign[88..].copy_from_slice(&seal(&cipher, &[5; 24], &prefix, b"header\0", &mut []).unwrap());
+            assert!(open(&cipher, &foreign[64..88], &foreign[..64], b"header\0", &mut [], &foreign[88..]).is_ok());
+            assert!(matches!(VaultKey::authenticate(&[9; 32], identity(), &foreign), Err(Error::Format)));
+            foreign[12..14].copy_from_slice(&format::BACKEND.to_le_bytes());
+            assert!(format::Header::parse(&foreign, identity()).is_ok());
+            assert!(matches!(VaultKey::authenticate(&[9; 32], identity(), &foreign), Err(Error::Authentication)));
+        }
         let proposed = InitializationKey::generate_with(identity(), &mut Fixed::at(40)).unwrap();
         let expected = *proposed.header();
         let (header, adopted) = proposed.consume_for_transport(|bytes| VaultKey::authenticate(bytes, identity(), &expected));
@@ -467,17 +493,28 @@ mod tests {
         assert!(decode_payload(&nullable, &payload(br#"{"token":null}"#, &[])).is_ok());
         let mut length = payload(br#"{"token":"a"}"#, &[]); length[..4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode_payload(&descriptor, &length).is_err());
-        for kind in [commands::Kind::AndroidFirebase, commands::Kind::IosFirebase] {
-            let descriptor = Descriptor::new(kind, None, vec![], true).unwrap();
-            let fields = commands::own_fields(kind, &serde_json::json!({})).unwrap_or_else(|_| panic!("fixed fields"));
+        // Inert file bytes prove storage semantics, never parser assessment,
+        // signing/account validity or permission to assign the recovered record.
+        for (kind, values) in [
+            (commands::Kind::AndroidFirebase, serde_json::json!({})),
+            (commands::Kind::IosFirebase, serde_json::json!({})),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            (commands::Kind::AppleP12, serde_json::json!({"password":" ORIGINAL_P12_PASSWORD_CANARY\0é "})),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            (commands::Kind::AppleProfile, serde_json::json!({})),
+        ] {
+            let fields = commands::own_fields(kind, &values).unwrap_or_else(|_| panic!("fixed fields"));
+            let descriptor = Descriptor::new(kind, None, fields.vault_presence(), true).unwrap();
             let sealed = key().seal_record_with(id(3), None, &descriptor, &fields, Some(b"synthetic-file"), ALLOWANCE, &mut Fixed::at(20)).unwrap();
             let opened = key().open_record(sealed.bytes, ALLOWANCE).unwrap();
             assert!(opened.descriptor.kind == kind);
+            assert_eq!(opened.fields.into_value(), values);
             assert_eq!(opened.file.as_ref().unwrap().bytes(), b"synthetic-file");
             assert!(opened.file.unwrap().retained_bytes().unwrap() > b"synthetic-file".len());
         }
     }
 
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn asc_file() -> Vec<u8> {
         use der_07::{asn1::ObjectIdentifier, Any, Encode, Tag};
         // Deliberately not an EC scalar. Authentication/envelope recognition
@@ -491,6 +528,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn asc_authenticated_round_trip_retains_original_bytes_and_requires_fresh_observation() {
         use crate::credential_format::{inspect, FileKind};
         let key = key(); let der = asc_file();
@@ -535,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn asc_payload_refuses_wrong_kind_presence_duplicate_companions_and_over_cap_before_entropy() {
         let key = key(); let kind = commands::Kind::AscP8; let file = asc_file();
         let descriptor = Descriptor::new(kind, None, vec![true, true], true).unwrap();

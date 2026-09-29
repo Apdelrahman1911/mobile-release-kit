@@ -9,11 +9,10 @@ use crate::vault_format::{self as format, Id, Mutation};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-pub(crate) const DESCRIPTOR_COUNT: usize = 128;
+pub(crate) use crate::vault_format::{DESCRIPTOR_COUNT, WORKING_BYTES};
 pub(crate) const ENTRY_COUNT: usize = 256;
 pub(crate) const DISK_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const RESIDENT_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const WORKING_BYTES: usize = 96 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Problem {

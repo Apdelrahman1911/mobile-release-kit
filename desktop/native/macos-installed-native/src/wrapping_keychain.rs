@@ -46,6 +46,11 @@ compile_error!("wrapping qualification requires matching explicit cfg, native bu
 #[path = "wrapping_keychain_qualification.rs"]
 pub mod qualification;
 
+#[cfg(all(mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native,
+    feature = "installed-observation", debug_assertions))]
+#[path = "wrapping_keychain_pair.rs"]
+pub mod private_pair;
+
 #[cfg(all(test, mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native,
     feature = "installed-observation", debug_assertions))]
 #[path = "wrapping_keychain_fixture.rs"]

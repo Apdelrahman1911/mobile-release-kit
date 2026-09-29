@@ -9,11 +9,14 @@
 //! The fixed17 fixture actions surround the unchanged14-case K1 roster. Every
 //! actual return remains in the original caller, including failure/panic. No
 //! automatic Drop cleanup, renewed clock, retry or uncertain-fixture deletion.
+//! Two fixed variants change only the last case; each has its own original
+//! invocation and never shares/restarts a stopped Harness.
 //! Caller-owned frame/material charges exclude unbounded SDK-internal allocator
 //! capacity and opaque panic allocations, which are retained as unknown on error.
 
 use super::{
-    qualification::{Case, CaseReturn, Harness, OwnerFixturePin, Refused, CALL_ROSTER},
+    qualification::{Case, CaseReturn, Harness, OwnerFixturePin, PeerLookup, Refused, CALL_ROSTER},
+    private_pair::{self, ControlBook},
     native_frame_bytes, AddEffect, Admission, Checkpoint, Context, Custody, Facts, Operation,
     Outcome, RawResult, ReferenceObservation, KEY_BYTES, KNOWN, UNKNOWN,
 };
@@ -358,6 +361,23 @@ impl OriginalAction {
         self.add_returned = true; self.add_status = add.status; self.add_effect = 1;
         true
     }
+    fn observe_before_item(&mut self, checkpoint: Checkpoint, facts: &Facts, phase: u32) -> bool {
+        if !self.registered || self.entered || checkpoint != Checkpoint::BeforeCall
+            || !matches!(phase, 10 | 11) || facts.phase() != Some(phase)
+            || facts.add_effect() != AddEffect::NotEntered || !no_item_call(facts) { return false; }
+        // Real callback observations. No item was entered or returned; zero is
+        // the NotEntered effect, not an invented successful OSStatus.
+        self.entered = true; self.checkpoint = 0; self.phase = phase;
+        self.add_returned = false; self.add_status = 0; self.add_effect = 0;
+        true
+    }
+    fn complete_for(&self, case: Case) -> bool {
+        if let Some(phase) = case.before_item_phase() {
+            self.registered && self.entered && self.returned && self.completed
+                && self.checkpoint == 0 && self.phase == phase
+                && !self.add_returned && self.add_status == 0 && self.add_effect == 0
+        } else { case == Case::StopAfterAdd && self.complete() }
+    }
     fn complete(&self) -> bool {
         self.registered && self.entered && self.returned && self.completed
             && self.checkpoint == 1 && self.phase == 10 && self.add_returned && self.add_status == 0 && self.add_effect == 1
@@ -390,7 +410,7 @@ fn expected_case(actual: &CaseReturn) -> bool {
         || facts.callback_panicked() || facts.native_exception() || !facts.ordinary_user_admitted()
         || !selection.verified() || !selection.account_selected() || !selection.callbacks_cleared() { return false; }
     let case = actual.case();
-    if case != Case::StopAfterAdd && facts.stopped() { return false; }
+    if !case.terminal_stop() && facts.stopped() { return false; }
     if !matches!(case, Case::Selector | Case::HelperShapes) && !selection.fixture_selected() { return false; }
     match case {
         Case::Selector => facts.outcome() == Outcome::Pending && selection.selector_boundary_returned()
@@ -429,6 +449,13 @@ fn expected_case(actual: &CaseReturn) -> bool {
         Case::StopAfterAdd => facts.outcome() == Outcome::Stopped && facts.stopped()
             && facts.add_effect() == AddEffect::Added && !actual.scoped_value_present()
             && item_call(facts, 10, 0) && facts.namespace_checkpoints_passed() == Some(3),
+        Case::CreatorControlLookup => private_pair::creator_lookup_ready(actual),
+        Case::OtherExecutableLookup => false, // Only the separate reader admits that fixed result.
+        Case::StopBeforeAdd | Case::StopBeforeLookup => facts.outcome() == Outcome::Stopped && facts.stopped()
+            && facts.add_effect() == AddEffect::NotEntered && !actual.scoped_value_present()
+            && no_item_call(facts) && selection.root_identity_matched()
+            && facts.first_refusal_phase() == case.before_item_phase()
+            && facts.namespace_checkpoints_passed() == Some(3),
     }
 }
 fn adapter_settled(actual: &CaseReturn) -> bool {
@@ -443,6 +470,9 @@ struct Cohort {
     material: Material, binding: Binding, material_return: ScalarReturn, binding_return: ScalarReturn,
     native_abi: u32, fixture_bytes: usize, adapter_bytes: usize, charged_bytes: usize,
     registered: bool, post_add: OriginalAction, stop: OriginalAction, retirement_admitted: bool,
+    terminal: Case, pair_enabled: bool, controls: ControlBook, control_bytes: usize, control_acl_bytes: usize,
+    peer: Option<PeerLookup>, positive: Option<CaseReturn>, positive_accepted: bool,
+    positive_refused: Option<Refused>, barrier_completed: bool, waits: usize,
     expected: [bool; 14], acknowledged: [bool; 14], comparison_refusals: [Option<Refused>; 14],
     harness_refusal: Option<Refused>, material_wiped: bool, stage: u32, run_entered: bool, run_returned: bool,
     cohort_completed: bool, output: RefCell<String>, report_built: bool, report_written: ScalarReturn, report_flushed: ScalarReturn,
@@ -457,6 +487,8 @@ impl Cohort {
             material: Material::default(), binding: Binding::default(), material_return: ScalarReturn::default(),
             binding_return: ScalarReturn::default(), native_abi: 0, fixture_bytes: 0, adapter_bytes: 0, charged_bytes: 0,
             registered: false, post_add: OriginalAction::default(), stop: OriginalAction::default(), retirement_admitted: false,
+            terminal: Case::StopAfterAdd, pair_enabled: false, controls: ControlBook::empty(), control_bytes: 0, control_acl_bytes: 0,
+            peer: None, positive: None, positive_accepted: false, positive_refused: None, barrier_completed: false, waits: 0,
             expected: [false; 14], acknowledged: [false; 14], comparison_refusals: [None; 14],
             harness_refusal: None, material_wiped: false, stage: 0, run_entered: false, run_returned: false,
             cohort_completed: false, output: RefCell::new(String::new()), report_built: false,
@@ -472,6 +504,10 @@ impl Cohort {
         self.fixture_bytes = unsafe { mrk_wrapping_fixture_frame_bytes() };
         let Some(adapter_bytes) = native_frame_bytes() else { return false; };
         self.adapter_bytes = adapter_bytes;
+        if self.pair_enabled {
+            let Some((book, acl)) = private_pair::native_control_charge() else { return false; };
+            self.control_bytes = book; self.control_acl_bytes = acl;
+        }
         if self.native_abi != 0x51460101 || self.fixture_bytes == 0 || self.fixture_bytes > FIXTURE_FRAME_LIMIT
             || self.fixtures.capacity() < ACTIONS || self.cases.capacity() < 14
             || self.output.get_mut().capacity() < PUBLIC_OUTPUT_LIMIT { return false; }
@@ -482,14 +518,22 @@ impl Cohort {
         let parts = [
             size_of::<ManuallyDrop<Self>>(), self.fixtures.capacity() * size_of::<FixtureReturn>(),
             self.cases.capacity() * size_of::<CaseReturn>(), self.output.get_mut().capacity(),
-            self.fixture_bytes, 14 * adapter_bytes, 196608,
+            self.fixture_bytes, (14 + usize::from(self.pair_enabled)) * adapter_bytes, 196608,
+            self.control_bytes, self.control_acl_bytes,
         ];
         let Some(charged) = parts.into_iter().try_fold(0usize, usize::checked_add) else { return false; };
         self.charged_bytes = charged;
         if charged > CALLER_OWNED_CHARGE_LIMIT || self.clock.admit(false) != Admission::Continue { return false; }
         self.registered = true;
         self.post_add.registered = true; self.stop.registered = true; // Distinct original-owner actions, before GO.
-        self.fixture.reserve(self.fixture_bytes) && self.clock.live()
+        if !self.fixture.reserve(self.fixture_bytes) || !self.clock.live() { return false; }
+        if self.pair_enabled {
+            if self.clock.admit(false) != Admission::Continue
+                || !self.controls.reserve(1, self.control_bytes, self.control_acl_bytes) { return false; }
+            let clock = &mut self.clock;
+            if !self.controls.initialize(&mut |_| clock.admit(false)) { return false; }
+        }
+        self.clock.live()
     }
     fn action(&mut self, action: Action, retirement: bool) -> bool {
         self.stage = 100 + action.raw();
@@ -513,7 +557,13 @@ impl Cohort {
         let [Some(a), Some(b), Some(c), Some(d)] = self.material.ids.each_ref().map(context) else { return false; };
         // SAFETY: one fixed registered original cohort, genuine generated
         // identities, full charges, unchanged original cutoff; no retry.
-        match unsafe { Harness::new(self.material.token, [a, b, c, d]) } {
+        let original = unsafe { match self.terminal {
+            Case::StopAfterAdd => Harness::new(self.material.token, [a, b, c, d]),
+            Case::StopBeforeAdd => Harness::new_stop_before_add(self.material.token, [a, b, c, d]),
+            Case::StopBeforeLookup => Harness::new_stop_before_lookup(self.material.token, [a, b, c, d]),
+            _ => return false,
+        } };
+        match original {
             Ok(harness) => self.harness = Some(harness),
             Err(refused) => { self.harness_refusal = Some(refused); return false; }
         }
@@ -540,7 +590,9 @@ impl Cohort {
     fn case(&mut self, case: Case) -> bool {
         let index = self.cases.len();
         self.stage = 200 + index as u32;
-        if !self.registered || index >= CALL_ROSTER.len() || CALL_ROSTER[index] != case
+        let expected = CALL_ROSTER.get(index).copied().map(|value|
+            if value == Case::StopAfterAdd { self.terminal } else { value });
+        if !self.registered || index >= CALL_ROSTER.len() || expected != Some(case)
             || self.cases.capacity() < 14 || self.clock.admit(false) != Admission::Continue { return false; }
         let Some(harness) = self.harness.as_mut() else { return false; };
         let clock = &mut self.clock; let fixture = &mut self.fixture; let fixtures = &mut self.fixtures;
@@ -548,6 +600,14 @@ impl Cohort {
         let mut admission = |checkpoint: Checkpoint, facts: &Facts| {
             let current = clock.admit(false);
             if current != Admission::Continue { return current; }
+            if let Some(phase) = case.before_item_phase() {
+                if checkpoint == Checkpoint::BeforeCall && facts.phase() == Some(phase) {
+                    if !stop.observe_before_item(checkpoint, facts, phase) { clock.poisoned = true; return Admission::Unknown; }
+                    let changed = clock.request_terminal_stop();
+                    stop.returned = true; stop.completed = changed;
+                    return if changed { Admission::Cutoff } else { Admission::Unknown };
+                }
+            }
             if checkpoint == Checkpoint::AfterCall && facts.phase() == Some(10) && facts.add_effect() == AddEffect::Added {
                 if case == Case::PostAddNamespaceRefusal {
                     if !post_add.observe_add(checkpoint, facts) { clock.poisoned = true; return Admission::Unknown; }
@@ -592,9 +652,9 @@ impl Cohort {
         }
         if !self.clock.live() || !adapter_settled(&self.cases[index])
             || case == Case::PostAddNamespaceRefusal && !self.post_add.complete()
-            || case == Case::StopAfterAdd && !self.stop.complete() { return false; }
+            || case.terminal_stop() && !self.stop.complete_for(case) { return false; }
         self.expected[index] = true;
-        if case == Case::StopAfterAdd {
+        if case.terminal_stop() {
             // Terminal STOP intentionally leaves the harness halted/pending.
             // No acknowledge, next call, restarted instance or implicit permit.
             return self.clock.stop_requested && self.harness.as_ref().is_some_and(Harness::halted);
@@ -608,19 +668,80 @@ impl Cohort {
             Err(refused) => { self.harness_refusal = Some(refused); false }
         }
     }
+    fn creator_barrier(&mut self) -> bool {
+        self.stage = 250;
+        if !self.pair_enabled || self.terminal != Case::StopAfterAdd || self.barrier_completed
+            || self.cases.len() != 13 || self.fixtures.len() != 16 || self.peer.is_some()
+            || self.clock.admit(false) != Admission::Continue { return false; }
+        let b = &self.binding;
+        let pin = || OwnerFixturePin { device: b.root_device, inode: b.root_inode,
+            mode: b.root_mode, uid: b.root_uid, gid: b.root_gid };
+        let ids = self.material.ids[0];
+        let Ok(context) = Context::new(ids[..16].try_into().unwrap(), ids[16..].try_into().unwrap()) else { return false; };
+        match PeerLookup::creator(self.material.token, context, pin()) {
+            Ok(peer) => self.peer = Some(peer), Err(refused) => { self.positive_refused = Some(refused); return false; }
+        }
+        let clock = &mut self.clock;
+        if clock.admit(false) != Admission::Continue { return false; }
+        match unsafe { self.peer.as_mut().unwrap().run(&mut |_, _| clock.admit(false)) } {
+            Ok(actual) => self.positive = Some(actual), // Retain before inspection/consumption.
+            Err(refused) => { self.positive_refused = Some(refused); return false; }
+        }
+        let original = self.positive.as_mut().unwrap();
+        if !clock.live() || !private_pair::creator_lookup_ready(original)
+            || original.retained_native_frame_bytes() != self.adapter_bytes
+            || clock.admit(false) != Admission::Continue { return false; }
+        match unsafe { original.compare_candidate(&self.material.key) } {
+            Ok(c) if c.callback_returned && c.bytes_equal && c.whole_frame_charge_transferred
+                && c.native_frame_bytes == self.adapter_bytes && c.consume_returned_and_frame_retired => {},
+            Ok(_) => return false, Err(refused) => { self.positive_refused = Some(refused); return false; }
+        }
+        if !adapter_settled(original) || clock.admit(false) != Admission::Continue { return false; }
+        self.positive_accepted = true;
+        let Ok(context) = Context::new(ids[..16].try_into().unwrap(), ids[16..].try_into().unwrap()) else { return false; };
+        if !self.controls.publish_ready(&self.material.token, &pin(), &context, &mut |_| clock.admit(false)) { return false; }
+        let mut acknowledged = false;
+        for _ in 0..private_pair::POLLS {
+            if clock.admit(false) != Admission::Continue { return false; }
+            match self.controls.poll(&mut |_| clock.admit(false)) {
+                1 => { acknowledged = true; break; },
+                2 => {}, _ => return false,
+            }
+            if clock.admit(false) != Admission::Continue { return false; }
+            self.waits += 1;
+            std::thread::sleep(private_pair::POLL_INTERVAL); // No worker, retry, or renewed clock.
+        }
+        if !acknowledged || clock.admit(false) != Admission::Continue
+            || !self.controls.finish(&mut |_| clock.admit(false)) || !clock.live() { return false; }
+        self.barrier_completed = true;
+        true // Only now is the original terminal case reachable; Retire stays separate.
+    }
+    fn finish_failed_pair_controls(&mut self) {
+        if self.pair_enabled && !self.controls.complete() {
+            let clock = &mut self.clock;
+            let _settled = self.controls.finish(&mut |_| clock.admit(false));
+            // Failure remains absorbing. No acknowledgement, terminal item, or
+            // native fixture retirement is acquired from a control close.
+        }
+    }
     fn run(&mut self) -> bool {
         if !self.prepare() || !self.action(Action::Entropy, false) || !self.initialize_harness()
             || !self.case(Case::Selector) || !self.case(Case::HelperShapes)
             || !self.action(Action::Create, false) || !self.bind() { return false; }
-        for case in CALL_ROSTER.into_iter().skip(2) {
+        let terminal = self.terminal;
+        for original_case in CALL_ROSTER.into_iter().skip(2) {
+            let case = if original_case == Case::StopAfterAdd { terminal } else { original_case };
             let before = match case {
                 Case::DenyDeleteAndReadonlyAllow => Some(Action::DenyRead),
                 Case::ForeignUserMutationAllow => Some(Action::ForeignUser),
                 Case::ForeignGroupInheritOnlyMutationAllow => Some(Action::ForeignGroup),
                 Case::PosixForeignWrite => Some(Action::Posix), Case::SymlinkLeaf => Some(Action::Symlink),
-                Case::LockedPrivateFixture => Some(Action::Lock), Case::StopAfterAdd => Some(Action::Unlock), _ => None,
+                Case::LockedPrivateFixture => Some(Action::Lock),
+                Case::StopAfterAdd | Case::StopBeforeAdd | Case::StopBeforeLookup => Some(Action::Unlock), _ => None,
             };
-            if before.is_some_and(|action| !self.action(action, false)) || !self.case(case) { return false; }
+            if before.is_some_and(|action| !self.action(action, false)) { return false; }
+            if self.pair_enabled && case == Case::StopAfterAdd && !self.creator_barrier() { return false; }
+            if !self.case(case) { return false; }
             let restore = match case {
                 Case::DenyDeleteAndReadonlyAllow => Some(Action::RestoreDeny),
                 Case::ForeignUserMutationAllow => Some(Action::RestoreUser),
@@ -630,9 +751,11 @@ impl Cohort {
             };
             if restore.is_some_and(|action| !self.action(action, false)) { return false; }
         }
+        if self.pair_enabled && (!self.barrier_completed || !self.positive_accepted || !self.controls.complete()
+            || !self.positive.as_ref().is_some_and(adapter_settled) || !self.peer.as_ref().is_some_and(PeerLookup::started)) { return false; }
         if self.cases.len() != 14 || self.fixtures.len() != 16 || !self.expected.iter().all(|v| *v)
             || !self.acknowledged[..13].iter().all(|v| *v) || self.acknowledged[13]
-            || !self.cases.iter().all(adapter_settled) || !self.post_add.complete() || !self.stop.complete()
+            || !self.cases.iter().all(adapter_settled) || !self.post_add.complete() || !self.stop.complete_for(self.terminal)
             || !self.harness.as_ref().is_some_and(|h| h.invocations_started() == 14 && h.halted())
             || !self.clock.stop_requested || self.clock.admit(true) != Admission::Continue { return false; }
         // A distinct fresh admission of the originally registered last action,
@@ -666,58 +789,9 @@ impl FmtWrite for Bounded<'_> {
         Ok(())
     }
 }
-fn numbers(out: &mut Bounded<'_>, values: &[i64]) -> fmt::Result {
-    out.write_char('[')?;
-    for (i, value) in values.iter().enumerate() {
-        if i != 0 { out.write_char(',')?; }
-        write!(out, "{value}")?;
-    }
-    out.write_char(']')
-}
-fn references(out: &mut Bounded<'_>, rows: &[ReferenceObservation]) -> fmt::Result {
-    out.write_char('[')?;
-    for (i, row) in rows.iter().enumerate() {
-        if i != 0 { out.write_char(',')?; }
-        numbers(out, &[row.reserved.into(), row.call_entered.into(), row.call_returned.into(),
-            row.nonnull_returned.into(), row.release_entered.into(), row.release_returned.into()])?;
-    }
-    out.write_char(']')
-}
-fn native_result(out: &mut Bounded<'_>, raw: &RawResult) -> fmt::Result {
-    out.write_str("{\"header\":")?;
-    numbers(out, &[raw.version.into(), raw.operation.into(), raw.outcome.into(), raw.effect.into(), raw.phase.into(),
-        raw.failure_phase.into(), raw.flags.into(), raw.account_errno.into(), raw.keychain_status.into(),
-        raw.slot_count.into(), raw.call_count.into(), raw.key_bytes.into(), raw.run_returned.into(),
-        raw.directory_count.into(), raw.descriptor_count.into(), raw.namespace_entered.into(),
-        raw.namespace_returned.into(), raw.namespace_passed.into()])?;
-    out.write_str(",\"references\":")?;
-    references(out, &raw.references[..(raw.slot_count as usize).min(raw.references.len())])?;
-    out.write_str(",\"calls\":[")?;
-    for (i, row) in raw.calls.iter().take(raw.call_count as usize).enumerate() {
-        if i != 0 { out.write_char(',')?; }
-        numbers(out, &[row.phase.into(), row.entered.into(), row.returned.into(), row.status.into()])?;
-    }
-    out.write_str("],\"descriptors\":[")?;
-    for (i, row) in raw.descriptors.iter().take(raw.descriptor_count as usize).enumerate() {
-        if i != 0 { out.write_char(',')?; }
-        numbers(out, &[row.reserved.into(), row.open_entered.into(), row.open_returned.into(),
-            row.acquired.into(), row.open_errno.into(), row.close_entered.into(), row.close_returned.into(),
-            row.closed.into(), row.close_result.into(), row.close_errno.into()])?;
-    }
-    let a = &raw.acl;
-    out.write_str("],\"acl\":")?;
-    numbers(out, &[a.snapshots_entered.into(), a.snapshots_returned.into(), a.snapshots_admitted.into(), a.entries.into(),
-        a.filesec_init_entered.into(), a.filesec_init_returned.into(), a.filesec_acquired.into(),
-        a.filesec_free_entered.into(), a.filesec_free_returned.into(), a.acl_export_entered.into(),
-        a.acl_export_returned.into(), a.acl_acquired.into(), a.acl_free_entered.into(), a.acl_free_returned.into(),
-        a.acl_freed.into(), a.qualifier_entered.into(), a.qualifier_returned.into(), a.qualifier_acquired.into(),
-        a.qualifier_free_entered.into(), a.qualifier_free_returned.into(), a.qualifier_freed.into()])?;
-    let n = &raw.native;
-    out.write_str(",\"native\":")?;
-    numbers(out, &[n.entered.into(), n.returned.into(), n.last_call.into(), n.last_returned.into(),
-        n.last_result.into(), n.last_errno.into(), n.failure_call.into(), n.failure_result.into(), n.failure_errno.into()])?;
-    out.write_char('}')
-}
+fn numbers(out: &mut Bounded<'_>, values: &[i64]) -> fmt::Result { private_pair::numbers(out, values) }
+fn references(out: &mut Bounded<'_>, rows: &[ReferenceObservation]) -> fmt::Result { private_pair::references(out, rows) }
+fn native_result(out: &mut Bounded<'_>, raw: &RawResult) -> fmt::Result { private_pair::native_result(out, raw) }
 fn original_action(out: &mut Bounded<'_>, row: &OriginalAction) -> fmt::Result {
     numbers(out, &[row.registered.into(), row.entered.into(), row.returned.into(), row.completed.into(),
         row.checkpoint.into(), row.phase.into(), row.add_returned.into(), row.add_status.into(), row.add_effect.into()])
@@ -732,17 +806,27 @@ fn case_name(case: Case) -> &'static str {
         Case::PosixForeignWrite => "PosixForeignWrite", Case::SymlinkLeaf => "SymlinkLeaf",
         Case::PostAddNamespaceRefusal => "PostAddNamespaceRefusal",
         Case::LockedPrivateFixture => "LockedPrivateFixture", Case::StopAfterAdd => "StopAfterAdd",
+        Case::StopBeforeAdd => "StopBeforeAdd", Case::StopBeforeLookup => "StopBeforeLookup",
+        Case::CreatorControlLookup => "CreatorControlLookup", Case::OtherExecutableLookup => "OtherExecutableLookup",
     }
 }
 impl Cohort {
+    fn report_scope(&self) -> &'static str {
+        if self.pair_enabled { return "wrapping-private-creator-pair"; }
+        match self.terminal {
+            Case::StopBeforeAdd => "wrapping-private-stop-before-add",
+            Case::StopBeforeLookup => "wrapping-private-stop-before-lookup",
+            _ => "wrapping-private-common-cohort",
+        }
+    }
     fn build_report(&self) -> fmt::Result {
         let mut buffer = self.output.borrow_mut();
         buffer.clear();
         let out = &mut Bounded { value: &mut buffer };
-        out.write_str("MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-common-cohort\",")?;
+        write!(out, "MRK_WRAPPING_PRIVATE_RESULT={{\"schemaVersion\":1,\"scope\":\"{}\",", self.report_scope())?;
         out.write_str("\"provisional\":true,\"outerFinalityRequired\":true,\"shippingBinaryQualified\":false,")?;
         out.write_str("\"distributionQualified\":false,\"perQueryUIFailQualified\":false,")?;
-        write!(out, "\"cutoffSeconds\":{},\"adapterInvocationBound\":14,\"fixtureActionBound\":17,", COHORT_SECONDS)?;
+        write!(out, "\"cutoffSeconds\":{},\"adapterInvocationBound\":{},\"fixtureActionBound\":17,", COHORT_SECONDS, if self.pair_enabled { 15 } else { 14 })?;
         write!(out, "\"caller\":{{\"runEntered\":{},\"runReturned\":{},\"completed\":{},\"originalSlotRetained\":true,",
             self.run_entered, self.run_returned, self.cohort_completed)?;
         write!(out, "\"registered\":{},\"chargedBytes\":{},\"chargeLimit\":{},\"nativeAbi\":{},\"fixtureFrameBytes\":{},\"adapterFrameBytes\":{},",
@@ -754,6 +838,11 @@ impl Cohort {
         write!(out, "\"clockChecks\":{},\"forwardAdmissions\":{},\"retirementAdmissions\":{},\"harnessRefused\":{},\"materialWiped\":{},",
             self.clock.checks, self.clock.forward_admissions, self.clock.retirement_admissions,
             self.harness_refusal.is_some(), self.material_wiped)?;
+        if self.terminal.before_item_phase().is_some() || self.pair_enabled {
+            write!(out, "\"terminalHarnessHalted\":{},\"terminalHarnessInvocations\":{},",
+                self.harness.as_ref().is_some_and(Harness::halted),
+                self.harness.as_ref().map_or(0, Harness::invocations_started))?;
+        }
         out.write_str("\"materialGetter\":")?;
         numbers(out, &[self.material_return.entered.into(), self.material_return.returned.into(), self.material_return.actual.into()])?;
         out.write_str(",\"bindingGetter\":")?;
@@ -834,7 +923,16 @@ impl Cohort {
             native_result(out, &facts.raw)?;
             out.write_char('}')?;
         }
-        out.write_str("],\"owed\":[\"native-exception\",\"returned-failed-close\",\"incomplete-acl\",")?;
+        out.write_char(']')?;
+        if self.pair_enabled {
+            write!(out, ",\"pair\":{{\"positiveAccepted\":{},\"comparisonRefused\":{},\"barrierCompleted\":{},\"totalAdapterCalls\":{},\"waits\":{},\"controls\":",
+                self.positive_accepted, self.positive_refused.is_some(), self.barrier_completed,
+                self.harness.as_ref().map_or(0, Harness::invocations_started) + usize::from(self.peer.as_ref().is_some_and(PeerLookup::started)), self.waits)?;
+            self.controls.report(out)?; out.write_str(",\"positive\":")?;
+            if let Some(row) = &self.positive { private_pair::peer_report(out, row)?; } else { out.write_str("null")?; }
+            out.write_char('}')?;
+        }
+        out.write_str(",\"owed\":[\"native-exception\",\"returned-failed-close\",\"incomplete-acl\",")?;
         out.write_str("\"unforced-native-bounds\",\"before-item-stop\",\"second-executable-creator\",")?;
         out.write_str("\"uifail-no-prompt-denial\"],\"atomicProviderFdAttestation\":false}\n")
     }
@@ -843,8 +941,15 @@ impl Cohort {
         // A report's provisional 'completed' is not its write/flush result;
         // actual outer process return and strict receipt validation remain due.
         let buffer = self.output.borrow();
-        let fallback = b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-common-cohort\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n";
-        let bytes = if self.report_built { buffer.as_bytes() } else { &fallback[..] };
+        let fallback: &[u8] = match self.terminal {
+            Case::StopBeforeAdd => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-stop-before-add\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
+            Case::StopBeforeLookup => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-stop-before-lookup\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
+            _ => b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-common-cohort\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n",
+        };
+        let fallback = if self.pair_enabled {
+            b"MRK_WRAPPING_PRIVATE_RESULT={\"schemaVersion\":1,\"scope\":\"wrapping-private-creator-pair\",\"provisional\":true,\"outerFinalityRequired\":true,\"reportUnavailable\":true}\n".as_slice()
+        } else { fallback };
+        let bytes = if self.report_built { buffer.as_bytes() } else { fallback };
         let mut stdout = io::stdout().lock();
         self.report_written.entered = true;
         self.report_write_original = Some(IoWrite::write_all(&mut stdout, bytes));
@@ -864,14 +969,16 @@ impl Cohort {
 // task, path, clock or permission is acquired from it and no getter is exposed.
 // It keeps failed/panicked originals reachable after the test thread returns;
 // an outer timeout/process exit still cannot authorize fixture deletion.
-#[test]
-fn private_keychain_cohort() {
-    let entry = Instant::now(); // FIRST action: ONE cutoff covers every later step.
+fn run_registered_cohort(entry: Instant, terminal: Case) { run_registered_variant(entry, terminal, false); }
+fn run_registered_variant(entry: Instant, terminal: Case, pair_enabled: bool) {
     static CLAIMED: AtomicBool = AtomicBool::new(false);
     #[used]
     static ORIGINAL: AtomicPtr<ManuallyDrop<Cohort>> = AtomicPtr::new(std::ptr::null_mut());
     assert!(!CLAIMED.swap(true, Ordering::AcqRel), "private cohort is single-use");
-    let pointer = Box::into_raw(Box::new(ManuallyDrop::new(Cohort::empty(entry))));
+    let mut original = Cohort::empty(entry);
+    original.terminal = terminal; // A source-fixed test entry, never ambient input.
+    original.pair_enabled = pair_enabled;
+    let pointer = Box::into_raw(Box::new(ManuallyDrop::new(original)));
     ORIGINAL.store(pointer, Ordering::Release);
     // SAFETY: CLAIMED permits one caller only; no other code reads this private
     // slot. The allocation remains reachable and is never implicitly dropped.
@@ -881,6 +988,10 @@ fn private_keychain_cohort() {
         Ok(completed) => { cohort.run_returned = true; cohort.cohort_completed = completed; },
         Err(payload) => { cohort.panic = Some(payload); cohort.clock.poisoned = true; },
     }
+    match catch_unwind(AssertUnwindSafe(|| cohort.finish_failed_pair_controls())) {
+        Ok(()) => {}, Err(payload) => { cohort.report_panic = Some(payload); cohort.clock.poisoned = true; }
+    }
+    if cohort.report_panic.is_some() { assert!(false, "private pair control cleanup uncertain; original retained"); }
     match catch_unwind(AssertUnwindSafe(|| {
         cohort.report_built = cohort.build_report().is_ok();
         cohort.write_report();
@@ -896,4 +1007,26 @@ fn private_keychain_cohort() {
         && cohort.report_written.returned && cohort.report_written.actual == 1
         && cohort.report_flushed.returned && cohort.report_flushed.actual == 1 && cohort.clock.live();
     assert!(complete, "private cohort incomplete; retain originals and fixture");
+}
+
+#[test]
+fn private_keychain_cohort() {
+    let entry = Instant::now(); // FIRST action: ONE cutoff covers every later step.
+    run_registered_cohort(entry, Case::StopAfterAdd);
+}
+#[test]
+fn private_keychain_stop_before_add() {
+    let entry = Instant::now(); // Its separately registered original, not a reset.
+    run_registered_cohort(entry, Case::StopBeforeAdd);
+}
+#[test]
+fn private_keychain_stop_before_lookup() {
+    let entry = Instant::now(); // Its separately registered original, not a reset.
+    run_registered_cohort(entry, Case::StopBeforeLookup);
+}
+
+#[test]
+fn private_keychain_creator_pair() {
+    let entry = Instant::now(); // FIRST action: same original45s covers peer wait and retirement.
+    run_registered_variant(entry, Case::StopAfterAdd, true);
 }

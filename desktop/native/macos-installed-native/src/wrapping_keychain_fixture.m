@@ -922,3 +922,348 @@ uint32_t mrk_wrapping_fixture_free(void *frame) {
     return 1; // Actual own-allocation retirement, not provider erasure/finality.
 }
 #undef MRK_Q_SCALAR
+
+
+// Fixed creator/reader control book only. No Keychain operation below, and no
+// supplied pathname. The separate existing namespace frame is fully charged;
+// it is not hidden inside this <=4KiB wire/descriptor book.
+#include <dirent.h>
+#include <stdio.h>
+_Static_assert(RENAME_EXCL == 0x00000004, "Python fixed Darwin exclusive-rename ABI");
+_Static_assert(errSecInteractionNotAllowed == -25308, "Rust fixed UIFail denial OSStatus");
+#define MRK_QP_FDS 6u
+#define MRK_QP_RESULT_BYTES 1912u
+// I/O aggregate: entered/returned/lastKind/lastReturned/lastResult/lastErrno/
+// firstFailureKind/firstFailureResult/firstFailureErrno. Roster retains actual
+// fdopendir transfer, void rewind return, and entry/end calls separately.
+typedef struct { int64_t header[32], fds[MRK_QP_FDS][26], acl[21], native[9], io[9], roster[12]; } MRKQPResult;
+_Static_assert(sizeof(MRKQPResult) == MRK_QP_RESULT_BYTES, "private pair scalar ABI");
+typedef uint32_t (*MRKQPAdmission)(void *, uint32_t);
+typedef struct {
+    MRKQPResult result;
+    MRKWrappingFrame *ns;
+    MRKQPAdmission admission; void *context;
+    int fds[MRK_QP_FDS], consumed_fds[MRK_QP_FDS]; uint32_t close_spent[MRK_QP_FDS];
+    struct stat pins[MRK_QP_FDS];
+    DIR *roster;
+    uint8_t request[64], ready[128], acknowledgement[48], scratch[128];
+    uint32_t active, free_spent;
+} MRKQPair;
+_Static_assert(sizeof(MRKQPair) <= 4096, "private pair finite control-book ceiling");
+static const char *mrk_qp_names[MRK_QP_FDS] = {".", "request", "ready.next", "ready", "reader-settled", "."};
+static uint16_t mrk_qp_u16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)p[1] << 8; }
+static uint32_t mrk_qp_u32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint64_t mrk_qp_u64(const uint8_t *p) { return (uint64_t)mrk_qp_u32(p) | (uint64_t)mrk_qp_u32(p + 4) << 32; }
+static int mrk_qp_zero(const uint8_t *p, size_t count) { for (size_t i = 0; i < count; ++i) if (p[i]) return 0; return 1; }
+static int mrk_qp_fail(MRKQPair *p) { p->result.header[4] = 1; return 0; }
+static int mrk_qp_unknown(MRKQPair *p) { p->result.header[5] = 1; return mrk_qp_fail(p); }
+static int mrk_qp_admit(MRKQPair *p, uint32_t checkpoint) {
+    if (p->result.header[5] || !p->admission || !p->context) return 0;
+    uint32_t reply = p->admission(p->context, checkpoint);
+    if (reply == MRK_W_CUTOFF) {
+        p->result.header[6] = p->result.header[4] = 1;
+        return checkpoint == MRK_W_BEFORE_RELEASE;
+    }
+    if (reply != MRK_W_CONTINUE) return mrk_qp_unknown(p);
+    return !p->result.header[4] || checkpoint == MRK_W_BEFORE_RELEASE;
+}
+// Closed syscall kinds, finite cumulative observations; no arbitrary command.
+static int mrk_qp_io_enter(MRKQPair *p, uint32_t kind) {
+    int64_t *r = p->result.io;
+    if (r[0] != r[1] || r[0] >= 8192 || !mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return mrk_qp_fail(p);
+    ++r[0]; r[2] = kind; r[3] = 0; r[4] = r[5] = 0; return 1;
+}
+static int mrk_qp_io_return(MRKQPair *p, int64_t result, int error, int accepted) {
+    int64_t *r = p->result.io; ++r[1]; r[3] = 1; r[4] = result; r[5] = error;
+    if (!accepted) { if (!r[6]) { r[6] = r[2]; r[7] = result; r[8] = error; } return mrk_qp_fail(p); }
+    return mrk_qp_admit(p, MRK_W_AFTER_CALL);
+}
+static int mrk_qp_stat(MRKQPair *p, int fd, const char *name, struct stat *out, int absent) {
+    if (!mrk_qp_io_enter(p, name ? 2 : 1)) return 0;
+    memset(out, 0, sizeof(*out)); errno = 0;
+    int rc = name ? fstatat(fd, name, out, AT_SYMLINK_NOFOLLOW) : fstat(fd, out); int saved = errno;
+    return mrk_qp_io_return(p, rc, saved, absent ? rc == -1 && saved == ENOENT : rc == 0);
+}
+static uint32_t mrk_qp_acl_admission(void *context, const MRKWrappingResult *raw, uint32_t checkpoint) {
+    MRKQPair *p = context;
+    if (!p || raw != &p->ns->result) return MRK_W_RETAIN;
+    if (!mrk_qp_admit(p, checkpoint)) return p->result.header[6] && !p->result.header[5] ? MRK_W_CUTOFF : MRK_W_RETAIN;
+    return p->result.header[6] ? MRK_W_CUTOFF : MRK_W_CONTINUE;
+}
+static int mrk_qp_same(const struct stat *a, const struct stat *b, int times) {
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode
+        && a->st_uid == b->st_uid && a->st_gid == b->st_gid && a->st_nlink == b->st_nlink
+        && (!times || (a->st_size == b->st_size && a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec
+            && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec
+            && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec));
+}
+static int mrk_qp_shape(MRKQPair *p, const struct stat *s, int directory, size_t length) {
+    return (directory ? S_ISDIR(s->st_mode) && (s->st_mode & 07777) == 0700 && s->st_nlink == 2
+                      : S_ISREG(s->st_mode) && (s->st_mode & 07777) == 0600 && s->st_nlink == 1 && s->st_size == (off_t)length)
+        && s->st_uid == getuid() && s->st_uid == geteuid() && s->st_uid != 0
+        && s->st_gid == getgid() && s->st_gid == getegid() ? 1 : mrk_qp_fail(p);
+}
+static int mrk_qp_acl(MRKQPair *p, int fd, int directory, const struct stat *pin) {
+    MRKWrappingFd slot = {0}; slot.fd = fd; slot.consumed_number = -1; slot.directory = directory;
+    slot.uid_rule = 1; slot.identity_ready = 1; slot.identity = mrk_w_identity(pin);
+    if (!mrk_w_filesystem(p->ns, &slot) || !mrk_w_acl_snapshot(p->ns, &slot)) {
+        if (p->ns->result.flags & MRK_W_UNKNOWN) return mrk_qp_unknown(p);
+        return mrk_qp_fail(p);
+    }
+    p->result.header[28] = 1;
+    return 1;
+}
+static int mrk_qp_root(MRKQPair *p) {
+    if (!mrk_qp_admit(p, MRK_W_BEFORE_CALL) || p->fds[0] < 0) return 0;
+    struct stat held, named;
+    if (!mrk_qp_stat(p, p->fds[0], NULL, &held, 0) || !mrk_qp_stat(p, p->fds[0], ".", &named, 0)
+        || !mrk_qp_same(&held, &p->pins[0], 0) || !mrk_qp_same(&held, &named, 0)
+        || !mrk_qp_shape(p, &held, 1, 0) || !mrk_qp_acl(p, p->fds[0], 1, &held)) return mrk_qp_fail(p);
+    // Directory size/times legitimately change at the fixed file publications;
+    // its actual device/inode/type/mode/uid/gid/link count never changes.
+    if (!mrk_qp_stat(p, p->fds[0], NULL, &named, 0) || !mrk_qp_same(&held, &named, 0)) return mrk_qp_fail(p);
+    return mrk_qp_admit(p, MRK_W_AFTER_CALL);
+}
+static int mrk_qp_open(MRKQPair *p, uint32_t i, int flags) {
+    if (i >= MRK_QP_FDS) return mrk_qp_fail(p);
+    int64_t *r = p->result.fds[i];
+    if (r[1] || p->fds[i] >= 0 || !mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return mrk_qp_fail(p);
+    r[0] = r[1] = 1;
+    errno = 0;
+    p->fds[i] = i == 0 ? open(".", flags) : openat(p->fds[0], mrk_qp_names[i], flags, 0600);
+    r[4] = errno; r[2] = 1; r[3] = p->fds[i] >= 0;
+    if (!r[3]) return mrk_qp_fail(p);
+    return mrk_qp_admit(p, MRK_W_AFTER_CALL);
+}
+static int mrk_qp_close(MRKQPair *p, uint32_t i) {
+    int64_t *r = p->result.fds[i];
+    if (!r[3]) return !r[1] || r[2];
+    if (p->close_spent[i]) return r[18] && r[19];
+    if (!mrk_qp_admit(p, MRK_W_BEFORE_RELEASE)) return 0;
+    int original = p->fds[i]; p->consumed_fds[i] = original;
+    p->fds[i] = -1; p->close_spent[i] = 1; r[17] = 1;
+    errno = 0; int rc;
+    if (i == 5 && p->roster) rc = closedir(p->roster);
+    else rc = close(original);
+    int saved = errno; r[20] = rc; r[21] = saved; r[18] = 1; r[19] = rc == 0;
+    if (rc) return mrk_qp_unknown(p); // One original close; NEVER retry.
+    if (i == 5) p->roster = NULL; // Failed closedir retains the original pointer.
+    return 1;
+}
+static int mrk_qp_record_pin(MRKQPair *p, uint32_t i, size_t length, int original) {
+    struct stat held, named;
+    if (!mrk_qp_root(p) || !mrk_qp_stat(p, p->fds[i], NULL, &held, 0)
+        || !mrk_qp_stat(p, p->fds[0], mrk_qp_names[i], &named, 0)
+        || !mrk_qp_shape(p, &held, 0, length) || !mrk_qp_same(&held, &named, 1)
+        || (original && !mrk_qp_same(&held, &p->pins[i], 1)) || !mrk_qp_acl(p, p->fds[i], 0, &held)) return mrk_qp_fail(p);
+    if (!mrk_qp_stat(p, p->fds[i], NULL, &named, 0) || !mrk_qp_same(&held, &named, 1)) return mrk_qp_fail(p);
+    if (!original) p->pins[i] = held;
+    return 1;
+}
+static int mrk_qp_read(MRKQPair *p, uint32_t i, uint8_t *out, size_t length) {
+    if (!mrk_qp_record_pin(p, i, length, 0) || !mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return 0;
+    int64_t *r = p->result.fds[i]; r[5] += 1;
+    errno = 0; ssize_t got = pread(p->fds[i], out, length, 0); int saved = errno;
+    r[6] += 1; r[7] = got; r[8] = saved;
+    if (got != (ssize_t)length) return mrk_qp_fail(p); // No partial/EINTR retry.
+    uint8_t extra = 0;
+    if (!mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return 0;
+    r[22] += 1; errno = 0; got = pread(p->fds[i], &extra, 1, (off_t)length); saved = errno;
+    r[23] += 1; r[24] = got; r[25] = saved;
+    if (got != 0) return mrk_qp_fail(p);
+    return mrk_qp_record_pin(p, i, length, 1) && mrk_qp_admit(p, MRK_W_AFTER_CALL);
+}
+static int mrk_qp_roster(MRKQPair *p, int state) {
+    if (!mrk_qp_root(p)) return 0;
+    int64_t *r = p->result.roster;
+    if (!p->roster) {
+        struct stat held;
+        if (!mrk_qp_open(p, 5, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            || !mrk_qp_stat(p, p->fds[5], NULL, &held, 0) || !mrk_qp_same(&held, &p->pins[0], 0)
+            || !mrk_qp_acl(p, p->fds[5], 1, &held) || !mrk_qp_io_enter(p, 3)) return mrk_qp_fail(p);
+        r[0] = 1; errno = 0; p->roster = fdopendir(p->fds[5]); int saved = errno;
+        r[1] = 1; r[2] = p->roster != NULL; r[3] = saved; r[4] = r[2];
+        if (!mrk_qp_io_return(p, r[2], saved, r[2])) return 0;
+    }
+    if (!mrk_qp_io_enter(p, 4)) return 0;
+    ++r[5]; errno = 0; rewinddir(p->roster); int saved = errno; ++r[6];
+    if (!mrk_qp_io_return(p, 0, saved, saved == 0)) return 0;
+    uint32_t seen = 0, count = 0, entries = 0;
+    for (;;) {
+        if (!mrk_qp_io_enter(p, 5)) return 0;
+        ++r[7]; errno = 0; struct dirent *entry = readdir(p->roster); saved = errno; ++r[8];
+        r[10] = entry != NULL; r[11] = saved;
+        if (!mrk_qp_io_return(p, entry != NULL, saved, saved == 0)) return 0;
+        if (!entry) { ++r[9]; break; }
+        if (++entries > (state == 2 ? 6u : 5u)) return mrk_qp_fail(p); // Includes dot/dotdot; finite enumeration.
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++count > (state == 2 ? 4u : 3u)) return mrk_qp_fail(p);
+        uint32_t bit = !strcmp(entry->d_name, "request") ? 1 : !strcmp(entry->d_name, "ready") ? 2
+            : !strcmp(entry->d_name, "reader-settled.next") ? 4 : !strcmp(entry->d_name, "reader-settled") ? 8 : 0;
+        if (!bit || seen & bit) return mrk_qp_fail(p); seen |= bit;
+    }
+    ++p->result.header[20];
+    // A live no-overwrite rename can be seen once under each spelling during
+    // readdir. Only the fixed staging/final pair is allowed in the waiting
+    // state; actual grant consumption still requires a NEW exact final roster
+    // with staging absent. No unexpected name/alias becomes an admitted grant.
+    if (state == 0 ? seen != 1 : state == 1 ? seen != 3 : state == 2 ? (seen != 3 && seen != 7 && seen != 11 && seen != 15) : seen != 11)
+        return mrk_qp_fail(p);
+    return mrk_qp_root(p);
+}
+static int mrk_qp_wire(MRKQPair *p, const uint8_t *bytes, size_t length, uint32_t role) {
+    const char *magic = role == 0 ? "MRKQPR01" : role == 1 ? "MRKQPD01" : "MRKQPA01";
+    if (length != (role == 0 ? 64u : role == 1 ? 128u : 48u) || memcmp(bytes, magic, 8)
+        || mrk_qp_u16(bytes + 8) != 1 || mrk_qp_u16(bytes + 10) != (role == 0 ? 2 : role)
+        || !mrk_qp_zero(bytes + 12, 4) || !mrk_q_nonzero(bytes + 16, 16)
+        || (role && memcmp(bytes + 16, p->request + 16, 16))) return mrk_qp_fail(p);
+    if (role == 0) {
+        struct stat *s = &p->pins[0];
+        return mrk_qp_u64(bytes + 32) == (uint64_t)(uint32_t)s->st_dev && mrk_qp_u64(bytes + 40) == s->st_ino
+            && mrk_qp_u32(bytes + 48) == s->st_uid && mrk_qp_u32(bytes + 52) == s->st_gid
+            && mrk_qp_zero(bytes + 56, 8) ? 1 : mrk_qp_fail(p);
+    }
+    if (role == 1) {
+        return mrk_qp_u32(bytes + 32) == 1 && mrk_qp_u32(bytes + 36) == 56
+            && mrk_qp_u64(bytes + 40) <= UINT32_MAX && mrk_qp_u64(bytes + 48) != 0
+            && mrk_qp_u32(bytes + 56) == (S_IFDIR | 0700) && mrk_qp_u32(bytes + 60) == getuid()
+            && mrk_qp_u32(bytes + 64) == getgid() && mrk_qp_zero(bytes + 68, 4)
+            && mrk_q_nonzero(bytes + 72, 16) && mrk_q_nonzero(bytes + 88, 16)
+            && mrk_q_nonzero(bytes + 104, 16) && memcmp(bytes + 88, bytes + 104, 16)
+            && mrk_qp_zero(bytes + 120, 8) ? 1 : mrk_qp_fail(p);
+    }
+    return mrk_qp_u32(bytes + 32) == 1 && mrk_qp_zero(bytes + 36, 12) ? 1 : mrk_qp_fail(p);
+}
+static int mrk_qp_initialize(MRKQPair *p, uint8_t *out) {
+    if (p->result.header[3] || !mrk_qp_open(p, 0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) return mrk_qp_fail(p);
+    if (!mrk_qp_stat(p, p->fds[0], NULL, &p->pins[0], 0) || !mrk_qp_shape(p, &p->pins[0], 1, 0)) return mrk_qp_fail(p);
+    uint32_t uid = 0;
+    if (!mrk_qp_io_enter(p, 6)) return 0;
+    errno = 0; int rc = mrk_user(&uid); int saved = errno;
+    if (!mrk_qp_io_return(p, rc, saved, rc == 0 && uid == getuid())) return 0;
+    p->ns->uid = uid;
+    if (!mrk_w_user_uuids(p->ns) || !mrk_qp_roster(p, p->result.header[2] == 1 ? 0 : 1)
+        || !mrk_qp_open(p, 1, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        || !mrk_qp_read(p, 1, p->request, 64) || !mrk_qp_wire(p, p->request, 64, 0)) return mrk_qp_fail(p);
+    memcpy(out, p->request, 64); p->result.header[9] = p->result.header[26] = 1; p->result.header[3] = 1;
+    return 1;
+}
+static int mrk_qp_publish_ready(MRKQPair *p, const uint8_t *input) {
+    if (p->result.header[2] != 1 || p->result.header[3] != 1 || !mrk_qp_wire(p, input, 128, 1)
+        || !mrk_qp_roster(p, 0) || !mrk_qp_open(p, 2, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) return mrk_qp_fail(p);
+    int64_t *r = p->result.fds[2];
+    if (!mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return 0;
+    r[9] = 1; errno = 0; ssize_t written = pwrite(p->fds[2], input, 128, 0); int saved = errno;
+    r[10] = 1; r[11] = written; r[12] = saved;
+    if (written != 128 || !mrk_qp_record_pin(p, 2, 128, 0) || !mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return mrk_qp_fail(p);
+    r[13] = 1; errno = 0; int rc = fsync(p->fds[2]); saved = errno;
+    r[14] = 1; r[15] = rc; r[16] = saved;
+    if (rc || !mrk_qp_record_pin(p, 2, 128, 1) || !mrk_qp_close(p, 2) || !mrk_qp_root(p)) return mrk_qp_fail(p);
+    struct stat absent;
+    if (!mrk_qp_stat(p, p->fds[0], "ready", &absent, 1) || !mrk_qp_admit(p, MRK_W_BEFORE_CALL)) return mrk_qp_fail(p);
+    p->result.header[14] = p->result.header[16] = 1; // May be visible even on an interrupted rename.
+    errno = 0; rc = renameatx_np(p->fds[0], "ready.next", p->fds[0], "ready", RENAME_EXCL); saved = errno;
+    p->result.header[15] = 1; p->result.header[18] = rc; p->result.header[19] = saved;
+    if (rc) return mrk_qp_unknown(p);
+    p->result.header[17] = p->result.header[10] = 1;
+    // Publication can wake main before this call's readback finishes. Main may
+    // already have settled its reader and staged/published the acknowledgement;
+    // allow only that fixed forward state, never arbitrary directory entries.
+    if (!mrk_qp_admit(p, MRK_W_AFTER_CALL) || !mrk_qp_roster(p, 2)
+        || !mrk_qp_open(p, 3, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        || !mrk_qp_read(p, 3, p->ready, 128) || memcmp(input, p->ready, 128)
+        || !mrk_qp_same(&p->pins[2], &p->pins[3], 0)) return mrk_qp_fail(p);
+    p->result.header[3] = 2; return 1;
+}
+static int mrk_qp_read_ready(MRKQPair *p, uint8_t *out) {
+    if (p->result.header[2] != 2 || p->result.header[3] != 1 || !mrk_qp_roster(p, 1)
+        || !mrk_qp_open(p, 3, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        || !mrk_qp_read(p, 3, p->ready, 128) || !mrk_qp_wire(p, p->ready, 128, 1)) return mrk_qp_fail(p);
+    memcpy(out, p->ready, 128); p->result.header[11] = 1; p->result.header[3] = 2; return 1;
+}
+static int mrk_qp_poll_settled(MRKQPair *p) {
+    if (p->result.header[2] != 1 || p->result.header[3] != 2 || p->result.header[21] >= 128
+        || !mrk_qp_roster(p, 2)) return mrk_qp_fail(p);
+    struct stat observed;
+    if (!mrk_qp_io_enter(p, 2)) return 0;
+    ++p->result.header[21];
+    errno = 0; int rc = fstatat(p->fds[0], "reader-settled", &observed, AT_SYMLINK_NOFOLLOW); int saved = errno;
+    ++p->result.header[22]; p->result.header[23] = rc; p->result.header[24] = saved;
+    if (!mrk_qp_io_return(p, rc, saved, rc == 0 || (rc == -1 && saved == ENOENT))) return 0;
+    if (rc == -1 && saved == ENOENT) return 2; // Only absence is pending; not a grant.
+    if (rc || !mrk_qp_roster(p, 3) || !mrk_qp_open(p, 4, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        || !mrk_qp_read(p, 4, p->acknowledgement, 48) || !mrk_qp_wire(p, p->acknowledgement, 48, 2)) return mrk_qp_fail(p);
+    p->result.header[12] = 1; p->result.header[3] = 3; return 1;
+}
+static int mrk_qp_finish(MRKQPair *p) {
+    if (p->result.header[27] || p->result.header[5] || !mrk_w_acl_settled(p->ns)) return mrk_qp_fail(p);
+    p->result.header[27] = 1; // Independently registered one close pass, even after known failure.
+    if (!p->result.header[4]) {
+        int valid = p->result.header[2] == 1 ? p->result.header[3] == 3 && mrk_qp_roster(p, 3)
+            : p->result.header[3] == 2 && mrk_qp_roster(p, 1);
+        if (!valid) mrk_qp_fail(p);
+        for (uint32_t i = 1; !p->result.header[4] && i < MRK_QP_FDS; ++i) {
+            if (p->fds[i] < 0 || i == 5) continue;
+            size_t length = i == 1 ? 64 : i == 4 ? 48 : 128;
+            if (!mrk_qp_record_pin(p, i, length, 1)) mrk_qp_fail(p);
+        }
+    }
+    // No further filesystem operation on a failed path: only known ORIGINAL
+    // descriptor releases. This cannot erase failure, grant a peer, or retire a
+    // Keychain. A failed/unknown close is spent and leaves all other originals.
+    for (uint32_t left = MRK_QP_FDS; left; --left) if (!mrk_qp_close(p, left - 1)) return 0;
+    if (!mrk_w_acl_settled(p->ns)) return mrk_qp_unknown(p);
+    p->result.header[13] = 1; p->result.header[3] = 4; return 1;
+}
+static void mrk_qp_snapshot(MRKQPair *p) {
+    if (p->ns->result.flags & MRK_W_UNKNOWN) mrk_qp_unknown(p);
+    if (p->ns->result.flags & MRK_W_STOP) p->result.header[4] = p->result.header[6] = 1;
+    const MRKWrappingAcl *a = &p->ns->result.acl; const MRKWrappingNative *n = &p->ns->result.native;
+    int64_t acl[21] = {a->snapshots_entered,a->snapshots_returned,a->snapshots_admitted,a->entries,
+        a->filesec_init_entered,a->filesec_init_returned,a->filesec_acquired,a->filesec_free_entered,a->filesec_free_returned,
+        a->acl_export_entered,a->acl_export_returned,a->acl_acquired,a->acl_free_entered,a->acl_free_returned,a->acl_freed,
+        a->qualifier_entered,a->qualifier_returned,a->qualifier_acquired,a->qualifier_free_entered,a->qualifier_free_returned,a->qualifier_freed};
+    int64_t native[9] = {n->entered,n->returned,n->last_call,n->last_returned,n->last_result,n->last_errno,n->failure_call,n->failure_result,n->failure_errno};
+    memcpy(p->result.acl, acl, sizeof(acl)); memcpy(p->result.native, native, sizeof(native));
+    p->result.header[8] = !p->admission && !p->context && !p->ns->admission && !p->ns->context;
+}
+uint32_t mrk_wrapping_pair_abi(void) { return 0x51500101u; }
+size_t mrk_wrapping_pair_frame_bytes(void) { return sizeof(MRKQPair); }
+size_t mrk_wrapping_pair_acl_frame_bytes(void) { return sizeof(MRKWrappingFrame); }
+void *mrk_wrapping_pair_new(uint32_t role) {
+    if (role != 1 && role != 2) return NULL;
+    MRKQPair *p = calloc(1, sizeof(*p)); if (!p) return NULL;
+    p->ns = mrk_wrapping_frame_new(); if (!p->ns) { free(p); return NULL; }
+    for (uint32_t i = 0; i < MRK_QP_FDS; ++i) p->fds[i] = p->consumed_fds[i] = -1;
+    p->result.header[0] = 1; p->result.header[1] = sizeof(MRKQPResult); p->result.header[2] = role;
+    p->result.header[25] = sizeof(MRKWrappingFrame); p->ns->result.flags = 0; p->ns->result.operation = MRK_W_LOOKUP;
+    return p;
+}
+uint32_t mrk_wrapping_pair_step(void *frame, uint32_t action, const uint8_t *input, size_t input_bytes,
+    uint8_t *output, size_t output_bytes, MRKQPAdmission admission, void *context, MRKQPResult *out, size_t result_bytes) {
+    if (!frame || !admission || !context || !out || result_bytes != sizeof(MRKQPResult)) return 0;
+    MRKQPair *p = frame; if (p->active || p->free_spent) return 0;
+    p->active = 1; p->admission = admission; p->context = context;
+    p->ns->admission = mrk_qp_acl_admission; p->ns->context = p; uint32_t answer = 0;
+    @try {
+        if (action == 1 && !input && !input_bytes && output && output_bytes == 64) answer = mrk_qp_initialize(p, output);
+        else if (action == 2 && input && input_bytes == 128 && !output && !output_bytes) answer = mrk_qp_publish_ready(p, input);
+        else if (action == 3 && !input && !input_bytes && output && output_bytes == 128) answer = mrk_qp_read_ready(p, output);
+        else if (action == 4 && !input && !input_bytes && !output && !output_bytes) answer = mrk_qp_poll_settled(p);
+        else if (action == 5 && !input && !input_bytes && !output && !output_bytes) answer = mrk_qp_finish(p);
+        else mrk_qp_fail(p);
+    } @catch (NSException *exception) { (void)exception; p->result.header[7] = 1; mrk_qp_unknown(p); }
+    p->admission = NULL; p->context = NULL; p->ns->admission = NULL; p->ns->context = NULL; p->active = 0;
+    mrk_qp_snapshot(p); *out = p->result;
+    return p->result.header[4] || p->result.header[5] || p->result.header[6] || p->result.header[7] ? 0 : answer;
+}
+uint32_t mrk_wrapping_pair_free(void *frame) {
+    if (!frame) return 0; MRKQPair *p = frame;
+    if (p->active || p->free_spent || !p->result.header[13] || p->result.header[5]
+        || !p->result.header[8] || p->result.io[0] != p->result.io[1] || !mrk_w_acl_settled(p->ns)) return 0;
+    for (uint32_t i = 0; i < MRK_QP_FDS; ++i) if (p->fds[i] >= 0 || (p->result.fds[i][3] && !p->result.fds[i][19])) return 0;
+    p->free_spent = 1;
+    // Same original namespace/ACL frame. No provider frame, pointer or FD retry.
+    mrk_w_wipe(p->ns, sizeof(*p->ns)); free(p->ns); p->ns = NULL;
+    mrk_w_wipe(p, sizeof(*p)); free(p); return 1;
+}

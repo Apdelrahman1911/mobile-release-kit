@@ -13,3 +13,10 @@ installed-observation = []
 
 [build-dependencies]
 cc = "=1.4.6"
+
+# Explicit nonshipping peer only. No default app/package target includes it.
+[[example]]
+name = "wrapping_peer_reader"
+path = "examples/wrapping_peer_reader.rs"
+test = false
+required-features = ["installed-observation"]

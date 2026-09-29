@@ -4937,7 +4937,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                 "always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'",
         }
         private = {
-            "Compile only native wrapping variants and run the one owned private cohort":
+            "Compile native wrapping variants once and run fixed cohorts and creator-reader pair":
                 "success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'",
             "Preserve bounded private-cohort public facts and compiler-only diagnostics":
                 "always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success'",
@@ -5003,11 +5003,13 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "  aqua:\n"
             "    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-aqua'\n"
             "    name: aqua-${{ matrix.scope }}\n"
+            "    permissions:\n"
+            "      contents: read\n"
             "    strategy:\n"
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
-            "          - project-fields-android-inputs\n"
+            "          - wrapping-keychain-private\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
         )
@@ -5028,7 +5030,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow.count("      - name: " + compiler + "\n"), 1)
         self.assertEqual(steps[compiler].count("cargo test --locked"), 1)
         self.assertEqual(steps[compiler].count("npm run build"), 1)
-        private = steps["Compile only native wrapping variants and run the one owned private cohort"]
+        private = steps["Compile native wrapping variants once and run fixed cohorts and creator-reader pair"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'", private)
         for required in (
             'for role, features, flags in (("normal", [], ""), ("observer", ["installed-observation"], ""),\n'
@@ -5052,9 +5054,11 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertIn("name: " + artifact_prefix + "wrapping-keychain-private", private_upload)
         resolved = [artifact_prefix + scope for scope in ("project-fields-android-inputs", "wrapping-keychain-private")]
         self.assertEqual(len(set(resolved)), 2)
-        private_leaves = ["source-inventory.json", "wrapping-native.receipt.json", "wrapping-native.report.json"]
+        private_leaves = ["source-inventory.json", "wrapping-native.receipt.json", "wrapping-native.report.json",
+                          "wrapping-before-add.report.json", "wrapping-before-lookup.report.json", "wrapping-creator.report.json",
+                          "wrapping-reader.report.json", "wrapping-pair.receipt.json", "wrapping-codec.receipt.json"]
         private_leaves += ["wrapping-" + role + "-build." + suffix
-                           for role in ("normal", "observer", "qualification")
+                           for role in ("codec", "normal", "observer", "qualification", "reader")
                            for suffix in ("jsonl", "stderr", "status")]
         self.assertEqual([line.strip() for line in private_upload.splitlines()
                           if "${{ steps.work.outputs.root }}/" in line],
@@ -5136,6 +5140,658 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in xcode.splitlines() if line.strip().startswith("if:")],
                          ["if: success() && env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic'"])
 
+
+class BeforeItemStopWorkflowTests(unittest.TestCase):
+    """Closed DATA models only; never native receipts, fixture actions or CI passes."""
+
+    @staticmethod
+    def functions():
+        import ast
+        import re
+        import textwrap
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        module = ast.parse(textwrap.dedent(body))
+        names = {"pairs", "parse", "exact_keys", "ints", "settled_raw", "cohort_profile",
+                 "admit_before_item_terminal", "public_report", "admit_native_report"}
+        bindings = {"name", "creator_entry", "case_names", "native_cohorts"}
+        selected = []
+        for node in module.body:
+            if isinstance(node, ast.FunctionDef) and node.name in names:
+                selected.append(node)
+            elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and isinstance(node.targets[0], ast.Name) and node.targets[0].id in bindings):
+                # These are source-fixed literal/tuple references, not executable
+                # workflow preparation or a native invocation.
+                if any(not isinstance(child, (ast.Tuple, ast.Constant, ast.Name, ast.Load))
+                       for child in ast.walk(node.value)):
+                    raise AssertionError("private profile must remain literal DATA")
+                selected.append(node)
+        if {node.name for node in selected if isinstance(node, ast.FunctionDef)} != names:
+            raise AssertionError("exact pure validator functions required")
+        namespace = {"json": json, "re": re}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "<private-report-DATA-only>", "exec"), namespace)
+        return namespace
+
+    @staticmethod
+    def terminal_model(terminal):
+        """Small deliberately modelled DTO, not observed Security/CF/FD output."""
+        phase, operation = (10, 1) if terminal == "StopBeforeAdd" else (11, 2)
+        calls = [[value, 1, 1, 0] for value in ((4, 5, 6, 8, 9) if operation == 1 else (4, 5, 6))]
+        raw = {
+            "header": [2, operation, 14, 0, 16, phase, 229, 0, 3, 2, len(calls), 0, 1, 1, 6, 3, 3, 3],
+            "references": [[1, 1, 1, 1, 1, 1], [1, 0, 0, 0, 0, 0]], "calls": calls,
+            "descriptors": [[1, 1, 1, 1, 0, 1, 1, 1, 0, 0] for _ in range(4)]
+                           + [[1, 0, 0, 0, 0, 0, 0, 0, 0, 0] for _ in range(2)],
+            "acl": [7, 7, 7, 0, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "native": [1, 1, 3, 1, 0, 0, 0, 0, 0],
+        }
+        case = {"case": terminal, "raw": raw, "selection": [1, 1, 1, 1, 0, 1],
+                "acknowledged": False, "scopedValuePresent": False, "comparison": None,
+                "comparisonRefused": False, "frameRetired": True, "retainedNativeBytes": 0,
+                "expected": True, "nativeReturned": True, "verified": True, "settled": True}
+        action = [1, 1, 1, 1, 0, phase, 0, 0, 0]
+        caller = {"terminalHarnessHalted": True, "terminalHarnessInvocations": 14,
+                  "retirementAdmitted": True, "stopRequested": True}
+        return case, action, caller
+
+    def test_terminal_variants_preserve_fixed_roster_and_finality(self):
+        import re
+        native = PATH.parents[2] / "desktop/native/macos-installed-native/src"
+        qualification = (native / "wrapping_keychain_qualification.rs").read_text()
+        fixture = (native / "wrapping_keychain_fixture.rs").read_text()
+        c = (native / "wrapping_keychain.m").read_text()
+        roster = qualification.split("pub const CALL_ROSTER:", 1)[1].split("const _: ()", 1)[0]
+        expected = list(self.functions()["case_names"])
+        self.assertEqual(re.findall(r"Case::([A-Za-z]+)", roster), expected)
+        for value in ("MAX_ADAPTER_INVOCATIONS: usize = 16", "HELPER_SHAPE_CHECKS: u32 = 20",
+                      "HELPER_CF_ORIGINALS: u32 = 12"):
+            self.assertIn(value, qualification)
+        for value in ("const ACTIONS: usize = 17;", "const COHORT_SECONDS: u64 = 45;",
+                      "const CALLER_OWNED_CHARGE_LIMIT: usize = 2 * 1024 * 1024;",
+                      "const PUBLIC_OUTPUT_LIMIT: usize = 128 * 1024;"):
+            self.assertIn(value, fixture)
+        call = c.split("static MRKWrappingCall *mrk_w_call(", 1)[1].split("static void mrk_w_return(", 1)[0]
+        self.assertLess(call.index("s->result.phase = phase"), call.index("mrk_w_admit(s, MRK_W_BEFORE_CALL)"))
+        self.assertLess(call.index("mrk_w_admit(s, MRK_W_BEFORE_CALL)"), call.index("call->entered = 1"))
+        callback = fixture.split("let mut admission = |checkpoint: Checkpoint, facts: &Facts|", 1)[1].split("let key =", 1)[0]
+        self.assertIn("checkpoint == Checkpoint::BeforeCall && facts.phase() == Some(phase)", callback)
+        self.assertLess(callback.index("stop.observe_before_item("), callback.index("clock.request_terminal_stop()"))
+        self.assertIn("if case.terminal_stop()", fixture)
+        self.assertIn("return self.clock.stop_requested && self.harness.as_ref().is_some_and(Harness::halted)", fixture)
+        self.assertIn("!self.acknowledged[..13].iter().all(|v| *v) || self.acknowledged[13]", fixture)
+        self.assertIn("!self.cases.iter().all(adapter_settled)", fixture)
+        self.assertIn("self.retirement_admitted = true;", fixture)
+        self.assertIn("!self.action(Action::Retire, true)", fixture)
+        self.assertIn("!self.fixture.retire_allocation()", fixture)
+        self.assertEqual(fixture.count("static CLAIMED: AtomicBool"), 1)
+        self.assertEqual(fixture.count("static ORIGINAL: AtomicPtr<ManuallyDrop<Cohort>>"), 1)
+        fallback = fixture.split("let fallback: &[u8] = match self.terminal {", 1)[1].split("\n        };", 1)[0]
+        for scope in ("wrapping-private-common-cohort", "wrapping-private-stop-before-add", "wrapping-private-stop-before-lookup"):
+            self.assertEqual(fallback.count(scope), 1)
+        self.assertEqual(fallback.count('reportUnavailable\\\":true'), 3)
+        for name, terminal in (("private_keychain_cohort", "StopAfterAdd"),
+                               ("private_keychain_stop_before_add", "StopBeforeAdd"),
+                               ("private_keychain_stop_before_lookup", "StopBeforeLookup")):
+            entry = fixture.split("fn " + name + "() {", 1)[1].split("\n}", 1)[0]
+            self.assertTrue(entry.lstrip().startswith("let entry = Instant::now();"))
+            self.assertIn("run_registered_cohort(entry, Case::" + terminal + ")", entry)
+        # Report success is still gated by actual write/flush and the same cutoff.
+        for condition in ("cohort.report_written.returned && cohort.report_written.actual == 1",
+                          "cohort.report_flushed.returned && cohort.report_flushed.actual == 1 && cohort.clock.live()"):
+            self.assertIn(condition, fixture)
+
+    def test_before_item_validator_rejects_effect_or_custody_substitution(self):
+        check = self.functions()["admit_before_item_terminal"]
+        mutations = [
+            ("after-call-not-before", lambda c, a, o: a.__setitem__(4, 1)),
+            ("wrong-phase", lambda c, a, o: a.__setitem__(5, 11 if a[5] == 10 else 10)),
+            ("invented-add-return", lambda c, a, o: a.__setitem__(6, 1)),
+            ("invented-effect", lambda c, a, o: a.__setitem__(8, 1)),
+            ("raw-effect", lambda c, a, o: c["raw"]["header"].__setitem__(3, 1)),
+            ("stop-not-observed", lambda c, a, o: c["raw"]["header"].__setitem__(6, 225)),
+            ("key-bytes", lambda c, a, o: c["raw"]["header"].__setitem__(11, 32)),
+            ("item-was-entered", lambda c, a, o: c["raw"]["calls"][0].__setitem__(0, a[5])),
+            ("candidate", lambda c, a, o: c.__setitem__("scopedValuePresent", True)),
+            ("acknowledged", lambda c, a, o: c.__setitem__("acknowledged", True)),
+            ("frame-still-retained", lambda c, a, o: c.__setitem__("retainedNativeBytes", 1)),
+            ("frame-not-retired", lambda c, a, o: c.__setitem__("frameRetired", False)),
+            ("cf-not-released", lambda c, a, o: c["raw"]["references"][0].__setitem__(5, 0)),
+            ("fd-not-closed", lambda c, a, o: c["raw"]["descriptors"][0].__setitem__(7, 0)),
+            ("acl-not-settled", lambda c, a, o: c["raw"]["acl"].__setitem__(8, 6)),
+            ("harness-not-halted", lambda c, a, o: o.__setitem__("terminalHarnessHalted", False)),
+            ("wrong-invocation-count", lambda c, a, o: o.__setitem__("terminalHarnessInvocations", 13)),
+            ("retirement-not-admitted", lambda c, a, o: o.__setitem__("retirementAdmitted", False)),
+            ("stop-not-requested", lambda c, a, o: o.__setitem__("stopRequested", False)),
+        ]
+        for terminal in ("StopBeforeAdd", "StopBeforeLookup"):
+            model = self.terminal_model(terminal)
+            self.assertIsNone(check(*model))  # DATA validation only, never native acceptance.
+            for label, mutate in mutations:
+                with self.subTest(terminal=terminal, mutation=label):
+                    changed = deepcopy(model)
+                    mutate(*changed)
+                    with self.assertRaises(ValueError):
+                        check(*changed)
+
+    def test_partial_public_reports_are_closed_and_not_native_acceptance(self):
+        functions = self.functions()
+        owed = ["native-exception", "returned-failed-close", "incomplete-acl", "unforced-native-bounds",
+                "before-item-stop", "second-executable-creator", "uifail-no-prompt-denial"]
+        for entry, scope, terminal, _ in functions["native_cohorts"]:
+            partial = {"schemaVersion": 1, "scope": scope, "provisional": True, "outerFinalityRequired": True,
+                       "reportUnavailable": True, "cases": [{"case": terminal}], "owed": owed}
+            def capture(value):
+                stdout = ("running 1 test\nMRK_WRAPPING_PRIVATE_RESULT=" + json.dumps(value) + "\n"
+                          + "test " + entry + " ... ok\n"
+                          + "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s\n").encode()
+                return CompletedProcess(["inert-model-only"], 0, stdout, b"")
+            self.assertEqual(functions["public_report"](capture(partial), entry), partial)
+            with self.assertRaises(ValueError):
+                functions["admit_native_report"](capture(partial), entry)
+            for mutated in (dict(partial, scope="INERT_NONPUBLIC_TEXT"),
+                            dict(partial, password="INERT_NONPUBLIC_TEXT"),
+                            dict(partial, cases=[{"case": "INERT_NONPUBLIC_TEXT"}])):
+                with self.assertRaises(ValueError):
+                    functions["public_report"](capture(mutated), entry)
+            with self.assertRaises(ValueError):
+                functions["public_report"](capture(partial), "unregistered-entry")
+
+    def test_one_binary_has_three_fixed_original_entries_and_public_outputs(self):
+        functions = self.functions()
+        cohorts = functions["native_cohorts"]
+        self.assertEqual(len(cohorts), 3)
+        self.assertEqual([row[2] for row in cohorts], ["StopAfterAdd", "StopBeforeAdd", "StopBeforeLookup"])
+        self.assertEqual(len({row[0] for row in cohorts}), 3)
+        self.assertEqual(len({row[3] for row in cohorts}), 3)
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        private = workflow.split("      - name: Compile native wrapping variants once and run fixed cohorts and creator-reader pair\n", 1)[1].split("      - name: ", 1)[0]
+        self.assertEqual(private.count('argv = ["cargo", "test", "--locked"'), 1)
+        self.assertIn('owner = qualification.load_owner(checkout)', private)
+        self.assertIn('for cohort in receipt["nativeCohorts"]:', private)
+        self.assertIn('result, row = invoke(cohort["reportPrefix"], [str(qualification_binary["path"]), "--exact", entry,', private)
+        self.assertIn('environ=native_env, cwd=work, timeout=90, limit=256 * 1024)', private)
+        self.assertIn('sorted([entry + ": test" for entry, _, _, _ in native_cohorts] + [creator_entry + ": test"]) if role == "qualification" else []', private)
+        self.assertIn('if observed != (fixture_symbols if role == "qualification" else set()):', private)
+        self.assertIn('receipt["nativeReportAdmitted"] = all(row["reportAdmitted"] for row in receipt["nativeCohorts"])', private)
+        self.assertLess(private.index('admit_native_report(result, entry)'), private.index('cohort["reportAdmitted"] = True'))
+        upload = workflow.split("      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n", 1)[1]
+        for _, _, _, prefix in cohorts:
+            self.assertEqual(upload.count("${{ steps.work.outputs.root }}/" + prefix + ".report.json"), 1)
+        for forbidden in ("*.json", "*.keychain", "wrapping-native.stdout", "wrapping-native.stderr"):
+            self.assertNotIn(forbidden, upload)
+
+
+class CreatorReaderUIFailDataTests(unittest.TestCase):
+    """Focused labelled DATA/state models. No native process, thread or signing.
+
+    These prove parser/latch/ownership routing, NOT macOS observations or CI.
+    The actual native two-original pair remains a separately owned verification.
+    """
+    @staticmethod
+    def functions(include_worker=False):
+        import ast
+        import hashlib
+        import math
+        import re
+        import struct
+        import textwrap
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        tree = ast.parse(textwrap.dedent(body))
+        names = {"pairs", "parse", "exact_keys", "ints", "settled_raw", "record_bytes", "owner_budget", "launch_admitted",
+                 "acknowledge_admitted", "pair_finality", "admit_peer_case", "admit_controls", "public_reader_report",
+                 "admit_reader_report", "signature_identity", "distinct_code_identities"}
+        if include_worker: names.add("creator_worker")
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        if len(nodes) != len(names): raise AssertionError("fixed pair functions missing or duplicated")
+        namespace = {"json": json, "math": math, "hashlib": hashlib, "re": re, "struct": struct,
+                     "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess),
+                     "creator_identifier": "dev.mobile-release-kit.qualification.wrapping.creator",
+                     "reader_identifier": "dev.mobile-release-kit.qualification.wrapping.reader"}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<inert-pair-data-functions>", "exec"), namespace)
+        return namespace
+
+    @staticmethod
+    def wire_data():
+        import struct
+        # Deliberately synthetic scalars; not filesystem/native observations.
+        nonce, root = b"n" * 16, (7, 19, UID, GID)
+        request = b"MRKQPR01" + struct.pack("<HHI", 1, 2, 0) + nonce + struct.pack("<QQII", *root) + bytes(8)
+        ready = (b"MRKQPD01" + struct.pack("<HHI", 1, 1, 0) + nonce
+                 + struct.pack("<IIQQIIII", 1, 56, 7, 23, 0o040700, UID, GID, 0)
+                 + b"t" * 16 + b"v" * 16 + b"g" * 16 + bytes(8))
+        ack = b"MRKQPA01" + struct.pack("<HHI", 1, 2, 0) + nonce + struct.pack("<I", 1) + bytes(12)
+        return nonce, root, {"request": request, "ready": ready, "reader-settled": ack}
+
+    def test_fixed_wire_rejects_partial_stale_replayed_wrong_role_and_reserved(self):
+        functions = self.functions(); validate = functions["record_bytes"]
+        nonce, root, records = self.wire_data()
+        for kind, data in records.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(validate(data, kind, nonce, root), data)
+                for invalid in (data[:-1], data + b"\0", bytearray(data), data[:8] + b"\2\0" + data[10:],
+                                data[:10] + b"\3\0" + data[12:], data[:12] + b"x" + data[13:],
+                                data[:16] + bytes(16) + data[32:], data[:16] + b"z" * 16 + data[32:],
+                                data[:-1] + b"x"):
+                    with self.assertRaises(ValueError): validate(invalid, kind, nonce, root)
+                with self.assertRaises(ValueError): validate(data, kind, b"q" * 16, root)
+        with self.assertRaises(ValueError): validate(records["request"], "request", nonce, (7, 20, UID, GID))
+        for at, count in ((48, 8), (60, 4), (72, 16), (88, 16), (104, 16)):
+            data = bytearray(records["ready"]); data[at:at + count] = bytes(count)
+            with self.assertRaises(ValueError): validate(bytes(data), "ready", nonce, root)
+        data = records["ready"][:104] + records["ready"][88:104] + records["ready"][120:]
+        with self.assertRaises(ValueError): validate(data, "ready", nonce, root)
+        data = records["reader-settled"][:32] + bytes(4) + records["reader-settled"][36:]
+        with self.assertRaises(ValueError): validate(data, "reader-settled", nonce, root)
+
+    def test_original_endpoints_reserve_cleanup_and_never_renew(self):
+        f = self.functions()
+        self.assertEqual(f["launch_admitted"](False, 4.0, 5.0, 100.0), 90)
+        self.assertEqual(f["owner_budget"](24.1, 35.0, 15), 7)
+        for args in ((True, 1, 5, 100), (False, 5, 5, 100), (False, 7, 5, 100), (False, 1, 5, 4)):
+            with self.assertRaises(ValueError): f["launch_admitted"](*args)
+        for now in (31.1, 32, 35, float("inf"), float("nan")):
+            with self.assertRaises(ValueError): f["owner_budget"](now, 35, 15)
+
+    def test_actual_worker_rechecks_after_activation_and_restores_same_guard(self):
+        # Execute only the extracted routing function with inert objects: no
+        # threading.Thread, Process API, native import, signals, or time sleeps.
+        for delayed, initially_aborted, owner_error in ((True, False, False), (False, True, False),
+                                                        (False, False, True), (False, False, False)):
+            with self.subTest(delayed=delayed, abort=initially_aborted, owner_error=owner_error):
+                f = self.functions(include_worker=True); calls = []; now = [1.0]; latch = [initially_aborted]
+                class Lock:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return False
+                class Guard:
+                    handler_state = "NOT_INSTALLED"
+                    def __init__(self, *args): calls.append("guard-created")
+                    def install(self): calls.append("install"); self.handler_state = "ACTIVE"
+                    def activate(self):
+                        calls.append("activate")
+                        if delayed: now[0] = 6.0
+                    def restore(self): calls.append("restore"); self.handler_state = "RESTORED"
+                    def check(self): calls.append("check")
+                def run_owned(*args, **kwargs):
+                    calls.append("owner")
+                    self.assertIsInstance(kwargs["cancellation"], Guard)
+                    self.assertEqual(kwargs["timeout"], 90)
+                    if owner_error: raise ValueError("inert owner failure")
+                    return CompletedProcess(["inert-data-model"], 0, b"", b"")
+                f.update(owner=SimpleNamespace(DefaultCancellation=Guard, ProcessCleanupError=ValueError, run_owned=run_owned),
+                         time=SimpleNamespace(monotonic=lambda: now[0]), native_env={})
+                holder = {key: False for key in ("bodyEntered", "bodyReturned", "ownerEntered", "ownerReturned",
+                                                "guardInstalled", "guardActivated", "guardRestored", "guardChecked")}
+                holder.update(result=None, errors=[], guardState="NOT_INSTALLED")
+                abort = SimpleNamespace(is_set=lambda: latch[0], set=lambda: latch.__setitem__(0, True))
+                f["creator_worker"](holder, Lock(), abort, ["inert-data-model"], Path("/not-executed"), 5.0, 100.0)
+                self.assertEqual(calls[-2:], ["restore", "check"])
+                self.assertTrue(holder["bodyReturned"])
+                self.assertEqual(holder["guardState"], "RESTORED")
+                self.assertEqual(calls.count("owner"), int(not delayed and not initially_aborted))
+                self.assertEqual(holder["ownerReturned"], not (delayed or initially_aborted or owner_error))
+                self.assertEqual(latch[0], delayed or initially_aborted or owner_error)
+
+    def test_grant_and_finality_require_originals_and_preserve_possible_publication_failure(self):
+        f = self.functions()
+        grant = {"aborted": False, "readerOwnerReturned": True, "readerNativeAdmitted": True, "ackEntered": False}
+        f["acknowledge_admitted"](grant, 20.0, 35.0)
+        for key in grant:
+            changed = dict(grant); changed[key] = not changed[key]
+            with self.assertRaises(ValueError): f["acknowledge_admitted"](changed, 20.0, 35.0)
+        with self.assertRaises(ValueError): f["acknowledge_admitted"](grant, 35.0, 35.0)
+        required = "startAttempted startReturned joinAttempted joinReturned joined joinedBeforeDrain readyAdmitted readerOwnerReturned readerNativeAdmitted creatorNativeAdmitted ackEntered ackReturned ackMayHavePublished ackPublished controlRetired controlOriginalsClosed".split()
+        settled = dict.fromkeys(required, True); settled.update(aborted=False, errors=[], ackResult=0, ackErrno=0)
+        self.assertTrue(f["pair_finality"](settled))
+        for key in required:
+            changed = dict(settled); changed[key] = False
+            self.assertFalse(f["pair_finality"](changed), key)
+        for change in ({"aborted": True}, {"errors": ["inert-error"]}, {"ackResult": -1}, {"ackResult": False},
+                       {"ackEntered": True, "ackMayHavePublished": True, "ackReturned": False},
+                       {"creatorNativeAdmitted": True, "aborted": True}):
+            self.assertFalse(f["pair_finality"](dict(settled, **change)))
+
+    @staticmethod
+    def lookup_data(reader):
+        # Internally coherent parser DATA, deliberately NOT evidence from macOS.
+        refs = [[1, 1, 1, 1, 1, 1] for _ in range(5 if reader else 7)]
+        if reader: refs.append([1, 1, 1, 0, 0, 0])
+        calls = [[4, 1, 1, 0], [5, 1, 1, 0], [6, 1, 1, 0], [11, 1, 1, -25308 if reader else 0]]
+        if not reader: calls.append([12, 1, 1, 0])
+        h = [2, 2, 6 if reader else 2, 0, 16, 11 if reader else 0, 1249 if reader else 1145, 0, 1,
+             len(refs), len(calls), 0 if reader else 32, 1, 1, 6, 5, 5, 5]
+        raw = {"header": h, "references": refs, "calls": calls,
+               "descriptors": [[1, 1, 1, 1, 0, 1, 1, 1, 0, 0] for _ in range(6)],
+               "acl": [11, 11, 11, 0, 11, 11, 11, 11, 11] + [0] * 12,
+               "native": [121, 121, 21, 1, 0, 0, 0, 0, 0]}
+        return {"nativeReturned": True, "verified": True, "retainedNativeBytes": 0, "frameRetired": reader,
+                "scopedValuePresent": False, "selection": [1, 1, 1, 1, 0, 1],
+                "comparison": None if reader else [1, 1, 1, 40960, 1], "raw": raw}
+
+    def test_only_unlocked_actual_returned_interaction_denial_is_accepted(self):
+        f = self.functions(); original = self.lookup_data(True)
+        f["admit_peer_case"](original, True, 40960)
+        for status in (0, -25300, -25293, -128, -25291):
+            bad = deepcopy(original); bad["raw"]["calls"][-1][3] = status
+            with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+        for index, value in ((2, 3), (2, 5), (2, 2), (3, 1), (6, 1253), (8, 0), (11, 32), (12, 0), (17, 4)):
+            bad = deepcopy(original); bad["raw"]["header"][index] = value
+            with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+        for section, index, field, value in (("calls", 3, 2, 0), ("calls", 3, 0, 10),
+                                            ("references", 0, 5, 0), ("descriptors", 0, 7, 0)):
+            bad = deepcopy(original); bad["raw"][section][index][field] = value
+            with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+        for key, value in (("frameRetired", False), ("retainedNativeBytes", 40960), ("scopedValuePresent", True),
+                           ("selection", [1, 1, 1, True, 0, 1]), ("comparison", [1] * 5)):
+            bad = deepcopy(original); bad[key] = value
+            with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+        creator = self.lookup_data(False); f["admit_peer_case"](creator, False, 40960)
+        for field in range(5):
+            bad = deepcopy(creator); bad["comparison"][field] = 0
+            with self.assertRaises(ValueError): f["admit_peer_case"](bad, False, 40960)
+
+    @staticmethod
+    def control_data(role):
+        # Closed state model, not a report claimed to have run the native book.
+        h = [0] * 32; h[:10] = [1, 1912, role, 4, 0, 0, 0, 0, 1, 1]
+        h[10:13] = [1, 0, 1] if role == 1 else [0, 1, 0]; h[13] = 1; h[20] = 6
+        h[25:] = [40960, 1, 1, 1, 0, 0, 0]
+        if role == 1: h[14:20] = [1, 1, 1, 1, 0, 0]; h[21:23] = [2, 2]
+        fds = []
+        for i in range(6):
+            row = [0] * 26
+            if role == 1 or i not in (2, 4):
+                row[:4], row[17:20] = [1] * 4, [1] * 3
+                if i in (1, 3, 4): row[5:8], row[22:24] = [1, 1, {1:64, 3:128, 4:48}[i]], [1, 1]
+                if i == 2: row[9:17] = [1, 1, 128, 0, 1, 1, 0, 0]
+            fds.append(row)
+        steps = [[1,1,1,1,1], [2,1,1,1,1], [4,1,1,2,1], [4,1,1,1,1], [5,1,1,1,1]] if role == 1 else [[1,1,1,1,1], [3,1,1,1,1], [5,1,1,1,1]]
+        return {"role": role, "bookBytes": 3504, "aclFrameBytes": 40960, "blocked": False, "uncertain": False, "complete": True,
+                "retained": False, "callbackPanic": False, "allocation": [1,1,1], "free": [1,1,1], "steps": steps,
+                "header": h, "fds": fds, "acl": [24,24,24,0,24,24,24,24,24] + [0] * 12,
+                "native": [264,264,21,1,0,0,0,0,0], "io": [120,120,1,1,0,0,0,0,0],
+                "roster": [1,1,1,0,1,6,6,24,24,6,0,0]}
+
+    def test_control_records_require_exact_original_close_eof_acl_and_fixed_steps(self):
+        f = self.functions()
+        for role in (1, 2):
+            original = self.control_data(role); f["admit_controls"](original, role)
+            for section, field, value in (("header", 5, 1), ("header", 8, 0), ("header", 13, 0),
+                                           ("acl", 8, 23), ("native", 1, 263), ("io", 1, 119),
+                                           ("roster", 4, 0), ("roster", 9, 5), ("free", 1, 0)):
+                bad = deepcopy(original); bad[section][field] = value
+                with self.assertRaises(ValueError): f["admit_controls"](bad, role)
+            for field, value in ((7, 63), (18, 0), (19, 0), (20, -1), (23, 0), (24, 1)):
+                bad = deepcopy(original); bad["fds"][1][field] = value
+                with self.assertRaises(ValueError): f["admit_controls"](bad, role)
+            for field in (1, 2, 3, 4):
+                bad = deepcopy(original); bad["steps"][-1][field] = 0
+                with self.assertRaises(ValueError): f["admit_controls"](bad, role)
+            for key, value in (("retained", True), ("blocked", True), ("uncertain", True), ("callbackPanic", True), ("bookBytes", 4097)):
+                bad = deepcopy(original); bad[key] = value
+                with self.assertRaises(ValueError): f["admit_controls"](bad, role)
+
+    def test_uncertain_original_has_absorbing_no_next_native_entry_gates(self):
+        # Source DATA checks of the actual guards, not a fake pointer/FFI run.
+        # Mutated scalar reports are tested by the existing control matrix.
+        pair = (PATH.parents[2] / "desktop/native/macos-installed-native/src/wrapping_keychain_pair.rs").read_text()
+        step = pair.split("    fn step<", 1)[1].split("    pub(super) fn initialize", 1)[0]
+        self.assertIn("if self.uncertain || self.pointer.is_none()", step)
+        self.assertLess(step.index("if self.uncertain"), step.index("self.calls[index] ="))
+        self.assertLess(step.index("if self.uncertain"), step.index("mrk_wrapping_pair_step("))
+        self.assertIn("if !valid || self.raw.header[5] != 0 || self.raw.header[7] != 0 { self.uncertain = true; }", step)
+        self.assertIn("self.blocked && action != 5", step)  # Valid known refusal may close once.
+        finish = pair.split("    pub(super) fn finish<", 1)[1].split("    pub(super) fn complete", 1)[0]
+        self.assertIn("if self.uncertain || self.finish_spent", finish)
+        self.assertLess(finish.index("if self.uncertain"), finish.index("self.finish_spent = true"))
+        after_cleanup = finish.split("let _actual = self.step(5, None, None, admission);", 1)[1]
+        self.assertIn("if self.uncertain || !self.raw.valid", after_cleanup)
+        self.assertLess(after_cleanup.index("if self.uncertain"), after_cleanup.index("self.free[0] = 1"))
+        self.assertLess(after_cleanup.index("if self.uncertain"), after_cleanup.index("mrk_wrapping_pair_free("))
+        self.assertIn("!self.uncertain && !self.blocked && actual_controls", pair)
+        self.assertEqual(pair.count("self.uncertain = true"), 1)
+        self.assertNotIn("self.uncertain = false", pair)
+
+    def test_reader_public_failure_preserves_status_without_exporting_private_text(self):
+        f = self.functions()
+        partial = {"schemaVersion": 1, "scope": "wrapping-other-executable-reader", "provisional": True,
+                   "outerFinalityRequired": True, "reportUnavailable": True, "lookup": self.lookup_data(True)}
+        def captured(value): return CompletedProcess(["inert-data-only"], 101,
+            b"MRK_WRAPPING_PEER_RESULT=" + json.dumps(value).encode() + b"\n", b"private stderr NOT exported")
+        self.assertEqual(f["public_reader_report"](captured(partial)), partial)
+        with self.assertRaises(ValueError): f["admit_reader_report"](captured(partial))
+        for value in (dict(partial, path="INERT_PRIVATE_TEXT"), dict(partial, scope="INERT_PRIVATE_TEXT"),
+                      dict(partial, lookup={"raw": {"header": ["INERT_PRIVATE_TEXT"]}})):
+            with self.assertRaises(ValueError): f["public_reader_report"](captured(value))
+
+    def test_distinct_actual_code_identities_not_different_path_spelling(self):
+        f = self.functions()
+        creator = {"identifier": f["creator_identifier"], "cdhash": "a" * 40, "requirementSha256": "b" * 64, "fileSha256": "c" * 64}
+        reader = {"identifier": f["reader_identifier"], "cdhash": "d" * 40, "requirementSha256": "e" * 64, "fileSha256": "f" * 64}
+        f["distinct_code_identities"](creator, reader)
+        for field in creator:
+            bad = dict(reader); bad[field] = creator[field]
+            with self.assertRaises(ValueError): f["distinct_code_identities"](creator, bad)
+        display = CompletedProcess(["inert-codesign-data"], 0, b'designated => cdhash H"' + b"a" * 40 + b'"\n',
+            ("Identifier=" + f["creator_identifier"] + "\nCDHash=" + "a" * 40 + "\nSignature=adhoc\n").encode())
+        self.assertEqual(f["signature_identity"](display, f["creator_identifier"])["cdhash"], "a" * 40)
+        for invalid in (CompletedProcess([], 1, display.stdout, display.stderr),
+                        CompletedProcess([], 0, display.stdout * 2, display.stderr),
+                        CompletedProcess([], 0, display.stdout, display.stderr.replace(b"Signature=adhoc", b"Signature=unknown"))):
+            with self.assertRaises(ValueError): f["signature_identity"](invalid, f["creator_identifier"])
+
+    def test_source_fixed_profile_barrier_charges_and_no_candidate_reader(self):
+        root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"
+        fixture = (native / "src/wrapping_keychain_fixture.rs").read_text()
+        dispatcher = (native / "src/wrapping_keychain_qualification.rs").read_text()
+        pair = (native / "src/wrapping_keychain_pair.rs").read_text()
+        control = (native / "src/wrapping_keychain_fixture.m").read_text().split("// Fixed creator/reader control book only.", 1)[1]
+        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        self.assertIn("CALL_ROSTER: [Case; 14]", dispatcher)
+        self.assertIn("MAX_ADAPTER_INVOCATIONS: usize = 16", dispatcher)
+        self.assertIn("Original::Data(finish_without_key(returned, None))", dispatcher)
+        self.assertIn("(14 + usize::from(self.pair_enabled)) * adapter_bytes", fixture)
+        self.assertIn("self.control_bytes, self.control_acl_bytes", fixture)
+        self.assertIn("CALLER_OWNED_CHARGE_LIMIT: usize = 2 * 1024 * 1024", fixture)
+        run = fixture.split("    fn run(&mut self) -> bool {", 1)[1].split("// Every string emitted", 1)[0]
+        self.assertLess(run.index("self.action(action, false)"), run.index("self.creator_barrier()"))
+        self.assertLess(run.index("self.creator_barrier()"), run.index("self.case(case)"))
+        self.assertLess(run.index("!self.controls.complete()"), run.index("self.action(Action::Retire, true)"))
+        self.assertIn("COHORT_SECONDS: u64 = 45", fixture)
+        self.assertIn("READER_SECONDS: u64 = 10", pair)
+        self.assertIn("POLLS: usize = 128", pair)
+        self.assertIn("_Static_assert(sizeof(MRKQPair) <= 4096", control)
+        self.assertIn("_Static_assert(errSecInteractionNotAllowed == -25308", control)
+        self.assertIn("_Static_assert(RENAME_EXCL == 0x00000004", control)
+        self.assertIn("mrk_w_acl_snapshot", control)
+        self.assertIn("fdopendir", control); self.assertIn("closedir", control)
+        for forbidden in ("SecKeychainCreate", "SecItemAdd", "SecKeychainDelete", "SecKeychainUnlock", "SecKeychainLock", "CFRelease"):
+            self.assertNotIn(forbidden, control)
+        self.assertIn('name = "wrapping_peer_reader"', (native / "Cargo.toml").read_text())
+        self.assertIn('test = false', (native / "Cargo.toml").read_text())
+        self.assertIn('compile_error!', (native / "examples/wrapping_peer_reader.rs").read_text())
+        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        self.assertLess(body.index('invoke("reader-build"'), body.index('cells = [admit_file(out / "libmrk'))
+        self.assertLess(body.index('code_role + "-adhoc-sign"'), body.index('cells = [admit_file(out / "libmrk'))
+        self.assertIn('ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)', body)
+        self.assertIn('worker.join(max(0, drain_end - time.monotonic()))', body)
+        self.assertIn('acknowledge_admitted(pair, time.monotonic(), forward_end)', body)
+        self.assertIn('pair["ackMayHavePublished"] = True', body)
+        self.assertNotIn('abort.clear', body)
+        for forbidden in ('Popen(', 'threading.Timer(', 'os.kill(', 'killpg(', 'os.rename(', 'os.replace(', 'find_library('):
+            self.assertNotIn(forbidden, body)
+        upload = workflow.split("      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n", 1)[1]
+        for leaf in ("wrapping-creator.report.json", "wrapping-reader.report.json", "wrapping-pair.receipt.json"):
+            self.assertEqual(upload.count("${{ steps.work.outputs.root }}/" + leaf), 1)
+        for forbidden in ("wrapping-pair-control", "reader-settled", "*.json", ".keychain", "wrapping-reader.stdout", "wrapping-reader.stderr"):
+            self.assertNotIn(forbidden, upload)
+
+
+class PrivateCodecWorkflowDataTests(unittest.TestCase):
+    """Focused synthetic DATA only; never a native/Mac/compiler pass."""
+
+    @staticmethod
+    def functions():
+        import ast
+        import hashlib
+        import pathlib
+        import re
+        import textwrap
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        tree = ast.parse(textwrap.dedent(body))
+        names = {"pairs", "parse", "admit_codec_compiler", "admit_codec_results", "codec_original_settled",
+                 "codec_originals_succeeded", "private_batch_finality", "public_codec_receipt"}
+        bindings = {"codec_names", "artifact_roles"}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        if len(nodes) != len(names): raise AssertionError("fixed codec DATA functions missing or duplicated")
+        namespace = {"json": json, "hashlib": hashlib, "pathlib": pathlib, "re": re,
+                     "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess),
+                     "work": Path("/inert-private-work"), "app": Path("/inert-checkout/desktop/src-tauri"),
+                     "codec_library": "mobile_release_desktop"}
+        for name in bindings:
+            matching = [node for node in tree.body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name]
+            if len(matching) != 1: raise AssertionError("fixed codec literal binding")
+            namespace[name] = ast.literal_eval(matching[0].value)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<inert-codec-data-functions>", "exec"), namespace)
+        return namespace
+
+    def test_codec_exact_fifteen_successes_refuse_missing_extra_failed_or_ignored(self):
+        f = self.functions(); names = f["codec_names"]
+        self.assertEqual(len(names), 15)
+        self.assertEqual(sum(name.startswith("vault_crypto::tests::") for name in names), 9)
+        self.assertEqual(sum(name.startswith("vault_format::tests::") for name in names), 6)
+        lines = ["running 15 tests", *("test " + name + " ... ok" for name in names),
+                 "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 291 filtered out; finished in 0.01s"]
+        def original(rows, code=0, stderr=b""):
+            return CompletedProcess(["inert-codec-data-only"], code, ("\n".join(rows) + "\n").encode(), stderr)
+        check = f["admit_codec_results"]
+        self.assertEqual(check(original(lines)), {"testsPassed": True, "tests": 15, "failed": 0, "ignored": 0, "measured": 0, "filtered": 291})
+        self.assertEqual(check(original([lines[0], *reversed(lines[1:-1]), lines[-1]]))["tests"], 15)
+        invalid = [original(lines, 101), original(lines, False), original(lines, stderr=b"unpublished-diagnostic"),
+                   original(lines[:3] + lines[4:]), original(lines[:-1] + ["test unexpected ... ok", lines[-1]]),
+                   original(lines[:2] + [lines[1]] + lines[3:]), original(["running 14 tests", *lines[1:]]),
+                   original(lines[:-1] + [lines[-1].replace("0 ignored", "1 ignored")]),
+                   original(lines[:-1] + [lines[-1].replace("0 failed", "1 failed")]),
+                   original(lines[:-1] + [lines[-1].replace("0 measured", "1 measured")]),
+                   original(lines[:1] + [lines[1].replace(" ... ok", " ... FAILED")] + lines[2:]),
+                   original(lines[:1] + [lines[1].replace(names[0], "vault_store::tests::unselected")] + lines[2:]),
+                   CompletedProcess([], 0, b"x" * (64 * 1024 + 1), b"")]
+        for index, result in enumerate(invalid):
+            with self.subTest(mutation=index), self.assertRaises(ValueError): check(result)
+
+    def test_codec_compiler_requires_exact_app_empty_features_debug_libtest_and_one_artifact(self):
+        f = self.functions(); app, work = f["app"], f["work"]
+        binary = work / "wrapping-codec-target/aarch64-apple-darwin/debug/deps/mobile_release_desktop-0123456789abcdef"
+        artifact = {"reason": "compiler-artifact", "package_id": "path+" + app.as_uri() + "#mobile-release-kit-desktop@0.1.0",
+                    "manifest_path": str(app / "Cargo.toml"), "features": [], "executable": str(binary), "filenames": [str(binary)],
+                    "target": {"name": "mobile_release_desktop", "kind": ["lib"], "crate_types": ["lib"], "src_path": str(app / "src/lib.rs")},
+                    "profile": {"test": True, "debug_assertions": True, "overflow_checks": True, "opt_level": "0"}}
+        def captured(rows, code=0): return CompletedProcess(["inert-cargo-json-data"], code,
+            b"\n".join(json.dumps(row).encode() for row in rows) + b"\n", b"compiler DATA")
+        finish = {"reason": "build-finished", "success": True}
+        check = f["admit_codec_compiler"]
+        self.assertEqual(check(captured([artifact, finish])), binary)
+        mutations = [lambda a: a.__setitem__("package_id", "path+file:///different#mobile-release-kit-desktop@0.1.0"),
+                     lambda a: a.__setitem__("manifest_path", str(app.parent / "Cargo.toml")),
+                     lambda a: a.__setitem__("features", ["macos-installed-observation"]),
+                     lambda a: a["target"].__setitem__("name", "mrk_macos_installed_native"),
+                     lambda a: a["target"].__setitem__("kind", ["bin"]),
+                     lambda a: a["target"].__setitem__("src_path", str(app / "src/main.rs")),
+                     lambda a: a["profile"].__setitem__("test", False),
+                     lambda a: a["profile"].__setitem__("debug_assertions", False),
+                     lambda a: a["profile"].__setitem__("overflow_checks", False),
+                     lambda a: a["profile"].__setitem__("opt_level", "3"),
+                     lambda a: a.__setitem__("executable", str(work / "wrapping-qualification-target/debug/test")),
+                     lambda a: a.__setitem__("filenames", [str(binary), "unexpected"])]
+        for index, mutate in enumerate(mutations):
+            changed = deepcopy(artifact); mutate(changed)
+            with self.subTest(mutation=index), self.assertRaises(ValueError): check(captured([changed, finish]))
+        for rows, code in (([finish], 0), ([artifact, artifact, finish], 0), ([artifact], 0),
+                           ([artifact, finish, finish], 0), ([artifact, dict(finish, success=False)], 0),
+                           ([artifact, dict(finish, success=1)], 0), ([artifact, finish], False), ([artifact, finish], 101)):
+            with self.subTest(rows=len(rows), code=code), self.assertRaises(ValueError): check(captured(rows, code))
+
+    def test_codec_failure_unknown_original_and_each_of_nine_closes_gate_batch_finality(self):
+        f = self.functions()
+        receipt = {"calls": [{"role": "codec-build", "returned": True, "returncode": 0},
+                             {"role": "codec-tests", "returned": True, "returncode": 0}], "nativeOriginalReturned": True,
+                   "nativeReportAdmitted": True, "pair": {"passed": True}, "pairNativeObservationsAdmitted": True}
+        codec = {"compilerAdmitted": True, "testsPassed": True, "artifactHashRechecked": True, "syntheticDirectoriesRetired": True}
+        cells = [{"role": role, "unchanged": True, "closed": True} for role in f["artifact_roles"]]
+        check = f["private_batch_finality"]
+        self.assertTrue(check(receipt, codec, cells, [], []))
+        for key in codec:
+            with self.subTest(codec=key): self.assertFalse(check(receipt, dict(codec, **{key: False}), cells, [], []))
+        for index, cell in enumerate(cells):
+            for key in ("unchanged", "closed"):
+                changed = deepcopy(cells); changed[index][key] = False
+                with self.subTest(role=cell["role"], finality=key): self.assertFalse(check(receipt, codec, changed, [], []))
+        for changed in (cells[:-1], cells + [cells[0]], [cells[0], *cells[:-1]], [dict(cells[0], role="unadmitted"), *cells[1:]]):
+            self.assertFalse(check(receipt, codec, changed, [], []))
+        for key in ("nativeOriginalReturned", "nativeReportAdmitted", "pairNativeObservationsAdmitted"):
+            self.assertFalse(check(dict(receipt, **{key: False}), codec, cells, [], []))
+        self.assertFalse(check(dict(receipt, pair={"passed": False}), codec, cells, [], []))
+        self.assertFalse(check(receipt, codec, cells, [ValueError("unpublished DATA")], []))
+        self.assertFalse(check(receipt, codec, cells, [], [{"role": "codec-binary", "close": False}]))
+        settled = f["codec_original_settled"]
+        for row in ({"returned": False}, {"returned": True}, {"contained": True, "cleanupComplete": False},
+                    {"contained": False, "cleanupComplete": True}, {"returned": True, "returncode": False}):
+            calls = [dict(row, role="codec-tests")]
+            self.assertFalse(settled(calls))
+            self.assertFalse(check(dict(receipt, calls=calls), codec, cells, [], []))
+        for row in ({"returned": True, "returncode": 101}, {"dispatched": False}, {"contained": True, "cleanupComplete": True}):
+            self.assertTrue(settled([dict(row, role="codec-tests")]))
+        self.assertFalse(settled(receipt["calls"] * 2))
+        for calls in ([], receipt["calls"][:1], receipt["calls"][1:], receipt["calls"] * 2):
+            self.assertFalse(check(dict(receipt, calls=calls), codec, cells, [], []))
+        for index in (0, 1):
+            for replacement in ({"returned": True, "returncode": False}, {"returned": True, "returncode": 101},
+                                {"returned": False, "returncode": 0}, {"dispatched": False},
+                                {"contained": True, "cleanupComplete": True}):
+                calls = deepcopy(receipt["calls"]); calls[index] = dict(replacement, role=calls[index]["role"])
+                with self.subTest(role=index, original=replacement):
+                    self.assertFalse(check(dict(receipt, calls=calls), codec, cells, [], []))
+
+    def test_codec_closed_receipt_and_source_sequence_never_publish_raw_outputs_or_skip_finality(self):
+        f = self.functions()
+        private = "INERT_PRIVATE_TEXT_NOT_FOR_PUBLICATION"
+        receipt = {"source": "a" * 40, "workflowSource": "a" * 40, "workflow": "fixed-source-workflow", "runId": "1", "runAttempt": "1",
+                   "calls": [{"role": "codec-tests", "returned": True, "returncode": 101, "stdoutBytes": 4, "stderrBytes": 0,
+                              "stdoutSha256": "b" * 64, "stderrSha256": "c" * 64, "argv": [private], "stdout": private,
+                              "stderr": private, "errorType": private}], "passed": False, "failure": private}
+        codec = {"compilerAdmitted": True, "testsPassed": False, "artifactHashRechecked": True,
+                 "syntheticDirectoriesRetired": False, "private": private}
+        cells = [{"role": "codec-binary", "unchanged": False, "closed": False, "path": private}]
+        public = f["public_codec_receipt"](receipt, codec, cells, [ValueError(private)], [])
+        self.assertNotIn(private, json.dumps(public))
+        self.assertTrue(all(value is None or type(value) in (bool, int, str) for value in public.values()))
+        self.assertFalse(public["passed"]); self.assertFalse(public["artifactOriginalClosed"])
+        self.assertTrue(public["testOriginalReturned"]); self.assertEqual(public["testReturncode"], 101)
+        self.assertTrue(public["receiptProvisionalUntilSourcePostAndStepExitZero"])
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        dispatch = body.split('              stage = "codec-target-preparation"', 1)[1].split('              qualification_binary, reader_binary = None, None', 1)[0]
+        for required in ('codec_environment = dict(build_env, CARGO_TARGET_DIR=str(codec_target), RUSTFLAGS="")',
+                         '"--package", "mobile-release-kit-desktop"', '"--manifest-path", str(app / "Cargo.toml")',
+                         'timeout=600, limit=4 * 1024 * 1024)', 'cwd=work, timeout=30, limit=64 * 1024)',
+                         '"--exact", "--test-threads=1", "--color=never", "--format=pretty", *codec_names',
+                         'codec_home.rmdir()', 'codec_tmp.rmdir()'):
+            self.assertIn(required, dispatch)
+        self.assertEqual(dispatch.count('invoke("codec-build"'), 1); self.assertEqual(dispatch.count('invoke("codec-tests"'), 1)
+        self.assertLess(dispatch.index('publish("wrapping-codec-build.status"'), dispatch.index('admit_codec_compiler(result)'))
+        self.assertLess(dispatch.index('admit_file(codec_path, "codec-binary"'), dispatch.index('invoke("codec-tests"'))
+        self.assertLess(dispatch.index('invoke("codec-tests"'), dispatch.index('codec.update(admit_codec_results(result))'))
+        self.assertIn('receipt["passed"] = private_batch_finality(receipt, codec, files, errors, close_errors)', body)
+        self.assertIn('if cell["role"] == "codec-binary" and not codec_original_settled(receipt["calls"]):', body)
+        self.assertIn('retainedForUnsettledCodecOriginal', body)
+        self.assertIn('if receipt.get("pair", {}).get("startAttempted") and not receipt["pair"]["joined"]:', body)
+        self.assertEqual(body.count('os.close(descriptor)  # Spend once;'), 1)
+        upload = workflow.split('      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n', 1)[1]
+        for forbidden in ('wrapping-codec-tests.stdout', 'wrapping-codec-tests.stderr', 'wrapping-codec-target', '*.json'):
+            self.assertNotIn(forbidden, upload)
 
 if __name__ == "__main__":
     unittest.main()

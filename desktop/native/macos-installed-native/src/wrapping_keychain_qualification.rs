@@ -5,6 +5,8 @@
 //! provisions nothing, changes no fixture, and performs no teardown or retry.
 //! The independent execution packet must bind this exact14-call roster, the
 //! native binary, owner, fixture provisioning and every external setup/action.
+//! Two separately admitted variants replace ONLY the terminal slot with a
+//! BeforeCall add/lookup STOP; CALL_ROSTER remains the original common14.
 //!
 //! The roster is a bounded common-logic cohort, not a complete qualification
 //! claim. Unforced failed-close/exception/ACL-incomplete behavior, optional
@@ -49,6 +51,7 @@ pub enum Case {
     Selector, HelperShapes, AddBaseline, LookupBaseline, DuplicateBaseline, MissingOther,
     DenyDeleteAndReadonlyAllow, ForeignUserMutationAllow, ForeignGroupInheritOnlyMutationAllow,
     PosixForeignWrite, SymlinkLeaf, PostAddNamespaceRefusal, LockedPrivateFixture, StopAfterAdd,
+    StopBeforeAdd, StopBeforeLookup, CreatorControlLookup, OtherExecutableLookup,
 }
 pub const CALL_ROSTER: [Case; 14] = [
     Case::Selector, Case::HelperShapes, Case::AddBaseline, Case::LookupBaseline,
@@ -64,12 +67,18 @@ impl Case {
             Self::HelperShapes => EvidenceKind::HelperShapeOnly, _ => EvidenceKind::SyntheticProviderOnly }
     }
     pub fn operation(self) -> Operation {
-        match self { Self::AddBaseline | Self::DuplicateBaseline | Self::PostAddNamespaceRefusal | Self::StopAfterAdd =>
+        match self { Self::AddBaseline | Self::DuplicateBaseline | Self::PostAddNamespaceRefusal | Self::StopAfterAdd | Self::StopBeforeAdd =>
             Operation::AddOnly, _ => Operation::Lookup }
+    }
+    pub fn terminal_stop(self) -> bool {
+        matches!(self, Self::StopAfterAdd | Self::StopBeforeAdd | Self::StopBeforeLookup)
+    }
+    pub fn before_item_phase(self) -> Option<u32> {
+        match self { Self::StopBeforeAdd => Some(10), Self::StopBeforeLookup => Some(11), _ => None }
     }
     fn mode(self) -> u32 { match self { Self::Selector => SELECTOR, Self::HelperShapes => HELPERS, _ => FIXTURE } }
     fn context_index(self) -> usize {
-        match self { Self::MissingOther => 1, Self::PostAddNamespaceRefusal => 2, Self::StopAfterAdd => 3, _ => 0 }
+        match self { Self::MissingOther => 1, Self::PostAddNamespaceRefusal => 2, Self::StopAfterAdd | Self::StopBeforeAdd => 3, _ => 0 }
     }
 }
 
@@ -264,6 +273,7 @@ pub struct Harness {
     fixture: Option<FixtureInput>,
     next: usize,
     pending: Option<Case>,
+    terminal: Case,
     halted: bool,
     _not_sync: PhantomData<Cell<()>>,
 }
@@ -285,7 +295,22 @@ impl Harness {
         }
         // SAFETY: a linked constant ABI marker only; no allocation/provider call.
         if unsafe { mrk_wrapping_qualification_abi() } != 0x514b0101 { return Err(Refused::NativeAbiMismatch); }
-        Ok(Self { token, contexts, fixture: None, next: 0, pending: None, halted: false, _not_sync: PhantomData })
+        Ok(Self { token, contexts, fixture: None, next: 0, pending: None, terminal: Case::StopAfterAdd, halted: false, _not_sync: PhantomData })
+    }
+    /// # Safety
+    /// Same original-owner binding as new; this separately registered variant
+    /// replaces only its terminal call. Never construct it to restart a STOP.
+    pub unsafe fn new_stop_before_add(token: [u8; 16], contexts: [Context; 4]) -> Result<Self, Refused> {
+        let mut value = unsafe { Self::new(token, contexts) }?;
+        value.terminal = Case::StopBeforeAdd;
+        Ok(value)
+    }
+    /// # Safety
+    /// Same distinct-original requirements as new_stop_before_add; no retry.
+    pub unsafe fn new_stop_before_lookup(token: [u8; 16], contexts: [Context; 4]) -> Result<Self, Refused> {
+        let mut value = unsafe { Self::new(token, contexts) }?;
+        value.terminal = Case::StopBeforeLookup;
+        Ok(value)
     }
     /// # Safety
     /// Provisioning has separate prior approval and ACTUAL known completion.
@@ -319,7 +344,9 @@ impl Harness {
     ) -> Result<CaseReturn, Refused> {
         if self.halted { return Err(Refused::Halted); }
         if self.pending.is_some() { return Err(Refused::PendingOriginal); }
-        if self.next >= CALL_ROSTER.len() || self.next >= MAX_ADAPTER_INVOCATIONS || CALL_ROSTER[self.next] != case
+        let expected = CALL_ROSTER.get(self.next).copied().map(|value|
+            if value == Case::StopAfterAdd { self.terminal } else { value });
+        if self.next >= CALL_ROSTER.len() || self.next >= MAX_ADAPTER_INVOCATIONS || expected != Some(case)
             || (case.operation() == Operation::AddOnly) != key.is_some()
             || (case.mode() == FIXTURE && self.fixture.is_none()) { return Err(Refused::WrongCaseOrInput); }
         self.next += 1; self.pending = Some(case); // Spend this fixed call before native entry.
@@ -393,5 +420,53 @@ impl Harness {
 /// actual facts. Added/MayHaveAdded after a refused postcheck or STOP must remain
 /// visible even when the case has no successful value and the cohort halts.
 pub fn expected_terminal_add_effect(case: Case) -> Option<AddEffect> {
-    match case { Case::PostAddNamespaceRefusal | Case::StopAfterAdd => Some(AddEffect::Added), _ => None }
+    match case { Case::PostAddNamespaceRefusal | Case::StopAfterAdd => Some(AddEffect::Added),
+        Case::StopBeforeAdd | Case::StopBeforeLookup => Some(AddEffect::NotEntered), _ => None }
 }
+
+// Exactly one extra comparison in the live creator, or one denial lookup in
+// the distinct reader. Neither book mutates or restarts the common14 Harness.
+// Construction is private to the two source-fixed qualification callers.
+pub(super) struct PeerLookup {
+    token: [u8; 16], context: Context, fixture: FixtureInput, case: Case, spent: bool,
+    _not_sync: PhantomData<Cell<()>>,
+}
+impl PeerLookup {
+    fn fixed(token: [u8; 16], context: Context, pin: OwnerFixturePin, case: Case) -> Result<Self, Refused> {
+        if token == [0; 16] || pin.device > u32::MAX as u64 || pin.inode == 0 || pin.uid == 0 || pin.mode != 0o040700 {
+            return Err(Refused::InvalidBinding);
+        }
+        if unsafe { mrk_wrapping_qualification_abi() } != 0x514b0101 { return Err(Refused::NativeAbiMismatch); }
+        Ok(Self { token, context, fixture: FixtureInput { version: 1, bytes: size_of::<FixtureInput>() as u32,
+            root_device: pin.device, root_inode: pin.inode, root_mode: pin.mode, root_uid: pin.uid,
+            root_gid: pin.gid, reserved: 0, token }, case, spent: false, _not_sync: PhantomData })
+    }
+    pub(super) fn creator(token: [u8; 16], context: Context, pin: OwnerFixturePin) -> Result<Self, Refused> {
+        Self::fixed(token, context, pin, Case::CreatorControlLookup)
+    }
+    pub(super) fn reader(token: [u8; 16], context: Context, pin: OwnerFixturePin) -> Result<Self, Refused> {
+        Self::fixed(token, context, pin, Case::OtherExecutableLookup)
+    }
+    pub(super) fn started(&self) -> bool { self.spent }
+    /// # Safety
+    /// The fixed original caller precharges the full adapter frame and retains
+    /// the actual return through its own original cutoff, cleanup and finality.
+    pub(super) unsafe fn run<F: FnMut(Checkpoint, &Facts) -> Admission>(&mut self, admission: &mut F) -> Result<CaseReturn, Refused> {
+        if self.spent { return Err(Refused::WrongCaseOrInput); }
+        self.spent = true; // One original attempt, even if its native receipt fails.
+        let mut observation = Observation::default();
+        let returned = run_using(Operation::Lookup, admission, |frame, callback, bridge, raw| {
+            unsafe { mrk_wrapping_qualification_run(frame, FIXTURE, &self.fixture, Operation::Lookup.raw(),
+                self.context.vault.as_ptr(), self.context.generation.as_ptr(), std::ptr::null(),
+                callback, bridge, raw, &mut observation); }
+            observation.valid(raw, FIXTURE)
+        });
+        let mut selection = SelectionFacts { raw: observation, verified: returned.facts.verified && returned.facts.ffi_returned };
+        let original = if self.case == Case::CreatorControlLookup { Original::Lookup(finish_lookup(returned)) }
+            else { Original::Data(finish_without_key(returned, None)) }; // Unexpected success exports NO candidate.
+        selection.verified &= original.facts().verified_native_run_receipt();
+        Ok(CaseReturn { original, case: self.case, token: self.token, selection, comparison: None,
+            consumption_started: false, unresolved_consumption_charge: 0, consumption_retained: None, consumption_panic: None })
+    }
+}
+const _: () = assert!(CALL_ROSTER.len() + 1 <= MAX_ADAPTER_INVOCATIONS);
