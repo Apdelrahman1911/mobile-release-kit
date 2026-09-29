@@ -49,6 +49,10 @@ function observed(revision = 7) {
     run: { id: '44', attempt: 1, status: 'queued', conclusion: null, observedAt: TIME, jobs: [],
       url: 'https://github.com/owner/app/actions/runs/44', assurance: 'github-workflow-observation-not-release-evidence' } };
 }
+function completedObservation(p = prepared(), revision = 7) {
+  const value = observed(revision); value.pending[0].prepared = p;
+  value.run.status = 'completed'; value.run.conclusion = 'failure'; return value;
+}
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function flush() { for (let i = 0; i < 12; i += 1) await Promise.resolve(); }
 function harness() {
@@ -67,7 +71,7 @@ function harness() {
     count: (kind) => calls.filter((v) => v.kind === kind).length, last: (kind) => calls.filter((v) => v.kind === kind).at(-1),
     emit: (s) => { current = clone(s); listener?.(clone(s)); }, retain: (s) => { current = clone(s); },
     respond: (kind, s) => { current = clone(s); calls.filter((v) => v.kind === kind).at(-1).resolve(clone(s)); },
-    context: (next) => { view = next; controller.syncContext(); },
+    context: (next, synchronize = true) => { view = next; if (synchronize) controller.syncContext(); },
   };
 }
 async function attached() { const h = harness(); await h.controller.connect(h.api); return h; }
@@ -217,4 +221,137 @@ test('bridge uses a distinct closed command family and never falls back in previ
   assert.equal(githubReleaseError({ code: 'github_preflight_refused_busy' }).admission, 'unknown');
   const unavailable = createNativeApi('unavailable', async () => { throw new Error('must not invoke'); });
   await assert.rejects(unavailable.githubReleaseStatus(), (e) => e.admission === 'not-admitted');
+});
+
+test('copying an original candidate fills only declarations and clears retained consent without IPC', async () => {
+  const h = await ready();
+  try {
+    const originalRequest = prepared(); originalRequest.target.marker = 'e'.repeat(32);
+    originalRequest.displayTitle = `MRK Desktop candidate [${originalRequest.target.marker}]`;
+    h.emit({ ...review(4), pending: [{ prepared: originalRequest, runId: '44' }] });
+    h.controller.setConfirmed(true); h.controller.setConfirmation(prepared().confirmation);
+    assert.ok(h.controller.currentPrepared());
+    // Valid native DATA transition: Prepare and Track cannot share one Status.
+    h.emit(completedObservation(originalRequest, 5));
+    assert.equal(h.controller.currentPrepared(), null);
+    assert.equal(h.state.confirmation, prepared().confirmation);
+    const status = h.state.status, original = clone(status), record = status.pending[0], calls = h.calls.length;
+    assert.equal(h.controller.recoveryPrefillReason(record), null);
+    assert.equal(h.controller.prefillRecovery(record), true);
+    assert.equal(h.state.branch, record.prepared.target.branch); assert.equal(h.state.platform, 'android');
+    assert.equal(h.state.recovery, true);
+    assert.deepEqual(h.controller.selection(), { stage: 'candidate', candidateRunId: null, externalRunId: null,
+      recoveryRunId: '44', originalSourceSha: 'a'.repeat(40), originalVersion: { name: '2.0.0', build: 99 } });
+    assert.equal(h.state.confirmed, false); assert.equal(h.state.confirmation, '');
+    assert.strictEqual(h.state.status, status); assert.deepEqual(status, original);
+    h.controller.setConfirmed(true); h.controller.dispatch();
+    assert.equal(h.controller.currentPrepared(), null); assert.equal(h.calls.length, calls);
+  } finally { h.controller.dispose(); }
+});
+
+test('recovery prefill preserves original producer A, original version, and exact optional predecessors', async () => {
+  const repeated = prepared('production-submit', true);
+  repeated.target.platform = 'ios'; repeated.confirmation = 'production-submit:ios:1.2.3:42';
+  repeated.target.selection.candidateRunId = '101'; repeated.target.selection.externalRunId = '102';
+  for (const p of [prepared('production-submit'), repeated, prepared('external-testing', true)]) {
+    const h = await attached();
+    try {
+      h.emit(completedObservation(p));
+      h.controller.setInput('candidateRunId', '555'); h.controller.setInput('externalRunId', '556');
+      const record = h.state.status.pending[0], before = clone(record), calls = h.calls.length;
+      assert.equal(h.controller.prefillRecovery(record), true);
+      assert.deepEqual(h.controller.selection(), { ...p.target.selection, recoveryRunId: p.target.selection.recoveryRunId ?? '44' });
+      assert.equal(h.state.branch, p.target.branch); assert.equal(h.state.platform, p.target.platform);
+      assert.equal(h.state.originalSourceSha, 'f'.repeat(40)); assert.equal(h.state.originalVersionName, '1.2.3');
+      assert.equal(h.state.originalVersionBuild, '42'); // Not current dispatch version2.0.0/build99.
+      assert.equal(h.state.candidateRunId, p.target.selection.candidateRunId ?? '');
+      assert.equal(h.state.externalRunId, p.target.selection.externalRunId ?? '');
+      if (p.target.selection.recoveryRunId !== null) assert.equal(h.state.recoveryRunId, '103'); // Original A, not observed B44.
+      assert.deepEqual(h.state.status.pending[0], before); assert.equal(h.calls.length, calls);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('recovery prefill refuses unobserved, stale, foreign, busy and replaced-owner inputs without repairing state', async () => {
+  const refused = (h, record, pattern) => {
+    const snapshot = h.state, calls = h.calls.length, reason = h.controller.recoveryPrefillReason(record);
+    assert.notEqual(reason, null); if (pattern) assert.match(reason, pattern);
+    assert.equal(h.controller.prefillRecovery(record), false);
+    assert.strictEqual(h.state, snapshot); assert.equal(h.calls.length, calls);
+  };
+  const cases = [
+    ['unknown run', (v) => { v.run = null; v.pending[0].runId = null; }, null, /reconcile/i],
+    ['missing observation', (v) => { v.run = null; }, null, /track/i],
+    ['unfinished run', (v) => { v.run.status = 'in_progress'; v.run.conclusion = null; }, null, /wait/i],
+    ['different observed run', (v) => {
+      const other = clone(v.pending[0]); other.runId = '45'; other.prepared.target.marker = 'e'.repeat(32);
+      other.prepared.displayTitle = `MRK Desktop candidate [${other.prepared.target.marker}]`;
+      v.pending.push(other); v.run.id = '45'; v.run.url = 'https://github.com/owner/app/actions/runs/45';
+    }],
+    ['foreign account', null, (r) => { r.prepared.target.accountId = '99'; }],
+    ['stale run binding', null, (r) => { r.runId = '43'; }],
+    ['record not loaded', null, (r) => {
+      r.prepared.target.marker = 'e'.repeat(32); r.prepared.displayTitle = `MRK Desktop candidate [${r.prepared.target.marker}]`;
+    }],
+  ];
+  for (const [label, changeStatus, changeRecord, pattern] of cases) {
+    const h = await attached();
+    try {
+      const value = completedObservation(); changeStatus?.(value);
+      assert.ok(parseGitHubReleaseStatus(value), label); h.emit(value); assert.equal(h.state.uncertain, false, label);
+      const record = clone(h.state.status.pending[0]); changeRecord?.(record); refused(h, record, pattern);
+    } finally { h.controller.dispose(); }
+  }
+  const busy = await attached();
+  try {
+    busy.emit(completedObservation()); const record = busy.state.status.pending[0];
+    busy.controller.loadPending(); refused(busy, record);
+    busy.respond('pending', { ...operation('pending', 'settled', 9), pending: [clone(record)] }); await flush();
+    assert.equal(busy.state.pending, false);
+    busy.emit(null); refused(busy, record);
+  } finally { busy.controller.dispose(); }
+  const disposed = await attached(); disposed.emit(completedObservation());
+  const disposedRecord = disposed.state.status.pending[0]; disposed.controller.dispose(); refused(disposed, disposedRecord);
+  for (const [key, value] of [['documentId', 'doc-b'], ['projectGeneration', 2]]) {
+    const h = await attached();
+    try {
+      h.emit(completedObservation()); const record = h.state.status.pending[0], next = connection(); next.context[key] = value;
+      h.context(next, false); refused(h, record);
+      h.context(connection(), false); assert.equal(h.controller.prefillRecovery(record), true);
+    } finally { h.controller.dispose(); }
+  }
+  const h = await attached(), firstStatus = deferred();
+  let reconnect;
+  try {
+    h.emit(completedObservation()); const originalStatus = h.state.status, record = originalStatus.pending[0];
+    const replacement = { ...h.api, githubReleaseStatus: () => { h.calls.push({ kind: 'replacement-status' }); return firstStatus.promise; } };
+    reconnect = h.controller.connect(replacement); await flush();
+    assert.strictEqual(h.state.status, originalStatus); refused(h, record);
+    firstStatus.resolve(completedObservation()); await reconnect;
+    assert.notStrictEqual(h.state.status, originalStatus);
+    assert.equal(h.controller.prefillRecovery(h.state.status.pending[0]), true);
+  } finally { firstStatus.resolve(completedObservation()); await reconnect; h.controller.dispose(); }
+});
+
+test('copied recovery declarations require a fresh matching Prepare and edited consent cannot dispatch', async () => {
+  const h = await attached();
+  try {
+    h.emit(completedObservation(prepared('production-submit')));
+    const record = h.state.status.pending[0];
+    assert.equal(h.controller.prefillRecovery(record), true);
+    const selected = clone(h.controller.selection());
+    h.controller.setConfirmed(true); h.controller.setConfirmation('production-submit:android:1.2.3:42');
+    h.controller.dispatch(); assert.equal(h.count('dispatch'), 0);
+    h.controller.prepare(); assert.equal(h.count('prepare'), 1);
+    assert.deepEqual(h.last('prepare').args.selection, selected);
+    assert.equal(h.last('prepare').args.branch, record.prepared.target.branch);
+    assert.equal(h.last('prepare').args.platform, record.prepared.target.platform);
+    const fresh = prepared('production-submit', true); fresh.target.selection = selected;
+    fresh.target.marker = 'e'.repeat(32); fresh.displayTitle = `MRK Desktop production-submit [${fresh.target.marker}]`;
+    h.respond('prepare', { ...review(9), prepared: fresh, pending: [clone(record)] }); await flush();
+    assert.ok(h.controller.currentPrepared()); assert.equal(h.state.confirmed, false); assert.equal(h.state.confirmation, '');
+    h.controller.setConfirmed(true); h.controller.setConfirmation(fresh.confirmation);
+    h.controller.setInput('originalVersionBuild', '43'); h.controller.setInput('originalVersionBuild', '42');
+    h.controller.dispatch(); assert.equal(h.count('dispatch'), 0); assert.equal(h.controller.currentPrepared(), null);
+  } finally { h.controller.dispose(); }
 });

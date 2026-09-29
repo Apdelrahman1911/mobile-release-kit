@@ -115,6 +115,12 @@ def _desktop_recovery_checkpoint(guard: DefaultCancellation) -> None:
     source = getattr(guard, "_ios_archive_source", None)
     if source is not None and source.recovery:
         source.require_operation().signing.recovery_checkpoint()
+    source = getattr(guard, "_android_build_source", None)
+    if source is not None and source.signed:
+        operation = source.require_operation()
+        # The existing finite materializer's IO inherits the original work/
+        # settlement endpoints; it does not open a fresh cleanup clock.
+        operation.cleanup_checkpoint() if guard.depth else operation._tick()
 
 
 def _supported() -> None:
@@ -256,6 +262,9 @@ def _consumer_idle(guard: DefaultCancellation, *, lane_binding=None, desktop_bin
         if not guard.lifetime_ledger.verdict().contained:
             return False
         if desktop_binding is not None:
+            from ._desktop_android_signed_inputs import SignedAndroidInputs
+            if type(desktop_binding) is SignedAndroidInputs:
+                return (lane_binding is None and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
             from .ios_archive_operation import IOSArchiveSnapshotBinding
             return (lane_binding is None and type(desktop_binding) is IOSArchiveSnapshotBinding
                     and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
@@ -695,6 +704,11 @@ class FiniteScratch:
         self._lane_binding = None
         self._desktop_binding = None
         self._cleanup_complete = False
+        source = getattr(guard, "_android_build_source", None)
+        if source is not None and layout in {"signing-validation", "build"}:
+            operation = source.require_operation()
+            _need(operation.signing is not None, "unsigned Android cannot acquire signing scratch")
+            operation.signing.bind_scratch(self)
         source = getattr(guard, "_ios_archive_source", None)
         if source is not None and layout in {"signing-validation", "build"}:
             operation = source.require_operation()
@@ -725,6 +739,9 @@ class FiniteScratch:
             self.cancellation.check()
 
     def _check(self) -> None:
+        source = getattr(self.cancellation, "_android_build_source", None)
+        if source is not None and self.layout in {"signing-validation", "build"}:
+            source.require_operation().signing.scratch_checkpoint(self)
         source = getattr(self.cancellation, "_ios_archive_source", None)
         if source is not None and self.layout in {"signing-validation", "build"}:
             source.require_operation().signing.scratch_checkpoint(self)
@@ -1038,6 +1055,9 @@ class FiniteScratch:
 @contextmanager
 def _scope(owner: Any, guard: DefaultCancellation, owns: bool) -> Iterator[Any]:
     def cleanup() -> None:
+        source = getattr(guard, "_android_build_source", None)
+        if source is not None and source.signed and scope._first_error is not None:
+            source.failure_observed()  # Original acquisition/body failure precedes input disposal.
         # Failed context entry has no outer ExitStack callback yet. Retire the
         # original Store admission BEFORE that input's own cleanup, preserving
         # the incoming primary rather than manufacturing live consumers on a
@@ -1786,9 +1806,11 @@ class InvocationCustody:
         self.project_started = True
         expected_root = None
         source = getattr(self.cancellation, "_ios_archive_source", None)
+        if source is None:
+            source = getattr(self.cancellation, "_android_build_source", None)
         if source is not None:
             operation = source.require_operation()
-            _need(operation.invocation is self, "iOS project requires its original invocation")
+            _need(operation.invocation is self, "saved build requires its original invocation")
             expected = operation.request.native["rootIdentity"]
             expected_root = (int(expected["device"]), int(expected["inode"]), expected["mode"], expected["uid"], expected["gid"])
         project = _Project(self.root, self.cancellation, recovery=False, expected_root=expected_root)
@@ -1807,6 +1829,12 @@ class InvocationCustody:
               "one materializer requires continuous project admission")
         child = BuildInputs(self, self.project_owner)
         self.child = child
+        source = getattr(self.cancellation, "_android_build_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _need(operation.signing is not None and operation.invocation is self
+                  and operation.signing.materialization is child,
+                  "Android materialization lost its original constructor binding")
         source = getattr(self.cancellation, "_ios_archive_source", None)
         if source is not None:
             operation = source.require_operation()
@@ -1922,7 +1950,16 @@ class InvocationCustody:
               and self.cancellation._android_build_source is operation.source
               and operation.source.require_operation() is operation,
               "Android root requires its original invocation")
-        return self._unsigned_build_root(operation.guard)
+        if operation.signing is None:
+            return self._unsigned_build_root(operation.guard)
+        self.require(root=self.root, cancellation=operation.guard, signing_lease=None)
+        _need(self.mode == "build" and self.project_owner is self._original_project
+              and self.project_owner is not None
+              and (self.child is None or self.child is operation.signing.materialization),
+              "signed Android root requires its original project and materialization")
+        value = os.fstat(self.project_owner.fd)
+        return self.project_owner.fd, {"device": str(value.st_dev), "inode": str(value.st_ino),
+            "mode": value.st_mode, "uid": value.st_uid, "gid": value.st_gid}
 
     def _android_build_cleanup_root(self, operation) -> tuple[int, dict[str, Any]]:
         """Check the same still-held project during original resource cleanup.
@@ -1941,6 +1978,7 @@ class InvocationCustody:
               "Android cleanup root requires its claimed original namespace")
         operation.cleanup_checkpoint()
         _need(self.mode == "build" and self.signing_lease is None and self.child is None
+              and (operation.signing is None or operation.signing.inputs_closed())
               and self.active and self.reserved and _ENV_OWNER is self and not _ENV_TAINTED
               and self.project_owner is not None and self.project_owner is self._original_project
               and not self.project_owner.claimed,
@@ -1960,7 +1998,8 @@ class InvocationCustody:
         _need(type(operation) is AndroidBuildOperation and operation.invocation is self
               and operation.guard is self.cancellation and operation.source.operation is operation,
               "Android closure requires its original invocation")
-        return self._unsigned_build_closed(operation.guard)
+        return (self._unsigned_build_closed(operation.guard)
+                and (operation.signing is None or operation.signing.inputs_closed()))
 
     def _ios_archive_root(self, operation) -> tuple[int, dict[str, Any]]:
         from .ios_archive_operation import IOSArchiveOperation
@@ -2205,6 +2244,12 @@ class BuildInputs:
         self._cleanup_complete = False
         self.created = False
         self.creation = {"state": "NEW"}
+        self.scratch = None
+        source = getattr(self.cancellation, "_android_build_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _need(operation.signing is not None, "unsigned Android cannot create signing materialization")
+            operation.signing.bind_materialization(self)
         self.scratch = FiniteScratch("build", self.cancellation,
             project.root / _PRIVATE / _PENDING, _name="scratch", _journal=self)
 
@@ -2219,6 +2264,12 @@ class BuildInputs:
 
     def _check(self) -> None:
         self._owner()
+        source = getattr(self.cancellation, "_android_build_source", None)
+        if source is not None:
+            operation = source.require_operation()
+            _need(operation.signing is not None and operation.signing.materialization is self,
+                  "materialization is not the original Android input owner")
+            operation.cleanup_checkpoint() if self.claimed else operation._tick()
         source = getattr(self.cancellation, "_ios_archive_source", None)
         if source is not None and source.signed:
             operation = source.require_operation()
@@ -2485,7 +2536,8 @@ class BuildInputs:
         self._check()
         _need(self.header_digest and not self.failed, "incomplete transaction controls must be preserved")
         if self.invocation is not None:
-            _need(_consumer_idle(self.cancellation), "original material consumers are unconfirmed")
+            _need(_consumer_idle(self.cancellation, desktop_binding=self.scratch._desktop_binding,
+                                 owner=self.scratch), "original material consumers are unconfirmed")
             self.quiescence = "original"
             self._checkpoint()
         _need(self.quiescence in ("original", "operator"), "recovery needs original or explicit operator quiescence")
@@ -2542,9 +2594,13 @@ class BuildInputs:
         if self.claimed:
             return
         self.claimed = True
-        _attempt_all(self.cancellation, [self._finish,
-            *[slot.close for slot in reversed(self.scratch.writer_slots)],
-            self.scratch.slot.close, self.scratch.parent.close,
+        # Android roots this journal before the scratch constructor can return.
+        # A constructor with no acquired scratch still has independent originals
+        # to close; a partially acquired scratch is rooted by bind_scratch.
+        scratch_closes = ([] if self.scratch is None else
+                          [*[slot.close for slot in reversed(self.scratch.writer_slots)],
+                           self.scratch.slot.close, self.scratch.parent.close])
+        _attempt_all(self.cancellation, [self._finish, *scratch_closes,
             *[parent.close for parent in reversed(tuple(self.parents.values()))],
             *[slot.close for slot in reversed(self.control_slots)], self.slot.close])
         self._cleanup_complete = True

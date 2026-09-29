@@ -2,7 +2,7 @@
 
 This is NOT a consumer repair tool or a native-policy exception. Only an audited
 root:admin /Applications 0775 may become 0755, once, before any candidate worker.
-Native Book/ACL/toolchain admission is unchanged and runs independently afterward.
+Concrete native Book/ACL/toolchain protection runs independently afterward.
 A result file is provisional until this original helper has closed every owner
 and returned zero. Unknown command retirement blocks until job/VM disposal.
 
@@ -50,6 +50,8 @@ RUNNER_TEMP = "/Users/runner/work/_temp"
 INVENTORY = "source-inventory.json"
 INTENT = "xcode-host-preparation-intent.json"
 RESULT = "xcode-host-preparation-result.json"
+CLASSIFICATION_ARG = "--classify-installed"
+CLASSIFICATION_RESULT = "xcode-installed-classification-result.json"
 COMMAND = ("/usr/bin/sudo", "-n", "--", "/bin/chmod", "-h", "0755", "/Applications")
 SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 MAX_ORIGINALS = 40
@@ -82,8 +84,10 @@ MNT_NOEXEC = 0x4
 MNT_NOSUID = 0x8
 MNT_UNION = 0x20
 MNT_LOCAL = 0x1000
+MNT_ROOTFS = 0x4000
 MNT_IGNORE_OWNERSHIP = 0x200000
 MNT_AUTOMOUNTED = 0x400000
+MNT_SNAPSHOT = 0x40000000
 ENVIRONMENT_KEYS = frozenset((
     "PATH", "HOME", "LANG", "LC_ALL", "TZ", "RUNNER_ENVIRONMENT", "RUNNER_OS",
     "RUNNER_ARCH", "RUNNER_TEMP", "GITHUB_REPOSITORY", "GITHUB_EVENT_NAME",
@@ -511,6 +515,36 @@ def _sibling(target):
     return name
 
 
+def _selection_alias_owner(owner, account):
+    # The one alias chooses a sibling name; it never authenticates that sibling.
+    return account != 0 and owner in (0, account)
+
+
+def _sudo_xattr_basis(node, snapshot, root_filesystem):
+    """Prove stability, NOT readable/empty xattrs or a cryptographic seal."""
+    if (node.path != "/usr/bin/sudo" or node.role != "os-provisioner-sudo"
+            or node.kind != "file" or node.policy != "sudo"):
+        raise Refused("sudo-snapshot-fixed-role-required")
+    identity = snapshot["full9"]
+    mode, flags = identity[2], snapshot["flags"]
+    if (not stat.S_ISREG(mode) or identity[3:6] != [0, 0, 1]
+            or mode & 0o3022 or not mode & stat.S_ISUID or not mode & 0o111
+            or not isinstance(flags, int) or not flags & SF_RESTRICTED
+            or flags & ~_observation_flags("sudo", "file")):
+        raise Refused("sudo-snapshot-protected-original-required")
+    filesystem = snapshot.get("filesystem")
+    required = MNT_RDONLY | MNT_LOCAL | MNT_ROOTFS | MNT_SNAPSHOT
+    forbidden = MNT_NOEXEC | MNT_NOSUID | MNT_UNION | MNT_IGNORE_OWNERSHIP | MNT_AUTOMOUNTED
+    if (not filesystem or filesystem != root_filesystem
+            or filesystem["typeName"] != "apfs" or filesystem["owner"] != 0
+            or filesystem["mountOn"] != "/"
+            or filesystem["flags"] & required != required
+            or filesystem["flags"] & forbidden):
+        raise Refused("sudo-snapshot-original-readonly-root-apfs-required")
+    return {"observed": False, "basis": "same-held-readonly-root-apfs-snapshot",
+            "filesystem": dict(filesystem)}
+
+
 def _unchanged_payload(snapshot):
     # ACL call diagnostics contain the matching current stat mode/ctime. Only
     # the semantic ACL state is compared as an extra; the current full9 below
@@ -551,6 +585,7 @@ class Node:
         self.alias_target = None
         self.checks = []
         self.close_state = "not-opened"
+        self.budgeted = False
 
     def data(self):
         return {"path": self.path, "role": self.role, "kind": self.kind,
@@ -562,8 +597,13 @@ class Node:
 
 
 class Originals:
-    def __init__(self, api, context, deadline):
+    def __init__(self, api, context, deadline, budget=None, classification=False):
         self.api, self.context, self.deadline = api, context, deadline
+        # Candidate ledgers share this one count with their still-held common
+        # originals. A failed consuming close permanently withholds capacity.
+        self.budget = budget if budget is not None else {"live": 0, "peak": 0, "uncertain": False}
+        self.classification = classification
+        self.receipt_names = (CLASSIFICATION_RESULT,) if classification else (INTENT, RESULT)
         self.nodes = {}
         self.errors = []
         self.absences = []
@@ -576,8 +616,27 @@ class Originals:
         self.result_fd = None
         self.result_pin = None
         self.result_bytes = None
+        self.result_budgeted = False
         self.source_binding = None
         self.receipt_attempts = set()
+
+    def reserve(self, code):
+        self.deadline.check()
+        if self.budget["uncertain"]:
+            raise Refused("original-close-uncertain-no-new-acquisition")
+        if self.budget["live"] >= MAX_ORIGINALS:
+            raise Refused(code)
+        self.budget["live"] += 1
+        self.budget["peak"] = max(self.budget["peak"], self.budget["live"])
+
+    def consuming_close(self, descriptor, budgeted=True):
+        try:
+            os.close(descriptor)
+        except BaseException:
+            self.budget["uncertain"] = True
+            raise
+        if budgeted:
+            self.budget["live"] -= 1
 
     def error(self, stage, role, code, observed_errno=0):
         if len(self.errors) >= 256:
@@ -588,7 +647,16 @@ class Originals:
     def roster(self, node):
         self.deadline.check()
         values = []
-        iterator = os.scandir(node.fd)
+        # scandir(fd) owns a transient duplicate too; it is not a free slot.
+        self.reserve("roster-descriptor-bound")
+        try:
+            iterator = os.scandir(node.fd)
+        except OSError:
+            self.budget["live"] -= 1  # No descriptor was returned.
+            raise
+        except BaseException:
+            self.budget["uncertain"] = True
+            raise
         try:
             for entry in iterator:
                 self.deadline.check()
@@ -598,7 +666,13 @@ class Originals:
                     raise Refused("directory-roster-bound")
                 values.append(name)
         finally:
-            iterator.close()
+            try:
+                iterator.close()
+            except BaseException:
+                self.budget["uncertain"] = True
+                self.error("close", node.role, "roster-original-close-unknown")
+                raise
+            self.budget["live"] -= 1
         if len(set(values)) != len(values):
             raise Refused("duplicate-directory-entry")
         return sorted(values)
@@ -616,7 +690,10 @@ class Originals:
             self.error(phase, node.role, "type-refused")
             return False
         if node.policy in ("native", "applications", "sudo", "alias"):
-            if current.st_uid != 0:
+            if node.policy == "alias":
+                if not _selection_alias_owner(current.st_uid, self.context["uid"]):
+                    self.error(phase, node.role, "alias-root-or-current-account-required")
+            elif current.st_uid != 0:
                 self.error(phase, node.role, "root-owner-required")
             if node.policy == "applications":
                 try:
@@ -681,10 +758,29 @@ class Originals:
             if diagnostic.get("snapshotFlags") != value["flags"]:
                 self.error(phase, node.role, "native-python-flags-mismatch")
             value["birthtimeNs"] = diagnostic.get("snapshotBirthtimeNs")
-            try:
-                value["xattrs"] = self.api.xattrs(node.fd)
-            except (OSError, Refused, UnicodeError) as error:
-                self.error(phase, node.role, "xattr-" + type(error).__name__, getattr(error, "errno", 0))
+            if node.policy == "sudo":
+                # O_EXEC need not authorize xattr reads. This fixed role needs
+                # stability, not empty attributes. Positively prove an immutable
+                # root snapshot before substituting that basis; never catch an
+                # EACCES and call it success. All other roles still read xattrs.
+                value["xattrs"] = None
+                try:
+                    root = self.nodes.get("/")
+                    if root is None or root.fd is None or not root.expected:
+                        raise Refused("sudo-snapshot-held-root-unavailable")
+                    self.deadline.check()
+                    root_filesystem = self.api.filesystem(root.fd)
+                    if root_filesystem != root.expected.get("filesystem"):
+                        raise Refused("sudo-snapshot-held-root-changed")
+                    value["xattrStability"] = _sudo_xattr_basis(node, value, root_filesystem)
+                except (OSError, Refused, UnicodeError) as error:
+                    self.error(phase, node.role, str(error) if isinstance(error, Refused)
+                               else "sudo-snapshot-observation-failed", getattr(error, "errno", 0))
+            else:
+                try:
+                    value["xattrs"] = self.api.xattrs(node.fd)
+                except (OSError, Refused, UnicodeError) as error:
+                    self.error(phase, node.role, "xattr-" + type(error).__name__, getattr(error, "errno", 0))
             flags = value["flags"]
             if not isinstance(flags, int) or flags & ~_observation_flags(node.policy, node.kind):
                 self.error(phase, node.role, "unknown-immutable-append-or-dataless-flags")
@@ -721,13 +817,15 @@ class Originals:
                 or (parent is None and name != "/")):
             self.error("acquire", role, "unavailable-parent-or-path")
             return node
-        if sum(n.fd is not None for n in self.nodes.values()) >= MAX_ORIGINALS:
-            self.error("acquire", role, "original-descriptor-bound")
-            return node
         try:
             named = self.named_stat(node)
             expected = {"directory": stat.S_ISDIR, "file": stat.S_ISREG, "alias": stat.S_ISLNK}[kind]
             if not expected(named.st_mode):
+                if self.classification:
+                    # A type-negative never follows this name. A later strict
+                    # named POST is required before calling it a stable negative.
+                    node.pre = {"full9": full9(named), "flags": getattr(named, "st_flags", None)}
+                    node.expected = node.pre
                 self.error("acquire", role, "unavailable-invalid-type-no-follow")
                 return node
             flags = os.O_NONBLOCK | os.O_CLOEXEC
@@ -742,7 +840,17 @@ class Originals:
                 flags |= O_EXEC if policy == "sudo" else os.O_RDONLY
             if kind == "directory":
                 flags |= os.O_DIRECTORY
-            node.fd = os.open(name, flags, **({} if parent is None else {"dir_fd": parent.fd}))
+            self.reserve("original-descriptor-bound")
+            try:
+                node.fd = os.open(name, flags, **({} if parent is None else {"dir_fd": parent.fd}))
+            except OSError:
+                self.budget["live"] -= 1  # Definitively no returned original.
+                raise
+            except BaseException:
+                self.budget["uncertain"] = True
+                node.close_state = "unknown"
+                raise
+            node.budgeted = True
             node.close_state = "owned"
             if full9(os.fstat(node.fd)) != full9(named):
                 self.error("acquire", role, "lstat-opened-identity-mismatch")
@@ -828,7 +936,7 @@ class Originals:
             faults.append("snapshot-errors")
         if previous["roster"] != self.work_names:
             faults.append("prior-roster")
-        if added not in (INTENT, RESULT) or added in self.work_names:
+        if added not in self.receipt_names or added in self.work_names:
             faults.append("receipt-name")
         if after[:5] != before[:5]:
             faults.append("identity")
@@ -860,12 +968,20 @@ class Originals:
         self.deadline.check()
         for node in self.nodes.values():
             if node.fd is None:
+                if self.classification and node.pre is not None and node.close_state == "not-opened":
+                    try:
+                        named = self.named_stat(node)
+                        node.post = {"full9": full9(named), "flags": getattr(named, "st_flags", None)}
+                        if not _same_snapshot(node.pre, node.post):
+                            self.error(phase, node.role, "type-negative-name-changed")
+                    except (OSError, Refused, UnicodeError) as error:
+                        self.error(phase, node.role, "type-negative-post-unavailable", getattr(error, "errno", 0))
                 continue
             count = len(self.errors)
             try:
                 observed = self.snapshot(node, phase)
                 before = node.expected
-                if node.policy == "shared-identity":
+                if node.policy == "shared-identity" and not self.classification:
                     same = (before is not None and before["full9"][:5] == observed["full9"][:5]
                             and before["flags"] == observed["flags"])
                 else:
@@ -899,7 +1015,10 @@ class Originals:
                 self.error(phase, "intent", "immutable-intent-name-changed")
         if self.result_fd is not None:
             current = full9(os.fstat(self.result_fd))
-            named = full9(os.stat(RESULT, dir_fd=self.work.fd, follow_symlinks=False))
+            result_name = self.result_pin["name"]
+            if result_name not in self.receipt_names:
+                raise Refused("fixed-result-name-required")
+            named = full9(os.stat(result_name, dir_fd=self.work.fd, follow_symlinks=False))
             os.lseek(self.result_fd, 0, os.SEEK_SET)
             observed = bytearray()
             while True:
@@ -912,24 +1031,30 @@ class Originals:
                     raise Refused("final-result-readback-bound")
             if (current != self.result_pin["full9"] or named != current
                     or full9(os.fstat(self.result_fd)) != current
-                    or full9(os.stat(RESULT, dir_fd=self.work.fd, follow_symlinks=False)) != current
+                    or full9(os.stat(result_name, dir_fd=self.work.fd, follow_symlinks=False)) != current
                     or bytes(observed) != self.result_bytes):
                 self.error(phase, "result", "original-result-readback-changed")
         self.deadline.check()
 
     def receipt(self, name, value, retain=False):
         if (self.work is None or self.work.fd is None or not self.work_admitted
-                or name not in (INTENT, RESULT)):
+                or name not in self.receipt_names or (retain and self.result_fd is not None)):
             raise Refused("receipt-private-work-unavailable")
         if name in self.receipt_attempts:
             raise Refused("receipt-name-already-attempted")
         self.deadline.check()
-        if sum(n.fd is not None for n in self.nodes.values()) + int(self.result_fd is not None) >= MAX_ORIGINALS:
-            raise Refused("receipt-descriptor-bound")
         data = _json_bytes(value)
+        self.reserve("receipt-descriptor-bound")
         self.receipt_attempts.add(name)
-        descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                             0o600, dir_fd=self.work.fd)
+        try:
+            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=self.work.fd)
+        except OSError:
+            self.budget["live"] -= 1
+            raise
+        except BaseException:
+            self.budget["uncertain"] = True
+            raise
         retained = False
         try:
             offset = 0
@@ -964,32 +1089,60 @@ class Originals:
                 self.result_fd = descriptor
                 self.result_pin = pin
                 self.result_bytes = data
+                self.result_budgeted = True
                 retained = True
             return pin
         finally:
             if not retained:
-                os.close(descriptor)  # Failure vetoes the claim; never retry.
+                self.consuming_close(descriptor)  # Failure vetoes the claim; never retry.
 
     def close_all(self):
         errors = []
         if self.result_fd is not None:
             descriptor, self.result_fd = self.result_fd, None
+            budgeted, self.result_budgeted = self.result_budgeted, False
             try:
-                os.close(descriptor)
+                self.consuming_close(descriptor, budgeted)
             except BaseException:
                 errors.append("result-original-close-unknown")
         for node in reversed(list(self.nodes.values())):
             if node.fd is None:
                 continue
             descriptor, node.fd = node.fd, None
+            budgeted, node.budgeted = node.budgeted, False
             node.close_state = "closing"
             try:
-                os.close(descriptor)
+                self.consuming_close(descriptor, budgeted)
                 node.close_state = "closed"
             except BaseException:
                 node.close_state = "unknown"
                 errors.append(node.role + ":original-close-unknown")
         return errors
+
+
+def _collect_xcode_chain(book, applications, selected, stop_on_error=False):
+    """The same eleven concrete roles, never an alternate selector/tool query."""
+    if selected is None:
+        app = Node("/Applications/Xcode.app", "selected-xcode-unavailable", applications,
+                   "Xcode.app", "directory", "native")
+    else:
+        app = book.open(applications, selected, "directory", "native", "selected-xcode")
+    nodes = [app]
+    for parent_index, name, kind, role in (
+            (0, "Contents", "directory", "xcode-developer:0"),
+            (1, "Developer", "directory", "xcode-developer:1"),
+            (2, "usr", "directory", "xcode-tool-bin:0"),
+            (3, "bin", "directory", "xcode-tool-bin:1"),
+            (4, "xcodebuild", "file", "xcodebuild"),
+            (2, "Platforms", "directory", "iphoneos-sdk:0"),
+            (6, "iPhoneOS.platform", "directory", "iphoneos-sdk:1"),
+            (7, "Developer", "directory", "iphoneos-sdk:2"),
+            (8, "SDKs", "directory", "iphoneos-sdk:3"),
+            (9, "iPhoneOS.sdk", "directory", "iphoneos-sdk:4")):
+        if stop_on_error and book.errors:
+            break
+        nodes.append(book.open(nodes[parent_index], name, kind, "native", role))
+    return nodes
 
 
 def _collect_prerequisites(book):
@@ -1003,25 +1156,15 @@ def _collect_prerequisites(book):
             named = os.stat("Xcode.app", dir_fd=applications.fd, follow_symlinks=False)
             if stat.S_ISLNK(named.st_mode):
                 alias = book.open(applications, "Xcode.app", "alias", "alias", "xcode-alias")
-                if (alias.pre is None or alias.pre["full9"][3] != 0 or alias.pre["full9"][5] != 1
+                if (alias.pre is None or not _selection_alias_owner(alias.pre["full9"][3], book.context["uid"])
+                        or alias.pre["full9"][5] != 1
                         or not 1 <= alias.pre["full9"][6] <= 1024 or alias.alias_target is None):
                     raise Refused("invalid-alias-no-descendant-follow")
                 selected = _sibling(alias.alias_target)
         except (OSError, Refused, UnicodeError) as error:
             book.error("selection", "xcode-alias", type(error).__name__, getattr(error, "errno", 0))
             selected = None
-    if selected is None:
-        # Keep actual parent identity; an unavailable synthetic node is NOT an
-        # observed directory and is never opened through the refused alias.
-        app = Node("/Applications/Xcode.app", "selected-xcode-unavailable", applications,
-                   "Xcode.app", "directory", "native")
-    else:
-        app = book.open(applications, selected, "directory", "native", "selected-xcode")
-    developer = book.chain(app, ("Contents", "Developer"), "xcode-developer")
-    tool_bin = book.chain(developer, ("usr", "bin"), "xcode-tool-bin")
-    book.open(tool_bin, "xcodebuild", "file", "native", "xcodebuild")
-    book.chain(developer, ("Platforms", "iPhoneOS.platform", "Developer", "SDKs", "iPhoneOS.sdk"),
-               "iphoneos-sdk")
+    _collect_xcode_chain(book, applications, selected)
     system_bin = book.chain(root, ("usr", "bin"), "fixed-system-bin")
     for name in ("security", "codesign", "openssl"):
         book.open(system_bin, name, "file", "native", "signing-recovery:" + name)
@@ -1101,8 +1244,9 @@ def _bind_source(book):
                 or hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != item["blob"]):
             raise Refused("source-helper-workflow-not-original-inventory")
         bindings.append({"path": name, "size": len(data), "sha256": item["sha256"], "blob": item["blob"]})
+    expected_argv = [WORKSPACE + "/" + HELPER] + ([CLASSIFICATION_ARG] if book.classification else [])
     if (os.getcwd() != WORKSPACE or os.path.abspath(__file__) != WORKSPACE + "/" + HELPER
-            or len(sys.argv) != 1 or sys.argv[0] != WORKSPACE + "/" + HELPER):
+            or sys.argv != expected_argv):
         raise Refused("fixed-helper-launch-path-required")
     book.source_binding = {"source": value["source"], "tree": value["tree"],
                            "completeInventorySha256": hashlib.sha256(raw).hexdigest(),
@@ -1113,6 +1257,213 @@ def _eligible_action(book):
     if book.errors or book.applications is None or book.applications.pre is None:
         return None
     return _application_mode(book.applications.pre["full9"])
+
+
+def _classification_objects(book):
+    """Compact policy facts, not a recursive inventory or native admission."""
+    result = []
+    for node in book.nodes.values():
+        before, after = node.pre or {}, node.post or {}
+        fs, acl = before.get("filesystem", {}), before.get("acl", {})
+        result.append({"role": node.role, "name": node.name, "kind": node.kind,
+                       "preFull9": before.get("full9"), "postFull9": after.get("full9"),
+                       "flags": before.get("flags"), "aclKind": acl.get("kind"),
+                       "filesystemType": fs.get("typeName"), "filesystemFlags": fs.get("flags"),
+                       "filesystemOwner": fs.get("owner"),
+                       "xattrCount": len(before["xattrs"]) if isinstance(before.get("xattrs"), list) else None,
+                       "strictPostMatched": _same_snapshot(node.pre, node.post),
+                       "finalClose": "pending-original-helper-exit" if node.fd is not None else node.close_state})
+    return result
+
+
+def _classification_policy_known(book):
+    # These are observed policy negatives, not substitutes for failed reads.
+    # Every acquired original still needs its complete snapshot and strict POST.
+    known = {"root-owner-required", "native-protected-mode-07022", "single-link-executable-required",
+             "native-apfs-local-mount-policy", "executable-noexec-mount",
+             "unknown-immutable-append-or-dataless-flags", "unavailable-invalid-type-no-follow",
+             "native-empty-acl-required"}
+    if any(error["code"] not in known for error in book.errors):
+        return False
+    required = {"full9", "flags", "filesystem", "acl", "aclDiagnostic", "birthtimeNs", "xattrs"}
+    for node in book.nodes.values():
+        if not _same_snapshot(node.pre, node.post):
+            return False
+        if node.close_state == "not-opened":
+            # Only a twice-observed wrong type has no original to consume.
+            if not any(error["role"] == node.role and error["code"] == "unavailable-invalid-type-no-follow"
+                       for error in book.errors):
+                return False
+            continue
+        if node.close_state != "closed":
+            return False
+        for snapshot in (node.pre, node.post):
+            if not required.issubset(snapshot):
+                return False
+            diagnostic = snapshot["aclDiagnostic"]
+            if (not diagnostic.get("filesecFreeReturned") or diagnostic.get("aclFreeException")
+                    or diagnostic.get("filesecFreeException") or diagnostic.get("exception")
+                    or diagnostic.get("snapshotFull9") != snapshot["full9"]
+                    or diagnostic.get("snapshotFlags") != snapshot["flags"]):
+                return False
+            if snapshot["acl"]["empty"]:
+                if diagnostic.get("phase") != 0:
+                    return False
+            elif (diagnostic.get("kind") != "contains-entry" or diagnostic.get("phase") != 11
+                  or diagnostic.get("aclFreeResult") != 0):
+                return False
+    return not book.budget["uncertain"]
+
+
+def _classify_candidate(common, name):
+    book = Originals(common.api, common.context, common.deadline,
+                     budget=common.budget, classification=True)
+    alias = None
+    close_errors = []
+    try:
+        common.deadline.check()
+        if name == "Xcode.app" and stat.S_ISLNK(
+                os.stat(name, dir_fd=common.applications.fd, follow_symlinks=False).st_mode):
+            # Observe the one selection alias itself; never walk its target.
+            alias = book.open(common.applications, name, "alias", "alias", "xcode-alias-selection-only")
+        else:
+            _collect_xcode_chain(book, common.applications, name, stop_on_error=True)
+        book.recheck("post")
+        common.recheck("classification-candidate-post")
+        common.deadline.check()
+    except BaseException as error:
+        book.error("classification", "candidate", type(error).__name__
+                   + (":" + str(error) if isinstance(error, Refused) else ""), getattr(error, "errno", 0))
+    finally:
+        close_errors = book.close_all()
+    for detail in close_errors:
+        common.error("close", "candidate", detail)
+    known = not common.errors and not close_errors and _classification_policy_known(book)
+    complete_chain = alias is None and len(book.nodes) == 11 and not book.errors
+    outcome = "unresolved"
+    if known:
+        outcome = "ineligible" if book.errors or alias is not None else ("eligible" if complete_chain else "unresolved")
+    return {"name": name, "outcome": outcome, "completeChain": complete_chain,
+            "selectionDataOnly": alias is not None,
+            "selectionTarget": alias.alias_target if alias is not None else None,
+            "reasons": book.errors, "objects": _classification_objects(book),
+            "closeErrors": close_errors}
+
+
+def _classification_report(book, state):
+    return {"schemaVersion": 1, "scope": "dedicated-disposable-macos-xcode-installed-classification",
+            "context": book.context, "sourceBinding": book.source_binding,
+            "phase": "classification-final-closes-pending", "prepared": False,
+            "consumerQualified": False, "nativeQualified": False,
+            "command": {"claimed": False, "retirement": "not-started"}, "intent": None,
+            "completionAuthority": "same-original-helper-exit0-after-all-input-work-result-closes",
+            "applicationsActionStillRequired": _application_mode(book.applications.pre["full9"])
+            if book.applications is not None and book.applications.pre is not None and not book.errors else None,
+            "classification": state, "commonObjects": _classification_objects(book),
+            "errors": book.errors[:16], "errorCount": len(book.errors), "errorsTruncated": len(book.errors) > 16,
+            "bounds": {"absoluteSeconds": 60, "aggregateDescriptors": MAX_ORIGINALS,
+                       "applicationsEntries": MAX_ENTRIES, "recordBytes": MAX_RECORD},
+            "descriptorBudgetBeforeReceipt": dict(book.budget)}
+
+
+def _classify_installed(book, state):
+    """Sequential observation only; no old 38-original preparer or command owner."""
+    root = book.open(None, "/", "directory", "native", "root")
+    book.applications = book.open(root, "Applications", "directory", "applications", "applications")
+    _bind_source(book)
+    book.recheck("classification-common-before-enumeration")
+    if book.errors or book.applications.pre is None:
+        raise Refused("classification-common-admission-incomplete")
+    roster = book.applications.pre["roster"]
+    names = []
+    for name in roster:
+        try:
+            if name != "Xcode.app":
+                _sibling(name)
+        except Refused:
+            continue
+        names.append(name)
+    state.update(rosterEntries=len(roster), candidateNames=len(names), excludedNames=len(roster) - len(names))
+    for name in names:
+        book.deadline.check()
+        record = _classify_candidate(book, name)
+        state["observations"].append(record)
+        try:
+            # Leave a fixed small margin for final common observations/errors;
+            # the actual final escaped aggregate is checked again by receipt.
+            _json_bytes(_classification_report(book, state), MAX_RECORD - 8192)
+        except Refused:
+            state["observations"].pop()
+            state["omittedObservations"] += 1
+            raise Refused("classification-report-bound")
+        if record["outcome"] == "unresolved" or book.budget["uncertain"] or book.errors:
+            raise Refused("classification-candidate-incomplete")
+        # No next candidate can acquire a slot before all previous closes and
+        # this same absolute deadline check; uncertain capacity is never reused.
+        book.deadline.check()
+    book.recheck("post")
+    if book.errors:
+        raise Refused("classification-common-post-incomplete")
+    state["complete"] = True
+
+
+def _classification_main(deadline):
+    book = None
+    state = {"complete": False, "observations": [], "omittedObservations": 0,
+             "rosterEntries": None, "candidateNames": None, "excludedNames": None}
+    result_written = False
+    final_errors = []
+    try:
+        u = os.uname()
+        context = _validate_context(dict(os.environ),
+                                    (os.getuid(), os.geteuid(), os.getgid(), os.getegid()),
+                                    (u.sysname, u.machine), sys.version_info[:3],
+                                    (sys.flags.isolated, sys.flags.no_site, sys.dont_write_bytecode))
+        api = DarwinAPI(deadline)
+        context["macosVersion"] = api.version
+        context["dataPython"] = "3.14.7-isolated-no-site-no-bytecode"
+        book = Originals(api, context, deadline, classification=True)
+        _classify_installed(book, state)
+        book.receipt(CLASSIFICATION_RESULT, _classification_report(book, state), retain=True)
+        result_written = True
+        book.recheck("final-before-closes")
+        if book.errors:
+            state["complete"] = False
+        deadline.check()
+    except BaseException as error:
+        state["complete"] = False
+        final_errors.append(type(error).__name__ + (":" + str(error) if isinstance(error, Refused) else ""))
+        if book is not None:
+            try:
+                book.error("classification", "helper", final_errors[-1], getattr(error, "errno", 0))
+                if (book.work_admitted and not result_written
+                        and CLASSIFICATION_RESULT not in book.receipt_attempts):
+                    book.receipt(CLASSIFICATION_RESULT, _classification_report(book, state), retain=True)
+                    result_written = True
+            except BaseException as report_error:
+                final_errors.append("result-" + type(report_error).__name__)
+    finally:
+        if book is not None:
+            final_errors.extend(book.close_all())
+    try:
+        deadline.check()
+    except Refused:
+        final_errors.append("final-deadline")
+    if (book is not None and state["complete"] and result_written and not final_errors
+            and not book.budget["uncertain"] and book.budget["live"] == 0):
+        return 0  # Complete classification, including a complete negative, NOT preparation.
+    if book is not None:
+        # Unknown custody can forbid even receipt acquisition. Preserve the
+        # bounded original close cause using inherited stderr, never a new FD.
+        close_details = [{"role": item["role"][:64], "code": item["code"][:128]}
+                         for item in book.errors if item["stage"] == "close"][:4]
+        if close_details:
+            print("Classification original close uncertainty: "
+                  + _json_bytes(close_details, 8192).decode("ascii").rstrip(), file=sys.stderr, flush=True)
+    print("Xcode installed classification incomplete; no preparation/native authority."
+          + (" Final owner errors: " + ",".join(final_errors) if final_errors else ""),
+          file=sys.stderr, flush=True)
+    return 1
 
 
 def _command_acknowledged(value):
@@ -1358,6 +1709,8 @@ def _report(book, context, command, phase, eligible=False):
 
 def main():
     deadline = Deadline()
+    if sys.argv[1:] == [CLASSIFICATION_ARG]:
+        return _classification_main(deadline)
     book = None
     owner = None
     unknown = False

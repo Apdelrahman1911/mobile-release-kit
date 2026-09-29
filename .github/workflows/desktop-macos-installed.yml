@@ -21,8 +21,10 @@ jobs:
     env:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
-      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: 2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef
-      MRK_BUNDLED_PROTOCOL_SHA256: 860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e
+      # Exact accepted current-payload DATA; ordinary installation is not Aqua qualification.
+      MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371
+      MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
@@ -36,8 +38,10 @@ jobs:
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]]
-          # Independently accepted DATA01 M-plus-two-notices description; no rebuild.
-          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == 2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef ]]
+          # Historical archive reuse supplies the interpreter, not the current core.
+          [[ "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" == bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37 ]]
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371 ]]
+          [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]]
           [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]]
       - name: Check out exact reviewed source without retained credentials
@@ -89,7 +93,10 @@ jobs:
           value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
+                   "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
+                   "protocolSha256": os.environ["MRK_BUNDLED_PROTOCOL_SHA256"],
                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
+                   "reusedSupplierOnly": True,
                    "scope": "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
                    "aclPrimitiveCases": 6,
                    "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
@@ -259,7 +266,7 @@ jobs:
           with os.fdopen(fd, "wb") as stream:
               stream.write(data); stream.flush(); os.fsync(stream.fileno())
           PYDATA
-      - name: Download only the exact accepted M archive (no rebuild or fallback)
+      - name: Download only the exact accepted interpreter supplier archive (no rebuild or fallback)
         timeout-minutes: 3
         shell: bash
         env:
@@ -268,14 +275,17 @@ jobs:
           set -euo pipefail
           set -o noclobber
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/10639324707/zip" > "$MRK_MACOS_WORK/accepted-native-evidence.zip"
-      - name: Reuse complete M bytes and add the two pinned notices
+      - name: Reuse accepted Mac supplier and prepare only the current ordinary payload
         timeout-minutes: 3
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py runtime \
+          umask 077
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
             --archive "$MRK_MACOS_WORK/accepted-native-evidence.zip" \
+            --work "$MRK_MACOS_WORK/current-runtime-preparation" \
+            --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Build only the normal ARM64 bundled-asset shell
@@ -301,7 +311,7 @@ jobs:
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           /usr/bin/codesign --force --sign - --timestamp=none "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
-      - name: Bind this completed signed app and unchanged runtime into fresh Installer DATA
+      - name: Bind this completed signed app and current-source runtime into fresh Installer DATA
         timeout-minutes: 3
         shell: bash
         run: |
@@ -309,6 +319,7 @@ jobs:
           set -o noclobber
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py input \
             --app "$MRK_MACOS_WORK/app/Mobile Release Kit.app" --runtime "$MRK_MACOS_WORK/runtime" \
+            --current-runtime \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/input" > "$MRK_MACOS_WORK/input-result.json"
           inventory=$("$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/input-result.json" <<'PY'

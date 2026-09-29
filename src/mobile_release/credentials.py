@@ -21,6 +21,10 @@ from typing import Any, Callable, Iterable, Mapping
 from .cancellation import CleanupScope as _ProfileCleanup, DefaultCancellation as _ProfileCancellation, cancellation_owner
 from .config import ConfigurationError, ReleaseConfig
 from .errors import CredentialError, ValidationError
+from .credential_group_envelope import (
+    INPUT_GROUP_ENVIRONMENT_NAMES, decode_group_envelope, envelope_present,
+    group_mask_commands, groups_for_requirements, validate_input_field, _observe_input_environment,
+)
 from .reporting import FAILING_STATUSES, Finding, Status
 from .checked_files import inspect_external_path, read_external_bytes
 from .build_inputs import (
@@ -34,7 +38,7 @@ from ._profile_callers import consume_profile_evidence, fatal_cancellation_error
 
 # Public names remain available here for existing CLI/integration callers.
 from .credential_requirements import (
-    ENVIRONMENT_NAMES, STAGES, Requirement, requirements,
+    ENVIRONMENT_NAMES, STAGES, Requirement, requirements, local_requirements,
     _apple_api_requirements, _apple_review_requirements, _google_requirements,
 )
 from .credential_policy import (
@@ -80,7 +84,7 @@ ALLOWED_CREDENTIAL_NAMES = {
     "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_PATH",
     "MOBILE_RELEASE_PROJECT_READ_TOKEN",
 }
-CREDENTIAL_ENVIRONMENT_NAMES = ALLOWED_CREDENTIAL_NAMES | {
+CREDENTIAL_ENVIRONMENT_NAMES = ALLOWED_CREDENTIAL_NAMES | INPUT_GROUP_ENVIRONMENT_NAMES | {
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     "ACTIONS_ID_TOKEN_REQUEST_URL",
     "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
@@ -248,14 +252,33 @@ def load_credentials_file(
     return values
 
 
-def credential_values_from_environment(environ: Mapping[str, str]) -> dict[str, str]:
-    return {
-        name: environ[name]
+def credential_values_from_environment(
+    environ: Mapping[str, str], *, required: Iterable[Requirement] = (),
+) -> dict[str, str]:
+    """Keep legacy opt-in values; decode only complete, core-selected groups."""
+    groups = groups_for_requirements(required)
+    observed = _observe_input_environment(environ,
+        ALLOWED_CREDENTIAL_NAMES | {"GITHUB_ACTIONS"} | {group.secret_name for group in groups})
+    values = {
+        name: observed[name]
         for name in ALLOWED_CREDENTIAL_NAMES
-        if environ.get(name)
+        if observed.get(name)
     }
-
-
+    decoded = [
+        (group, decode_group_envelope(group.kind, observed[group.secret_name]))
+        for group in groups
+        if envelope_present(observed, group)
+    ]
+    # Validate every applicable envelope before exposing any decoded value.
+    for group, group_values in decoded:
+        for name in group.names:
+            values.pop(name, None)
+        values.update(group_values)
+    if observed.get("GITHUB_ACTIONS") == "true":
+        for group, group_values in decoded:
+            for command in group_mask_commands(group, group_values):
+                print(command, flush=True)
+    return values
 def _reject_ambiguous_material(values: Mapping[str, str], source: str) -> None:
     for alternatives in CREDENTIAL_MATERIAL_GROUPS:
         configured = sorted(name for name in alternatives if values.get(name))
@@ -273,27 +296,57 @@ def resolve_credential_values(
     credentials_from_env: bool = False,
     environ: Mapping[str, str] | None = None,
     cancellation: _ProfileCancellation | None = None,
+    required: Iterable[Requirement] | None = None,
 ) -> dict[str, str]:
-    """Resolve only allowlisted credentials; an explicit file wins by material family."""
+    """Resolve allowlisted inputs without combining parts of an atomic group.
 
-    resolved = (
-        credential_values_from_environment(environ if environ is not None else os.environ)
-        if credentials_from_env
-        else {}
-    )
+    Existing legacy-only file/environment precedence is unchanged. With an
+    applicable envelope, a file override must provide and validate the whole
+    group. Environment mode remains explicit; no ambient envelope is admitted
+    merely because a credentials file was selected.
+    """
+    selected = tuple(requirements(config) if required is None else required) if credentials_from_env else ()
+    groups = groups_for_requirements(selected)
+    source = _observe_input_environment(environ if environ is not None else os.environ,
+        ALLOWED_CREDENTIAL_NAMES | {"GITHUB_ACTIONS"} | {group.secret_name for group in groups}) if credentials_from_env else {}
+    active = tuple(group for group in groups if envelope_present(source, group))
+    resolved = credential_values_from_environment(source, required=selected) if credentials_from_env else {}
     _reject_ambiguous_material(resolved, "explicit environment mode")
     if credentials_file is None:
         return resolved
 
+    # Malformed applicable envelopes above refuse even if a complete file was
+    # selected. Never use that file as an excuse to fall back after a bad group.
     file_values = load_credentials_file(credentials_file, config.root, cancellation=cancellation)
     _reject_ambiguous_material(file_values, "credentials file")
+    replaced = []
+    for group in active:
+        if not group.names & file_values.keys():
+            continue
+        for field in group.fields:
+            names = [name for name in field.names if name in file_values]
+            if len(names) != 1:
+                raise CredentialError(f"Credentials file must provide the complete {group.kind} input group")
+            name = names[0]
+            if name == field.name:
+                validate_input_field(group, field, file_values[name])
+            status, _detail = _value_state(name, file_values, config.root, cancellation=cancellation)
+            if status != Status.CONFIGURED:
+                raise CredentialError(f"Credentials file {group.kind} field {field.id} is invalid")
+        replaced.append(group)
+    for group in replaced:
+        for name in group.names:
+            resolved.pop(name, None)
     for alternatives in CREDENTIAL_MATERIAL_GROUPS:
         if alternatives & file_values.keys():
             for name in alternatives:
                 resolved.pop(name, None)
     resolved.update(file_values)
+    if source.get("GITHUB_ACTIONS") == "true":
+        for group in replaced:
+            for command in group_mask_commands(group, file_values):
+                print(command, flush=True)
     return resolved
-
 
 def credential_values_for_purpose(
     config: ReleaseConfig,
@@ -313,7 +366,8 @@ def credential_values_for_purpose(
     if purpose == "store" and "android" in selected:
         allowed.add("GOOGLE_APPLICATION_CREDENTIALS")
     from ._desktop_ios_signing_material import CapturedBuildValues
-    if type(values) is CapturedBuildValues:
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    if type(values) in {CapturedBuildValues, CapturedAndroidBuildValues}:
         # Captured file bytes are not environment/renderer mapping values.
         # Preserve their original source while applying the SAME core policy.
         return values.select(allowed)
@@ -422,46 +476,19 @@ def credential_findings(
     environ: Mapping[str, str] | None = None,
     cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
+    requested = (requirements if github else local_requirements)(config, stage, purpose=purpose, platforms=platforms)
     env = resolve_credential_values(
         config,
         credentials_file=credentials_file,
         credentials_from_env=credentials_from_env,
         environ=environ,
         cancellation=cancellation,
+        required=requested,
     )
     github_cache: dict[str, tuple[set[str], set[str], str | None]] = {}
     result: list[Finding] = []
-    requested = requirements(config, stage, purpose=purpose, platforms=platforms)
-    if not github and purpose == "store":
-        google_stages = {
-            item.stage
-            for item in requested
-            if item.platform == "android"
-            and item.name
-            in {"MOBILE_RELEASE_GOOGLE_WIF_PROVIDER", "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT"}
-        }
-        requested = [
-            item
-            for item in requested
-            if not (
-                item.platform == "android"
-                and item.name
-                in {
-                    "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
-                    "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT",
-                }
-            )
-        ]
-        requested.extend(
-            Requirement(
-                "GOOGLE_APPLICATION_CREDENTIALS",
-                "file",
-                current_stage,
-                "android",
-                reason="Local read-only Google Application Default Credentials file",
-            )
-            for current_stage in sorted(google_stages)
-        )
+    group_names = {field.name: group.secret_name for group in groups_for_requirements(requested)
+                   for field in group.fields} if github else {}
     for item in requested:
         candidates = (
             (item.name,)
@@ -480,8 +507,13 @@ def credential_findings(
                 status = Status.MANUAL
                 remediation = error
             else:
+                group_name = group_names.get(item.name)
                 available = variables if item.kind == "variable" else secrets
-                configured_name = next((name for name in candidates if name in available), None)
+                if group_name in secrets:
+                    configured_name = group_name
+                    remediation = "Group secret name observed only; content is not inspected until the pinned consumer runs."
+                else:
+                    configured_name = next((name for name in candidates if name in available), None)
                 status = Status.CONFIGURED if configured_name else Status.MISSING
         else:
             for candidate in candidates:
@@ -529,7 +561,8 @@ def _selected_material_bytes(
 ) -> bytes | None:
     """Select an external source once, never return its filename to consumers."""
     from ._desktop_ios_signing_material import CapturedBuildValues
-    if type(values) is CapturedBuildValues:
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
+    if type(values) in {CapturedBuildValues, CapturedAndroidBuildValues}:
         return values.material(base64_name, root=project_root, cancellation=cancellation)
     if values.get(base64_name) and values.get(path_name):
         raise CredentialError("private material has mutually exclusive input sources")
@@ -1256,9 +1289,29 @@ def _fingerprint_from_text(text: str) -> str | None:
     return match.group(1).replace(":", "").lower() if match else None
 
 
+def _android_alias_operand(value: object) -> bool:
+    """Preserve shared alias grammar while refusing an option-like tool operand."""
+    return (type(value) is str and not value.startswith("-")
+            and _shared_credential_format_error("MOBILE_RELEASE_ANDROID_KEY_ALIAS", value) is None)
+
+
 def _validate_android_material(
     config: ReleaseConfig, values: Mapping[str, str], directory: Path | FiniteScratch, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
+    android_operation=None,
 ) -> Finding:
+    if android_operation is not None:
+        from .android_build_operation import AndroidBuildOperation
+        if (type(android_operation) is not AndroidBuildOperation or android_operation.signing is None
+                or execution_source is not None or type(directory) is not FiniteScratch):
+            raise CredentialError("Android signing validation requires its original operation")
+        android_operation.signing.require_values(config, values)
+        if cancellation is not android_operation.guard:
+            raise CredentialError("Android signing validation cancellation differs")
+    alias = values.get("MOBILE_RELEASE_ANDROID_KEY_ALIAS")
+    if alias and not _android_alias_operand(alias):
+        return Finding("credential-material.android", Status.INVALID,
+                       "The existing Android key alias must use letters, digits, underscore, dot or hyphen and cannot start with a hyphen.",
+                       category="credentials")
     if type(directory) is not FiniteScratch:
         with finite_scratch(layout="signing-validation", parent=directory, cancellation=cancellation) as scratch:
             return _validate_android_material(config, values, scratch, execution_source=execution_source,
@@ -1292,11 +1345,11 @@ def _validate_android_material(
             "Android signing passwords or alias are incomplete.",
             category="credentials",
         )
-    env = scrub_credential_capabilities(os.environ)
-    env.update(values)
-    env["LC_ALL"] = "C"
-    result = _run_private(
-        [
+    if android_operation is None:
+        env = scrub_credential_capabilities(os.environ)
+        env.update(values)
+        env["LC_ALL"] = "C"
+        result = _run_private([
             "keytool",
             "-J-Duser.timezone=UTC",
             "-list",
@@ -1309,10 +1362,18 @@ def _validate_android_material(
             "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
             "-keypass:env",
             "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
-        ],
-        environ=env,
-        execution_source=execution_source, cancellation=cancellation,
-    )
+            ], environ=env, execution_source=execution_source, cancellation=cancellation)
+    else:
+        try:
+            argv = android_operation.signing.validation_command(scratch, keystore, values)
+            result = run_owned(argv, environ=android_operation.command_environment(),
+                               cwd=config.root, capture=True, timeout=30, output_limit=2 * 1024 * 1024,
+                               cancellation=cancellation)
+            android_operation.returned("keytool-validate", result.returncode)
+        except BaseException as error:
+            android_operation.command_error("keytool-validate", error)
+            raise
+        android_operation.tools.check()
     scratch.require(keystore)
     output = result.stdout + result.stderr
     if result.returncode or "PrivateKeyEntry" not in output:
@@ -1746,11 +1807,18 @@ def validate_signing_material(
     platforms: Iterable[str],
     execution_source=None,
     cancellation: _ProfileCancellation | None = None,
+    android_operation=None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     selected = tuple(platforms)
     if len(set(selected)) != len(selected) or any(platform not in {"android", "ios"} for platform in selected):
         raise CredentialError("signing material requires an exact platform selection")
+    if android_operation is not None:
+        from .android_build_operation import AndroidBuildOperation
+        if (type(android_operation) is not AndroidBuildOperation or android_operation.signing is None
+                or selected != ("android",) or cancellation is not android_operation.guard or execution_source is not None):
+            raise CredentialError("Android validation requires its exact saved signing operation")
+        android_operation.signing.require_values(config, values)
     with finite_scratch(layout="signing-validation", cancellation=cancellation) as directory:
         cancellation = directory.cancellation
         values = credential_values_for_purpose(config, values, stage="candidate", purpose="signing", platforms=selected)
@@ -1758,8 +1826,9 @@ def validate_signing_material(
             try:
                 platform_findings = []
                 if platform == "android":
+                    extra = {} if android_operation is None else {"android_operation": android_operation}
                     platform_findings.append(_validate_android_material(config, values, directory,
-                                                                        execution_source=execution_source, cancellation=cancellation))
+                                                                        execution_source=execution_source, cancellation=cancellation, **extra))
                 elif platform == "ios":
                     platform_findings.extend(_validate_apple_signing_material(config, values, directory,
                                                                              execution_source=execution_source, cancellation=cancellation))
@@ -1772,12 +1841,18 @@ def validate_signing_material(
                     if firebase.status in FAILING_STATUSES:
                         break
             except ProcessError as error:
+                if android_operation is not None:
+                    android_operation.source.failure_observed()
+                    raise  # A missing return/custody error is never a bad-password finding.
                 if error.fatal:
                     raise
                 findings.append(Finding(f"credential-material.{platform}", Status.INVALID,
                                         str(error), category="credentials"))
                 break
             except (CredentialError, OSError) as error:
+                if android_operation is not None:
+                    android_operation.source.failure_observed()
+                    raise
                 findings.append(
                     Finding(
                         f"credential-material.{platform}",
@@ -1787,6 +1862,8 @@ def validate_signing_material(
                     )
                 )
                 break
+        if android_operation is not None:
+            android_operation.signing.validation_finished(findings)
     return findings
 
 
@@ -2143,9 +2220,12 @@ def materialize_build_inputs(
     scratch = build_inputs.scratch
     _material_guard(scratch, cancellation)
     from ._desktop_ios_signing_material import CapturedBuildValues
+    from ._desktop_android_signing_material import CapturedAndroidBuildValues
     # After environment/account/project admission, not before. Captured bytes
     # keep their exact operation binding instead of becoming path/base64 data.
-    values = values.for_invocation(invocation) if type(values) is CapturedBuildValues else dict(values)
+    if type(values) is CapturedAndroidBuildValues and (selected != ("android",) or prepare_ios_signing or signing_lease is not None):
+        raise CredentialError("captured Android material cannot borrow an Apple or unrelated build scope")
+    values = values.for_invocation(invocation) if type(values) in {CapturedBuildValues, CapturedAndroidBuildValues} else dict(values)
     material: dict[str, InputSnapshot] = {}
     for platform, base64_name, path_name, role in (
         ("android", "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH", "android-keystore"),
@@ -2167,8 +2247,12 @@ def materialize_build_inputs(
             content, platform="android", expected_identity=config.section("android").get("applicationId"),
         ):
             raise CredentialError("Android Firebase client file is missing, malformed, or for another application")
-        module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
-            execution_source=None if signing_lease is None else signing_lease.execution_source()))
+        # A captured saved-build selection already requires an explicit module.
+        # Reuse the selector without a second whole-project discovery or tool call.
+        discovered = {} if type(values) is CapturedAndroidBuildValues else discover_project(
+            config.root, include_git=False, cancellation=cancellation,
+            execution_source=None if signing_lease is None else signing_lease.execution_source())
+        module = selected_android_module(config, discovered)
         if not module:
             raise CredentialError("Android Firebase material or application module is unavailable")
         module_relative = module.lstrip(":").replace(":", "/")

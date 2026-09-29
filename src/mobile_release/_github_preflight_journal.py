@@ -27,6 +27,7 @@ MAX_TOTAL_BYTES = MAX_RECORDS * (MAX_INTENT_BYTES + MAX_RUN_BYTES)
 MAX_PATH_COMPONENTS = 128
 MAX_PATH_BYTES = 4096
 _LEAF = re.compile(r"([0-9a-f]{32})\.(intent|run)\.json\Z", re.ASCII)
+_INPUT_LEAF = re.compile(r"([0-9a-f]{32})\.(intent|outcome)\.json\Z", re.ASCII)
 _SUFFIX = (".local", "share", "mobile-release-kit", "github-preflight")
 
 
@@ -76,6 +77,28 @@ def parse_run(raw: bytes, intent_sha256: str) -> str:
     return result
 
 
+def outcome_bytes(intent_sha256: str, write: object) -> bytes:
+    from .github_environment_inputs import PROTOCOL as INPUT_PROTOCOL, parse_write
+
+    raw = canonical({"schemaVersion": 1, "protocol": INPUT_PROTOCOL,
+                     "intentSha256": _match(intent_sha256, _DIGEST), "write": parse_write(write)}) + b"\n"
+    _require(len(raw) <= MAX_RUN_BYTES)
+    return raw
+
+
+def parse_outcome(raw: bytes, intent_sha256: str) -> dict[str, Any]:
+    from .github_environment_inputs import PROTOCOL as INPUT_PROTOCOL, parse_write
+
+    _require(type(raw) is bytes and raw.endswith(b"\n") and raw.count(b"\n") == 1)
+    row = _object(_decode_json(raw[:-1], limit=MAX_RUN_BYTES - 1, nodes=32, depth=4, exact=True),
+                  {"schemaVersion", "protocol", "intentSha256", "write"})
+    _require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1
+             and row["protocol"] == INPUT_PROTOCOL and row["intentSha256"] == intent_sha256)
+    write = parse_write(row["write"])
+    _require(raw == outcome_bytes(intent_sha256, write))
+    return write
+
+
 def _identity(value: os.stat_result) -> tuple[int, ...]:
     return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
             value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
@@ -98,6 +121,8 @@ class Journal:
     def __init__(self, home: str, *, end: float, family: Family = Family.PREFLIGHT) -> None:
         self.family = family
         self.suffix = journal_suffix(family)
+        self.leaf_pattern = _INPUT_LEAF if family is Family.INPUT_GROUP else _LEAF
+        self.result_suffix = ".outcome.json" if family is Family.INPUT_GROUP else ".run.json"
         # Construction is DATA only. open() is called after the helper itself is
         # registered in the original native Supervisor's resource roster.
         if (type(home) is not str or not home.startswith("/") or home == "/"
@@ -113,7 +138,7 @@ class Journal:
         self.gid = os.getegid()
         self.ancestors: list[tuple[int, int | None, str | None, tuple[int, ...] | None]] = []
         self.leaves: dict[str, tuple[tuple[int, ...], bytes]] = {}
-        self.records: dict[str, tuple[Prepared, str | None, str]] = {}
+        self.records: dict[str, tuple[Any, str | dict[str, Any] | None, str]] = {}
         self.root: int | None = None
         self.opened = False
         self.closed = False
@@ -190,7 +215,7 @@ class Journal:
         with os.scandir(self.root) as entries:
             for entry in entries:
                 self._time()
-                if len(names) >= MAX_ENTRIES or _LEAF.fullmatch(entry.name) is None or entry.name in names:
+                if len(names) >= MAX_ENTRIES or self.leaf_pattern.fullmatch(entry.name) is None or entry.name in names:
                     raise JournalError("Private preflight journal inventory differs")
                 names.add(entry.name)
         return names
@@ -223,8 +248,8 @@ class Journal:
     def _load(self) -> None:
         names = self._names()
         intents = sorted(name for name in names if name.endswith(".intent.json"))
-        if len(intents) > MAX_RECORDS or any(name[:-9] + ".intent.json" not in names
-                                           for name in names if name.endswith(".run.json")):
+        if len(intents) > MAX_RECORDS or any(name[:-len(self.result_suffix)] + ".intent.json" not in names
+                                           for name in names if name.endswith(self.result_suffix)):
             raise JournalError("Private preflight journal identity is incomplete")
         total = 0
         for name in intents:
@@ -235,12 +260,13 @@ class Journal:
             if prepared.target.marker != marker:
                 raise JournalError("Private preflight intent identity differs")
             digest = hashlib.sha256(raw).hexdigest()
-            run_name = marker + ".run.json"
+            run_name = marker + self.result_suffix
             run_id = None
             if run_name in names:
                 run_raw = self._read(run_name)
                 total += len(run_raw)
-                run_id = parse_run(run_raw, digest)
+                run_id = (parse_outcome(run_raw, digest) if self.family is Family.INPUT_GROUP
+                          else parse_run(run_raw, digest))
             if total > MAX_TOTAL_BYTES:
                 raise JournalError("Private preflight journal byte limit exceeded")
             self.records[marker] = prepared, run_id, digest
@@ -265,7 +291,7 @@ class Journal:
 
     def _create(self, name: str, raw: bytes) -> None:
         self._post()
-        if (self.root is None or _LEAF.fullmatch(name) is None or name in self.leaves
+        if (self.root is None or self.leaf_pattern.fullmatch(name) is None or name in self.leaves
                 or len(self.leaves) >= MAX_ENTRIES or len(raw) + sum(len(row[1]) for row in self.leaves.values()) > MAX_TOTAL_BYTES):
             raise JournalError("Private preflight journal collision or capacity limit")
         maximum = MAX_INTENT_BYTES if name.endswith(".intent.json") else MAX_RUN_BYTES
@@ -304,6 +330,8 @@ class Journal:
         self._post()
 
     def create_intent(self, prepared: Prepared) -> str:
+        if self.family is Family.INPUT_GROUP:
+            self.admit_input_intent(prepared)
         marker = prepared.target.marker
         if marker in self.records or len(self.records) >= MAX_RECORDS:
             raise JournalError("Private preflight request was already used or capacity is full")
@@ -314,6 +342,7 @@ class Journal:
         return digest
 
     def match_intent(self, prepared: Prepared, run_id: str | None = None) -> str:
+        _require(self.family is not Family.INPUT_GROUP or run_id is None)
         self._post()
         original = self.records.get(prepared.target.marker)
         if original is None or original[0] != prepared or run_id is not None and original[1] != run_id:
@@ -321,6 +350,7 @@ class Journal:
         return original[2]
 
     def bind_run(self, prepared: Prepared, run_id: str) -> None:
+        _require(self.family is not Family.INPUT_GROUP)
         digest = self.match_intent(prepared)
         old = self.records[prepared.target.marker][1]
         run_id = _id(run_id)
@@ -331,6 +361,46 @@ class Journal:
         self._create(prepared.target.marker + ".run.json", run_bytes(digest, run_id))
         self.records[prepared.target.marker] = prepared, run_id, digest
 
+    def admit_input_intent(self, prepared) -> None:
+        from .github_environment_inputs import record_value
+
+        _require(self.family is Family.INPUT_GROUP)
+        self._post()
+        raw = intent_bytes(prepared, family=self.family)
+        digest = hashlib.sha256(raw).hexdigest()
+        largest = {"state": "explicitly-rejected", "reason": "not-found-or-inaccessible"}
+        record_value(prepared, largest, digest)
+        reserve = len(raw) + len(outcome_bytes(digest, largest))
+        if (prepared.target.marker in self.records or len(self.records) >= MAX_RECORDS
+                or len(self.leaves) + 2 > MAX_ENTRIES
+                or sum(len(row[1]) for row in self.leaves.values()) + reserve > MAX_TOTAL_BYTES):
+            raise JournalError("Private input-group journal collision or capacity limit")
+
+    def bind_outcome(self, prepared, write: object) -> None:
+        from .github_environment_inputs import parse_write
+
+        _require(self.family is Family.INPUT_GROUP)
+        digest = self.match_intent(prepared)
+        old = self.records[prepared.target.marker][1]
+        selected = parse_write(write)
+        if old is not None:
+            if old != selected:
+                raise JournalError("Private input-group outcome collides")
+            return
+        self._create(prepared.target.marker + ".outcome.json", outcome_bytes(digest, selected))
+        self.records[prepared.target.marker] = prepared, selected, digest
+
+    def input_record(self, prepared) -> dict[str, Any]:
+        from .github_environment_inputs import record_value
+
+        _require(self.family is Family.INPUT_GROUP)
+        digest = self.match_intent(prepared)
+        selected = self.records[prepared.target.marker][1]
+        # A crash after intent creation may have sent. Current reads/closes
+        # cannot prove the previous writer's no-send, cleanup or finality.
+        return record_value(prepared, selected if selected is not None
+                            else {"state": "attempted-outcome-unknown"}, digest)
+
     def pending(self, scope: dict[str, str]) -> list[dict[str, Any]]:
         self._post()
         selected = []
@@ -338,7 +408,12 @@ class Journal:
             target = prepared.target
             if (target.project_binding == scope["projectBinding"] and target.repository == scope["repository"]
                     and target.account_id == scope["accountId"] and target.repository_id == scope["repositoryId"]):
-                selected.append({"prepared": prepared.value(), "runId": run_id})
+                if self.family is Family.INPUT_GROUP:
+                    from .github_environment_inputs import record_value
+                    selected.append(record_value(prepared, run_id if run_id is not None
+                        else {"state": "attempted-outcome-unknown"}, self.records[target.marker][2]))
+                else:
+                    selected.append({"prepared": prepared.value(), "runId": run_id})
         return selected
 
     def close(self) -> None:

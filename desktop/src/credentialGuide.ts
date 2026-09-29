@@ -2,7 +2,7 @@ import type { CredentialGuide } from './types.ts';
 
 // A presentation contract, not a second credential-policy or requirement table.
 // A future/malformed guide becomes unavailable; it never enables collection.
-const KIND_IDS = ['android-keystore', 'android-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'ios-firebase', 'google-wif', 'project-read-token'];
+const KIND_IDS = ['android-keystore', 'android-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'ios-firebase', 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo-account', 'apple-operation-commitment'];
 const CONTROL_IDS = ['project', 'platform', 'stage', 'purpose', 'mode', 'label', 'choose', 'prepare', 'review', 'save', 'assign', 'replace', 'delete', 'cancel', 'discard', 'lock'];
 const STATE_IDS = ['unknown', 'missing', 'invalid', 'configured', 'format-valid', 'native-not-run', 'service-not-run', 'stored', 'locked', 'unlocked', 'assigned', 'stale', 'cleanup-unknown', 'unavailable'];
 const HELP_KEYS = ['label', 'requiredness', 'requiredWhen', 'what', 'why', 'where', 'format', 'failure'];

@@ -8,8 +8,8 @@ fn empty_state() -> DocumentState {
     DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
-        session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
-        quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(),
+        session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), assignment_retirement: AssignmentRetirement::default(), quit: None,
+        quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new(), images: images::Registry::new(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         vault: None,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -89,10 +89,13 @@ fn android_admission_and_reciprocal_exclusion_use_the_real_document_gate() {
     let prepare = section(DOCUMENT, "pub(crate) fn prepare_android_build(", "\n    }");
     assert!(prepare.find("self.lock()").unwrap() < prepare.find("self.android_build_gate(&state)").unwrap());
     assert!(prepare.find("self.android_build_gate(&state)").unwrap() < prepare.find("native_project(&args.project_id)").unwrap());
-    assert!(prepare.find("native_project(&args.project_id)").unwrap() < prepare.find("android_build.prepare(args, generation, root, gate)").unwrap());
+    assert!(prepare.find("native_project(&args.project_id)").unwrap() < prepare.find("android_build.prepare_material(args, generation, root, gate, material)").unwrap());
+    assert!(prepare.find("android_build.ensure_idle()?").unwrap() < prepare.find("self.review_android_material(").unwrap());
+    assert!(prepare.find("self.review_android_material(").unwrap() < prepare.find("android_build.prepare_material(").unwrap());
     let start = section(DOCUMENT, "pub(crate) fn start_android_build(", "\n    }");
     let ordered = ["Instant::now()", "self.lock()", "android_build.prepared_project(", "native_project(&project)",
-        "android_build.start(args, admitted_at, selected, self.android_build_gate(&state))?", "drop(state)", "admitted.release()"];
+        "android_build.prepared_material(", "self.recheck_android_material(",
+        "android_build.start_material(args, admitted_at, selected, self.android_build_gate(&state), material)?", "drop(state)", "admitted.release()"];
     for pair in ordered.windows(2) { assert!(start.find(pair[0]).unwrap() < start.find(pair[1]).unwrap()); }
     assert!(!start.contains(".await") && !start.contains("spawn("));
     let gate = section(DOCUMENT, "fn android_build_gate(", "\n    }");
@@ -112,9 +115,32 @@ fn android_admission_and_reciprocal_exclusion_use_the_real_document_gate() {
         let qualified = private_gate.find(qualification).unwrap_or_else(|| panic!("missing private qualification: {qualification}"));
         assert!(common < qualified, "common lifecycle gate must precede {qualification}");
     }
-    for name in ["pub(crate) fn passive_query(", "pub(crate) fn configuration_edit_admit<T>(", "fn registered_edit_admit<T>(",
+    for name in ["pub(crate) fn passive_query(", "pub(crate) fn configuration_edit_admit<T>(", "fn registered_edit_root_locked(",
         "pub(crate) fn compatibility_picker_begin(", "pub(crate) fn compatibility_picker_publish(", "pub(crate) fn not_quitting("] {
         assert!(section(DOCUMENT, name, "\n    }").contains("android_build.ensure_idle()?"), "{name}");
+    }
+    // Registered domains delegate under the same document guard. Inspect the
+    // actual shared gate without losing coverage of the wrapper's custody.
+    let registered = section(DOCUMENT, "fn registered_edit_admit<T>(", "\n    }");
+    let delegated = ["let mut state = self.lock();",
+        "let registered = self.registered_edit_root_locked(&mut state, domain, project_id, None)?;",
+        "enqueue(&self.inner.bridge, registered)"];
+    for pair in delegated.windows(2) {
+        let before = registered.find(pair[0]).unwrap_or_else(|| panic!("registered edit wrapper missing {}", pair[0]));
+        let after = registered.find(pair[1]).unwrap_or_else(|| panic!("registered edit wrapper missing {}", pair[1]));
+        assert!(before < after, "registered edit must keep its original guard through delegation and enqueue");
+    }
+    assert_eq!(registered.matches("self.lock()").count(), 1);
+    for release in ["drop(", ".await", "spawn(", "unlock("] {
+        assert!(!registered.contains(release), "registered edit wrapper must not release or transfer its guard: {release}");
+    }
+    let root = section(DOCUMENT, "fn registered_edit_root_locked(", "\n    }");
+    let gated_root = ["android_build.ensure_idle()?", "project_id(&self.inner.bridge)?",
+        "self.inner.bridge.native_project(&id)", "Ok(crate::edit_owner::RegisteredEditRoot { generation, root })"];
+    for pair in gated_root.windows(2) {
+        let before = root.find(pair[0]).unwrap_or_else(|| panic!("registered root helper missing {}", pair[0]));
+        let after = root.find(pair[1]).unwrap_or_else(|| panic!("registered root helper missing {}", pair[1]));
+        assert!(before < after, "registered root admission must gate before root lookup and publication");
     }
     assert!(section(DOCUMENT, "fn evidence_gate(", "\n    }").contains("self.common_gate(state, false)"));
     let passive = section(DOCUMENT, "pub(crate) fn passive_query(", "\n    }");
@@ -124,7 +150,7 @@ fn android_admission_and_reciprocal_exclusion_use_the_real_document_gate() {
 
 #[test]
 fn android_retirement_never_hides_status_stop_or_lends_offline_fixture_authority() {
-    for name in ["pub(crate) fn configuration_edit_admit<T>(", "fn registered_edit_admit<T>(", "pub(crate) fn compatibility_picker_begin("] {
+    for name in ["pub(crate) fn configuration_edit_admit<T>(", "fn registered_edit_root_locked(", "pub(crate) fn compatibility_picker_begin("] {
         let body = section(DOCUMENT, name, "\n    }");
         assert!(body.find("android_build.context_changed()").unwrap() < body.find("android_build.ensure_idle()?").unwrap());
     }

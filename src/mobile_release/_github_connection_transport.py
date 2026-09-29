@@ -1,4 +1,4 @@
-"""Fixed, bounded GitHub.com GET profile and its inert response/schedule seams.
+"""Fixed GitHub API reads/actions and one-shot App device authorization profiles.
 
 No socket/http.client/ssl import occurs at module import. Only the private live
 factory loads them, from the original private engine entry after channel custody.
@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Protocol
 
-from ._desktop_github_engine import (MAX_COOLDOWN_SECONDS, READ_SECONDS, ReadRequest,
+from ._desktop_github_engine import (MAX_COOLDOWN_SECONDS, READ_SECONDS, ReadRequest, DeviceRequest,
+                                    _client_id, _device_code, project_device_result,
                                     _JsonError, _JsonLimit, _check_control, _check_values,
                                     _decode_json)
 
@@ -50,36 +51,84 @@ _FATAL = frozenset({"unauthorized", "target-changed", "response-invalid", "expir
 class _ExchangeProfile(Enum):
     STANDARD = "standard"
     RELEASE_PREPARE = "release-prepare"
+    DEVICE_START = "device-start"
+    DEVICE_POLL = "device-poll"
+    INPUT_GROUP = "input-group"
+    RUNNER_PREREQUISITE = "runner-prerequisite"
 
 
 class _ResponseRole(Enum):
     STANDARD = "standard"
     RELEASE_CONFIG = "release-config"
     RELEASE_VERSION = "release-version"
+    INPUT_GROUP_CONFIG = "input-group-config"
+    INPUT_GROUP_WRITE = "input-group-write"
+    RUNNER_PREREQUISITE = "runner-prerequisite"
 
 
 def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, int]:
     """Closed private roles, never caller-provided numeric limits."""
     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
         raise ValueError("Invalid fixed GitHub response role")
-    if role is not _ResponseRole.STANDARD and profile is not _ExchangeProfile.RELEASE_PREPARE:
-        raise ValueError("Fixed GitHub response role belongs to another action")
-    return (768 * 1024 if role is _ResponseRole.RELEASE_CONFIG else MAX_BODY_BYTES,
+    if role in {_ResponseRole.RELEASE_CONFIG, _ResponseRole.RELEASE_VERSION}:
+        if profile is not _ExchangeProfile.RELEASE_PREPARE:
+            raise ValueError("Fixed GitHub response role belongs to another action")
+    elif role in {_ResponseRole.INPUT_GROUP_CONFIG, _ResponseRole.INPUT_GROUP_WRITE}:
+        if profile is not _ExchangeProfile.INPUT_GROUP:
+            raise ValueError("Fixed GitHub response role belongs to another action")
+    elif role is _ResponseRole.RUNNER_PREREQUISITE:
+        if profile is not _ExchangeProfile.RUNNER_PREREQUISITE:
+            raise ValueError("Fixed runner response role belongs to another action")
+    if profile in {_ExchangeProfile.DEVICE_START, _ExchangeProfile.DEVICE_POLL}:
+        return 64 * 1024, 128
+    return (768 * 1024 if role in {_ResponseRole.RELEASE_CONFIG, _ResponseRole.INPUT_GROUP_CONFIG} else MAX_BODY_BYTES,
             2048 if role is _ResponseRole.RELEASE_VERSION else 1024)
-
 
 def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
     limits = _role_limits(profile, role)
+    if profile in {_ExchangeProfile.DEVICE_START, _ExchangeProfile.DEVICE_POLL}:
+        expected = "/login/device/code" if profile is _ExchangeProfile.DEVICE_START else "/login/oauth/access_token"
+        if method != "POST" or path != expected:
+            raise ValueError("Fixed GitHub device endpoint differs")
     prefix = r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/contents/"
-    if role is _ResponseRole.RELEASE_CONFIG:
+    if role in {_ResponseRole.RELEASE_CONFIG, _ResponseRole.INPUT_GROUP_CONFIG}:
         if method != "GET" or type(path) is not str or re.fullmatch(prefix + r"release/mobile-release\.json\?ref=[0-9a-f]{40}", path) is None:
             raise ValueError("Fixed release config response role differs")
     elif role is _ResponseRole.RELEASE_VERSION:
         component = r"(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+"
         if method != "GET" or type(path) is not str or re.fullmatch(prefix + component + r"(?:/" + component + r"){0,11}\?ref=[0-9a-f]{40}", path) is None:
             raise ValueError("Fixed release version response role differs")
+    if profile is _ExchangeProfile.INPUT_GROUP:
+        from .credential_group_envelope import INPUT_GROUP_ENVIRONMENT_NAMES
+        repo = r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+        environment = repo + r"/environments/mobile-(?:candidate|external-testing|production)"
+        secret = environment + "/secrets/(?:" + "|".join(sorted(INPUT_GROUP_ENVIRONMENT_NAMES)) + ")"
+        if role is _ResponseRole.INPUT_GROUP_WRITE:
+            valid = method == "PUT" and type(path) is str and re.fullmatch(secret, path) is not None
+        elif role is _ResponseRole.INPUT_GROUP_CONFIG:
+            valid = True  # Exact fixed Contents route checked above.
+        else:
+            caller = prefix + r"\.github/workflows/mobile-(?:candidate|external-testing|production-submit)\.yml\?ref=[0-9a-f]{40}"
+            ref = repo + r"/git/ref/heads/(?:[A-Za-z0-9._~-]|%[0-9A-F]{2}){1,600}"
+            valid = (role is _ResponseRole.STANDARD and method == "GET" and type(path) is str
+                     and (path == "/user" or any(re.fullmatch(pattern, path) is not None
+                          for pattern in (repo, caller, ref, environment, environment + "/secrets/public-key", secret))))
+        if not valid:
+            raise ValueError("Fixed input-group request role differs")
+    if profile is _ExchangeProfile.RUNNER_PREREQUISITE:
+        repository = r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+        organization = r"/orgs/[A-Za-z0-9_.-]+"
+        suffix = r"\?per_page=100&page=1"
+        group = (re.fullmatch(organization + r"/actions/runner-groups/([1-9][0-9]{0,19})/runners" + suffix, path)
+                 if type(path) is str else None)
+        valid = (role is _ResponseRole.RUNNER_PREREQUISITE and method == "GET" and type(path) is str
+                 and (path == "/user" or re.fullmatch(repository, path) is not None
+                      or re.fullmatch(repository + r"/actions/runners" + suffix, path) is not None
+                      or re.fullmatch(organization + r"/actions/runner-groups" + suffix, path) is not None
+                      or group is not None and int(group[1]) <= 2**64 - 1))
+        if not valid:
+            raise ValueError("Fixed runner prerequisite request role differs")
     return limits
-
 
 class ReadFailure(Exception):
     def __init__(self, reason: str) -> None:
@@ -140,7 +189,8 @@ class _Budget:
         self.body_bytes = 0
         self.metadata_bytes = 0
         self.profile = _profile
-        self.body_total_limit = 2 * 1024 * 1024 if _profile is _ExchangeProfile.RELEASE_PREPARE else MAX_BODY_TOTAL
+        self.body_total_limit = (64 * 1024 if _profile in {_ExchangeProfile.DEVICE_START, _ExchangeProfile.DEVICE_POLL}
+                                 else 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.INPUT_GROUP} else MAX_BODY_TOTAL)
         if not math.isfinite(started) or not math.isfinite(self.end):
             raise ReadFailure("network-unavailable")
 
@@ -483,7 +533,9 @@ def _status_reason(status: int) -> str:
         status, "network-unavailable" if status >= 500 else "response-invalid")
 
 
-def _header_control(head: _Head, budget: _Budget) -> dict[str, Any]:
+def _header_control(head: _Head, budget: _Budget, *, _input_group_write: bool = False) -> dict[str, Any]:
+    if _input_group_write and budget.profile is not _ExchangeProfile.INPUT_GROUP:
+        raise ValueError("Input-group acknowledgement belongs to its fixed profile")
     expiry, has_expiry, expiry_ok = _single(head.headers, "github-authentication-token-expiration")
     retry, has_retry, retry_ok = _single(head.headers, "retry-after")
     remaining, has_remaining, remaining_ok = _single(head.headers, "x-ratelimit-remaining")
@@ -532,7 +584,7 @@ def _header_control(head: _Head, budget: _Budget) -> dict[str, Any]:
         else:
             delays.append(delay)
     delay = None if blocked else max(delays) if delays else 60 if recognized else None
-    base = _status_reason(head.status)
+    base = "none" if _input_group_write and head.status in {201, 204} else _status_reason(head.status)
     if invalid:
         reason = "response-invalid"
     elif delay is not None or blocked:
@@ -576,6 +628,76 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
         return _failed("response-invalid", control)
     except ReadFailure as error:
         return _failed(error.reason, control)
+
+
+@dataclass(slots=True, repr=False)
+class _InputWriteResult:
+    # A remote head fact is separate from later original cleanup/publication.
+    # This type belongs only to the fixed P2 PUT, never to old read profiles.
+    write: dict[str, Any]
+    control: dict[str, Any]
+    cleanup: str = "pending"
+    observation_sent: bool = False
+    head_valid: bool = False
+
+
+def _input_write_result(response: _ResponseBody, budget: _Budget) -> _InputWriteResult:
+    if budget.profile is not _ExchangeProfile.INPUT_GROUP:
+        raise ValueError("Input-group acknowledgement belongs to its fixed profile")
+    head = response.head
+    control = _header_control(head, budget, _input_group_write=True)
+    response.control = control
+    invalid = (head.invalid or head.error is not None
+               or head.length is not None and head.length > response.maximum
+               or head.status == 204 and (head.framing == "chunked" or head.length not in {None, 0}))
+    if invalid:
+        return _InputWriteResult({"state": "attempted-outcome-unknown"},
+                                 _refuse(control, head.error or "response-invalid"))
+    if head.status == 201:
+        write = {"state": "acknowledged-created", "statusCode": 201}
+    elif head.status == 204:
+        write = {"state": "acknowledged-updated", "statusCode": 204}
+    elif head.status in {401, 403, 404, 422, 429}:
+        reason = {401: "unauthorized", 403: "forbidden", 404: "not-found-or-inaccessible",
+                  422: "input-invalid", 429: "rate-limited"}[head.status]
+        if head.status == 403 and control["reason"] == "rate-limited":
+            reason = "rate-limited"
+        write = {"state": "explicitly-rejected", "reason": reason}
+    else:
+        write = {"state": "attempted-outcome-unknown"}
+    # Never consume an upstream PUT body. Exact TLS/head observation is enough
+    # for its limited acknowledgement; close/finality/credential validity are
+    # separate obligations. _ResponseBody already validated bounded framing.
+    return _InputWriteResult(write, control, head_valid=True)
+
+
+def _publish_input_write(result: _InputWriteResult, observer) -> None:
+    if not result.head_valid:
+        return
+    try:
+        # Copies prevent the notification adapter from rewriting latched DATA.
+        observer(dict(result.write), dict(result.control))
+        result.observation_sent = True
+    except BaseException:
+        # No native observation is fabricated. Every original close is still
+        # attempted by exchange's existing finally; the fact itself survives.
+        result.control = _refuse(result.control, "response-invalid")
+
+
+def _settle_originals(originals: tuple[Any, Any], close_failed: list[bool],
+                      write_result: _InputWriteResult | None = None) -> None:
+    for original in originals:
+        if original is not None:
+            try:
+                original.close()
+            except BaseException:
+                close_failed[0] = True
+    if write_result is not None:
+        write_result.cleanup = "unknown" if close_failed[0] else "confirmed"
+        if close_failed[0]:
+            write_result.control = _refuse(write_result.control, "response-invalid")
+    elif close_failed[0]:
+        raise _CloseFailure("Original GitHub close did not return") from None
 
 
 def observe(request: ReadRequest, reader: _Reader, *, observed_at: str) -> dict[str, Any]:
@@ -765,7 +887,13 @@ def _fixed_ca(runtime_dir: str, budget: _Budget) -> str:
         os.close(retired)  # Sole close; failure cannot be reported as success.
 
 
-def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int) -> Any:
+def _fixed_host(profile: _ExchangeProfile) -> str:
+    _role_limits(profile, _ResponseRole.STANDARD)
+    return "github.com" if profile in {_ExchangeProfile.DEVICE_START, _ExchangeProfile.DEVICE_POLL} else "api.github.com"
+
+
+def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int,
+                    _profile: _ExchangeProfile = _ExchangeProfile.STANDARD) -> Any:
     """One fixed documented wrap, with no suppressed unexpected TLS EOF.
 
     The live caller supplies the actual SSLContext/option/socket. Inert tests
@@ -778,20 +906,26 @@ def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int) -> Any
     context.options = int(context.options) & ~option
     if int(context.options) & option:
         raise ReadFailure("tls-failed")
-    return context.wrap_socket(source, server_hostname="api.github.com", suppress_ragged_eofs=False)
+    return context.wrap_socket(source, server_hostname=_fixed_host(_profile), suppress_ragged_eofs=False)
 
 
-def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_version: str,
-                        _profile: _ExchangeProfile = _ExchangeProfile.STANDARD) -> Callable[..., ReadResult]:
-    """Private bounded TLS/framing shared by two closed native action profiles.
+def _make_live_exchange(token: str | None, *, started: float, runtime_dir: str, api_version: str | None,
+                        _profile: _ExchangeProfile = _ExchangeProfile.STANDARD) -> Callable[..., ReadResult | _InputWriteResult]:
+    """Private bounded TLS/framing shared by closed native GitHub profiles.
 
     This is not a renderer/API URL interface. The calling profile separately
     claims each fixed endpoint once; this layer cannot grant or retry an action.
     """
-    if (api_version not in {"2022-11-28", "2026-03-10"} or type(token) is not str
-            or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
+    device = _profile in {_ExchangeProfile.DEVICE_START, _ExchangeProfile.DEVICE_POLL}
+    if ((device and (token is not None or api_version is not None))
+            or not device and (api_version not in {"2022-11-28", "2026-03-10"} or type(token) is not str
+            or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token))):
         raise ValueError("Invalid fixed GitHub transport input")
     _role_limits(_profile, _ResponseRole.STANDARD)
+    if _profile in {_ExchangeProfile.INPUT_GROUP, _ExchangeProfile.RUNNER_PREREQUISITE} and api_version != "2026-03-10":
+        raise ValueError("The fixed action requires its own API version")
+    host = _fixed_host(_profile)
+    device_claimed = False
     # http.client itself imports ssl. Both must stay inside this original live
     # entry, not at pure frame/schedule import or fixture construction time.
     import http.client
@@ -807,17 +941,27 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     context.set_alpn_protocols(["http/1.1"])
     context.load_verify_locations(cadata=_fixed_ca(runtime_dir, budget))
     # Never create_default_context/load_default_certs/default_verify_paths;
-    # never urllib, proxies, netrc, environment credentials or workflow clients.
+    # never urllib transport, proxies, netrc, environment credentials or workflow clients.
 
     def exchange(method: str, path: str, body: bytes | None = None, *,
-                 _role: _ResponseRole = _ResponseRole.STANDARD) -> ReadResult:
+                 _role: _ResponseRole = _ResponseRole.STANDARD,
+                 _on_write_status=None) -> ReadResult | _InputWriteResult:
+        nonlocal device_claimed
         _, path_limit = _request_limits(_profile, _role, method, path)
-        if (method not in {"GET", "POST"} or type(path) is not str or not path.startswith("/")
+        writing = _profile is _ExchangeProfile.INPUT_GROUP and _role is _ResponseRole.INPUT_GROUP_WRITE
+        if (writing and not callable(_on_write_status) or not writing and _on_write_status is not None):
+            raise ValueError("Fixed write observation callback differs")
+        if (method not in ({"PUT"} if writing else {"GET", "POST"}) or type(path) is not str or not path.startswith("/")
                 or len(path) > path_limit or any(not 0x21 <= ord(c) <= 0x7e for c in path)
                 or "#" in path or "\\" in path
                 or method == "GET" and body is not None
-                or method == "POST" and (type(body) is not bytes or not 1 <= len(body) <= 2048)):
+                or method == "POST" and (type(body) is not bytes or not 1 <= len(body) <= 2048)
+                or writing and (type(body) is not bytes or not 1 <= len(body) <= 70 * 1024)):
             raise ValueError("Invalid fixed GitHub transport request")
+        if device:
+            if device_claimed:
+                raise ValueError("The original GitHub device step was already claimed")
+            device_claimed = True  # Includes transport ambiguity; never retry.
         original_response: list[Any] = [None]
         close_failed = [False]
         original_socket: list[Any] = [None]
@@ -839,6 +983,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 super().__init__(*args, **kwargs)
 
             def begin(self) -> None:
+                nonlocal write_result
                 if self.headers is not None:
                     return
                 self.bounded = _ResponseBody(self.fp, budget, before_read=timeout, _role=_role)
@@ -855,6 +1000,11 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 self.chunk_left = None
                 self.length = head.length
                 self.will_close = head.framing == "eof" or self._check_close()
+                if writing:
+                    write_result = _input_write_result(self.bounded, budget)
+                    # stdlib getresponse may close the connection before
+                    # returning to exchange. Emit here, before that happens.
+                    _publish_input_write(write_result, _on_write_status)
 
             def read(self, amt: int | None = None) -> bytes:
                 return self.bounded.read(amt)
@@ -872,7 +1022,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
         class FixedConnection(http.client.HTTPSConnection):
             def __init__(self) -> None:
                 self._close_claimed = False
-                super().__init__("api.github.com", 443, timeout=budget.remaining(), context=context)
+                super().__init__(host, 443, timeout=budget.remaining(), context=context)
                 self.response_class = FixedResponse
                 self.set_debuglevel(0)
 
@@ -883,7 +1033,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 http.client.HTTPConnection.connect(self)
                 self.sock.settimeout(budget.remaining())
                 self.sock = _wrap_fixed_tls(context, self.sock,
-                                           ignore_eof_option=getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0))
+                                           ignore_eof_option=getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0), _profile=_profile)
 
             def close(self) -> None:
                 if self._close_claimed:
@@ -895,52 +1045,98 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                     close_failed[0] = True
                     raise
 
+        def fail(reason: str) -> None:
+            nonlocal result, write_result
+            if write_result is None:
+                result = _failed(reason, prior_control())
+            elif write_result.head_valid:
+                write_result.control = _refuse(write_result.control, reason)
+            else:
+                write_result = _InputWriteResult({"state": "attempted-outcome-unknown"},
+                                                  _failed(reason, prior_control()).control)
+
         connection: Any = None
+        result: ReadResult = _failed("network-unavailable")
+        # FixedResponse may outlive this call through its original-response
+        # custody cycle. Its captured cell must never retain raw GET data.
+        write_result: _InputWriteResult | None = (_InputWriteResult({"state": "attempted-outcome-unknown"},
+                _control("network-unavailable")) if writing else None)
         try:
+            if writing:
+                budget.remaining()
+                if budget.body_bytes + len(body) > budget.body_total_limit:
+                    raise ReadFailure("response-limit")
+                budget.body_bytes += len(body)
             connection = FixedConnection()
             connection.connect()
             original_socket[0] = connection.sock
             timeout(budget.remaining())
             connection.auto_open = 0  # No implicit reconnect after our connect.
             connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
-            for name, value in (
-                ("Host", "api.github.com"), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
-                ("Accept", "application/vnd.github+json"), ("X-GitHub-Api-Version", api_version),
-                ("Accept-Encoding", "identity"), ("Connection", "close"),
-                ("Authorization", "Bearer " + token),
-            ):
+            headers = (("Host", host), ("User-Agent", "MobileReleaseKit-Desktop/0.3.0"),
+                       ("Accept", "application/json" if device else "application/vnd.github+json"))
+            if not device:
+                headers += (("X-GitHub-Api-Version", api_version),)
+            headers += (("Accept-Encoding", "identity"), ("Connection", "close"))
+            if not device:
+                headers += (("Authorization", "Bearer " + token),)
+            for name, value in headers:
                 connection.putheader(name, value)
             timeout(budget.remaining())
             if body is not None:
-                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Content-Type", "application/x-www-form-urlencoded" if device else "application/json")
                 connection.putheader("Content-Length", str(len(body)))
             connection.endheaders(body)
             timeout(budget.remaining())
             response = connection.getresponse()
-            result = _response_result(response.bounded, budget)
+            if not writing:
+                result = _response_result(response.bounded, budget)
         except ReadFailure as error:
-            result = _failed(error.reason, prior_control())
+            fail(error.reason)
         except ssl.SSLError:
-            result = _failed("tls-failed", prior_control())
+            fail("tls-failed")
         except http.client.HTTPException:
-            result = _failed("response-invalid", prior_control())
+            fail("response-invalid")
         except OSError:
-            result = _failed("network-unavailable", prior_control())
+            fail("network-unavailable")
         finally:
             # Each original response/connection has one synchronous close
             # claim, even if stdlib already closed it on its own failure path.
             # No retry, scan, replacement joiner or cleanup timeout is added.
-            for original in (original_response[0], connection):
-                if original is not None:
-                    try:
-                        original.close()
-                    except BaseException:
-                        close_failed[0] = True
-            if close_failed[0]:
-                raise _CloseFailure("Original GitHub close did not return") from None
-        return result
+            _settle_originals((original_response[0], connection), close_failed, write_result)
+        return write_result if write_result is not None else result
 
     return exchange
+
+
+def _device_form(request: DeviceRequest) -> tuple[_ExchangeProfile, str, bytes]:
+    # The standard URI encoder is DATA-only: no urllib request/proxy machinery.
+    from urllib.parse import urlencode
+
+    if type(request) is not DeviceRequest or not _client_id(request.client_id):
+        raise ValueError("Invalid fixed GitHub device request")
+    values = {"client_id": request.client_id}
+    if request.step == "start" and request.device_code is None:
+        profile, path = _ExchangeProfile.DEVICE_START, "/login/device/code"
+    elif request.step == "poll" and _device_code(request.device_code):
+        profile, path = _ExchangeProfile.DEVICE_POLL, "/login/oauth/access_token"
+        values.update(device_code=request.device_code, grant_type="urn:ietf:params:oauth:grant-type:device_code")
+    else:
+        raise ValueError("Invalid fixed GitHub device request")
+    return profile, path, urlencode(values).encode("ascii")
+
+
+def device_step(request: DeviceRequest, *, started: float, runtime_dir: str) -> dict[str, Any]:
+    """Exactly ONE original OAuth request, never a polling loop or API delegate."""
+    profile, path, body = _device_form(request)
+    exchange = _make_live_exchange(None, started=started, runtime_dir=runtime_dir, api_version=None, _profile=profile)
+    result = exchange("POST", path, body)
+    try:
+        return project_device_result(request, result.observation, result.control)
+    finally:
+        # Private raw OAuth/refresh fields are not retained after projection.
+        if type(result.observation.get("body")) is dict:
+            result.observation["body"].clear()
 
 
 def _make_live_reader(request: ReadRequest, *, started: float, runtime_dir: str) -> _Reader:

@@ -92,7 +92,7 @@ test('exact core rows retain all guide families, scalar/file companions, alterna
   const supplied = guide.kinds.flatMap((kind) => kind.fields.map((field) => row(field.requirement, kind.platform, 'candidate', {
     kind: field.input === 'text' ? 'variable' : field.input, alternatives: field.alternatives,
   })));
-  const review = row('MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL', 'ios', 'production', { kind: 'variable' });
+  const review = row('MOBILE_RELEASE_FUTURE_INPUT', 'project', 'production', { kind: 'variable' });
   const unknown = row('MOBILE_RELEASE_UNMATCHED_INPUT', 'project', 'candidate');
   const result = parseReleaseInputResult(valid([...supplied, review, unknown]));
   assert.ok(result);
@@ -265,8 +265,9 @@ test('preparation targets require the exact current core row, active hint and ac
     assert.equal(h.controller.preparationCurrent(active, active), true);
     assert.equal(h.controller.preparationTarget(source, { ...input }), null);
     assert.equal(h.controller.preparationTarget(source, source.result.requirements[1]), null); // other stage, even an actual row
-    const unsupported = h.controller.preparationTarget(source, source.result.requirements[2]);
-    assert.ok(unsupported); assert.equal(sessionPreparationKind(unsupported.guideId), null);
+    const asc = h.controller.preparationTarget(source, source.result.requirements[2]);
+    assert.ok(asc); assert.equal(sessionPreparationKind(asc.guideId), 'asc-p8');
+    assert.equal(sessionPreparationKind('unknown-credential'), null);
     for (const changed of [{ guideId: 'android-firebase' }, { requirement: { ...input } }, { scope: { ...target.scope, purpose: 'signing' } }]) {
       const unrelated = { ...target, ...changed };
       assert.equal(h.controller.preparationCurrent(unrelated, unrelated), false);
@@ -309,6 +310,26 @@ for (const kindId of ['apple-p12', 'apple-profile']) test(`a current ${kindId} r
     assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === kindId).fields.map((field) => field.id), kindId === 'apple-p12' ? ['file', 'password'] : ['file']);
     assert.equal(h.controller.preparationCurrent(target, target), true); assert.equal(h.state, source); assert.equal(h.calls.length, calls);
     h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.teamId', value: 'Z9' });
+    assert.equal(h.controller.preparationCurrent(target, target), false);
+  } finally { h.controller.dispose(); }
+});
+
+for (const stage of ['candidate', 'external-testing', 'production']) test(`ASC ${stage} requirements hand off to iOS/full preparation without collecting or assessing material`, async () => {
+  const h = harness();
+  try {
+    h.controller.setStage(stage);
+    await read(h, valid([guidedRow('asc-p8', stage)]));
+    const source = h.state, calls = h.calls.length;
+    const target = h.controller.preparationTarget(source, source.result.requirements[0]);
+    assert.ok(target); assert.equal(sessionPreparationKind(target.guideId), 'asc-p8');
+    assert.deepEqual(target.scope, { platform: 'ios', stage, purpose: 'full' });
+    assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === 'asc-p8').fields.map((field) => field.id), ['file', 'keyId', 'issuerId']);
+    assert.equal(h.controller.preparationCurrent(target, target), true);
+    assert.equal(h.state, source); assert.equal(h.calls.length, calls);
+    // The static core guide and its requiredness stay unchanged; a handoff
+    // is not native availability, file collection, assessment or assignment.
+    assert.deepEqual(target.source.help.guide.kinds.find((kind) => kind.id === 'asc-p8'), guide.kinds.find((kind) => kind.id === 'asc-p8'));
+    h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.bundleId', value: 'org.changed' });
     assert.equal(h.controller.preparationCurrent(target, target), false);
   } finally { h.controller.dispose(); }
 });
@@ -385,11 +406,11 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   assert.ok(session.includes('localRef.current = next; setLocal(next)'));
   for (const update of ['changeLocal({ kindId: event.target.value as AssetKind, replacementId: null })', 'changeLocal({ replacementId: event.target.value || null })',
     'changeLocal({ confirmLock: true })']) assert.ok(session.includes(update), update);
-  assert.ok(session.includes('const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive)'));
+  assert.ok(session.includes('const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive && !imageActive)'));
   assert.ok(session.includes('const writable = assetStorageWritable(status)'));
   for (const action of ["controller.open('encrypted')", 'controller.prepareInitialize()', 'controller.unlock()', 'Assess and assign…']) assert.ok(session.includes(action));
   assert.ok(session.includes('const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind)'));
-  assert.ok(session.includes("(idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token'))"));
+  assert.ok(session.includes("(idle && !intentPending && isAssetScalarKind(kindId))"));
   assert.ok(session.includes('{writeOnlyFormMounted && kind &&'));
   assert.ok(session.includes("<WriteOnlyFields key={`${state.entryGeneration}-${kind.id}-${replacementId ?? 'new'}`}"));
   const privateForm = session.slice(session.indexOf('function WriteOnlyFields'), session.indexOf('export function CredentialSession'));
@@ -409,4 +430,30 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   assert.doesNotMatch(pane, /type="(?:file|password|checkbox)"|dangerouslySetInnerHTML/);
   assert.doesNotMatch(module, /validationFresh|\.chooseProject\(|\.assess\(|\.assign\(|\.environment\(|\.snapshot\(/);
   assert.equal((module.match(/await binding\.api\.validate\(draft\)/g) ?? []).length, 1);
+});
+
+
+test('private Apple contact, demo and recovery-key requirements route to separate write-only guides without collecting or assigning', async () => {
+  for (const kindId of ['apple-review-contact', 'apple-review-demo-account', 'apple-operation-commitment']) {
+    const h = harness();
+    try {
+      h.controller.setStage('production');
+      const kind = guide.kinds.find((entry) => entry.id === kindId);
+      await read(h, valid(kind.fields.map((field) => row(field.requirement, 'ios', 'production'))));
+      const source = h.state, count = h.calls.length;
+      for (const requirement of source.result.requirements) {
+        const target = h.controller.preparationTarget(source, requirement);
+        assert.ok(target); assert.equal(target.guideId, kindId); assert.equal(sessionPreparationKind(target.guideId), kindId);
+        assert.deepEqual(target.scope, { platform: 'ios', stage: 'production', purpose: 'full' });
+        const fields = target.source.help.guide.kinds.find((entry) => entry.id === kindId).fields;
+        assert.ok(fields.every((field) => field.input === (field.id === 'keyVersion' ? 'text' : 'secret') && field.suffixes.length === 0));
+        assert.equal(h.controller.preparationCurrent(target, target), true);
+        assert.equal(h.state, source); assert.equal(h.calls.length, count);
+      }
+      const retained = h.controller.preparationTarget(source, source.result.requirements[0]);
+      h.dispatch({ type: 'edit', projectId: 'p1', path: 'ios.review.demoAccountRequired', value: false });
+      assert.equal(h.controller.preparationCurrent(retained, retained), false);
+      assert.equal(h.controller.preparationTarget(source, retained.requirement), null);
+    } finally { h.controller.dispose(); }
+  }
 });

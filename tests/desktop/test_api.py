@@ -272,6 +272,7 @@ class ApiPureTests(unittest.TestCase):
             self.assertEqual(methods, {"capabilities": True, "catalog": True, "project.snapshot": False,
                                        "config.validate": True, "config.suggest": True, "config.preview": True,
                                        "github.setup.propose": True, "credentials.assess": True,
+                                       "metadata.validate": False,
                                        "metadata.text.observe": False, "metadata.text.validate": True,
                                         "environment.requirements": True, "release.version.observe": False,
                                         "artifacts.candidate.observe": False, "release.evidence.observe": False})

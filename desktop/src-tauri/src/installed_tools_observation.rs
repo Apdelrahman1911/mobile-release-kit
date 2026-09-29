@@ -11,19 +11,23 @@ use crate::{error::BridgeError, environment_diagnostics_protocol as tools, offli
 use super::{Observation, Case as ShellCase, Step as ShellStep};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Case { ToolsObserved, ToolsCancel, ToolsSettlement, OfflinePass, OfflineNegative, OfflineDrift, OfflineCancel, OfflineSettlement, AndroidBuild, AndroidFailure, AndroidCancel, AndroidRefusals }
+pub(crate) enum Case { ToolsObserved, ToolsCancel, ToolsSettlement, OfflinePass, OfflineNegative, OfflineDrift, OfflineCancel, OfflineSettlement, AndroidBuild, AndroidFailure, AndroidCancel, AndroidRefusals, AndroidSavedSigning, AndroidSavedWrongFingerprint, AndroidSavedCancel }
 impl Case {
     pub(crate) const ALL: [Self; 12] = [Self::ToolsObserved, Self::ToolsCancel, Self::ToolsSettlement, Self::OfflinePass,
         Self::OfflineNegative, Self::OfflineDrift, Self::OfflineCancel, Self::OfflineSettlement,
         Self::AndroidBuild, Self::AndroidFailure, Self::AndroidCancel, Self::AndroidRefusals];
+    pub(crate) const SAVED: [Self;3] = [Self::AndroidSavedSigning, Self::AndroidSavedWrongFingerprint, Self::AndroidSavedCancel];
+    pub(crate) fn saved_signing(self) -> bool { Self::SAVED.contains(&self) }
+    pub(super) fn initial_step(self) -> Step { if self.saved_signing() { Step::Saved(SavedStep::Settings) } else { Step::Navigate } }
     pub(crate) fn name(self) -> &'static str { match self {
         Self::ToolsObserved => "tools-observed", Self::ToolsCancel => "tools-cancel", Self::ToolsSettlement => "tools-settlement",
         Self::OfflinePass => "offline-pass", Self::OfflineNegative => "offline-negative", Self::OfflineDrift => "offline-drift",
         Self::OfflineCancel => "offline-cancel", Self::OfflineSettlement => "offline-settlement",
         Self::AndroidBuild => "android-build", Self::AndroidFailure => "android-build-failure",
         Self::AndroidCancel => "android-build-cancel", Self::AndroidRefusals => "android-build-refusals",
+        Self::AndroidSavedSigning => "android-saved-signing", Self::AndroidSavedWrongFingerprint => "android-saved-signing-wrong-fingerprint", Self::AndroidSavedCancel => "android-saved-signing-cancel",
     } }
-    pub(crate) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|case| value == std::ffi::OsStr::new(case.name())) }
+    pub(crate) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().chain(Self::SAVED).find(|case| value == std::ffi::OsStr::new(case.name())) }
     pub(super) fn failure_leaf(self) -> &'static str { match self {
         Self::ToolsObserved => "shell-tools-observed-failure.labels", Self::ToolsCancel => "shell-tools-cancel-failure.labels",
         Self::ToolsSettlement => "shell-tools-settlement-failure.labels", Self::OfflinePass => "shell-offline-pass-failure.labels",
@@ -31,6 +35,9 @@ impl Case {
         Self::OfflineCancel => "shell-offline-cancel-failure.labels", Self::OfflineSettlement => "shell-offline-settlement-failure.labels",
         Self::AndroidBuild => "shell-android-build-failure.labels", Self::AndroidFailure => "shell-android-build-failure-failure.labels",
         Self::AndroidCancel => "shell-android-build-cancel-failure.labels", Self::AndroidRefusals => "shell-android-build-refusals-failure.labels",
+        Self::AndroidSavedSigning => "shell-android-saved-signing-failure.labels",
+        Self::AndroidSavedWrongFingerprint => "shell-android-saved-signing-wrong-fingerprint-failure.labels",
+        Self::AndroidSavedCancel => "shell-android-saved-signing-cancel-failure.labels",
     } }
     pub(super) fn verified_line(self) -> &'static [u8] { match self {
         Self::ToolsObserved => b"MRK_INSTALLED_SHELL_OBSERVATION=tools-observed-verified\n",
@@ -45,18 +52,22 @@ impl Case {
         Self::AndroidFailure => b"MRK_INSTALLED_SHELL_OBSERVATION=android-build-failure-verified\n",
         Self::AndroidCancel => b"MRK_INSTALLED_SHELL_OBSERVATION=android-build-cancel-verified\n",
         Self::AndroidRefusals => b"MRK_INSTALLED_SHELL_OBSERVATION=android-build-refusals-verified\n",
+        Self::AndroidSavedSigning => b"MRK_INSTALLED_SHELL_OBSERVATION=android-saved-signing-verified\n",
+        Self::AndroidSavedWrongFingerprint => b"MRK_INSTALLED_SHELL_OBSERVATION=android-saved-signing-wrong-fingerprint-verified\n",
+        Self::AndroidSavedCancel => b"MRK_INSTALLED_SHELL_OBSERVATION=android-saved-signing-cancel-verified\n",
     } }
     pub(crate) fn tools(self) -> bool { matches!(self, Self::ToolsObserved | Self::ToolsCancel | Self::ToolsSettlement) }
     pub(crate) fn domain(self) -> Domain {
         match self {
             Self::ToolsObserved | Self::ToolsCancel | Self::ToolsSettlement => Domain::Tools,
             Self::OfflinePass | Self::OfflineNegative | Self::OfflineDrift | Self::OfflineCancel | Self::OfflineSettlement => Domain::Offline,
-            Self::AndroidBuild | Self::AndroidFailure | Self::AndroidCancel | Self::AndroidRefusals => Domain::Android,
+            Self::AndroidBuild | Self::AndroidFailure | Self::AndroidCancel | Self::AndroidRefusals
+                | Self::AndroidSavedSigning | Self::AndroidSavedWrongFingerprint | Self::AndroidSavedCancel => Domain::Android,
         }
     }
     pub(crate) fn android(self) -> bool { self.domain() == Domain::Android }
     fn required_mask(self) -> u8 { match self.domain() { Domain::Tools | Domain::Offline => 3, Domain::Android => 4 } }
-    fn cancel(self) -> bool { matches!(self, Self::ToolsCancel | Self::OfflineCancel | Self::AndroidCancel) }
+    fn cancel(self) -> bool { matches!(self, Self::ToolsCancel | Self::OfflineCancel | Self::AndroidCancel | Self::AndroidSavedCancel) }
     fn reciprocal(self) -> bool { matches!(self, Self::ToolsSettlement | Self::OfflineCancel | Self::OfflineSettlement) }
     fn boundary(self) -> &'static str { match self { Self::ToolsCancel => "inspection",
         Self::ToolsSettlement | Self::OfflineSettlement => "settlement", _ => "none" } }
@@ -77,7 +88,7 @@ fn claim_once(case: Case, admitted: u8, claimed: &AtomicU8, domain: Domain) -> b
 
 // Non-cloneable setup tokens; only this module can construct them. They carry
 // neither paths nor results, and the actual document consumes them before IPC.
-pub(crate) struct ToolsAdmission { control: Arc<Control> }
+pub(crate) struct ToolsAdmission { control: Arc<Control>, document: Weak<()>, owner: Weak<()> }
 pub(crate) struct OfflineAdmission { control: Arc<Control> }
 // Constructed only for this actual document/Android owner at setup. Neither a
 // cloned owner wrapper nor a peer-domain token creates a second admission.
@@ -95,7 +106,17 @@ impl AndroidAdmission {
         self.control.consume(Domain::Android)?; Ok(self.control)
     }
 }
-impl ToolsAdmission { pub(crate) fn consume(self) -> Result<Arc<Control>, BridgeError> { self.control.consume(Domain::Tools)?; Ok(self.control) } }
+impl ToolsAdmission {
+    pub(crate) fn document_matches(&self, original: &Arc<()>) -> bool {
+        self.document.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original))
+    }
+    pub(crate) fn consume(self, original: &Arc<()>) -> Result<Arc<Control>, BridgeError> {
+        if self.document.upgrade().is_none() || !self.owner.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, original)) {
+            return Err(BridgeError::invalid());
+        }
+        self.control.consume(Domain::Tools)?; Ok(self.control)
+    }
+}
 impl OfflineAdmission { pub(crate) fn consume(self) -> Result<Arc<Control>, BridgeError> { self.control.consume(Domain::Offline)?; Ok(self.control) } }
 
 #[derive(Clone, Serialize)]
@@ -444,7 +465,7 @@ pub(super) fn script(step: Step, case: Case) -> Option<String> {
             const report=card.querySelector('.offline-report'),rows=report?[...report.querySelectorAll('.offline-counts > div')]:null;
             if(rows&&rows.length!==9)throw 0;const counts=rows?Object.fromEntries(rows.map(row=>[text(row.querySelector('dt')),Number(text(row.querySelector('dd')))])):null;
             return {state:'ready',phase:text(progress.querySelector('.badge')),outcome:text(p).slice(9),counts};"#,
-        Step::ReadVersion | Step::Work | Step::WaitFinal => return None,
+        Step::ReadVersion | Step::Work | Step::WaitFinal | Step::Saved(_) => return None,
     };
     Some(format!(r#"(() => {{try {{
         const primary={primary:?},text=node=>node?.textContent?.trim()??'';
@@ -459,7 +480,7 @@ pub(super) fn script(step: Step, case: Case) -> Option<String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step { Navigate, ReadVersion, Ready, Prepare, Review, Acknowledge, Confirmed, Start, Work,
-    Reciprocal, ReadReciprocal, Cancel, WaitFinal, Return, Terminal }
+    Reciprocal, ReadReciprocal, Cancel, WaitFinal, Return, Terminal, Saved(SavedStep) }
 impl Step {
     pub(super) fn failure_token(self) -> &'static [u8] { match self {
         Self::Navigate => b"Navigate",
@@ -477,6 +498,7 @@ impl Step {
         Self::WaitFinal => b"WaitFinal",
         Self::Return => b"Return",
         Self::Terminal => b"Terminal",
+        Self::Saved(step) => step.failure_token(),
     } }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -496,8 +518,10 @@ struct Record {
     held_observed: bool, terminal_visible: bool, final_snapshot: Option<Snapshot>,
     android_fixture: Option<AndroidFixture>, android_final_snapshot: Option<AndroidSnapshot>,
     android_selected_before_observation: bool,
+    tools_selected_before_observation: bool,
     android_version_requested: bool, android_version_observed: bool, android_busy_observed: bool,
     android_requests: [u8;3], android_replies: [u8;3],
+    saved_signing: SavedSigningRecord,
 }
 impl Control {
     fn record(&self) -> Option<std::sync::MutexGuard<'_, Record>> {
@@ -505,19 +529,29 @@ impl Control {
     }
     pub(super) fn attach(self: &Arc<Self>, q: &Arc<Observation>, document: &crate::asset_session::DocumentBinding) -> Result<(), BridgeError> {
         if self.case.android() { return self.attach_android(q,document); }
+        // Observe the ordinary owner before attachment/fixture acquisition.
+        // This history never grants routing; registration rechecks the same
+        // original under Registry before spending the Tools token's bit.
+        let selected_before_observation = document.installed_tools_normal_selected();
+        if self.case.tools() && !selected_before_observation { return Err(BridgeError::invalid()); }
+        let (document_identity, owner_identity) = document.installed_tools_identities();
         {
             let shell = q.record().ok_or_else(BridgeError::cleanup_unknown)?;
             let mut r = self.record().ok_or_else(BridgeError::cleanup_unknown)?;
-            if q.case != ShellCase::Commands(self.case) || !shell.attached || shell.started || r.issued { return Err(BridgeError::invalid()); }
+            if q.case != ShellCase::Commands(self.case) || !shell.attached || shell.started || r.issued
+                || document_identity.upgrade().is_none() || owner_identity.upgrade().is_none() { return Err(BridgeError::invalid()); }
             let mut original = self.original.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if original.is_some() { return Err(BridgeError::invalid()); }
             let fixture = Fixture::capture(q.project_path().ok_or_else(BridgeError::invalid)?, self.case).map_err(|_| BridgeError::invalid())?;
+            r.tools_selected_before_observation = selected_before_observation;
             r.content = Some(fixture.content()); r.saved = Some(fixture.saved.clone()); r.fixture = Some(fixture); r.issued = true;
             *original = Some(Arc::downgrade(q));
         }
-        document.admit_installed_commands(ToolsAdmission { control: self.clone() }, OfflineAdmission { control: self.clone() })
+        document.admit_installed_commands(ToolsAdmission { control: self.clone(), document: document_identity, owner: owner_identity },
+            OfflineAdmission { control: self.clone() })
     }
     pub(super) fn snapshot(&self, project_id: &str, result: &Result<Value, BridgeError>) {
+        if self.case.saved_signing() { return self.saved_snapshot(project_id,result); }
         let Ok(q) = self.original() else { self.fail(); return; };
         let Some(mut shell) = q.record_at(super::Boundary::Result) else { return; };
         let Some(r) = self.record() else { return; };
@@ -791,6 +825,7 @@ impl Control {
         let Some(r) = self.record() else { return false; };
         let Ok(h) = self.hold.lock() else { self.fail(); return false; };
         !self.failed.load(Ordering::SeqCst) && self.admitted.load(Ordering::SeqCst) == 3
+            && (!self.case.tools() || r.tools_selected_before_observation)
             && self.claimed.load(Ordering::SeqCst) == (if self.case.tools() { Domain::Tools } else { Domain::Offline }).bit()
             && r.requests == self.expected_requests() && r.replies == r.requests && r.initial && r.ready && r.start
             && r.consent == !self.case.tools() && r.cancel == self.case.cancel() && r.reciprocal == self.case.reciprocal()
@@ -835,13 +870,13 @@ fn android_settings(root: &Path) -> Result<Vec<u8>, ()> {
 }
 fn android_files(case: Case, root: &Path) -> Result<Vec<(&'static str, Vec<u8>)>, ()> {
     let action = match case {
-        Case::AndroidBuild | Case::AndroidRefusals => "",
+        Case::AndroidBuild | Case::AndroidRefusals | Case::AndroidSavedSigning | Case::AndroidSavedWrongFingerprint | Case::AndroidSavedCancel => "",
         Case::AndroidFailure => "        throw new GradleException('Fixed trusted native fixture failure')\n",
         Case::AndroidCancel => "        Thread.sleep(20000)\n",
         _ => return Err(()),
     };
     Ok(vec![
-        ("project/.gitignore", b"/.mobile-release/\n/.gradle/\n/build/\n/app/build/\n".to_vec()),
+        ("project/.gitignore", android_ignore(case)),
         ("project/gradlew", b"#!/bin/sh\n# Desktop must use its protected Gradle, never this fallback.\nexit 70\n".to_vec()),
         ("project/settings.gradle", android_settings(root)?),
         ("project/app/build.gradle", format!("{ANDROID_APP_PREFIX}{action}{ANDROID_APP_SUFFIX}").into_bytes()),
@@ -860,6 +895,7 @@ struct AndroidFile { name: &'static str, identity: super::FixtureIdentity, raw: 
 struct AndroidFixture {
     case: Case, root: PathBuf, ancestors: Vec<(PathBuf, super::FixtureIdentity)>,
     directories: Vec<(&'static str, super::FixtureIdentity)>, files: Vec<AndroidFile>, changed: bool, active_size_seen: u64,
+    saved_config: Option<AndroidFile>, retired_config: Option<super::FixtureIdentity>,
 }
 impl AndroidFixture {
     fn capture(project: &Path, case: Case) -> Result<Self, ()> {
@@ -877,15 +913,17 @@ impl AndroidFixture {
             if id[0] == 0 || id[1] == 0 || id[2] & 0o170000 != 0o040000 || id[2] & 0o022 != 0 || id[3..5] != [0,0]
                 || id[2] & 0o005 != 0o005
                 || (path == namespace && (id[2] != 0o040755 || id[5] == 0
-                    || id[5] > super::SESSION_FIXTURE_NAMESPACE.len() as u64 + 2 || id[6] > 1 << 20)) { return Err(()); }
+                    || id[5] > android_fixture_namespace(case).len() as u64 + 2 || id[6] > 1 << 20)) { return Err(()); }
             ancestors.push((path.to_path_buf(), id));
         }
         if ancestors.len() != 4 { return Err(()); }
-        super::session_fixture_directory(namespace, &super::SESSION_FIXTURE_NAMESPACE)?;
-        let mut fixture = Self { case, root, ancestors, directories: Vec::new(), files: Vec::new(), changed: false, active_size_seen: 0 };
+        super::session_fixture_directory(namespace, android_fixture_namespace(case))?;
+        let mut fixture = Self { case, root, ancestors, directories: Vec::new(), files: Vec::new(), changed: false, active_size_seen: 0,
+            saved_config: None, retired_config: None };
         let result = (|| {
             let mut identities = Vec::new();
-            for name in ANDROID_DIRECTORIES {
+            let mut directory_names=ANDROID_DIRECTORIES.to_vec(); if case.saved_signing() { directory_names.push("sources"); }
+            for name in directory_names {
                 let path = if name == "." { fixture.root.clone() } else { fixture.root.join(name) };
                 let id = super::fixture_identity(&path)?;
                 if !fixture.valid_identity(&id, true) || identities.contains(&id[..2].to_vec()) { return Err(()); }
@@ -893,18 +931,21 @@ impl AndroidFixture {
             }
             let mut files = android_files(case, profile.installed_candidate_root())?;
             files.push((ANDROID_WRAPPER, Vec::new()));
+            if case.saved_signing() { files.extend(SAVED_ANDROID_INPUTS.iter().map(|name| (*name,Vec::new()))); }
             for (name, mut raw) in files {
                 let path = fixture.root.join(name); let id = super::fixture_identity(&path)?;
-                if !fixture.valid_identity(&id, false) || identities.contains(&id[..2].to_vec()) { return Err(()); }
+                if !fixture.valid_source_identity(&id, name) || identities.contains(&id[..2].to_vec()) { return Err(()); }
                 identities.push(id[..2].to_vec());
                 let file = open_file(&path, case == Case::AndroidRefusals && name == ANDROID_VERSION_PATH)?;
                 // Register every open before its first fallible body observation.
                 fixture.files.push(AndroidFile { name, identity:id, raw:Vec::new(), handle:Some(file) });
                 let index = fixture.files.len() - 1; let bytes = fixture.read(index, false)?;
                 if name == ANDROID_WRAPPER { if !android_wrapper_valid(&bytes) { return Err(()); } raw = bytes.clone(); }
+                if case.saved_signing() && SAVED_ANDROID_INPUTS.contains(&name) { raw=bytes.clone(); }
                 if bytes != raw { return Err(()); }
                 fixture.files[index].raw = raw;
             }
+            if case.saved_signing() { fixture.saved_inputs()?; }
             fixture.verify(false)
         })();
         if result.is_err() { let _ = fixture.close(); return Err(()); }
@@ -917,6 +958,9 @@ impl AndroidFixture {
     }
     fn read(&self, index: usize, variable: bool) -> Result<Vec<u8>, ()> {
         let row = self.files.get(index).ok_or(())?;
+        if self.case.saved_signing() && matches!(row.name,"sources/input.jks" | "sources/certificate.der") {
+            return read_saved_original(row.handle.as_ref().ok_or(())?, &self.root.join(row.name), &row.identity, saved_input_limit(row.name)?);
+        }
         read_bound(row.handle.as_ref().ok_or(())?, &self.root.join(row.name), &row.identity, variable)
     }
     fn content() -> Value { json!({"bytes":ANDROID_CONFIG.len(),"sha256":format!("{:x}",Sha256::digest(ANDROID_CONFIG))}) }
@@ -927,13 +971,15 @@ impl AndroidFixture {
             let now = super::fixture_identity(path)?;
             if if index == 0 { now != *old } else { now[..5] != old[..5] } { return Err(()); }
         }
-        super::session_fixture_directory(&self.ancestors[0].0, &super::SESSION_FIXTURE_NAMESPACE)?;
+        super::session_fixture_directory(&self.ancestors[0].0, android_fixture_namespace(self.case))?;
         for (name,old) in &self.directories {
             let path = if *name == "." { self.root.clone() } else { self.root.join(name) };
             let now = super::fixture_identity(&path)?;
             let generated = ANDROID_GENERATED.contains(name);
+            let saved_change=self.case.saved_signing() && self.saved_config.is_some()
+                && (*name=="project" || *name=="project/release" || after && *name=="project/app");
             if !self.valid_identity(&now,true)
-                || if after && (generated || *name == "project") { now[..5] != old[..5] } else { now != *old } { return Err(()); }
+                || if saved_change || after && (generated || *name == "project") { now[..5] != old[..5] } else { now != *old } { return Err(()); }
             // Deliberately no output/AAB/cache traversal, before/after receipts
             // account for this exclusion instead of claiming an immutable build tree.
             if after && generated { continue; }
@@ -950,7 +996,12 @@ impl AndroidFixture {
             let variable = row.name == ANDROID_TRACE || self.changed && row.name == ANDROID_VERSION_PATH;
             let mut expected = row.raw.clone();
             if self.changed && row.name == ANDROID_VERSION_PATH { expected.push(b'\n'); }
-            if after && row.name == ANDROID_TRACE && self.case != Case::AndroidRefusals { expected = b"active\n".to_vec(); }
+            if after && row.name == ANDROID_TRACE && !matches!(self.case,Case::AndroidRefusals | Case::AndroidSavedWrongFingerprint) { expected = b"active\n".to_vec(); }
+            if row.name==SAVED_ANDROID_CONFIG && self.saved_config.is_some() {
+                self.saved_config_original()?; let replacement=self.saved_config.as_ref().ok_or(())?;
+                if read_bound(replacement.handle.as_ref().ok_or(())?,&self.root.join(row.name),&replacement.identity,false)?!=replacement.raw { return Err(()); }
+                continue;
+            }
             if self.read(index,variable)? != expected { return Err(()); }
         }
         Ok(())
@@ -975,15 +1026,21 @@ impl AndroidFixture {
     }
     fn close(&mut self) -> bool {
         let mut closed=true;
+        if let Some(row)=self.saved_config.as_mut() { match row.handle.take() {
+            Some(file)=>if nix::unistd::close(file).is_err() { closed=false; }, None=>closed=false,
+        } }
         for row in &mut self.files { match row.handle.take() {
             Some(file) => if nix::unistd::close(file).is_err() { closed=false; }, None => closed=false,
         } }
         closed
     }
     fn finish(mut self) -> Result<Value, ()> {
-        let valid = self.verify(true).is_ok() && self.changed == (self.case == Case::AndroidRefusals);
+        let valid = self.verify(true).is_ok() && self.changed == (self.case == Case::AndroidRefusals)
+            && (!self.case.saved_signing() || self.saved_config.is_some() && self.saved_postconditions().is_ok());
+        let saved_report=if self.case.saved_signing() { self.saved_fixture_report().ok() } else { None };
         let closed = self.close();
         if !valid || !closed { return Err(()); }
+        if self.case.saved_signing() { return saved_report.ok_or(()); }
         Ok(json!({"sourceControlsAccounted":true,"savedVersionChanged":self.changed,
             "gradleBoundary":if self.case == Case::AndroidRefusals { "" } else { "active\n" },
             "generatedScopesNotExported":["project/.mobile-release","project/app/build","project/build"]}))
@@ -1073,7 +1130,7 @@ impl Control {
             || !matches!(shell.step,ShellStep::Commands(Step::ReadVersion | Step::Ready))
             || !super::keys(&v,&["schemaVersion","source","version","savedConfig","savedVersion","observationScope","assurance"])
             || v["schemaVersion"]!=2 || v["source"]!="release/version.properties"
-            || v["version"]!=json!({"name":"1.2.3","build":7}) || v["savedConfig"]!=AndroidFixture::content()
+            || v["version"]!=json!({"name":"1.2.3","build":7}) || r.content.as_ref()!=v.get("savedConfig")
             || v["savedVersion"]!=json!({"bytes":ANDROID_VERSION.len(),"sha256":format!("{:x}",Sha256::digest(ANDROID_VERSION))})
             || v["observationScope"]!="single-request-non-atomic" || !super::assurance(&v,"static-text") { self.fail(); return; }
         r.android_version_observed=true;
@@ -1090,10 +1147,12 @@ impl Control {
                 && body["projectId"].as_str()==Some(project.id.as_str())
                 && body["draftRevision"].as_u64().is_some_and(|n|n<u64::from(u32::MAX))
                 && body["baselineGeneration"].as_u64().is_some_and(|n|n<u64::from(u32::MAX))
-                && body["savedConfig"]==AndroidFixture::content() && body["savedVersion"]==AndroidFixture::version(),
+                && r.content.as_ref()==body.get("savedConfig") && body["savedVersion"]==AndroidFixture::version()
+                && (!self.case.saved_signing() || r.saved_signing.assignments.as_ref()==body.get("signing")
+                    && body["artifactValidation"]==json!({"mode":"upload-signature","uploadCertificateSha256":r.saved_signing.saved_certificate})),
             Command::AndroidStart => matches!(shell.step,ShellStep::Commands(Step::Start | Step::Work)) && r.consent
                 && r.android_replies[0]==1 && original() && body["consentVersion"]==crate::android_build_protocol::CONSENT,
-            Command::AndroidCancel => self.case==Case::AndroidCancel && matches!(shell.step,ShellStep::Commands(Step::Cancel | Step::WaitFinal))
+            Command::AndroidCancel => matches!(self.case,Case::AndroidCancel | Case::AndroidSavedCancel) && matches!(shell.step,ShellStep::Commands(Step::Cancel | Step::WaitFinal))
                 && r.android_busy_observed && r.android_replies[1]==1 && original(),
             _ => false,
         };
@@ -1124,6 +1183,7 @@ impl Control {
         r.android_replies[index]=1;
     }
     fn android_terminal_valid(&self, r: &Record, snapshot: &AndroidSnapshot) -> bool {
+        if self.case.saved_signing() { return self.saved_terminal_valid(r,snapshot); }
         let p=&snapshot.terminal;let life=&snapshot.lifetime;
         if !self.case.android() || !snapshot.facts.final_for(self.case) || !snapshot.tools_ledger_settled || !snapshot.native_integrity
             || !self.original_matches(r,&snapshot.facts,p) || p["phase"]!="terminal" || p["intentUsable"]!=false
@@ -1159,10 +1219,15 @@ impl Control {
             && result["artifacts"].as_array().is_some_and(|a|a.len()==1 && a[0]["architectures"]==json!([]) && a[0]["unknownAbi"]==false)
     }
     fn android_tick(&self, app: &tauri::AppHandle, step: Step) -> bool {
+        if let Step::Saved(saved)=step { return self.saved_tick(app,saved); }
         use crate::android_build_protocol as android;
         let Ok(q)=self.original() else { self.fail(); return false; };
         let state=app.state::<super::super::ShellState>();
-        if self.case==Case::AndroidCancel && step==Step::WaitFinal {
+        if self.case==Case::AndroidSavedCancel && step==Step::Work {
+            let Some(r)=self.record() else { return false; };
+            if !saved_cancel_status_ready(&r) { return false; }
+        }
+        if self.case.cancel() && step==Step::WaitFinal {
             // Observe the acknowledgement BEFORE sampling Status, then release
             // this guard. Otherwise a pre-Cancel sample could race the reply.
             let Some(r)=self.record() else { return false; };
@@ -1202,10 +1267,25 @@ impl Control {
                         || !state.document.prepare_android_build(input).is_err_and(|e|e.code=="android_build_busy") { self.fail();return false; }
                     // This receipt fact is the pre-Cancel Busy/Prepare probe only.
                     r.android_busy_observed=true;next=Some(Step::Cancel);
+                } else if self.case==Case::AndroidSavedCancel {
+                    if !r.saved_signing.dispatch_observed { return false; }
+                    let Some(p)=status.operation.as_ref() else { self.fail();return false; };
+                    if p.phase!=android::Phase::Running || p.stage!=Some(android::Stage::Signing) || p.result.is_some() {
+                        self.fail();return false; // Completed/fast signer is a coverage miss.
+                    }
+                    if status.availability!=android::Availability::Busy || p.intent_usable
+                        || r.id.as_deref()!=Some(p.operation_id.as_str()) || r.generation.as_deref()!=Some(p.owner_generation.as_str()) {
+                        self.fail();return false;
+                    }
+                    let Some(context)=r.context.as_ref() else { self.fail();return false; };
+                    let mut request=context.clone();request.as_object_mut().map(|v|{v.remove("platform");v.remove("operation");});
+                    let Ok(input)=android::prepare(&request) else { self.fail();return false; };
+                    if !state.document.prepare_android_build(input).is_err_and(|e|e.code=="android_build_busy") { self.fail();return false; }
+                    r.android_busy_observed=true;next=Some(Step::Cancel);
                 } else { next=Some(Step::WaitFinal); }
             },
             Step::WaitFinal => {
-                if self.case==Case::AndroidCancel {
+                if self.case.cancel() {
                     if r.android_replies[2]!=1 { return false; }
                     let Ok(observed)=serde_json::to_value(&status) else { self.fail();return false; };
                     if !android_cancel_projection_valid(&r,&observed) { self.fail();return false; }
@@ -1213,13 +1293,13 @@ impl Control {
                 let Some(snapshot)=state.bridge.android_build.installed_observation_snapshot() else {
                     // Available is not permission to wait for missing original
                     // finality. Busy may legitimately race the final snapshot.
-                    if self.case==Case::AndroidCancel && status.availability==android::Availability::Available { self.fail(); }
+                    if self.case.cancel() && status.availability==android::Availability::Available { self.fail(); }
                     return false;
                 };
                 if snapshot.facts.resource_unknown
-                    || self.case==Case::AndroidCancel && !self.original_matches(&r,&snapshot.facts,&snapshot.terminal) { self.fail();return false; }
+                    || self.case.cancel() && !self.original_matches(&r,&snapshot.facts,&snapshot.terminal) { self.fail();return false; }
                 if !snapshot.facts.retired_before_cutoff {
-                    if self.case==Case::AndroidCancel && status.availability!=android::Availability::Busy { self.fail(); }
+                    if self.case.cancel() && status.availability!=android::Availability::Busy { self.fail(); }
                     return false;
                 }
                 if status.availability==android::Availability::Busy { return false; }
@@ -1240,6 +1320,7 @@ impl Control {
         true
     }
     fn android_dom(&self, step: Step, value: &Value) {
+        if let Step::Saved(saved)=step { return self.saved_dom(saved,value); }
         let Ok(q)=self.original() else { self.fail();return; };
         let Some(mut shell)=q.record_at(super::Boundary::Dom) else { return; };
         if shell.step!=ShellStep::Commands(step) || shell.pending.take()!=Some(super::Pending::Dom(ShellStep::Commands(step))) { self.fail();return; }
@@ -1255,7 +1336,7 @@ impl Control {
         };
         if !valid { self.fail();return; }
         let next=match step {
-            Step::Navigate=>Step::ReadVersion, Step::ReadVersion=>Step::Ready,
+            Step::Navigate=>if self.case.saved_signing() { Step::Saved(SavedStep::Sign) } else { Step::ReadVersion }, Step::ReadVersion=>Step::Ready,
             Step::Ready=>{r.ready=true;Step::Prepare}, Step::Prepare=>Step::Review,
             Step::Review=>Step::Acknowledge, Step::Acknowledge=>Step::Confirmed,
             Step::Confirmed=>{r.consent=true;Step::Start}, Step::Start=>{r.start=true;Step::Work},
@@ -1268,9 +1349,10 @@ impl Control {
     fn android_complete(&self) -> bool {
         let Some(r)=self.record() else { return false; };
         self.android_registration_valid() && r.android_selected_before_observation && r.requests==[0;5] && r.replies==[0;5]
-            && r.android_requests==[1,1,u8::from(self.case==Case::AndroidCancel)] && r.android_replies==r.android_requests
+            && r.android_requests==[1,1,u8::from(self.case.cancel())] && r.android_replies==r.android_requests
             && r.android_version_requested && r.android_version_observed && r.initial && r.ready && r.start && r.consent
-            && r.cancel==(self.case==Case::AndroidCancel) && r.android_busy_observed==r.cancel && !r.reciprocal && !r.held_observed
+            && r.cancel==(self.case.cancel()) && r.android_busy_observed==r.cancel && !r.reciprocal && !r.held_observed
+            && (!self.case.saved_signing() || r.saved_signing.complete(self.case))
             && r.terminal_visible && r.android_fixture.is_none() && r.fixture.is_none() && r.fixture_report.is_some()
             // Final receipt checks historical selection/binding after teardown.
             // Only the ordinary owner, never these facts, checks live eligibility.
@@ -1284,6 +1366,7 @@ impl Control {
                 && q.commands.as_ref().is_some_and(|c|std::ptr::eq(c.as_ref(),self)))
     }
     fn android_report(&self) -> Option<Vec<u8>> {
+        if self.case.saved_signing() { return self.saved_report(); }
         if !self.android_complete() { return None; }
         // normalSelection is recorded routing history, not the normal-activation
         // qualification credit which remains false in the product/native limits.
@@ -1329,7 +1412,47 @@ fn android_terminal_dom(p: &Value, value: &Value) -> bool {
 }
 
 
+fn assert_tools_identity_contracts() {
+    let document = Arc::new(()); let foreign = Arc::new(());
+    for case in [Case::ToolsObserved, Case::ToolsCancel, Case::ToolsSettlement] {
+        let control = Control::new(case);
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: Arc::downgrade(&document) };
+        assert!(token.document_matches(&document) && !token.document_matches(&foreign));
+        assert!(token.consume(&foreign).is_err()); assert_eq!(control.admitted.load(Ordering::SeqCst), 0);
+        let stale = Arc::new(());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&stale), owner: Arc::downgrade(&document) };
+        drop(stale); assert!(token.consume(&document).is_err()); assert_eq!(control.admitted.load(Ordering::SeqCst), 0);
+        let stale = Arc::new(());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: Arc::downgrade(&stale) };
+        drop(stale); assert!(token.consume(&document).is_err()); assert_eq!(control.admitted.load(Ordering::SeqCst), 0);
+
+        // Genuine inert owner constructors, but no runtime IO or live native
+        // Observation. Tokens cannot supply a missing original/compiled route.
+        let runtime = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/unopened-diagnostics-runtime"));
+        let owner = crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone());
+        let second = crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime);
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: owner.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&document, token).is_err());
+        assert!(!owner.normal_selected(&document));
+        owner.bind_original_document(&document); second.bind_original_document(&document);
+        let selected = owner.normal_selected(&document);
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: owner.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&foreign, token).is_err());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: second.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&document, token).is_err());
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: second.installed_tools_identity() };
+        assert!(second.admit_installed_observation(&document, token).is_err());
+        assert_eq!(owner.normal_selected(&document), selected); assert!(!second.normal_selected(&document));
+        owner.request_shutdown();
+        let token = ToolsAdmission { control: control.clone(), document: Arc::downgrade(&document), owner: owner.installed_tools_identity() };
+        assert!(owner.admit_installed_observation(&document, token).is_err());
+        assert!(!owner.normal_selected(&document) && owner.installed_observation_snapshot().is_none());
+        assert_eq!(control.admitted.load(Ordering::SeqCst), 0); assert!(!control.complete());
+    }
+}
+
 fn assert_android_contracts() {
+    assert_saved_signing_contracts();
     let original=Arc::new(());let foreign=Arc::new(());
     // Inert projection DATA, not a live Observation, owner or retirement permit.
     let binding=Record { id:Some("a".repeat(32)),generation:Some("b".repeat(32)),
@@ -1505,5 +1628,653 @@ pub(super) fn assert_contracts() {
     assert_eq!(names.len(),21); let mut unique=names.clone(); unique.sort();unique.dedup();assert_eq!(unique.len(),21);
     assert!(FILES.iter().all(|(_,n,hash)| *n < 2048 && hash.len()==64));
     for case in Case::ALL.into_iter().filter(|case|!case.android()) { let (size,hash)=config_descriptor(case); assert!(size<2048 && hash.len()==64); }
+    assert_tools_identity_contracts();
     assert_android_contracts();
+}
+
+
+// Saved3 has its own fixture namespace and original inputs. It is not another
+// name for the unsigned4 or the fictional credential-session fixtures.
+const SAVED_ANDROID_NAMESPACE: [&str;3] = [
+    "android-saved-signing", "android-saved-signing-cancel", "android-saved-signing-wrong-fingerprint",
+];
+const SAVED_ANDROID_INPUTS: [&str;4] = [
+    "sources/input.jks", "sources/certificate.der", "sources/signing-fields.json", "sources/firebase.json",
+];
+const SAVED_ANDROID_CONFIG: &str = "project/release/mobile-release.json";
+const SAVED_ANDROID_FIREBASE: &[u8] = b"{\"client\":[{\"client_info\":{\"android_client_info\":{\"package_name\":\"org.example.saved\"}}}]}\n";
+fn android_fixture_namespace(case: Case) -> &'static [&'static str] {
+    if case.saved_signing() { &SAVED_ANDROID_NAMESPACE } else { &super::SESSION_FIXTURE_NAMESPACE }
+}
+fn android_ignore(case: Case) -> Vec<u8> {
+    let mut raw=b"/.mobile-release/\n/.gradle/\n/build/\n/app/build/\n".to_vec();
+    if case.saved_signing() { for line in super::IGNORE_LINES { raw.extend_from_slice(line.as_bytes());raw.push(b'\n'); } }
+    raw
+}
+fn saved_input_limit(name: &str) -> Result<u64,()> {
+    match name { "sources/input.jks"=>Ok(64*1024), "sources/certificate.der"=>Ok(16*1024),
+        "sources/signing-fields.json" | "sources/firebase.json"=>Ok(2048), _=>Err(()) }
+}
+fn read_saved_original(file: &File,path: &Path,original: &super::FixtureIdentity,limit: u64) -> Result<Vec<u8>,()> {
+    if ![16*1024,64*1024].contains(&limit) || original[6]==0 || original[6]>limit
+        || file_identity(file)?!=*original || super::fixture_identity(path)?!=*original { return Err(()); }
+    let mut bytes=vec![0u8;usize::try_from(original[6]).map_err(|_|())?];file.read_exact_at(&mut bytes,0).map_err(|_|())?;
+    let mut eof=[0];if file.read_at(&mut eof,original[6]).map_err(|_|())?!=0
+        || file_identity(file)?!=*original || super::fixture_identity(path)?!=*original { return Err(()); } Ok(bytes)
+}
+impl AndroidFixture {
+    fn valid_source_identity(&self,id: &super::FixtureIdentity,name: &str) -> bool {
+        if !self.case.saved_signing() || !matches!(name,"sources/input.jks" | "sources/certificate.der") { return self.valid_identity(id,false); }
+        id[0]==self.ancestors[0].1[0] && id[1]>0 && id[2]==0o100600
+            && id[3]==u64::from(rustix::process::getuid().as_raw()) && id[4]==u64::from(rustix::process::getgid().as_raw())
+            && id[5]==1 && id[6]>0 && saved_input_limit(name).is_ok_and(|limit|id[6]<=limit)
+    }
+    fn original_bytes(&self,name: &str) -> Result<&[u8],()> {
+        let index=self.files.iter().position(|row|row.name==name).ok_or(())?;
+        if self.read(index,false)?!=self.files[index].raw { return Err(()); } Ok(&self.files[index].raw)
+    }
+    fn saved_inputs(&self) -> Result<Value,()> {
+        if !self.case.saved_signing() || self.original_bytes("sources/firebase.json")?!=SAVED_ANDROID_FIREBASE { return Err(()); }
+        let key=self.original_bytes("sources/input.jks")?;let certificate=self.original_bytes("sources/certificate.der")?;
+        if key.is_empty() || certificate.first()!=Some(&0x30) { return Err(()); }
+        let fields=crate::protocol::strict_json(self.original_bytes("sources/signing-fields.json")?).map_err(|_|())?;
+        if !super::keys(&fields,&["storePassword","keyAlias","keyPassword"]) || fields["keyAlias"]!="fixture_saved"
+            || !["storePassword","keyPassword"].iter().all(|name|fields[*name].as_str().is_some_and(|text|
+                text.len()==64 && text.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b))))
+            || fields["storePassword"]==fields["keyPassword"] { return Err(()); }
+        Ok(fields)
+    }
+    fn certificate(&self) -> Result<String,()> {
+        if !self.case.saved_signing() { return Err(()); }
+        Ok(format!("{:x}",Sha256::digest(self.original_bytes("sources/certificate.der")?)))
+    }
+    fn desired_saved_config(&self) -> Result<Value,()> {
+        let mut value=crate::protocol::strict_json(ANDROID_CONFIG).map_err(|_|())?;
+        let actual=self.certificate()?;
+        let fingerprint=if self.case==Case::AndroidSavedWrongFingerprint {
+            // A distinct, nonzero, valid-format public fingerprint; not a
+            // replacement key or a different private-input assignment.
+            format!("{}{}",&actual[..63],if &actual[63..]=="0" { "1" } else { "0" })
+        } else { actual };
+        value["android"]["uploadCertificateSha256"]=json!(fingerprint);
+        value["services"]["androidFirebase"]=json!("required");Ok(value)
+    }
+    fn desired_saved_bytes(&self) -> Result<Vec<u8>,()> {
+        // Same JSON value/order sent by the native serializer; this fixture is
+        // ASCII-only and the core preserves indent-2/final-LF serialization.
+        let mut raw=serde_json::to_vec_pretty(&self.desired_saved_config()?).map_err(|_|())?;raw.push(b'\n');
+        if raw.len()>2048 { return Err(()); } Ok(raw)
+    }
+    fn saved_config_original(&self) -> Result<(),()> {
+        let old=self.files.iter().find(|row|row.name==SAVED_ANDROID_CONFIG).ok_or(())?;
+        let retired=self.retired_config.as_ref().ok_or(())?;let file=old.handle.as_ref().ok_or(())?;
+        if file_identity(file)?!=*retired || retired[..5]!=old.identity[..5] || retired[5]!=0
+            || retired[6..8]!=old.identity[6..8] || retired[8]<old.identity[8] { return Err(()); }
+        let mut raw=vec![0u8;old.raw.len()];file.read_exact_at(&mut raw,0).map_err(|_|())?;let mut eof=[0];
+        if raw!=old.raw || file.read_at(&mut eof,old.identity[6]).map_err(|_|())?!=0 || file_identity(file)?!=*retired { return Err(()); } Ok(())
+    }
+    fn saved_replace_observed(&mut self) -> Result<(),()> {
+        if !self.case.saved_signing() || self.saved_config.is_some() || self.retired_config.is_some() { return Err(()); }
+        let original=self.files.iter().find(|row|row.name==SAVED_ANDROID_CONFIG).ok_or(())?;
+        // The original edit owner has already joined. Retain the replaced
+        // original FD and record only its exact one-time unlink transition.
+        let retired=file_identity(original.handle.as_ref().ok_or(())?)?;
+        if retired[..5]!=original.identity[..5] || retired[5]!=0 || retired[6..8]!=original.identity[6..8]
+            || retired[8]<original.identity[8] { return Err(()); }
+        self.retired_config=Some(retired);self.saved_config_original()?;
+        let path=self.root.join(SAVED_ANDROID_CONFIG);let identity=super::fixture_identity(&path)?;
+        if !self.valid_identity(&identity,false) || self.files.iter().any(|row|row.identity[..2]==identity[..2])
+            || self.directories.iter().any(|(_,old)|old[..2]==identity[..2]) { return Err(()); }
+        let handle=open_file(&path,false)?;
+        // Register before the first fallible byte read; failure retains the FD
+        // for the same original fixture's close, never an unrelated new owner.
+        self.saved_config=Some(AndroidFile { name:SAVED_ANDROID_CONFIG,identity,raw:Vec::new(),handle:Some(handle) });
+        let expected=self.desired_saved_bytes()?;let row=self.saved_config.as_ref().ok_or(())?;
+        if read_bound(row.handle.as_ref().ok_or(())?,&path,&identity,false)?!=expected { return Err(()); }
+        self.saved_config.as_mut().ok_or(())?.raw=expected;self.verify(false)
+    }
+    fn saved_postconditions(&self) -> Result<(),()> {
+        for name in ["project/app/google-services.json","project/.mobile-release/build-inputs",
+            "project/.mobile-release/build-inputs-complete.json","project/.mobile-release/build-inputs-complete.stage"] {
+            match std::fs::symlink_metadata(self.root.join(name)) {
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{}, _=>return Err(()),
+            }
+        }
+        self.saved_config_original()?;self.saved_inputs()?;Ok(())
+    }
+    fn saved_fixture_report(&self) -> Result<Value,()> {
+        let key=self.files.iter().find(|row|row.name=="sources/input.jks").ok_or(())?;
+        Ok(json!({"sourceControlsAccounted":true,"savedVersionChanged":false,"savedConfigApplied":true,
+            "signingSourcesRetained":true,"firebaseRestoredToAbsence":true,"pendingMaterialAbsent":true,
+            "certificateSha256":self.certificate()?,"keystoreBytes":key.identity[6],"firebaseBytes":SAVED_ANDROID_FIREBASE.len(),
+            "gradleBoundary":if self.case==Case::AndroidSavedWrongFingerprint { "" } else { "active\n" },
+            "generatedScopesNotExported":["project/.mobile-release","project/app/build","project/build"]}))
+    }
+}
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(super) enum SavedStep { Settings, Android, Fingerprint, Services, Firebase, Prepare, Review, Confirmation,
+    ReadConfirmation, Acknowledge, ReadAcknowledged, Apply, Settled, Releases, Refresh, Readback, Sign }
+impl SavedStep {
+    fn failure_token(self) -> &'static [u8] { match self {
+        Self::Settings=>b"SavedSettings",Self::Android=>b"SavedAndroid",Self::Fingerprint=>b"SavedFingerprint",
+        Self::Services=>b"SavedServices",Self::Firebase=>b"SavedFirebase",Self::Prepare=>b"SavedPrepare",
+        Self::Review=>b"SavedReview",Self::Confirmation=>b"SavedConfirmation",Self::ReadConfirmation=>b"SavedReadConfirmation",
+        Self::Acknowledge=>b"SavedAcknowledge",Self::ReadAcknowledged=>b"SavedReadAcknowledged",Self::Apply=>b"SavedApply",
+        Self::Settled=>b"SavedSettled",Self::Releases=>b"SavedReleases",Self::Refresh=>b"SavedRefresh",Self::Readback=>b"SavedReadback",Self::Sign=>b"SavedSign",
+    } }
+}
+#[derive(Default)]
+struct SavedSigningRecord {
+    capability: bool, generation: Option<String>, revision: Option<u32>,
+    requests: [u8;3], replies: [u8;3], session: Option<super::SaveSession>, revision_pair: Option<(u32,u32)>,
+    acknowledged: bool, applied: bool, readback: bool, configured: bool, config_before_assignments: bool,
+    saved_certificate: Option<String>, actual_certificate: Option<String>, assignments: Option<Value>,
+    dispatch_observed: bool, dispatch_id: Option<String>, dispatch_generation: Option<String>,
+}
+impl SavedSigningRecord {
+    fn complete(&self,case: Case) -> bool {
+        self.requests==[1;3] && self.replies==[1;3] && self.acknowledged && self.applied && self.readback && self.configured
+            && self.session.as_ref().is_some_and(|session|session.review_visible && session.prepare_returned && session.finality.is_some())
+            && self.config_before_assignments && self.assignments.is_some() && self.actual_certificate.is_some() && self.saved_certificate.is_some()
+            && self.dispatch_observed==(case!=Case::AndroidSavedWrongFingerprint)
+            && self.dispatch_id.is_some()==self.dispatch_observed && self.dispatch_generation.is_some()==self.dispatch_observed
+    }
+}
+fn saved_review(view: &crate::edit_protocol::PreparedConfigView,fixture: &AndroidFixture) -> Option<Value> {
+    let raw=fixture.desired_saved_bytes().ok()?;let ignore=android_ignore(fixture.case);
+    if crate::edit_protocol::bounded(view,128*1024).is_err() || view.schema_version!=1 || view.files.len()!=2
+        || view.create_release_directory || !view.rewrites_config_formatting || !view.ignore_additions.is_empty()
+        || !super::format_valid(&view.preview["validation"]) || !super::assurance(&view.preview,"schema-policy") { return None; }
+    let expected=json!([
+        {"path":"release/mobile-release.json","action":"replace","beforeBytes":ANDROID_CONFIG.len(),"afterBytes":raw.len()},
+        {"path":".gitignore","action":"preserve","beforeBytes":ignore.len(),"afterBytes":ignore.len()},
+    ]);
+    if serde_json::to_value(&view.files).ok()?!=expected { return None; }
+    let comparison=&view.preview["comparison"];
+    if comparison["baseProvided"]!=true || comparison["state"]!="complete" || comparison["kind"]!="compare"
+        || comparison["semanticallyChanged"]!=true || comparison["unreviewedCount"]!=0
+        || comparison["counts"]!=json!({"added":1,"changed":1,"removed":0})
+        || !comparison["changes"].as_array().is_some_and(|rows|rows.len()==2 && rows.iter().all(|row|
+            matches!(row["path"].as_str(),Some("android.uploadCertificateSha256" | "services.androidFirebase")))) { return None; }
+    Some(expected)
+}
+
+
+impl Control {
+    pub(super) fn saved_open_request(&self,project_id: &str) {
+        let Ok(q)=self.original() else { self.fail();return; };
+        let Some(shell)=q.record_at(super::Boundary::Request) else { return; };
+        let Some(mut r)=self.record() else { return; };let s=&mut r.saved_signing;
+        if !self.case.saved_signing() || !s.capability || s.requests!=[0;3] || s.session.is_some()
+            || !matches!(shell.step,ShellStep::Commands(Step::Saved(SavedStep::Prepare | SavedStep::Review)))
+            || !shell.project.as_ref().is_some_and(|project|project.id==project_id) { self.fail();return; }
+        s.requests[0]=1;
+    }
+    pub(super) fn saved_open_result(&self,result: &Result<super::ConfigEditStatus,BridgeError>,edits: &super::EditOwner) {
+        {
+            let Some(mut r)=self.record() else { return; };let s=&mut r.saved_signing;
+            let Some(status)=result.as_ref().ok() else { self.fail();return; };let Some(owner)=status.active.as_ref() else { self.fail();return; };
+            if s.requests!=[1,0,0] || s.replies!=[0;3] || s.session.is_some() || owner.phase!=super::edit::Phase::Opening
+                || owner.checkout.is_some() || owner.prepared.is_some() || owner.apply_submitted
+                || s.generation.as_deref()!=Some(status.window_generation.as_str()) { self.fail();return; }
+            s.replies[0]=1;s.session=Some(super::SaveSession { projection:owner.clone(),prepared:None,review:None,
+                prepare_requested:false,prepare_returned:false,review_visible:false,finality:None });
+        }
+        if let Ok(status)=result { self.saved_edit_status(status,edits); }
+    }
+    pub(super) fn saved_prepare_request(&self,args: &super::edit::PrepareConfigEdit) {
+        let Ok(q)=self.original() else { self.fail();return; };
+        let Some(shell)=q.record_at(super::Boundary::Request) else { return; };
+        let Some(mut r)=self.record() else { return; };
+        let Some(fixture)=r.android_fixture.as_ref() else { self.fail();return; };
+        let Ok(desired)=fixture.desired_saved_config() else { self.fail();return; };
+        let Ok(before)=crate::protocol::strict_json(ANDROID_CONFIG) else { self.fail();return; };
+        let s=&mut r.saved_signing;let Some(session)=s.session.as_mut() else { self.fail();return; };
+        if !matches!(shell.step,ShellStep::Commands(Step::Saved(SavedStep::Prepare | SavedStep::Review)))
+            || s.requests!=[1,0,0] || s.replies!=[1,0,0] || session.prepare_requested
+            || session.projection.phase!=super::edit::Phase::Editing || session.projection.session_id!=args.session_id
+            || !session.projection.checkout.as_ref().is_some_and(|c|c.revision==args.revision && c.base==args.expected_base)
+            || args.expected_base!=before || args.draft!=desired || args.draft_revision==0 || args.baseline_generation==0
+            || args.draft_revision==u32::MAX || args.baseline_generation==u32::MAX { self.fail();return; }
+        s.revision_pair=Some((args.draft_revision,args.baseline_generation));
+        session.prepare_requested=true;s.requests[1]=1;
+    }
+    pub(super) fn saved_prepare_result(&self,result: &Result<super::ConfigEditStatus,BridgeError>,edits: &super::EditOwner) {
+        {
+            let Some(mut r)=self.record() else { return; };let s=&mut r.saved_signing;
+            let Some(owner)=result.as_ref().ok().and_then(|status|status.active.as_ref()) else { self.fail();return; };
+            let Some(session)=s.session.as_mut() else { self.fail();return; };
+            if s.requests!=[1,1,0] || s.replies!=[1,0,0] || !session.prepare_requested || session.prepare_returned
+                || owner.session_id!=session.projection.session_id || owner.owner_generation!=session.projection.owner_generation
+                || owner.phase!=super::edit::Phase::Preparing || owner.prepared.is_some() || owner.apply_submitted
+                || owner.checkout.as_ref().map(|c|&c.revision)!=session.projection.checkout.as_ref().map(|c|&c.revision) { self.fail();return; }
+            session.prepare_returned=true;s.replies[1]=1;
+        }
+        if let Ok(status)=result { self.saved_edit_status(status,edits); }
+    }
+    pub(super) fn saved_apply_request(&self,session_id: &str,plan_token: &str) {
+        let Ok(q)=self.original() else { self.fail();return; };
+        let Some(shell)=q.record_at(super::Boundary::Request) else { return; };
+        let Some(mut r)=self.record() else { return; };let s=&mut r.saved_signing;
+        if !matches!(shell.step,ShellStep::Commands(Step::Saved(SavedStep::Apply | SavedStep::Settled)))
+            || s.requests!=[1,1,0] || s.replies!=[1,1,0] || !s.acknowledged
+            || !s.session.as_ref().is_some_and(|session|session.review_visible && session.prepare_returned && session.live_review()
+                && session.projection.session_id==session_id && session.projection.prepared.as_ref().is_some_and(|p|p.plan_token==plan_token)) {
+            self.fail();return;
+        }
+        s.requests[2]=1;
+    }
+    pub(super) fn saved_apply_result(&self,result: &Result<super::ConfigEditStatus,BridgeError>,edits: &super::EditOwner) {
+        {
+            let Some(mut r)=self.record() else { return; };let s=&mut r.saved_signing;
+            let Some(owner)=result.as_ref().ok().and_then(|status|status.active.as_ref()) else { self.fail();return; };
+            if s.requests!=[1;3] || s.replies!=[1,1,0] || owner.phase!=super::edit::Phase::Applying || !owner.apply_submitted
+                || !s.session.as_ref().is_some_and(|session|session.projection.session_id==owner.session_id
+                    && session.projection.owner_generation==owner.owner_generation
+                    && session.projection.prepared.as_ref().map(|p|&p.plan_token)==owner.prepared.as_ref().map(|p|&p.plan_token)) {
+                self.fail();return;
+            }
+            s.replies[2]=1;
+        }
+        if let Ok(status)=result { self.saved_edit_status(status,edits); }
+    }
+    pub(super) fn saved_edit_status(&self,status: &super::ConfigEditStatus,edits: &super::EditOwner) {
+        use super::edit;
+        let Ok(q)=self.original() else { self.fail();return; };
+        let Some(shell)=q.record_at(super::Boundary::Result) else { return; };
+        let Some(mut r)=self.record() else { return; };
+        if status.schema_version!=1 || !edit::token(&status.window_generation)
+            || r.saved_signing.generation.as_ref().is_some_and(|g|g!=&status.window_generation) { self.fail();return; }
+        if r.saved_signing.generation.is_none() { r.saved_signing.generation=Some(status.window_generation.clone()); }
+        if r.saved_signing.revision.is_some_and(|old|status.status_revision<old) { return; }
+        if status.capability.available && status.capability.reason==edit::EditAvailability::Available { r.saved_signing.capability=true; }
+        else if !(shell.close_prevented && !status.capability.available && status.capability.reason==edit::EditAvailability::Shutdown)
+            && !(status.capability.reason==edit::EditAvailability::RuntimeUnqualified && !r.saved_signing.capability) { self.fail();return; }
+        if status.active.is_some() && r.saved_signing.session.is_none() && r.saved_signing.requests[0]==1 && r.saved_signing.replies[0]==0 { return; }
+        for projection in status.last_terminal.iter().chain(status.active.iter()) {
+            let Some(session)=r.saved_signing.session.as_ref() else { self.fail();return; };
+            let old=&session.projection;
+            if projection.domain!=edit::EditDomain::Configuration || projection.workflow.is_some() || projection.metadata_text.is_some()
+                || projection.release_version.is_some() || projection.metadata_images.is_some()
+                || projection.project_id!=old.project_id || !shell.project.as_ref().is_some_and(|p|p.id==projection.project_id)
+                || projection.session_id!=old.session_id || projection.owner_generation!=status.window_generation
+                || !edit::token(&projection.session_id) || projection.late_settled || projection.phase==edit::Phase::Unknown
+                || super::phase_order(projection.phase)<super::phase_order(old.phase) || projection.native_finality==edit::NativeFinality::Unknown
+                || projection.native_reason!=edit::NativeEditReason::None
+                || projection.apply_submitted!=(r.saved_signing.requests[2]==1 && super::phase_order(projection.phase)>=super::phase_order(edit::Phase::Applying)) {
+                self.fail();return;
+            }
+            if let Some(checkout)=&projection.checkout {
+                if !edit::token(&checkout.revision) || crate::protocol::strict_json(ANDROID_CONFIG).ok().as_ref()!=Some(&checkout.base)
+                    || old.checkout.as_ref().is_some_and(|before|before.revision!=checkout.revision || before.base!=checkout.base) { self.fail();return; }
+            } else if old.checkout.is_some() { self.fail();return; }
+            if let Some(prepared)=&projection.prepared {
+                let Some(fixture)=r.android_fixture.as_ref() else {
+                    // After build settlement the original fixture is closed;
+                    // the original previously checked Prepared value stays exact.
+                    if serde_json::to_value(&session.projection).ok()!=serde_json::to_value(projection).ok() { self.fail(); }
+                    continue;
+                };
+                let Some(review)=saved_review(&prepared.view,fixture) else { self.fail();return; };
+                let Ok(value)=serde_json::to_value(prepared) else { self.fail();return; };
+                if !session.prepare_requested || !edit::token(&prepared.plan_token)
+                    || !projection.checkout.as_ref().is_some_and(|checkout|checkout.revision==prepared.revision)
+                    || r.saved_signing.revision_pair!=Some((prepared.draft_revision,prepared.baseline_generation))
+                    || session.prepared.as_ref().is_some_and(|before|before!=&value) { self.fail();return; }
+                let Some(session)=r.saved_signing.session.as_mut() else { self.fail();return; };
+                session.prepared=Some(value);session.review=Some(review);
+            } else if session.prepared.is_some() { self.fail();return; }
+            if let Some(core)=&projection.core_outcome {
+                if core.effect!=edit::Effect::Committed || core.journal!=edit::Journal::Clean || core.resources!=edit::ResourceState::Settled
+                    || core.reason!=edit::CoreReason::None || super::phase_order(projection.phase)<super::phase_order(edit::Phase::Finalizing) { self.fail();return; }
+            }
+            let Some(session)=r.saved_signing.session.as_mut() else { self.fail();return; };
+            if projection.phase==edit::Phase::Final {
+                if projection.native_finality!=edit::NativeFinality::Settled || projection.core_outcome.is_none()
+                    || projection.prepared.is_none() { self.fail();return; }
+                if session.finality.is_none() {
+                    let Some(facts)=edits.installed_observation_final(&projection.session_id) else { self.fail();return; };
+                    if !super::original_final(&facts,projection,false) { self.fail();return; }
+                    session.finality=Some(facts);
+                }
+            } else if projection.native_finality!=edit::NativeFinality::Pending { self.fail();return; }
+            session.projection=projection.clone();
+        }
+        r.saved_signing.revision=Some(status.status_revision);
+    }
+    fn saved_snapshot(&self,project_id: &str,result: &Result<Value,BridgeError>) {
+        let Ok(q)=self.original() else { self.fail();return; };
+        let Some(mut shell)=q.record_at(super::Boundary::Result) else { return; };
+        let Some(mut r)=self.record() else { return; };let readback=r.saved_signing.applied;
+        let valid=result.as_ref().is_ok_and(|v|shell.project.as_ref().is_some_and(|p|p.id==project_id && v["root"].as_str()==Some(p.path.as_str()))
+            && v["observationScope"]=="single-request-non-atomic" && v["config"]["path"]=="release/mobile-release.json"
+            && v["config"]["state"]=="format-valid" && v["config"]["issues"].as_array().is_some_and(Vec::is_empty)
+            && r.saved.as_ref()==v["config"].get("data") && r.content.as_ref()==v["config"].get("content")
+            && v["discovery"]["state"]=="unverified" && v["discovery"]["partial"]==false
+            && v["issues"].as_array().is_some_and(Vec::is_empty) && super::assurance(v,"static-text"));
+        if !valid || if readback {
+            shell.snapshot_requests!=2 || !shell.snapshot || r.saved_signing.readback
+                || !matches!(shell.step,ShellStep::Commands(Step::Saved(SavedStep::Refresh | SavedStep::Readback)))
+        } else { shell.snapshot_requests!=1 || shell.snapshot || !matches!(shell.step,ShellStep::Selected | ShellStep::ReadSnapshot) } {
+            self.fail();return;
+        }
+        if readback {
+            if shell.session.draft.is_some() || shell.session.requests.iter().any(|n|*n!=0) { self.fail();return; }
+            shell.session.draft=r.saved.clone();r.saved_signing.readback=true;
+        } else { shell.snapshot=true; }
+    }
+    pub(super) fn saved_file_target(&self,file: &str) -> Option<PathBuf> {
+        let r=self.record()?;let fixture=r.android_fixture.as_ref()?;
+        if !self.case.saved_signing() || !r.saved_signing.readback || !["input.jks","firebase.json"].contains(&file) { return None; }
+        Some(fixture.root.join("sources").join(file))
+    }
+    pub(super) fn saved_file_bytes(&self,file: &str) -> Option<u64> {
+        let r=self.record()?;let fixture=r.android_fixture.as_ref()?;
+        let name=match file { "input.jks"=>"sources/input.jks","firebase.json"=>"sources/firebase.json",_=>return None };
+        fixture.original_bytes(name).ok().and_then(|bytes|u64::try_from(bytes.len()).ok())
+    }
+    pub(super) fn saved_private_fields(&self) -> Option<Value> {
+        let r=self.record()?;if !self.case.saved_signing() || !r.saved_signing.readback { return None; }
+        r.android_fixture.as_ref()?.saved_inputs().ok()
+    }
+    pub(super) fn saved_session_ready(&self,snapshot: &crate::asset_session::InstalledSessionSnapshot) -> bool {
+        let Some(mut r)=self.record() else { return false; };
+        if !self.case.saved_signing() || !r.saved_signing.readback || !r.saved_signing.applied || !r.saved_signing.configured
+            || r.saved_signing.config_before_assignments || r.saved_signing.assignments.is_some()
+            || !r.saved_signing.session.as_ref().is_some_and(|s|s.finality.is_some())
+            || !snapshot.settled || !snapshot.bound || snapshot.unknown || snapshot.lost || snapshot.quit_pending
+            || snapshot.status["mode"]!="session" || snapshot.status["operation"]["phase"]!="idle"
+            || snapshot.status["context"]["platform"]!="android" || snapshot.status["context"]["purpose"]!="full"
+            || snapshot.status["context"]["stage"]!="candidate"
+            || !r.android_fixture.as_ref().is_some_and(|fixture|fixture.verify(false).is_ok()) { self.fail();return false; }
+        let ctx=&snapshot.status["context"];let Some(assignments)=snapshot.status["assignments"].as_array() else { self.fail();return false; };
+        let mut rows=Vec::new();
+        for kind in ["android-keystore","android-firebase"] {
+            let matches: Vec<_>=assignments.iter().filter(|a|a["kind"]==kind).collect();
+            if matches.len()!=1 { self.fail();return false; }let a=matches[0];
+            if a["availability"]!="available" || a["contextRevision"]!=ctx["revision"]
+                || !snapshot.payloads.iter().any(|(id,revision,_)|a["recordId"].as_str()==Some(id.as_str())
+                    && a["recordRevision"].as_u64()==Some(u64::from(*revision))) { self.fail();return false; }
+            rows.push(json!({"kind":kind,"recordId":a["recordId"],"recordRevision":a["recordRevision"],"contextRevision":ctx["revision"]}));
+        }
+        if assignments.len()!=2 || snapshot.payloads.len()!=2 { self.fail();return false; }
+        let policy=json!({"source":"assigned-session","contextRevision":ctx["revision"],"assignments":rows});
+        if !serde_json::from_value::<crate::android_build_protocol::SigningPolicy>(policy.clone()).is_ok_and(|p|p.valid()) { self.fail();return false; }
+        r.saved_signing.config_before_assignments=true;r.saved_signing.assignments=Some(policy);true
+    }
+}
+
+
+impl Control {
+    pub(super) fn saved_refresh_allowed(&self) -> bool {
+        self.case.saved_signing() && self.record().is_some_and(|r|r.saved_signing.applied && !r.saved_signing.readback
+            && r.saved_signing.session.as_ref().is_some_and(|s|s.finality.is_some()))
+    }
+    fn saved_tick(&self,app: &tauri::AppHandle,step: SavedStep) -> bool {
+        let state=app.state::<super::super::ShellState>();
+        match state.bridge.edits.status() { Ok(status)=>self.saved_edit_status(&status,&state.bridge.edits),Err(_)=>{self.fail();return false;} }
+        let Some(mut r)=self.record() else { return false; };
+        match step {
+            SavedStep::Settings=>r.saved_signing.capability,
+            SavedStep::Review | SavedStep::Confirmation | SavedStep::ReadConfirmation | SavedStep::Acknowledge
+                | SavedStep::ReadAcknowledged | SavedStep::Apply=>{
+                r.saved_signing.replies[1]==1 && r.saved_signing.session.as_ref().is_some_and(|s|s.live_review() && s.review.is_some())
+            },
+            SavedStep::Settled=>{
+                if r.saved_signing.replies[2]!=1 || !r.saved_signing.session.as_ref().is_some_and(|s|s.finality.is_some()) { return false; }
+                if !r.saved_signing.applied {
+                    let Some(fixture)=r.android_fixture.as_mut() else { self.fail();return false; };
+                    if fixture.saved_replace_observed().is_err() { self.fail();return false; }
+                    let Ok(desired)=fixture.desired_saved_config() else { self.fail();return false; };
+                    let Some(row)=fixture.saved_config.as_ref() else { self.fail();return false; };
+                    let content=json!({"bytes":row.raw.len(),"sha256":format!("{:x}",Sha256::digest(&row.raw))});
+                    let Ok(actual)=fixture.certificate() else { self.fail();return false; };
+                    r.saved_signing.saved_certificate=desired["android"]["uploadCertificateSha256"].as_str().map(str::to_owned);
+                    r.saved_signing.actual_certificate=Some(actual);r.saved=Some(desired);r.content=Some(content);r.saved_signing.applied=true;
+                }
+                true
+            },
+            SavedStep::Readback=>r.saved_signing.readback,
+            SavedStep::Sign=>r.saved_signing.assignments.is_some(),
+            _=>true,
+        }
+    }
+    pub(super) fn script(&self,step: Step) -> Option<String> {
+        let Step::Saved(step)=step else { return script(step,self.case); };
+        if !self.case.saved_signing() { return None; }
+        let r=self.record()?;let fixture=r.android_fixture.as_ref()?;
+        let body=match step {
+            SavedStep::Settings=>"return navigate('Project settings');".to_owned(),
+            SavedStep::Android=>"return click('Android',document.querySelector('[aria-label=\"Settings section\"]'));".into(),
+            SavedStep::Fingerprint=>{
+                let expected=serde_json::to_string(&fixture.desired_saved_config().ok()?["android"]["uploadCertificateSha256"]).ok()?;
+                format!(r#"const input=field('Android upload certificate');if(!(input instanceof HTMLInputElement)||input.type!=='text'||input.value!==''||input.readOnly)throw 0;
+                    if(input.disabled)return {{state:'wait'}};show(input);input.focus();input.select();
+                    if(!document.execCommand('insertText',false,{expected}))throw 0;return {{state:'ready'}};"#)
+            },
+            SavedStep::Services=>"return click('Services',document.querySelector('[aria-label=\"Settings section\"]'));".into(),
+            SavedStep::Firebase=>r#"const s=field('Android Firebase configuration');if(!(s instanceof HTMLSelectElement)||s.value!=='disabled')throw 0;
+                if(s.disabled)return {state:'wait'};const found=[...s.options].flatMap((o,i)=>o.value==='required'?[i]:[]);
+                if(found.length!==1||s.options[found[0]].disabled)throw 0;show(s);s.focus();s.selectedIndex=found[0];
+                s.dispatchEvent(new Event('change',{bubbles:true}));return {state:'ready'};"#.into(),
+            SavedStep::Prepare=>"return click('Prepare save review',document.querySelector('.draft-toolbar'));".into(),
+            SavedStep::Review=>r#"const p=panel(),review=p.querySelector('.save-review');if(!review)return {state:'wait'};show(review);
+                if(text(review.querySelector('.review-basis strong'))!=='Only this reviewed native inventory can be applied')throw 0;
+                return {state:'ready',files:inventory(review)};"#.into(),
+            SavedStep::Confirmation=>"return click('Apply reviewed save',panel().querySelector('.save-actions'));".into(),
+            SavedStep::ReadConfirmation | SavedStep::ReadAcknowledged=>r#"const d=confirmation();if(!d)return {state:'wait'};
+                const checks=d.querySelectorAll('input[type="checkbox"]'),apply=button('Apply reviewed save',d);
+                if(checks.length!==1||!apply||checks[0].disabled)throw 0;show(d);
+                return {state:'ready',files:inventory(d),checked:checks[0].checked,applyAvailable:!apply.disabled};"#.into(),
+            SavedStep::Acknowledge=>r#"const d=confirmation();if(!d)throw 0;const c=d.querySelector('input[type="checkbox"]');
+                if(!c||c.disabled||c.checked)throw 0;show(c);c.click();return {state:'ready'};"#.into(),
+            SavedStep::Apply=>"return click('Apply reviewed save',confirmation());".into(),
+            SavedStep::Settled=>r#"const p=panel(),facts=p.querySelector('.save-outcome-facts');if(!facts)return {state:'wait'};
+                if(document.querySelector('dialog[open]'))throw 0;show(facts);
+                return {state:'ready',facts:[...facts.querySelectorAll(':scope > div')].map(row=>[text(row.querySelector('dt')),text(row.querySelector('dd'))])};"#.into(),
+            SavedStep::Releases=>"return navigate('Releases');".into(),
+            SavedStep::Refresh=>"return click('Refresh saved configuration',android());".into(),
+            SavedStep::Readback=>r#"const p=android();show(p);return {state:'ready'};"#.into(),
+            SavedStep::Sign=>r#"const p=android(),labels=[...p.querySelectorAll(':scope > label')].filter(l=>text(l.querySelector('span'))==='Build and sign with assigned upload key');
+                if(labels.length!==1)throw 0;const c=labels[0].querySelector('input[type="checkbox"]');if(!c||c.checked)throw 0;
+                if(c.disabled)return {state:'wait'};show(c);c.click();return {state:'ready'};"#.into(),
+        };
+        Some(format!(r#"(()=>{{try{{
+            const text=n=>n?.textContent?.trim()??'';
+            const show=n=>{{if(!n)throw 0;n.scrollIntoView({{block:'center'}});const r=n.getBoundingClientRect();
+                if(!n.isConnected||r.width<=0||r.height<=0||getComputedStyle(n).visibility!=='visible')throw 0;}};
+            const button=(label,root=document)=>{{const found=[...(root?.querySelectorAll('button')??[])].filter(b=>text(b)===label);if(found.length>1)throw 0;return found[0];}};
+            const click=(label,root=document)=>{{const b=button(label,root);if(!b||b.disabled)return {{state:'wait'}};show(b);b.click();return {{state:'ready'}};}};
+            const navigate=label=>{{const b=document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="'+label+'"]');if(!b||b.disabled)throw 0;show(b);b.click();return {{state:'ready'}};}};
+            const field=label=>{{const labels=[...document.querySelectorAll('.form-field .field-label-row > label')].filter(l=>text(l)===label);
+                if(labels.length!==1||!labels[0].htmlFor)throw 0;return document.getElementById(labels[0].htmlFor);}};
+            const panel=()=>{{const rows=document.querySelectorAll('.native-save-panel');if(rows.length!==1)throw 0;return rows[0];}};
+            const android=()=>{{const rows=[...document.querySelectorAll('section.card.offline-preflight')].filter(p=>text(p.querySelector('h2'))==='Build Android app');
+                if(rows.length!==1)throw 0;return rows[0];}};
+            const confirmation=()=>{{const rows=document.querySelectorAll('dialog.save-confirm-dialog[open]');if(rows.length===0)return null;
+                if(rows.length!==1||text(rows[0].querySelector('h2'))!=='Apply this configuration save?')throw 0;return rows[0];}};
+            const inventory=root=>{{const rows=[...root.querySelectorAll('.save-files tbody > tr')];if(rows.length!==2)throw 0;
+                const amount=t=>{{if(!/^[0-9,]+ bytes$/.test(t))throw 0;const n=Number(t.slice(0,-6).replaceAll(',',''));if(!Number.isSafeInteger(n)||n>2048)throw 0;return n;}};
+                return rows.map(row=>{{const cells=row.querySelectorAll('td');if(cells.length!==3)throw 0;const action={{'Replace document':'replace','Preserve original':'preserve'}}[text(cells[0])];
+                    if(!action)throw 0;return {{path:text(row.querySelector('th code')),action,beforeBytes:amount(text(cells[1])),afterBytes:amount(text(cells[2]))}};}});}};
+            {body}
+        }}catch{{return {{state:'error'}};}}}})()"#))
+    }
+    fn saved_dom(&self,step: SavedStep,value: &Value) {
+        let Ok(q)=self.original() else { self.fail();return; };
+        let Some(mut shell)=q.record_at(super::Boundary::Dom) else { return; };
+        if shell.step!=ShellStep::Commands(Step::Saved(step))
+            || shell.pending.take()!=Some(super::Pending::Dom(ShellStep::Commands(Step::Saved(step)))) { self.fail();return; }
+        let Some(object)=value.as_object() else { self.fail();return; };
+        if value["state"]=="wait" && object.len()==1 { return; }
+        let Some(mut r)=self.record() else { return; };let s=&mut r.saved_signing;
+        let files=||s.session.as_ref().and_then(|session|session.review.as_ref())==value.get("files");
+        let valid=value["state"]=="ready" && match step {
+            SavedStep::Review=>object.len()==2 && files() && s.replies[1]==1,
+            SavedStep::ReadConfirmation=>object.len()==4 && files() && value["checked"]==false && value["applyAvailable"]==false,
+            SavedStep::ReadAcknowledged=>object.len()==4 && files() && value["checked"]==true && value["applyAvailable"]==true,
+            SavedStep::Settled=>object.len()==2 && s.applied && value["facts"]==json!([
+                ["Transaction effect","committed"],["Journal","clean"],["Core resources","settled"],["Native finality","settled"]]),
+            SavedStep::Readback=>object.len()==1 && s.readback,
+            _=>object.len()==1,
+        };
+        if !valid { self.fail();return; }
+        let next=match step {
+            SavedStep::Settings=>SavedStep::Android,SavedStep::Android=>SavedStep::Fingerprint,
+            SavedStep::Fingerprint=>SavedStep::Services,SavedStep::Services=>SavedStep::Firebase,SavedStep::Firebase=>SavedStep::Prepare,
+            SavedStep::Prepare=>SavedStep::Review,SavedStep::Review=>{
+                let Some(session)=s.session.as_mut() else { self.fail();return; };session.review_visible=true;SavedStep::Confirmation
+            },
+            SavedStep::Confirmation=>SavedStep::ReadConfirmation,SavedStep::ReadConfirmation=>SavedStep::Acknowledge,
+            SavedStep::Acknowledge=>SavedStep::ReadAcknowledged,SavedStep::ReadAcknowledged=>{s.acknowledged=true;SavedStep::Apply},
+            SavedStep::Apply=>SavedStep::Settled,SavedStep::Settled=>SavedStep::Releases,SavedStep::Releases=>SavedStep::Refresh,
+            SavedStep::Refresh=>SavedStep::Readback,
+            SavedStep::Readback=>{s.configured=true;shell.step=ShellStep::Session(super::SessionStep::Navigate);return;},
+            SavedStep::Sign=>{shell.step=ShellStep::Commands(Step::ReadVersion);return;},
+        };
+        shell.step=ShellStep::Commands(Step::Saved(next));
+    }
+    fn saved_terminal_valid(&self,r: &Record,snapshot: &AndroidSnapshot) -> bool {
+        use crate::android_build_protocol as android;
+        let p=&snapshot.terminal;let life=&snapshot.lifetime;let s=&r.saved_signing;let activity=&p["activity"];let signing=&activity["signing"];
+        let mismatch=self.case==Case::AndroidSavedWrongFingerprint;let cancel=self.case==Case::AndroidSavedCancel;
+        let zero=json!({"outcome":"exited","exitCode":0});let unused=json!({"outcome":"not-dispatched","exitCode":null});
+        if !snapshot.facts.final_for(self.case) || !snapshot.tools_ledger_settled || !snapshot.native_integrity || !life.settled()
+            || !self.original_matches(r,&snapshot.facts,p) || p["phase"]!="terminal" || p["intentUsable"]!=false
+            || life.commands!=(if mismatch {1} else if cancel {3} else {6}) || life.profile_calls!=0 || life.command_dispatched!=Some(true)
+            || life.stop_observed!=(if cancel {android::CoreStop::Cancelled} else {android::CoreStop::None})
+            || r.content.as_ref()!=p["context"].get("savedConfig") || p["context"]["savedVersion"]!=AndroidFixture::version()
+            || s.assignments.as_ref()!=p["context"].get("signing") || p["context"]["artifactValidation"]!=json!({
+                "mode":"upload-signature","uploadCertificateSha256":s.saved_certificate})
+            || activity["selection"]!=json!({"module":":app","variant":"release","applicationId":"org.example.saved","task":":app:bundleRelease"})
+            || signing["validationCommand"]!=zero || p["stage"]!=activity["stage"]
+            || p["disposition"]!=json!({"work":"removed","artifacts":if mismatch||cancel {"retained-incomplete"} else {"retained-local-result"}})
+            || s.dispatch_observed==mismatch || s.dispatch_id.is_some()!=s.dispatch_observed || s.dispatch_generation.is_some()!=s.dispatch_observed
+            || s.dispatch_observed && (s.dispatch_id!=r.id || s.dispatch_generation!=r.generation)
+            || (s.actual_certificate!=s.saved_certificate)!=mismatch { return false; }
+        if mismatch {
+            return p["outcome"]=="failed" && p["reason"]=="signing-invalid" && p["result"].is_null()
+                && activity["stage"]=="validating-signing" && activity["command"]==unused
+                && signing["validationPassed"]==false && signing["materialization"]=="not-started" && signing["signingCommand"]==unused
+                && activity["findings"].as_array().is_some_and(|rows|!rows.is_empty() && rows.iter().all(|row|row["check"]=="other-core-finding")
+                    && rows.iter().any(|row|row["status"]=="INVALID"));
+        }
+        if signing["validationPassed"]!=true || signing["materialization"]!="restored" || activity["command"]!=zero { return false; }
+        if cancel {
+            return p["outcome"]=="cancelled" && p["reason"]=="cancelled" && activity["stage"]=="signing" && p["result"].is_null()
+                && signing["signingCommand"]==json!({"outcome":"unknown","exitCode":null})
+                && activity["findings"].as_array().is_some_and(Vec::is_empty);
+        }
+        let result=&p["result"];
+        p["outcome"]=="complete" && p["reason"]=="none" && activity["stage"]=="disposing-work" && signing["signingCommand"]==zero
+            && r.content.as_ref()==result.get("usedConfig") && result["usedVersion"]==AndroidFixture::version()
+            && result["artifactValidation"]==p["context"]["artifactValidation"]
+            && ["selection","command","signing","findings","summary"].iter().all(|name|result[*name]==activity[*name])
+            && result["assurances"]==json!({"structure":"passed","nativeManifest":"passed","applicationVersion":"native-checked","signature":"passed",
+                "signer":"matches-saved-upload-certificate","toolkitSigning":"verified","storeOperation":"not-requested",
+                "sourceBinding":"not-established","releaseReadiness":"not-assessed"})
+            && result["artifacts"].as_array().is_some_and(|rows|rows.len()==1 && rows[0]["architectures"]==json!([]) && rows[0]["unknownAbi"]==false)
+    }
+    fn saved_report(&self) -> Option<Vec<u8>> {
+        if !self.android_complete() { return None; }
+        let q=self.original().ok()?;let mut session=q.saved_signing_session_report()?;
+        let r=self.record()?;let original=r.android_final_snapshot.as_ref()?;let s=&r.saved_signing;
+        // This binding was captured from the actual assigned-session original
+        // before Android Prepare, never reconstructed from its terminal.
+        session["configBeforeAssignments"]=json!(s.config_before_assignments);
+        session["binding"]=s.assignments.clone()?;
+        serde_json::to_vec(&json!({"schema":"installed-android-saved-signing-v1","case":self.case.name(),"qualificationOnly":true,"builder":"normal",
+            "normalSelection":{"selectedBeforeObservation":r.android_selected_before_observation,"observerGranted":false},
+            "projectPicker":true,"savedObservation":true,"savedVersionObservation":r.android_version_observed,
+            "requests":{"androidPrepare":r.android_requests[0],"androidStart":r.android_requests[1],"androidCancel":r.android_requests[2]},
+            "ui":{"start":r.start,"consent":r.consent,"terminal":r.terminal_visible,"cancel":r.cancel},"busyObserved":r.android_busy_observed,
+            "original":original.facts,"toolsLedgerSettled":original.tools_ledger_settled,"nativeIntegrity":original.native_integrity,
+            "coreLifetime":original.lifetime,"terminal":original.terminal,"fixture":r.fixture_report,
+            "savedConfig":r.content,"savedVersion":AndroidFixture::version(),
+            "selection":{"module":":app","variant":"release","applicationId":"org.example.saved","task":":app:bundleRelease"},
+            "dispatch":{"observed":s.dispatch_observed,"operationId":s.dispatch_id,"ownerGeneration":s.dispatch_generation,
+                "stage":if s.dispatch_observed {Some("signing")} else {None},"cancelAfter":self.case==Case::AndroidSavedCancel},
+            "configSave":{"requests":s.requests,"replies":s.replies,"previewObserved":s.session.as_ref()?.review_visible,
+                "acknowledged":s.acknowledged,"applied":s.applied,"readback":s.readback,"originalFinal":s.session.as_ref()?.finality.is_some()},
+            "session":session,
+            "limits":{"normalActivation":false,"work3000Expiry":false,"privateJvmProfile":false,"noAutoInstall":false,
+                "allHelperNativeGates":false,"networkIsolated":false}
+        })).ok().filter(|raw|raw.len()<64*1024)
+    }
+}
+
+
+fn saved_cancel_status_ready(r: &Record) -> bool {
+    r.android_replies[1]==1 && r.saved_signing.dispatch_observed
+}
+
+// Pure request-latch predicate. It never turns polling into a Progress witness:
+// the only caller of the mutating latch is the original frame owner below.
+fn saved_dispatch_request_matches(case: Case,registered: bool,r: &Record,operation: &str,generation: &str) -> bool {
+    registered && matches!(case,Case::AndroidSavedSigning | Case::AndroidSavedCancel) && r.issued
+        && r.android_requests==[1,1,0] && r.android_replies[0]==1 && r.android_replies[1]<=1 && r.android_replies[2]==0
+        && r.consent && r.saved_signing.readback && r.saved_signing.configured
+        && r.saved_signing.config_before_assignments && r.saved_signing.assignments.is_some()
+        && r.id.as_deref()==Some(operation) && r.generation.as_deref()==Some(generation)
+        && !r.saved_signing.dispatch_observed && r.saved_signing.dispatch_id.is_none() && r.saved_signing.dispatch_generation.is_none()
+}
+// Called exclusively after accept_at validated the genuine original signing
+// Progress frame and released both Registry and observation-slot locks.
+impl Control {
+    pub(crate) fn saved_signing_dispatched(&self,operation: &str,generation: &str) {
+        if !self.case.saved_signing() { return; }
+        let registered=self.android_registration_valid() && self.claimed.load(Ordering::SeqCst)==Domain::Android.bit()
+            && self.android_document.get().and_then(Weak::upgrade).is_some();
+        let Some(mut r)=self.record() else { return; };
+        if !saved_dispatch_request_matches(self.case,registered,&r,operation,generation) { self.fail();return; }
+        // Do not depend on Start IPC reply scheduling: real progress may race
+        // before it. Work/Cancel still requires that same ordinary Start reply.
+        r.saved_signing.dispatch_observed=true;r.saved_signing.dispatch_id=Some(operation.into());
+        r.saved_signing.dispatch_generation=Some(generation.into());
+    }
+}
+fn assert_saved_signing_contracts() {
+    // Inert DATA, never a live registration, dispatch, original owner or receipt.
+    let mut r=Record { issued:true,id:Some("a".repeat(32)),generation:Some("b".repeat(32)),consent:true,
+        android_requests:[1,1,0],android_replies:[1,0,0],
+        saved_signing:SavedSigningRecord { readback:true,configured:true,config_before_assignments:true,assignments:Some(json!({"inert":true})),
+            ..SavedSigningRecord::default() },..Record::default() };
+    let id="a".repeat(32);let generation="b".repeat(32);
+    let accepted=|r: &Record|saved_dispatch_request_matches(Case::AndroidSavedCancel,true,r,&id,&generation);
+    assert!(accepted(&r)); // Genuine Progress may beat the Start IPC reply/DOM.
+    r.android_replies[1]=1;assert!(accepted(&r));
+    r.android_replies[1]=2;assert!(!accepted(&r));r.android_replies[1]=0;
+    assert!(!saved_dispatch_request_matches(Case::AndroidSavedCancel,false,&r,&id,&generation));
+    for case in Case::ALL.into_iter().chain([Case::AndroidSavedWrongFingerprint]) {
+        assert!(!saved_dispatch_request_matches(case,true,&r,&id,&generation));
+    }
+    for (operation,owner) in [("foreign",generation.as_str()),(id.as_str(),"foreign")] {
+        assert!(!saved_dispatch_request_matches(Case::AndroidSavedCancel,true,&r,operation,owner));
+    }
+    r.android_requests[1]=0;assert!(!accepted(&r));r.android_requests[1]=1;
+    r.android_requests[2]=1;assert!(!accepted(&r));r.android_requests[2]=0;
+    r.consent=false;assert!(!accepted(&r));r.consent=true;
+    r.saved_signing.readback=false;assert!(!accepted(&r));r.saved_signing.readback=true;
+    r.saved_signing.configured=false;assert!(!accepted(&r));r.saved_signing.configured=true;
+    r.saved_signing.config_before_assignments=false;assert!(!accepted(&r));r.saved_signing.config_before_assignments=true;
+    r.saved_signing.assignments=None;assert!(!accepted(&r));r.saved_signing.assignments=Some(json!({"inert":true}));
+    r.saved_signing.dispatch_observed=true;assert!(!accepted(&r));r.saved_signing.dispatch_observed=false;
+    r.saved_signing.dispatch_id=Some(id.clone());assert!(!accepted(&r));r.saved_signing.dispatch_id=None;
+    r.saved_signing.dispatch_generation=Some(generation.clone());assert!(!accepted(&r));
+    r.saved_signing.dispatch_generation=None;
+    assert!(!saved_cancel_status_ready(&r));
+    r.saved_signing.dispatch_observed=true;
+    assert!(!saved_cancel_status_ready(&r)); // Start reply is still required before Cancel's Status read.
+    r.android_replies[1]=1;assert!(saved_cancel_status_ready(&r));
+    r.saved_signing.dispatch_observed=false;assert!(!saved_cancel_status_ready(&r));
+    for case in Case::SAVED {
+        assert!(!Case::ALL.contains(&case));assert_eq!(case.domain(),Domain::Android);
+        assert_eq!(android_fixture_namespace(case),&SAVED_ANDROID_NAMESPACE);
+        let files=android_files(case,Path::new("/opt/mobile-release-kit/android/inert")).unwrap();
+        assert_eq!(files.len()+1+SAVED_ANDROID_INPUTS.len()+ANDROID_DIRECTORIES.len()+1,30);
+        assert!(files.iter().all(|(_,bytes)|bytes.len()<=2048));
+        assert!(files.iter().find(|(name,_)|*name=="project/app/build.gradle")
+            .is_some_and(|(_,bytes)|!String::from_utf8_lossy(bytes).contains("Thread.sleep")));
+    }
 }

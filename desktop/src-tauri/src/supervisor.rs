@@ -7,30 +7,41 @@
 //! One final observer owns the original driver/watchdog joins before retirement.
 //! After the one cleanup allowance, uncertainty is reported and ownership is
 //! retained; late positive settlement cannot restore successful admission.
-use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
+use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Weak, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
     all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use std::process::Stdio;
 use serde_json::Value;
+use zeroize::Zeroize;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
     all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
-    github_preflight_protocol as preflight_protocol, github_release_protocol as release_protocol,
+    github_device_protocol as device_protocol, github_runner_prerequisite_protocol as runner_protocol,
+    github_preflight_protocol as preflight_protocol, github_release_protocol as release_protocol, github_input_group_protocol as input_protocol,
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{AdmissionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-use crate::installed_runtime::{GitHubReadOnlyRuntimeSlots, GitHubPreflightRuntimeSlots, GitHubReleaseRuntimeSlots};
+use crate::installed_runtime::{GitHubReadOnlyRuntimeSlots, GitHubDeviceRuntimeSlots, GitHubPreflightRuntimeSlots, GitHubReleaseRuntimeSlots, GitHubInputGroupRuntimeSlots, GitHubRunnerPrerequisiteRuntimeSlots};
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 use crate::installed_runtime_windows::{InspectionFailure as PassiveAdmissionFailure, CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 
 #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
 #[path = "installed_windows_passive_tests.rs"]
 mod windows_passive_tests;
+
+#[path = "supervisor_github_runner_prerequisite.rs"]
+mod runner_io;
+#[cfg(test)]
+#[path = "supervisor_github_runner_prerequisite_tests.rs"]
+mod runner_contract_tests;
+#[path = "supervisor_github_input_group.rs"]
+mod input_group_io;
+pub(crate) use input_group_io::{ObservedRemote as GitHubInputObservedRemote,ObservedReply as GitHubInputObservedReply};
 
 pub const OPERATION_TIME: Duration = Duration::from_secs(10);
 pub const CLEANUP_TIME: Duration = Duration::from_secs(2);
@@ -50,6 +61,12 @@ pub(crate) mod github_tls_peer_owner;
     target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "github_preflight_native_observation.rs"]
 pub(crate) mod github_preflight_native_observation;
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "github_release_native_observation.rs"]
+pub(crate) mod github_release_native_observation;
 
 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitHubDocumentFixturePermit, GitHubFixtureRuntime};
@@ -129,6 +146,7 @@ struct Inner {
 struct Owner {
     key: u64, id: String, profile: Profile,
     github_receipt: Option<Arc<Mutex<GitHubReadReceipt>>>,
+    device_receipt: Option<Arc<Mutex<GitHubDeviceReceipt>>>,
     preflight_receipt: Option<Arc<Mutex<GitHubPreflightReceipt>>>,
     release_receipt: Option<Arc<Mutex<GitHubReleaseReceipt>>>,
     release_request: Option<release_protocol::Request>,
@@ -136,6 +154,8 @@ struct Owner {
     preflight_request: Option<preflight_protocol::Request>,
     preflight_gate: Option<crate::asset_session::GitHubPreflightGoGate>,
     preflight_go_claimed: AtomicBool,
+    input_receipt: Option<Arc<Mutex<GitHubInputGroupReceipt>>>, input_context: Option<input_group_io::Context>,
+    runner_receipt: Option<Arc<Mutex<GitHubRunnerReceipt>>>, runner_control: Mutex<Option<GitHubRunnerObservedControl>>,
     state: Mutex<OwnerState>, resources: AsyncMutex<Resources>,
     stop: watch::Sender<bool>, changed: Notify, permit: Mutex<Option<OwnedSemaphorePermit>>,
     driver: AsyncMutex<Option<JoinHandle<DriverEnd>>>, watchdog: AsyncMutex<Option<JoinHandle<WatchdogEnd>>>,
@@ -165,32 +185,41 @@ impl ManagementJoin {
         if error.is_cancelled() { Self::Cancelled } else if error.is_panic() { Self::Panicked } else { Self::Failed }
     }
 }
-#[derive(Debug, PartialEq)]
-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply) }
+// Device outcomes can contain private credentials: no Debug/Clone/Serialize,
+// including on the containing outcome and management result.
+enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Device(device_protocol::Outcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), InputGroup(input_protocol::Reply), Runner(runner_protocol::Reply) }
 enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
 
 #[derive(Clone, Copy)]
-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease }
+enum Profile { Passive(Method), GitHubReadOnly, GitHubDevice(device_protocol::Step), GitHubPreflight, GitHubRelease, GitHubInputGroup, GitHubRunnerPrerequisite }
 impl Profile {
     fn stdout_limit(self) -> usize {
         match self {
+            Self::Passive(Method::MetadataValidate) => crate::metadata_validation_protocol::RESPONSE_LIMIT,
             Self::Passive(Method::EnvironmentRequirements) => crate::environment::RESPONSE_LIMIT,
             Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::RESPONSE_LIMIT,
             Self::Passive(_) => protocol::RESPONSE_LIMIT, Self::GitHubReadOnly => github_protocol::RESPONSE_LIMIT,
+            Self::GitHubDevice(_) => device_protocol::RESPONSE_LIMIT,
             Self::GitHubPreflight => preflight_protocol::RESPONSE_LIMIT,
             Self::GitHubRelease => release_protocol::RESPONSE_LIMIT,
+            Self::GitHubInputGroup => input_protocol::STDOUT_LIMIT,
+            Self::GitHubRunnerPrerequisite => runner_protocol::RESPONSE_LIMIT,
         }
     }
-    fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
+    fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>, input: Option<&input_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
         match self {
+            Self::Passive(Method::MetadataValidate) => crate::metadata_validation_protocol::decode_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(Method::EnvironmentRequirements) => crate::environment::decode_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::decode_passive_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(_) => protocol::decode_response(bytes, id).map(ReadOutcome::Passive),
             Self::GitHubReadOnly => github_protocol::decode_private_response(id, bytes).map(ReadOutcome::GitHub),
+            Self::GitHubDevice(step) => device_protocol::decode_response(id, step, bytes).map(ReadOutcome::Device),
             Self::GitHubPreflight => preflight_protocol::decode_reply(id, bytes,
                 preflight.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Preflight),
             Self::GitHubRelease => release_protocol::decode_reply(id, bytes,
                 release.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Release),
+            Self::GitHubInputGroup => input_protocol::decode_reply(bytes,id,input.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::InputGroup),
+            Self::GitHubRunnerPrerequisite => runner_protocol::decode_reply(id,bytes).map(ReadOutcome::Runner),
         }
     }
 }
@@ -199,31 +228,46 @@ impl Profile {
 // Debug/Clone/Serialize. The one credential copy is the bounded writer buffer.
 enum AdmissionRequest<'a> {
     Passive { method: Method, params: &'a Value },
-    GitHub { repository: &'a str, expected_account_id: Option<&'a str>, expected_repository_id: Option<&'a str>, token: &'a str },
+    GitHub { repository: &'a str, expected_account_id: Option<&'a str>, expected_repository_id: Option<&'a str>, token: &'a str,
+        metadata: Option<&'a crate::github_environment_metadata::Selection> },
+    Device { step: device_protocol::Step, client_id: &'a str, device_code: Option<&'a str> },
     Preflight { request: preflight_protocol::Request, gate: crate::asset_session::GitHubPreflightGoGate },
     Release { request: release_protocol::Request, gate: crate::asset_session::GitHubReleaseGoGate },
+    InputGroup { request: input_protocol::Request, gate: crate::asset_session::GitHubInputGoGate },
+    Runner { repository: &'a str, account: &'a str, repository_id: &'a str, token: &'a str },
 }
 impl AdmissionRequest<'_> {
     fn profile(&self) -> Profile {
         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease }
+            Self::Device { step, .. } => Profile::GitHubDevice(*step),
+            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::InputGroup { .. } => Profile::GitHubInputGroup, Self::Runner { .. } => Profile::GitHubRunnerPrerequisite }
     }
     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
-        Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>), BridgeError> {
+        Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>, Option<input_group_io::Context>), BridgeError> {
         match self {
-            Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None)),
-            Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
-                Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None)),
-            Self::Preflight { request, gate } => Ok((preflight_protocol::encode_initial(id, &request)?, Some(request), Some(gate), None, None)),
-            Self::Release { request, gate } => Ok((release_protocol::encode_initial(id, &request)?, None, None, Some(request), Some(gate))),
+            Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None)),
+            Self::GitHub { repository, expected_account_id, expected_repository_id, token, metadata } =>
+                Ok((match metadata {
+                    None => github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?,
+                    Some(selection) => github_protocol::encode_metadata_request(id, repository, expected_account_id, expected_repository_id, token, selection)?,
+                }, None, None, None, None, None)),
+            Self::Device { step, client_id, device_code } =>
+                Ok((device_protocol::encode_request(id, step, client_id, device_code)?, None, None, None, None, None)),
+            Self::Preflight { request, gate } => Ok((preflight_protocol::encode_initial(id, &request)?, Some(request), Some(gate), None, None, None)),
+            Self::Release { request, gate } => Ok((release_protocol::encode_initial(id, &request)?, None, None, Some(request), Some(gate), None)),
+            Self::InputGroup { request, gate } => Ok((input_protocol::encode_initial(id,&request)?,None,None,None,None,Some(input_group_io::Context::new(request,gate)))),
+            Self::Runner { repository, account, repository_id, token } => Ok((runner_protocol::encode_request(id,repository,account,repository_id,token)?,None,None,None,None,None)),
         }
     }
 }
 enum CompletionTarget {
     Passive(oneshot::Sender<Result<Value, BridgeError>>),
     GitHub(Arc<Mutex<GitHubReadReceipt>>),
+    Device(Arc<Mutex<GitHubDeviceReceipt>>),
     Preflight(Arc<Mutex<GitHubPreflightReceipt>>),
     Release(Arc<Mutex<GitHubReleaseReceipt>>),
+    InputGroup(Arc<Mutex<GitHubInputGroupReceipt>>),
+    Runner(Arc<Mutex<GitHubRunnerReceipt>>),
 }
 
 /// A bounded native-only mailbox. Early unknown is not original resource
@@ -246,6 +290,41 @@ impl GitHubReadTicket {
     }
     pub(crate) fn receipt(&self) -> GitHubReadReceipt { lock(&self.receipt).clone() }
 }
+// A private consuming mailbox, not the cloneable safe read-only receipt. Only
+// original retirement may store Settled; observing a state never copies secrets.
+enum GitHubDeviceReceipt {
+    Pending, RetainedUnknown,
+    Settled { outcome: Option<Result<device_protocol::Outcome, BridgeError>>, settled_at: Instant, was_unknown: bool },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubDeviceState { Pending, RetainedUnknown, Settled { was_unknown: bool } }
+pub(crate) struct GitHubDeviceResult {
+    pub(crate) outcome: Result<device_protocol::Outcome, BridgeError>,
+    pub(crate) settled_at: Instant, pub(crate) was_unknown: bool,
+}
+pub(crate) struct GitHubDeviceTicket {
+    owner: Arc<Owner>, receipt: Arc<Mutex<GitHubDeviceReceipt>>, started_at: Instant, step: device_protocol::Step,
+}
+impl GitHubDeviceTicket {
+    pub(crate) fn started_at(&self) -> Instant { self.started_at }
+    pub(crate) fn step(&self) -> device_protocol::Step { self.step }
+    pub(crate) fn stop(&self) { self.owner.fail(BridgeError::new("cancelled", "The original GitHub device step was cancelled.")); }
+    pub(crate) fn state(&self) -> GitHubDeviceState {
+        match &*lock(&self.receipt) {
+            GitHubDeviceReceipt::Pending => GitHubDeviceState::Pending,
+            GitHubDeviceReceipt::RetainedUnknown => GitHubDeviceState::RetainedUnknown,
+            GitHubDeviceReceipt::Settled { was_unknown, .. } => GitHubDeviceState::Settled { was_unknown: *was_unknown },
+        }
+    }
+    pub(crate) fn take_settled(&self) -> Option<GitHubDeviceResult> {
+        let mut receipt = lock(&self.receipt);
+        match &mut *receipt {
+            GitHubDeviceReceipt::Settled { outcome, settled_at, was_unknown } => outcome.take().map(|outcome|
+                GitHubDeviceResult { outcome, settled_at: *settled_at, was_unknown: *was_unknown }),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub(crate) enum GitHubPreflightReceipt {
     Pending, RetainedUnknown,
@@ -259,6 +338,55 @@ impl GitHubPreflightTicket {
     pub(crate) fn stop(&self) { self.owner.fail(BridgeError::new("cancelled", "The local GitHub preflight operation was stopped; this does not cancel a remote workflow.")); }
     pub(crate) fn receipt(&self) -> GitHubPreflightReceipt { lock(&self.receipt).clone() }
     pub(crate) fn go_claimed(&self) -> bool { self.owner.preflight_go_claimed.load(Ordering::SeqCst) }
+}
+#[derive(Clone)]
+pub(crate) enum GitHubInputGroupReceipt {
+    Pending,RetainedUnknown,
+    Settled {outcome:Result<input_protocol::Reply,BridgeError>,settled_at:Instant,was_unknown:bool},
+}
+pub(crate) struct GitHubInputGroupTicket {owner:Arc<Owner>,receipt:Arc<Mutex<GitHubInputGroupReceipt>>}
+impl GitHubInputGroupTicket {
+    pub(crate) fn operation_id(&self)->&str {&self.owner.id}
+    pub(crate) fn stop(&self) {self.owner.fail(BridgeError::new("cancelled","The original input-group operation was stopped; an acknowledged GitHub update is not undone."));}
+    pub(crate) fn receipt(&self)->GitHubInputGroupReceipt {lock(&self.receipt).clone()}
+    pub(crate) fn read_claimed(&self)->bool {self.owner.input_context.as_ref().is_some_and(input_group_io::Context::read_claimed)}
+    pub(crate) fn go_claimed(&self)->bool {self.owner.input_context.as_ref().is_some_and(input_group_io::Context::go_claimed)}
+    pub(crate) fn remote(&self)->Option<GitHubInputObservedRemote> {self.owner.input_context.as_ref().and_then(input_group_io::Context::remote)}
+    pub(crate) fn observed_reply(&self)->Option<GitHubInputObservedReply> {self.owner.input_context.as_ref().and_then(input_group_io::Context::observed_reply)}
+}
+// Dedicated consuming runner mailbox. Decoded RESULT controls are observable
+// immediately, but only original retirement can install the Settled result.
+enum GitHubRunnerReceipt {
+    Pending, RetainedUnknown,
+    Settled { outcome: Option<Result<runner_protocol::Reply, BridgeError>>, settled_at: Instant, was_unknown: bool },
+}
+#[derive(Clone)]
+pub(crate) struct GitHubRunnerObservedControl { pub(crate) control: github_protocol::GitHubReadControl, pub(crate) observed_at: Instant }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubRunnerState { Pending, RetainedUnknown, Settled { was_unknown: bool } }
+pub(crate) struct GitHubRunnerResult {
+    pub(crate) outcome: Result<runner_protocol::Reply, BridgeError>, pub(crate) settled_at: Instant, pub(crate) was_unknown: bool,
+    original: Weak<Owner>, // Exact original owner identity; DATA cannot construct or swap a receipt.
+}
+impl GitHubRunnerResult {
+    pub(crate) fn belongs_to(&self, ticket: &GitHubRunnerTicket) -> bool { Weak::ptr_eq(&self.original, &Arc::downgrade(&ticket.owner)) }
+}
+pub(crate) struct GitHubRunnerTicket { owner: Arc<Owner>, receipt: Arc<Mutex<GitHubRunnerReceipt>>, admitted_at: Instant }
+impl GitHubRunnerTicket {
+    pub(crate) fn operation_id(&self) -> &str { &self.owner.id }
+    pub(crate) fn admitted_at(&self) -> Instant { self.admitted_at }
+    pub(crate) fn stop(&self) { self.owner.fail(BridgeError::new("cancelled", "The original runner-safety observation was cancelled.")); }
+    pub(crate) fn observed_control(&self) -> Option<GitHubRunnerObservedControl> { lock(&self.owner.runner_control).clone() }
+    pub(crate) fn state(&self) -> GitHubRunnerState { match &*lock(&self.receipt) {
+        GitHubRunnerReceipt::Pending => GitHubRunnerState::Pending,
+        GitHubRunnerReceipt::RetainedUnknown => GitHubRunnerState::RetainedUnknown,
+        GitHubRunnerReceipt::Settled { was_unknown, .. } => GitHubRunnerState::Settled { was_unknown: *was_unknown },
+    } }
+    pub(crate) fn take_settled(&self) -> Option<GitHubRunnerResult> { match &mut *lock(&self.receipt) {
+        GitHubRunnerReceipt::Settled { outcome, settled_at, was_unknown } => outcome.take().map(|outcome|
+            GitHubRunnerResult { outcome, settled_at: *settled_at, was_unknown: *was_unknown, original: Arc::downgrade(&self.owner) }),
+        _ => None,
+    } }
 }
 #[derive(Clone, Debug)]
 pub(crate) enum GitHubReleaseReceipt {
@@ -446,9 +574,15 @@ struct Resources {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_readonly: Option<Arc<Mutex<GitHubReadOnlyRuntimeSlots>>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_device: Option<Arc<Mutex<GitHubDeviceRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_preflight: Option<Arc<Mutex<GitHubPreflightRuntimeSlots>>>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_release: Option<Arc<Mutex<GitHubReleaseRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_input_group: Option<Arc<Mutex<GitHubInputGroupRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_runner: Option<Arc<Mutex<GitHubRunnerPrerequisiteRuntimeSlots>>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
@@ -460,7 +594,15 @@ struct Resources {
     waited: Option<ExitStatus>, write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
     kill_attempted: bool,
 }
+// Private raw buffers have no Debug/Clone surface. Erasure follows late/error
+// disposal too; transferring the one Vec does not copy its credential bytes.
+struct PrivateBytes(Vec<u8>);
+impl PrivateBytes { fn into_vec(mut self) -> Vec<u8> { std::mem::take(&mut self.0) } }
+impl Drop for PrivateBytes { fn drop(&mut self) { self.0.zeroize(); } }
+impl std::ops::Deref for PrivateBytes { type Target = Vec<u8>; fn deref(&self) -> &Vec<u8> { &self.0 } }
+impl std::ops::DerefMut for PrivateBytes { fn deref_mut(&mut self) -> &mut Vec<u8> { &mut self.0 } }
 struct ReadEnd { bytes: Vec<u8>, eof: bool, overflow: bool }
+impl Drop for ReadEnd { fn drop(&mut self) { self.bytes.zeroize(); } }
 #[derive(Clone, Copy)]
 struct WriteEnd { complete: bool }
 
@@ -511,6 +653,10 @@ impl Owner {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubReadReceipt::Pending) { *receipt = GitHubReadReceipt::RetainedUnknown; }
         }
+        if let Some(receipt) = &self.device_receipt {
+            let mut receipt = lock(receipt);
+            if matches!(&*receipt, GitHubDeviceReceipt::Pending) { *receipt = GitHubDeviceReceipt::RetainedUnknown; }
+        }
         if let Some(receipt) = &self.preflight_receipt {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubPreflightReceipt::Pending) { *receipt = GitHubPreflightReceipt::RetainedUnknown; }
@@ -518,6 +664,14 @@ impl Owner {
         if let Some(receipt) = &self.release_receipt {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubReleaseReceipt::Pending) { *receipt = GitHubReleaseReceipt::RetainedUnknown; }
+        }
+        if let Some(receipt) = &self.runner_receipt {
+            let mut receipt = lock(receipt);
+            if matches!(&*receipt, GitHubRunnerReceipt::Pending) { *receipt = GitHubRunnerReceipt::RetainedUnknown; }
+        }
+        if let Some(receipt)=&self.input_receipt {
+            let mut receipt=lock(receipt);
+            if matches!(&*receipt,GitHubInputGroupReceipt::Pending) {*receipt=GitHubInputGroupReceipt::RetainedUnknown;}
         }
         if let Some(reply) = reply {
             let error = BridgeError::cleanup_unknown();
@@ -604,6 +758,22 @@ impl Owner {
                     }
                 }
             }
+            Profile::GitHubDevice(_) => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::Device(value) => Ok(value), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(receipt) = &self.device_receipt {
+                    let mut receipt = lock(receipt);
+                    let was_unknown = was_unknown || matches!(&*receipt, GitHubDeviceReceipt::RetainedUnknown);
+                    if !matches!(&*receipt, GitHubDeviceReceipt::Settled { .. }) {
+                        *receipt = GitHubDeviceReceipt::Settled {
+                            outcome: Some(if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }),
+                            settled_at, was_unknown,
+                        };
+                    }
+                }
+            }
             Profile::GitHubRelease => {
                 drop(reply);
                 let outcome = result.and_then(|value| match value {
@@ -614,6 +784,36 @@ impl Owner {
                     let was_unknown = was_unknown || matches!(&*receipt, GitHubReleaseReceipt::RetainedUnknown);
                     if !matches!(&*receipt, GitHubReleaseReceipt::Settled { .. }) {
                         *receipt = GitHubReleaseReceipt::Settled {
+                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
+                        };
+                    }
+                }
+            }
+            Profile::GitHubRunnerPrerequisite => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::Runner(value) => Ok(value), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(receipt) = &self.runner_receipt {
+                    let mut receipt = lock(receipt);
+                    let was_unknown = was_unknown || matches!(&*receipt, GitHubRunnerReceipt::RetainedUnknown);
+                    if !matches!(&*receipt, GitHubRunnerReceipt::Settled { .. }) {
+                        *receipt = GitHubRunnerReceipt::Settled {
+                            outcome: Some(if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }), settled_at, was_unknown,
+                        };
+                    }
+                }
+            }
+            Profile::GitHubInputGroup => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::InputGroup(value) => Ok(value), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(receipt) = &self.input_receipt {
+                    let mut receipt = lock(receipt);
+                    let was_unknown = was_unknown || matches!(&*receipt, GitHubInputGroupReceipt::RetainedUnknown);
+                    if !matches!(&*receipt, GitHubInputGroupReceipt::Settled { .. }) {
+                        *receipt = GitHubInputGroupReceipt::Settled {
                             outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
                         };
                     }
@@ -680,7 +880,10 @@ impl Supervisor {
     pub fn runtime_mode(&self) -> &'static str { self.inner.runtime.mode() }
     pub(crate) fn passive_method_available(&self, name: &str) -> bool { self.inner.runtime.passive_method_available(name) }
     pub(crate) fn github_readonly_profile_available(&self) -> bool { self.inner.runtime.github_readonly_installed_profile_available() }
+    pub(crate) fn github_device_profile_available(&self) -> bool { self.inner.runtime.github_device_installed_profile_available() }
     pub(crate) fn github_preflight_profile_available(&self) -> bool { self.inner.runtime.github_preflight_profile_available() }
+    pub(crate) fn github_input_group_profile_available(&self) -> bool { self.inner.runtime.github_input_group_profile_available() }
+    pub(crate) fn github_runner_prerequisite_profile_available(&self) -> bool { self.inner.runtime.github_runner_prerequisite_profile_available() }
     pub(crate) fn github_release_profile_available(&self) -> bool { self.inner.runtime.github_release_profile_available() }
     pub(crate) fn bind_original_session_document(&self, identity: &Arc<()>) { self.inner.runtime.bind_original_session_document(identity); }
     pub(crate) fn installed_session_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_session_available(identity) }
@@ -719,12 +922,47 @@ impl Supervisor {
     /// stores this ticket. No wrapping query future, separate token owner or task.
     pub(crate) fn start_github_readonly(&self, repository: &str, expected_account_id: Option<&str>,
         expected_repository_id: Option<&str>, token: &str) -> Result<GitHubReadTicket, BridgeError> {
+        self.start_github_readonly_bounded(repository, expected_account_id, expected_repository_id, token, None, None)
+    }
+    pub(crate) fn start_github_readonly_until(&self, repository: &str, token: &str, original_end: Instant) -> Result<GitHubReadTicket, BridgeError> {
+        self.start_github_readonly_bounded(repository, None, None, token, Some(original_end), None)
+    }
+    pub(crate) fn start_github_metadata(&self, repository: &str, account: Option<&str>, repository_id: Option<&str>, token: &str,
+        selection: &crate::github_environment_metadata::Selection, original_end: Instant) -> Result<GitHubReadTicket, BridgeError> {
+        self.start_github_readonly_bounded(repository, account, repository_id, token, Some(original_end), Some(selection))
+    }
+    fn start_github_readonly_bounded(&self, repository: &str, expected_account_id: Option<&str>,
+        expected_repository_id: Option<&str>, token: &str, original_end: Option<Instant>,
+        metadata: Option<&crate::github_environment_metadata::Selection>) -> Result<GitHubReadTicket, BridgeError> {
         let receipt = Arc::new(Mutex::new(GitHubReadReceipt::Pending));
-        let owner = self.admit(AdmissionRequest::GitHub { repository, expected_account_id, expected_repository_id, token },
-            CompletionTarget::GitHub(receipt.clone()))?;
+        let owner = self.admit_until(AdmissionRequest::GitHub { repository, expected_account_id, expected_repository_id, token, metadata },
+            CompletionTarget::GitHub(receipt.clone()), original_end)?;
         // No fallible operation follows registration. A ready/unknown original
         // remains observable even if its first data delivery won this race.
         Ok(GitHubReadTicket { owner, receipt })
+    }
+    pub(crate) fn start_github_device(&self, step: device_protocol::Step, client_id: &str,
+        device_code: Option<&str>, original_end: Instant) -> Result<GitHubDeviceTicket, BridgeError> {
+        let started_at = Instant::now();
+        let endpoint = original_end.min(started_at + OPERATION_TIME);
+        let receipt = Arc::new(Mutex::new(GitHubDeviceReceipt::Pending));
+        let owner = self.admit_until(AdmissionRequest::Device { step, client_id, device_code },
+            CompletionTarget::Device(receipt.clone()), Some(endpoint))?;
+        Ok(GitHubDeviceTicket { owner, receipt, started_at, step })
+    }
+    pub(crate) fn start_github_runner_prerequisite(&self, repository: &str, account: &str, repository_id: &str,
+        token: &str, original_end: Instant) -> Result<GitHubRunnerTicket, BridgeError> {
+        let admitted_at = Instant::now();
+        let endpoint = original_end.min(admitted_at + OPERATION_TIME);
+        let receipt = Arc::new(Mutex::new(GitHubRunnerReceipt::Pending));
+        let owner = self.admit_until(AdmissionRequest::Runner { repository, account, repository_id, token },
+            CompletionTarget::Runner(receipt.clone()), Some(endpoint))?;
+        Ok(GitHubRunnerTicket { owner, receipt, admitted_at })
+    }
+    pub(crate) fn start_github_input_group(&self,request:input_protocol::Request,gate:crate::asset_session::GitHubInputGoGate) -> Result<GitHubInputGroupTicket,BridgeError> {
+        let receipt=Arc::new(Mutex::new(GitHubInputGroupReceipt::Pending));
+        let owner=self.admit_until(AdmissionRequest::InputGroup {request,gate},CompletionTarget::InputGroup(receipt.clone()),None)?;
+        Ok(GitHubInputGroupTicket {owner,receipt})
     }
     pub(crate) fn start_github_preflight(&self, request: preflight_protocol::Request,
         gate: crate::asset_session::GitHubPreflightGoGate) -> Result<GitHubPreflightTicket, BridgeError> {
@@ -741,13 +979,22 @@ impl Supervisor {
     }
 
     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
-        let endpoint = Instant::now() + OPERATION_TIME;
+        self.admit_until(request, completion, None)
+    }
+    fn admit_until(&self, request: AdmissionRequest<'_>, completion: CompletionTarget,
+        original_end: Option<Instant>) -> Result<Arc<Owner>, BridgeError> {
+        let started_at = Instant::now();
+        let endpoint = original_end.map_or(started_at + OPERATION_TIME, |end| end.min(started_at + OPERATION_TIME));
+        if endpoint <= started_at { return Err(BridgeError::timeout()); }
         let profile = request.profile();
-        let (reply, github_receipt, preflight_receipt, release_receipt) = match (profile, completion) {
-            (Profile::Passive(_), CompletionTarget::Passive(reply)) => (Some(reply), None, None, None),
-            (Profile::GitHubReadOnly, CompletionTarget::GitHub(receipt)) => (None, Some(receipt), None, None),
-            (Profile::GitHubPreflight, CompletionTarget::Preflight(receipt)) => (None, None, Some(receipt), None),
-            (Profile::GitHubRelease, CompletionTarget::Release(receipt)) => (None, None, None, Some(receipt)),
+        let (reply, github_receipt, device_receipt, preflight_receipt, release_receipt, input_receipt, runner_receipt) = match (profile, completion) {
+            (Profile::Passive(_), CompletionTarget::Passive(reply)) => (Some(reply), None, None, None, None, None, None),
+            (Profile::GitHubReadOnly, CompletionTarget::GitHub(receipt)) => (None, Some(receipt), None, None, None, None, None),
+            (Profile::GitHubDevice(_), CompletionTarget::Device(receipt)) => (None, None, Some(receipt), None, None, None, None),
+            (Profile::GitHubPreflight, CompletionTarget::Preflight(receipt)) => (None, None, None, Some(receipt), None, None, None),
+            (Profile::GitHubRelease, CompletionTarget::Release(receipt)) => (None, None, None, None, Some(receipt), None, None),
+            (Profile::GitHubInputGroup, CompletionTarget::InputGroup(receipt)) => (None, None, None, None, None, Some(receipt), None),
+            (Profile::GitHubRunnerPrerequisite, CompletionTarget::Runner(receipt)) => (None, None, None, None, None, None, Some(receipt)),
             _ => return Err(BridgeError::invalid()),
         };
         let executor = tokio::runtime::Handle::try_current()
@@ -759,12 +1006,14 @@ impl Supervisor {
         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}") };
-        let (bytes, preflight_request, preflight_gate, release_request, release_gate) = request.encode(&id)?;
+            Profile::GitHubDevice(_) => format!("github-device-{key}"),
+            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubInputGroup => format!("github-input-{key}"), Profile::GitHubRunnerPrerequisite => format!("github-runner-{key}") };
+        let (bytes, preflight_request, preflight_gate, release_request, release_gate, input_context) = request.encode(&id)?;
+        let bytes = PrivateBytes(bytes);
         let (stop, _) = watch::channel(false);
         let owner = Arc::new(Owner {
-            key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate,
-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new(OwnerState::new(endpoint, reply)),
+            key, id, profile, github_receipt, device_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate,
+            input_receipt,input_context,runner_receipt,runner_control:Mutex::new(None),preflight_go_claimed: AtomicBool::new(false), state: Mutex::new(OwnerState::new(endpoint, reply)),
             resources: AsyncMutex::new(Resources {
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 passive: if passive_selected(profile) {
@@ -775,6 +1024,10 @@ impl Supervisor {
                     Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())))
                 } else { None },
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                github_device: if github_device_selected(profile) {
+                    Some(Arc::new(Mutex::new(GitHubDeviceRuntimeSlots::new())))
+                } else { None },
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 github_preflight: if github_preflight_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubPreflightRuntimeSlots::new())))
                 } else { None },
@@ -782,6 +1035,10 @@ impl Supervisor {
                 github_release: if github_release_selected(profile) {
                     Some(Arc::new(Mutex::new(GitHubReleaseRuntimeSlots::new())))
                 } else { None },
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                github_input_group: if github_input_group_selected(profile) {Some(Arc::new(Mutex::new(GitHubInputGroupRuntimeSlots::new())))} else {None},
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                github_runner: if github_runner_selected(profile) {Some(Arc::new(Mutex::new(GitHubRunnerPrerequisiteRuntimeSlots::new())))} else {None},
                 ..Resources::default()
             }), stop, changed: Notify::new(),
             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -811,6 +1068,12 @@ impl Supervisor {
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if matches!(owner.profile, Profile::GitHubReadOnly | Profile::GitHubPreflight) {
                 if let Some(witness) = lock(&self.inner.native_test.github_preflight).as_ref() { witness.register(&owner); }
+            }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if matches!(owner.profile, Profile::GitHubReadOnly | Profile::GitHubRelease) {
+                if let Some(witness) = lock(&self.inner.native_test.github_release).as_ref() { witness.register(&owner); }
             }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
                 target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
@@ -1019,12 +1282,12 @@ fn spawn_original(runtime: VerifiedRuntime, owner: Arc<Owner>) -> std::io::Resul
 }
 
 async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R, limit: usize, faults: mpsc::Sender<BridgeError>) -> ReadEnd {
-    let mut bytes = Vec::new();
-    let mut buffer = [0u8; 8192];
+    let mut bytes = PrivateBytes(Vec::with_capacity(limit));
+    let mut buffer = PrivateBytes(vec![0u8; 8192]);
     let mut overflow = false;
     loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => return ReadEnd { bytes, eof: true, overflow },
+        match reader.read(&mut buffer[..]).await {
+            Ok(0) => return ReadEnd { bytes: bytes.into_vec(), eof: true, overflow },
             Ok(length) => {
                 if !overflow && length <= limit.saturating_sub(bytes.len()) { bytes.extend_from_slice(&buffer[..length]); }
                 else if !overflow {
@@ -1035,13 +1298,15 @@ async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R, limit: usize, faults:
             }
             Err(_) => {
                 let _ = faults.try_send(BridgeError::new("io_error", "An original core output channel failed."));
-                return ReadEnd { bytes, eof: false, overflow };
+                return ReadEnd { bytes: bytes.into_vec(), eof: false, overflow };
             }
         }
     }
 }
 
-async fn write_request(mut writer: tokio::process::ChildStdin, bytes: Vec<u8>, mut stop: watch::Receiver<bool>, faults: mpsc::Sender<BridgeError>) -> WriteEnd {
+fn write_request(mut writer: tokio::process::ChildStdin, bytes: Vec<u8>, mut stop: watch::Receiver<bool>, faults: mpsc::Sender<BridgeError>) -> impl std::future::Future<Output = WriteEnd> {
+    let bytes = PrivateBytes(bytes);
+    async move {
     if *stop.borrow() { return WriteEnd { complete: false }; }
     let written = tokio::select! {
         _ = stop.changed() => return WriteEnd { complete: false },
@@ -1053,6 +1318,7 @@ async fn write_request(mut writer: tokio::process::ChildStdin, bytes: Vec<u8>, m
     }
     // ChildStdin drops here, supplying EOF even where shutdown alone is a no-op.
     WriteEnd { complete: true }
+    }
 }
 
 async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest: String,
@@ -1130,6 +1396,19 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
             }
         }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(owner.profile, Profile::GitHubRelease) {
+        let witness = lock(&inner.native_test.github_release).clone();
+        if let Some(witness) = witness {
+            witness.ready(&owner);
+            if let Some(release) = witness.hold_ready(&owner) {
+                // Only this original writer is paused, with no retained lock.
+                if release.await.is_err() { witness.fail(); owner.fail(BridgeError::cleanup_unknown()); }
+            }
+        }
+    }
     // No registry/owner lock is held entering the document. The final actual
     // project/session check follows helper startup and durable intent READY.
     let go = match owner.profile {
@@ -1151,6 +1430,12 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
     if matches!(owner.profile, Profile::GitHubPreflight) {
         if let Some(witness) = lock(&inner.native_test.github_preflight).as_ref() { witness.claim_returned(&owner, &go); }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(owner.profile, Profile::GitHubRelease) {
+        if let Some(witness) = lock(&inner.native_test.github_release).as_ref() { witness.claim_returned(&owner, &digest, &go); }
+    }
     let bytes = match go {
         Ok(bytes) => bytes,
         Err(error) => { owner.fail(error); return WriteEnd { complete: false }; },
@@ -1169,6 +1454,12 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
         target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if matches!(owner.profile, Profile::GitHubPreflight) {
         if let Some(witness) = lock(&inner.native_test.github_preflight).as_ref() { witness.go_written(&owner); }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(owner.profile, Profile::GitHubRelease) {
+        if let Some(witness) = lock(&inner.native_test.github_release).as_ref() { witness.go_written(&owner); }
     }
     // The original private buffer and ChildStdin drop here. Only this actual
     // task return plus original child/IO/native/management finality can settle.
@@ -1204,6 +1495,10 @@ fn github_installed_selected(profile: Profile) -> bool {
         not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::GitHubReadOnly)
 }
+fn github_device_selected(profile: Profile) -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubDevice(_))
+}
 fn github_preflight_selected(profile: Profile) -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubPreflight)
@@ -1211,6 +1506,19 @@ fn github_preflight_selected(profile: Profile) -> bool {
 fn github_release_selected(profile: Profile) -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(all(feature = "development-runtime", debug_assertions)))) && matches!(profile, Profile::GitHubRelease)
+}
+fn github_runner_selected(profile: Profile) -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", not(all(feature = "development-runtime", debug_assertions))))
+        && matches!(profile, Profile::GitHubRunnerPrerequisite)
+}
+fn runner_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
+    stopping: bool, disabled: bool, stop: bool) -> bool {
+    original && matches!(profile, Profile::GitHubRunnerPrerequisite) && !state.terminal && !state.unknown && state.error.is_none()
+        && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+}
+fn github_input_group_selected(profile:Profile) -> bool {
+    cfg!(all(target_os="linux",target_arch="x86_64",target_env="gnu",not(all(feature="development-runtime",debug_assertions))))
+        && matches!(profile,Profile::GitHubInputGroup)
 }
 fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
     stopping: bool, disabled: bool, stop: bool) -> bool {
@@ -1229,6 +1537,11 @@ fn claim_preflight_go(inner: &Inner, owner: &Arc<Owner>, expected: Profile) -> b
 fn github_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
     stopping: bool, disabled: bool, stop: bool) -> bool {
     original && matches!(profile, Profile::GitHubReadOnly) && !state.terminal && !state.unknown && state.error.is_none()
+        && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+}
+fn device_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
+    stopping: bool, disabled: bool, stop: bool) -> bool {
+    original && matches!(profile, Profile::GitHubDevice(_)) && !state.terminal && !state.unknown && state.error.is_none()
         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
 }
 fn passive_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
@@ -1263,6 +1576,10 @@ fn passive_worker_lost(resources: &Resources) {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(native) = &resources.github_device {
+        match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(native) = &resources.github_preflight {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
@@ -1270,6 +1587,10 @@ fn passive_worker_lost(resources: &Resources) {
     if let Some(native) = &resources.github_release {
         match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
     }
+    #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+    if let Some(native)=&resources.github_input_group {match native.lock() {Ok(mut slots)=>slots.mark_interrupted(),Err(error)=>error.into_inner().mark_interrupted()}}
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(native)=&resources.github_runner {match native.lock() {Ok(mut slots)=>slots.mark_interrupted(),Err(error)=>error.into_inner().mark_interrupted()}}
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
@@ -1395,20 +1716,47 @@ enum InstalledSettlementSlots {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubReadOnly(Arc<Mutex<GitHubReadOnlyRuntimeSlots>>),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    GitHubDevice(Arc<Mutex<GitHubDeviceRuntimeSlots>>),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubPreflight(Arc<Mutex<GitHubPreflightRuntimeSlots>>),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubRelease(Arc<Mutex<GitHubReleaseRuntimeSlots>>),
+    #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+    GitHubInputGroup(Arc<Mutex<GitHubInputGroupRuntimeSlots>>),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    GitHubRunnerPrerequisite(Arc<Mutex<GitHubRunnerPrerequisiteRuntimeSlots>>),
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
+        if github_runner_selected(profile) {
+            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_device.is_some()
+                || resources.github_preflight.is_some() || resources.github_release.is_some() || resources.github_input_group.is_some() {
+                return Err(BridgeError::cleanup_unknown());
+            }
+            return resources.github_runner.as_ref().map(|v| Some(InstalledSettlementSlots::GitHubRunnerPrerequisite(v.clone())))
+                .ok_or_else(BridgeError::cleanup_unknown);
+        }
+        if resources.github_runner.is_some() { return Err(BridgeError::cleanup_unknown()); }
+        if github_input_group_selected(profile) {
+            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_device.is_some()
+                || resources.github_preflight.is_some() || resources.github_release.is_some() {return Err(BridgeError::cleanup_unknown());}
+            return resources.github_input_group.as_ref().map(|v| Some(InstalledSettlementSlots::GitHubInputGroup(v.clone()))).ok_or_else(BridgeError::cleanup_unknown);
+        }
+        if resources.github_input_group.is_some() {return Err(BridgeError::cleanup_unknown());}
         if github_installed_selected(profile) {
-            if resources.passive.is_some() || resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
+            if resources.passive.is_some() || resources.github_device.is_some() || resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
             return resources.github_readonly.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubReadOnly(slots.clone())))
                 .ok_or_else(BridgeError::cleanup_unknown);
         }
         if resources.github_readonly.is_some() { return Err(BridgeError::cleanup_unknown()); }
+        if github_device_selected(profile) {
+            if resources.passive.is_some() || resources.github_preflight.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
+            return resources.github_device.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubDevice(slots.clone())))
+                .ok_or_else(BridgeError::cleanup_unknown);
+        }
+        if resources.github_device.is_some() { return Err(BridgeError::cleanup_unknown()); }
         if github_preflight_selected(profile) {
             if resources.passive.is_some() || resources.github_release.is_some() { return Err(BridgeError::cleanup_unknown()); }
             return resources.github_preflight.as_ref().map(|slots| Some(InstalledSettlementSlots::GitHubPreflight(slots.clone())))
@@ -1437,9 +1785,15 @@ impl InstalledSettlementSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubReadOnly(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubDevice(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubPreflight(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubRelease(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+            #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+            Self::GitHubInputGroup(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubRunnerPrerequisite(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
         }
     }
     fn settle_originals(&self) -> CloseOutcome {
@@ -1454,12 +1808,27 @@ impl InstalledSettlementSlots {
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubDevice(native) => match native.lock() {
+                Ok(mut slots) => slots.settle_originals(),
+                Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+            },
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubPreflight(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubRelease(native) => match native.lock() {
+                Ok(mut slots) => slots.settle_originals(),
+                Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+            },
+            #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+            Self::GitHubInputGroup(native) => match native.lock() {
+                Ok(mut slots) => slots.settle_originals(),
+                Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+            },
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubRunnerPrerequisite(native) => match native.lock() {
                 Ok(mut slots) => slots.settle_originals(),
                 Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
             },
@@ -1471,9 +1840,15 @@ impl InstalledSettlementSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubReadOnly(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubDevice(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubPreflight(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubRelease(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+            #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+            Self::GitHubInputGroup(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::GitHubRunnerPrerequisite(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
         }
     }
 }
@@ -1489,6 +1864,19 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
             let owners = lock(&inner.owners); let state = lock(&owner.state);
             if !github_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+            }
+            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+        },
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Some(InstalledSettlementSlots::GitHubDevice(native)) => {
+            let (inspection, acquisition) = passive_borrows(resources);
+            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
+                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
+            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let owners = lock(&inner.owners); let state = lock(&owner.state);
+            if !device_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
                 &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
             }
@@ -1517,6 +1905,32 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             let owners = lock(&inner.owners); let state = lock(&owner.state);
             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
                 Profile::GitHubRelease, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+            }
+            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+        },
+        #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+        Some(InstalledSettlementSlots::GitHubInputGroup(native)) => {
+            let (inspection, acquisition) = passive_borrows(resources);
+            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
+                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
+            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let owners = lock(&inner.owners); let state = lock(&owner.state);
+            if !input_group_io::claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+            }
+            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+        },
+        #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+        Some(InstalledSettlementSlots::GitHubRunnerPrerequisite(native)) => {
+            let (inspection, acquisition) = passive_borrows(resources);
+            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
+                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
+            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let owners = lock(&inner.owners); let state = lock(&owner.state);
+            if !runner_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
             }
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
@@ -1552,6 +1966,36 @@ fn acquire_github_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_github_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReadOnlyRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub read-only runtime is unavailable in this profile"))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+fn acquire_device_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubDeviceRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    // THIS retained original acquisition borrows the domain-fixed book. Nothing
+    // takes caller-supplied Command/path data or transfers custody to a new task.
+    let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub device original custody is unavailable"))?;
+    let runtime = slots.capability().map_err(AcquisitionError::capability)?;
+    let stop = owner.stop.subscribe();
+    let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let owners = lock(&inner.owners); let state = lock(&owner.state);
+    if !device_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        return Err(AcquisitionError::unsupported("GitHub device original claim is no longer available"));
+    }
+    runtime.claim_once().map_err(AcquisitionError::final_claim)?;
+    drop(state); drop(owners);
+    // No await/callback/IO between the final one-use claim and creation. An
+    // opaque spawn error is NOT proof no child/pipe existed: retain Unknown.
+    command.spawn().map_err(AcquisitionError::returned_spawn)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
+fn acquire_device_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubDeviceRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    Err(AcquisitionError::unsupported("The installed GitHub device runtime is unavailable in this profile"))
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
@@ -1604,6 +2048,58 @@ fn acquire_release_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
 fn acquire_release_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubReleaseRuntimeSlots>>) -> Result<Child, AcquisitionError> {
     Err(AcquisitionError::unsupported("The installed GitHub release runtime is unavailable in this profile"))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+fn acquire_input_group_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubInputGroupRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub input-group original custody is unavailable"))?;
+    let runtime = slots.capability().map_err(AcquisitionError::capability)?;
+    let stop = owner.stop.subscribe();
+    let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let owners = lock(&inner.owners); let state = lock(&owner.state);
+    if !input_group_io::claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        return Err(AcquisitionError::unsupported("GitHub input-group original claim is no longer available"));
+    }
+    runtime.claim_once().map_err(AcquisitionError::final_claim)?;
+    drop(state); drop(owners);
+    command.spawn().map_err(AcquisitionError::returned_spawn)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
+fn acquire_input_group_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubInputGroupRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    Err(AcquisitionError::unsupported("The installed GitHub input-group runtime is unavailable in this profile"))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+fn acquire_runner_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<GitHubRunnerPrerequisiteRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    let mut slots = native.lock().map_err(|_| AcquisitionError::unsupported("GitHub runner-prerequisite original custody is unavailable"))?;
+    let runtime = slots.capability().map_err(AcquisitionError::capability)?;
+    let stop = owner.stop.subscribe();
+    let selected = runtime.prepare_once(owner.endpoint(), &stop).map_err(AcquisitionError::preparation)?;
+    let mut command = Command::new(&selected.python);
+    command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+        .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    let owners = lock(&inner.owners); let state = lock(&owner.state);
+    if !runner_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        return Err(AcquisitionError::unsupported("GitHub runner-prerequisite original claim is no longer available"));
+    }
+    runtime.claim_once().map_err(AcquisitionError::final_claim)?;
+    drop(state); drop(owners);
+    command.spawn().map_err(AcquisitionError::returned_spawn)
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
+fn acquire_runner_original(_inner: &Inner, _owner: &Arc<Owner>, _native: &Arc<Mutex<GitHubRunnerPrerequisiteRuntimeSlots>>) -> Result<Child, AcquisitionError> {
+    Err(AcquisitionError::unsupported("The installed GitHub runner-prerequisite runtime is unavailable in this profile"))
 }
 
 async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
@@ -1757,7 +2253,7 @@ async fn observe_installed_original(resources: &mut Resources, inner: &Arc<Inner
 
 enum Event { Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
 
-async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
+async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: PrivateBytes) -> DriverEnd {
     let mut resources = owner.resources.lock().await;
     if owner.failed() || Instant::now() >= owner.endpoint() {
         owner.fail(BridgeError::timeout());
@@ -1771,9 +2267,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let inspection_github = resources.github_readonly.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let inspection_device = resources.github_device.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let inspection_preflight = resources.github_preflight.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let inspection_release = resources.github_release.clone();
+    #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+    let inspection_input_group = resources.github_input_group.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let inspection_runner = resources.github_runner.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
@@ -1826,6 +2328,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 }
                 config.resolve_github_readonly(endpoint)?
             },
+            Profile::GitHubDevice(_) => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if github_device_selected(profile) {
+                    let native = inspection_device.ok_or_else(BridgeError::cleanup_unknown)?;
+                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return config.resolve_github_device_installed(&mut originals, endpoint, &inspection_stop);
+                }
+                return Err(BridgeError::unavailable("The GitHub device authorization runtime is not qualified."));
+            },
             Profile::GitHubPreflight => {
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if github_preflight_selected(profile) {
@@ -1844,11 +2355,29 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 }
                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
             },
+            Profile::GitHubInputGroup => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if github_input_group_selected(profile) {
+                    let native = inspection_input_group.ok_or_else(BridgeError::cleanup_unknown)?;
+                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return config.resolve_github_input_group_installed(&mut originals, endpoint, &inspection_stop);
+                }
+                return Err(BridgeError::unavailable("The GitHub input-group action runtime is not qualified."));
+            },
+            Profile::GitHubRunnerPrerequisite => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if github_runner_selected(profile) {
+                    let native = inspection_runner.ok_or_else(BridgeError::cleanup_unknown)?;
+                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return config.resolve_github_runner_prerequisite_installed(&mut originals, endpoint, &inspection_stop);
+                }
+                return Err(BridgeError::unavailable("The GitHub runner-prerequisite runtime is not qualified."));
+            },
         };
         #[cfg(all(windows, test, feature = "development-runtime"))]
         let runtime = match profile {
             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease => runtime, // Never a passive fixture override for GitHub actions.
+            Profile::GitHubReadOnly | Profile::GitHubDevice(_) | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubInputGroup | Profile::GitHubRunnerPrerequisite => runtime, // Never a passive fixture override for GitHub actions.
         };
         Ok(runtime)
     }));
@@ -1893,9 +2422,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let acquisition_github = resources.github_readonly.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let acquisition_device = resources.github_device.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let acquisition_preflight = resources.github_preflight.clone();
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let acquisition_release = resources.github_release.clone();
+    #[cfg(all(target_os="linux",target_arch="x86_64",target_env="gnu"))]
+    let acquisition_input_group = resources.github_input_group.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let acquisition_runner = resources.github_runner.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
     let (acquire_start, acquire_enter) = oneshot::channel();
@@ -1931,6 +2466,14 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             return acquire_github_original(&acquiring_inner, &acquiring_owner, &native);
         }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if github_device_selected(acquiring_owner.profile) {
+            let Some(native) = acquisition_device else {
+                owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
+                return Err(AcquisitionError::unsupported("original GitHub device custody is missing"));
+            };
+            return acquire_device_original(&acquiring_inner, &acquiring_owner, &native);
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if github_preflight_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_preflight else {
                 owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
@@ -1945,6 +2488,22 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 return Err(AcquisitionError::unsupported("original GitHub release custody is missing"));
             };
             return acquire_release_original(&acquiring_inner, &acquiring_owner, &native);
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if github_input_group_selected(acquiring_owner.profile) {
+            let Some(native) = acquisition_input_group else {
+                owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
+                return Err(AcquisitionError::unsupported("original GitHub input-group custody is missing"));
+            };
+            return acquire_input_group_original(&acquiring_inner, &acquiring_owner, &native);
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if github_runner_selected(acquiring_owner.profile) {
+            let Some(native) = acquisition_runner else {
+                owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
+                return Err(AcquisitionError::unsupported("original GitHub runner-prerequisite custody is missing"));
+            };
+            return acquire_runner_original(&acquiring_inner, &acquiring_owner, &native);
         }
         spawn_original(runtime, acquiring_owner).map_err(AcquisitionError::from)
     }));
@@ -2006,31 +2565,42 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
     };
     let (faults, mut fault_rx) = mpsc::channel(4);
+    let (mut input_reader,mut input_writer,mut input_start)=if matches!(profile,Profile::GitHubInputGroup) {
+        let(reader,writer,start)=input_group_io::channels();(Some(reader),Some(writer),Some(start))
+    } else {(None,None,None)};
+    let input_digest=matches!(profile,Profile::GitHubInputGroup).then(|| input_protocol::digest(&bytes));
     let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease) {
         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
     } else { (None, None) };
     let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease).then(|| preflight_protocol::request_digest(&bytes));
     if let Some(stdin) = stdin {
-        if let Some(ready) = ready_receive.take() {
-            resources.writer = Some(tokio::spawn(write_preflight(stdin, bytes, ready, inner.clone(), owner.clone(), faults.clone())));
+        if let Some(channels)=input_writer.take() {
+            resources.writer=Some(tokio::spawn(input_group_io::write(stdin,bytes.into_vec(),channels,inner.clone(),owner.clone())));
+        } else if let Some(ready) = ready_receive.take() {
+            resources.writer = Some(tokio::spawn(write_preflight(stdin, bytes.into_vec(), ready, inner.clone(), owner.clone(), faults.clone())));
         } else {
         #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
-        { resources.writer = Some(tokio::spawn(windows_passive_tests::write_request(stdin, bytes, owner.stop.subscribe(), faults.clone(), inner.windows_test.hold_writer()))); }
+        { resources.writer = Some(tokio::spawn(windows_passive_tests::write_request(stdin, bytes.into_vec(), owner.stop.subscribe(), faults.clone(), inner.windows_test.hold_writer()))); }
         #[cfg(not(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
         {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
                 target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
                 not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
-            { resources.writer = Some(tokio::spawn(windows_shell_observation::write_request(stdin, bytes, owner.stop.subscribe(), faults.clone(), windows_shell_observation::writer_hold(&inner, &owner)))); }
+            { resources.writer = Some(tokio::spawn(windows_shell_observation::write_request(stdin, bytes.into_vec(), owner.stop.subscribe(), faults.clone(), windows_shell_observation::writer_hold(&inner, &owner)))); }
             #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
                 target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
                 not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))]
-            { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
+            { resources.writer = Some(tokio::spawn(write_request(stdin, bytes.into_vec(), owner.stop.subscribe(), faults.clone()))); }
         }
         }
     }
     if let Some(stdout) = stdout {
-        if let Some(ready) = ready_send.take() {
+        if matches!(profile, Profile::GitHubRunnerPrerequisite) {
+            resources.stdout = Some(tokio::spawn(runner_io::read(stdout, owner.clone())));
+        } else if let Some(channels)=input_reader.take() {
+            if let Some(digest)=input_digest {resources.stdout=Some(tokio::spawn(input_group_io::read(stdout,owner.clone(),digest,channels)));}
+            else {owner.fail(BridgeError::cleanup_unknown());}
+        } else if let Some(ready) = ready_send.take() {
             let kind = match profile {
                 Profile::GitHubPreflight => owner.preflight_request.as_ref().map(preflight_protocol::Request::kind),
                 Profile::GitHubRelease => owner.release_request.as_ref().map(release_protocol::Request::kind), _ => None,
@@ -2060,6 +2630,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_shell_observation::after_io_registered(&inner, &owner, &mut resources);
+    if let Some(start)=input_start.take() {input_group_io::register_io(&owner,&resources,start);}
     drop(faults);
     if resources.writer.is_none() || resources.stdout.is_none() || resources.stderr.is_none() {
         owner.fail(BridgeError::cleanup_unknown());
@@ -2182,6 +2753,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if matches!(profile, Profile::GitHubReadOnly | Profile::GitHubPreflight) {
         if let Some(witness) = lock(&inner.native_test.github_preflight).as_ref() { witness.observe_settled_io(&owner, &resources); }
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(profile, Profile::GitHubReadOnly | Profile::GitHubRelease) {
+        if let Some(witness) = lock(&inner.native_test.github_release).as_ref() { witness.observe_settled_io(&owner, &resources); }
+    }
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {
@@ -2191,7 +2768,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // reaped. Diagnostics are never emitted to renderer/logs as raw contents.
     drop(diagnostics);
     resources.child.take();
-    let result = match output { Some(output) => profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref()), None => Err(BridgeError::protocol()) };
+    let result = match output { Some(output) => profile.decode(&output.bytes, &owner.id, owner.preflight_request.as_ref(), owner.release_request.as_ref(), owner.input_context.as_ref().map(|v| &v.request)), None => Err(BridgeError::protocol()) };
     if let Err(error) = &result { owner.fail(error.clone()); }
     DriverEnd::Ready(result)
 }
@@ -2221,6 +2798,47 @@ mod github_installed_contract_tests {
         assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
         state.unknown = false; state.terminal = true;
         assert!(!clear(&state, true, Profile::GitHubReadOnly, now, false, false, false));
+    }
+    #[test]
+    fn device_claim_requires_original_domain_endpoint_and_cleanup_state() {
+        let now = Instant::now();
+        for step in [device_protocol::Step::Start, device_protocol::Step::Poll] {
+            let profile = Profile::GitHubDevice(step); let mut state = OwnerState::new(now + OPERATION_TIME, None);
+            assert!(device_claim_clear(true, profile, &state, now, false, false, false));
+            for other in [Profile::Passive(Method::Capabilities), Profile::GitHubReadOnly, Profile::GitHubPreflight, Profile::GitHubRelease] {
+                assert!(!device_claim_clear(true, other, &state, now, false, false, false));
+            }
+            assert!(!github_claim_clear(true, profile, &state, now, false, false, false));
+            assert!(!device_claim_clear(false, profile, &state, now, false, false, false));
+            assert!(!device_claim_clear(true, profile, &state, state.endpoint, false, false, false));
+            for (stopping, disabled, stop) in [(true, false, false), (false, true, false), (false, false, true)] {
+                assert!(!device_claim_clear(true, profile, &state, now, stopping, disabled, stop));
+            }
+            state.fail_at(BridgeError::timeout(), now); state.error = None;
+            assert!(!device_claim_clear(true, profile, &state, now, false, false, false));
+            state.cleanup_endpoint = None; state.unknown = true;
+            assert!(!device_claim_clear(true, profile, &state, now, false, false, false));
+        }
+    }
+    #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+    #[test]
+    fn device_settlement_cannot_borrow_passive_read_or_action_custody() {
+        // Empty original books only; no native operation or successful custody is supplied.
+        let profile = Profile::GitHubDevice(device_protocol::Step::Poll);
+        let mut resources = Resources::default();
+        assert!(installed_settlement_slots(&resources, profile).is_err());
+        resources.github_device = Some(Arc::new(Mutex::new(GitHubDeviceRuntimeSlots::new())));
+        assert!(matches!(installed_settlement_slots(&resources, profile), Ok(Some(InstalledSettlementSlots::GitHubDevice(_)))));
+        for other in [Profile::Passive(Method::Capabilities), Profile::GitHubReadOnly, Profile::GitHubPreflight, Profile::GitHubRelease] {
+            assert!(installed_settlement_slots(&resources, other).is_err());
+        }
+        resources.github_readonly = Some(Arc::new(Mutex::new(GitHubReadOnlyRuntimeSlots::new())));
+        assert!(installed_settlement_slots(&resources, profile).is_err()); resources.github_readonly = None;
+        resources.passive = Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())));
+        assert!(installed_settlement_slots(&resources, profile).is_err()); resources.passive = None;
+        passive_worker_lost(&resources);
+        let original = resources.github_device.as_ref().unwrap().lock().unwrap();
+        assert!(!original.never_started() && !original.settled());
     }
     #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
     #[test]
@@ -2261,6 +2879,11 @@ mod installed_native_fixture {
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightPending,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightRevocation,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubPreflightCollision,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubReleaseConnect,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubRelease,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubReleaseNormalPending,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubReleasePending,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] GitHubReleaseRevocation,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionObserve,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionLoss,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))] SessionDeadline,
@@ -2284,10 +2907,14 @@ mod installed_native_fixture {
         pub github: Mutex<Option<Arc<github_tls_peer_owner::installed::ProductWitness>>>,
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
         pub github_preflight: Mutex<Option<Arc<github_preflight_native_observation::ProductWitness>>>,
+        #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+        pub github_release: Mutex<Option<Arc<github_release_native_observation::ProductWitness>>>,
     }
     impl Hooks {
         fn case(&self) -> Case { *lock(&self.case) }
         pub(super) fn child_case(&self, _owner: &Arc<Owner>) -> Option<Case> {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if let Some(case)=lock(&self.github_release).as_ref().and_then(|witness|witness.original_case(_owner)) { return Some(case); }
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             if let Some(case)=lock(&self.github_preflight).as_ref().and_then(|witness|witness.original_case(_owner)) { return Some(case); }
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
@@ -2366,13 +2993,30 @@ mod installed_native_fixture {
             _ => false,
         }
     }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn release_snapshot_clear(snapshot: &ChildObservation, case: Case) -> bool {
+        match case {
+            Case::GitHubReleaseNormalPending | Case::GitHubReleasePending | Case::GitHubReleaseRevocation =>
+                snapshot.environment_clear && pending_mapping_roles(&snapshot.maps),
+            Case::GitHubReleaseConnect | Case::GitHubRelease => snapshot_clear(snapshot),
+            _ => false,
+        }
+    }
     impl Case {
         pub(super) fn after_io(self) -> bool {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if matches!(self, Self::GitHubReleaseConnect | Self::GitHubRelease) { return true; }
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             if matches!(self, Self::GitHub(_) | Self::GitHubPreflightConnect | Self::GitHubPreflight) { return true; }
             false
         }
         fn version(self) -> &'static str {
+            #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+            if matches!(self, Self::GitHubReleaseConnect | Self::GitHubRelease | Self::GitHubReleasePending | Self::GitHubReleaseRevocation) {
+                return crate::runtime::GitHubReleaseObservationProfile::VERSION;
+            }
+            // GitHubReleaseNormalPending intentionally falls through to V.
+
             #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
             if matches!(self, Self::GitHubPreflightConnect | Self::GitHubPreflight | Self::GitHubPreflightPending
                 | Self::GitHubPreflightRevocation | Self::GitHubPreflightCollision) {
@@ -3312,6 +3956,35 @@ mod installed_native_fixture {
             Case::SessionObserve,Case::SessionLoss,Case::SessionDeadline] {assert!(!case.after_io());}
     }
     #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
+    pub(super) fn assert_release_observation_roles() {
+        let derivative=crate::runtime::GitHubReleaseObservationProfile::VERSION;
+        for case in [Case::GitHubReleaseConnect,Case::GitHubRelease,Case::GitHubReleaseNormalPending,
+            Case::GitHubReleasePending,Case::GitHubReleaseRevocation] {
+            let normal=case==Case::GitHubReleaseNormalPending;
+            assert_eq!(case.version(),if normal{VERSION}else{derivative});
+            assert_eq!(case.after_io(),matches!(case,Case::GitHubReleaseConnect|Case::GitHubRelease));
+            for (suffix,role) in [("/python/bin/python3",MapRole::Python),("/python/lib/libssl.so.3",MapRole::Ssl),
+                ("/python/lib/libcrypto.so.3",MapRole::Crypto)] {
+                assert_eq!(role_for_case(&format!("{}{suffix}",case.version()),case),Some(role));
+                assert_eq!(role_for_case(&format!("{}{suffix}",if normal{derivative}else{VERSION}),case),None);
+                assert_eq!(role_for_case(&format!("{}{suffix} (deleted)",case.version()),case),None);
+            }
+        }
+        let row=|role:MapRole| Mapping{role:role.name().into(),path:format!("inert-{}",role.name()),device_major:8,device_minor:1,inode:1};
+        for optional in [vec![],vec![MapRole::Ssl],vec![MapRole::Crypto],vec![MapRole::Ssl,MapRole::Crypto]] {
+            let mut found=BTreeMap::from([MapRole::Python,MapRole::Loader,MapRole::Libc,MapRole::Libm].map(|r|(r.name(),(row(r),true))));
+            for r in &optional {found.insert(r.name(),(row(*r),true));}
+            let mut snapshot=ChildObservation{maps:complete_pending_mappings(found).unwrap(),environment_clear:true};
+            for case in [Case::GitHubReleaseNormalPending,Case::GitHubReleasePending,Case::GitHubReleaseRevocation] {
+                assert!(release_snapshot_clear(&snapshot,case));
+            }
+            assert_eq!(release_snapshot_clear(&snapshot,Case::GitHubRelease),optional.len()==2);
+            assert!(!release_snapshot_clear(&snapshot,Case::GitHubPreflightPending));
+            snapshot.environment_clear=false;
+            assert!(!release_snapshot_clear(&snapshot,Case::GitHubReleaseNormalPending));
+        }
+    }
+    #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
     pub(super) fn assert_preflight_observation_roles() {
         let version=crate::runtime::GitHubPreflightObservationProfile::VERSION;
         for case in [Case::GitHubPreflightConnect,Case::GitHubPreflight,Case::GitHubPreflightPending,
@@ -3438,7 +4111,8 @@ mod installed_native_fixture {
             insert_mapping(&mut found, role, row, executable)?;
         }
         #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
-        if matches!(case,Case::GitHubPreflightPending|Case::GitHubPreflightRevocation|Case::GitHubPreflightCollision) {
+        if matches!(case,Case::GitHubPreflightPending|Case::GitHubPreflightRevocation|Case::GitHubPreflightCollision
+            |Case::GitHubReleaseNormalPending|Case::GitHubReleasePending|Case::GitHubReleaseRevocation) {
             return Ok(complete_pending_mappings(found));
         }
         Ok(complete_mappings(found))
@@ -4127,7 +4801,9 @@ mod installed_native_fixture {
                     },
                     #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
                     Case::GitHubPreflightConnect | Case::GitHubPreflight | Case::GitHubPreflightPending
-                        | Case::GitHubPreflightRevocation | Case::GitHubPreflightCollision => {},
+                        | Case::GitHubPreflightRevocation | Case::GitHubPreflightCollision
+                        | Case::GitHubReleaseConnect | Case::GitHubRelease | Case::GitHubReleaseNormalPending
+                        | Case::GitHubReleasePending | Case::GitHubReleaseRevocation => {},
                     #[cfg(all(debug_assertions, feature = "desktop-shell", feature = "custom-protocol"))]
                     Case::SessionObserve | Case::SessionLoss | Case::SessionDeadline => {
                         // Same original child/IO checkpoint, no new owner or clock.
@@ -4200,8 +4876,8 @@ mod tests {
         let (stop, receiver) = watch::channel(false);
         drop(receiver);
         Owner {
-            key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
-            preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, preflight_go_claimed: AtomicBool::new(false),
+            key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None, device_receipt: None,
+            preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, input_receipt: None, input_context: None, runner_receipt: None, runner_control: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -4334,9 +5010,12 @@ mod tests {
     fn closed_profile_changes_only_the_private_channel_bound() {
         assert_eq!(Profile::Passive(Method::Capabilities).stdout_limit(), protocol::RESPONSE_LIMIT);
         assert_eq!(Profile::Passive(Method::EnvironmentRequirements).stdout_limit(), 64 * 1024);
+        assert_eq!(Profile::Passive(Method::MetadataValidate).stdout_limit(), 256 * 1024 + 4096);
         assert_eq!(Profile::Passive(Method::MetadataTextObserve).stdout_limit(), 2 * 1024 * 1024);
         assert_eq!(Profile::Passive(Method::MetadataTextValidate).stdout_limit(), 2 * 1024 * 1024);
         assert_eq!(Profile::GitHubReadOnly.stdout_limit(), 64 * 1024);
+        assert_eq!(Profile::GitHubDevice(device_protocol::Step::Start).stdout_limit(), 64 * 1024);
+        assert_eq!(Profile::GitHubDevice(device_protocol::Step::Poll).stdout_limit(), 64 * 1024);
         assert_eq!(protocol::STDERR_LIMIT, 64 * 1024);
         assert_eq!(ACTIVE_LIMIT, 2);
         assert_eq!(OPERATION_TIME, Duration::from_secs(10));

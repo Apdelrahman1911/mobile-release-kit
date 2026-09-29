@@ -13,6 +13,67 @@ function ActionHelp({ state, id, onHelp }: { state: MetadataTextState; id: Metad
   const help = state.help?.actions.find((action) => action.id === id);
   return help ? <HelpButton content={help} onHelp={onHelp} /> : null;
 }
+const LOCALE_CHECK_HELP: HelpContent = {
+  label: 'Check all saved public text', requiredness: 'optional',
+  requiredWhen: 'Before preparing Store metadata for your enabled platforms and saved locales.',
+  what: 'Reads the required public text in every saved locale, then asks the core to check its format. Unsaved text drafts are not included.',
+  why: 'Finds missing public copy and text corrections without manually loading every locale.',
+  where: 'Configure enabled platforms and locale lists above, save settings, then Refresh the project. Use Edit this locale and Load public text to fix a reported field.',
+  format: 'Checks at most 250 locales per platform, one request at a time. Stop prevents the next request and waits for the current one; it does not undo or retry anything.',
+  failure: 'An incomplete check is not a pass. Correct the reported problem and explicitly check again. Images, optional/private text, Android changelogs and full metadata/Store readiness are not checked.',
+};
+function MetadataLocaleChecks({ state, controller, onHelp, onSelected }: {
+  state: MetadataTextState; controller: MetadataTextEditController; onHelp: (help: HelpContent) => void; onSelected: () => void;
+}) {
+  const id = useId(), report = state.localeChecks, reason = controller.checkSavedLocalesReason();
+  const current = controller.savedLocaleChecksCurrent(), progress = report?.current;
+  const locale = progress && report ? report.binding.choices[progress.index] : null;
+  const stops = { user: 'Stopped at your request.', 'context-changed': 'The original project, service or operation context changed.',
+    'time-limit': 'The two-minute scheduling limit was reached.', failed: 'The original read or validation could not be accepted.' };
+  const label = !report ? 'Not checked' : report.active ? report.stopReason || !current ? 'Stopping' : 'Checking' :
+    !current ? 'Earlier check' : report.complete ? 'Checks complete' : 'Incomplete';
+  return <section className="card metadata-locale-checks" aria-labelledby={id + '-title'}>
+    <SectionHeading title="Check saved text across locales" description="Required public text only, across every enabled saved locale. Unsaved text drafts are excluded; nothing is changed or sent to a Store.">
+      <Badge tone={report?.active ? 'info' : report && (!current || !report.complete) ? 'warning' : 'neutral'}>{label}</Badge>
+    </SectionHeading>
+    <h3 id={id + '-title'} className="sr-only">Saved required public locale text checks</h3>
+    <div className="button-row"><button type="button" className="button secondary" disabled={reason !== null} aria-describedby={id + '-reason'}
+      onClick={() => void controller.checkSavedLocales()}>Check all saved public text</button><HelpButton content={LOCALE_CHECK_HELP} onHelp={onHelp} />
+      {report?.active && <button type="button" className="button secondary" disabled={report.stopReason !== null || !current} onClick={() => controller.stopSavedLocales()}>Stop checking</button>}
+    </div>
+    <p id={id + '-reason'} className="save-note">{reason ?? 'Uses the saved project configuration and existing bounded core readers. No configured project commands, native build tools or Store services are run.'}</p>
+    {report && <>
+      <p role="status"><strong>{report.binding.projectName}</strong> · {report.results.length} / {report.binding.choices.length} locales checked · {report.binding.choices.length - report.results.length} remaining.
+        {locale && <> {progress?.step === 'observe' ? 'Reading' : 'Validating'} {locale.platform} / {locale.locale}.</>}
+        {report.active && (report.stopReason || !current) && ' Waiting for the original pending request; no further locale request will start.'}</p>
+      <progress value={report.results.length} max={report.binding.choices.length} aria-label="Saved public locales checked" />
+      {report.stopReason && <p className="review-caution">{stops[report.stopReason]} No complete current result. Rows below are retained observations; remaining locales, if any, were not checked.</p>}
+      {!current && <p className="save-note">Earlier context only. These observations cannot be used as a current saved-text result. Your text drafts and comparison baselines were kept.</p>}
+      {report.error && <ErrorNotice error={report.error} title="Saved public-text checks are incomplete" />}
+      {report.results.map((row) => {
+        const missing = row.baseline.filter((field) => field.state === 'absent').length;
+        const valid = !missing && row.validation.valid, editReason = controller.checkedLocaleReason(row.context.key);
+        return <details className="metadata-locale-result" key={row.context.key}><summary>{row.context.platform} / {row.context.locale} · <Badge tone={valid ? 'info' : 'warning'}>
+          {missing ? missing + ' required files missing' : valid ? 'Required text format-valid' : 'Text corrections needed'}</Badge></summary>
+          <ul className="issues">{row.validation.fields.map((field, index) => {
+            const guide = state.help?.fields.find((item) => item.platform === row.context.platform && item.id === field.id);
+            const absent = row.baseline[index]?.state === 'absent';
+            return <li key={field.id}><Badge tone={absent || !field.valid ? 'warning' : 'neutral'}>{absent ? 'Missing file' : field.valid ? 'Format-valid' : 'Correct text'}</Badge>
+              <div><strong>{guide?.label ?? field.id}</strong>{guide && <HelpButton content={guide} onHelp={onHelp} />}
+                <p>{absent ? 'Add this required public field using the locale text editor.' : 'Core count: ' + field.characterCount + ' / ' + field.limit + ' Unicode characters.'}</p>
+                {field.issues.map((issue) => <p key={issue.code}>{issue.message}</p>)}</div></li>;
+          })}</ul>
+          <button type="button" className="button small secondary" disabled={editReason !== null} onClick={() => {
+            if (controller.selectCheckedLocale(row.context.key)) onSelected();
+          }}>Edit this locale</button>
+          <p className="save-note">{editReason ?? 'Selects the existing editor only. Load public text, review changes and confirm Save separately; no draft is overwritten.'}</p>
+        </details>;
+      })}
+    </>}
+    <p className="subtle-note">Independent saved-file observations, not an atomic snapshot. Check again after changing files. “Checks complete” does not mean every field passed. Images, optional text, private App Review/TestFlight data, build-selected Android release notes, hidden/unconfigured files and whole-metadata/Store readiness remain unchecked.</p>
+  </section>;
+}
+
 function RawText({ file, side }: { file: MetadataPreparedFile; side: 'before' | 'after' }) {
   const value = side === 'before' ? file.before.state === 'present' ? file.before : null : file.after;
   return <section className="metadata-raw"><h4>{side === 'before' ? 'Original bytes' : 'Reviewed replacement bytes'}</h4>
@@ -169,7 +230,7 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
   state: MetadataTextState; controller: MetadataTextEditController; session: ProjectSession | null;
   onShowProject: (projectId: string, key?: string) => void; onHelp: (help: HelpContent) => void;
 }) {
-  const id = useId(); const entry = controller.selectedEntry();
+  const id = useId(), contextSelect = useRef<HTMLSelectElement>(null); const entry = controller.selectedEntry();
   const [discard, setDiscard] = useState<{ binding: MetadataDiscardBinding; action: 'reset' | 'latest' | 'forget'; label: string } | null>(null);
   const [retainedReview, setRetainedReview] = useState<MetadataRetainedDraftReview | null>(null);
   const [retainedNotice, setRetainedNotice] = useState<string | null>(null);
@@ -185,7 +246,7 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
       <SectionHeading title="2. Edit one locale’s public text" description="Load the required three Android or five iOS text files from the saved configuration. Text drafts are separate from the configuration form above."><Badge>{state.mode === 'preview' ? 'Browser preview · unavailable' : 'Selected text only'}</Badge></SectionHeading>
       <h3 id={`${id}-title`} className="sr-only">Configured public locale text</h3>
       <p className="metadata-public-note">Public Store copy only. Never paste credentials, private review contacts, demo accounts or TestFlight notes. Secret-pattern scanning is a heuristic, not proof that arbitrary prose is secret-free. Text stays in memory, never browser storage or telemetry.</p>
-      <div className="metadata-context-row"><label htmlFor={`${id}-context`}>Saved platform / locale</label><select id={`${id}-context`} value={state.selectedKey ?? ''} disabled={!session || !state.choices.length && !oldContexts.length} onChange={(event) => controller.selectContext(event.target.value)}>
+      <div className="metadata-context-row"><label htmlFor={`${id}-context`}>Saved platform / locale</label><select ref={contextSelect} id={`${id}-context`} value={state.selectedKey ?? ''} disabled={!session || !state.choices.length && !oldContexts.length} onChange={(event) => controller.selectContext(event.target.value)}>
         <option value="" disabled>No enabled configured locale</option><optgroup label="Current saved configuration">{state.choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.platform} / {choice.locale}</option>)}</optgroup>
         {oldContexts.length > 0 && <optgroup label="Retained earlier contexts · not retargeted">{oldContexts.map((item) => <option key={item.context.key} value={item.context.key}>{item.context.platform} / {item.context.locale} · earlier configuration {item.context.configBaselineGeneration}</option>)}</optgroup>}
       </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load public text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
@@ -226,6 +287,7 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
       </details>}
     </section>
     <MetadataTextSave state={state} controller={controller} detailed onShowProject={onShowProject} onHelp={onHelp} />
+    <MetadataLocaleChecks state={state} controller={controller} onHelp={onHelp} onSelected={() => contextSelect.current?.focus()} />
     {retained.length > 0 && <details className="card metadata-retained"><summary>Retained locale text · {retained.length} / 32 bundles · {(metadataCacheBytes(state.entries) / 1024 / 1024).toFixed(2)} / 8 MiB</summary>
       <p>Refresh, project switches and locale removal never evict these drafts or move their text. To reuse an earlier draft, first select and load its same project, metadata root, platform and locale under the current saved configuration above. Then review its retained changes below; conflicting fields are never merged or forced.</p>
       <p>Using a retained draft is not a save or transaction recovery. Closing the app loses all in-memory text; no automatic persistence or cache eviction is used.</p>

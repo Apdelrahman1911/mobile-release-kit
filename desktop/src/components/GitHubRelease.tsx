@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useId, useRef } from 'react';
 import type { HelpContent } from '../types.ts';
 import type { GitHubReleaseController } from '../githubReleaseController.ts';
 import type { GitHubReleasePlatform, GitHubReleaseStage, GitHubReleaseView } from '../githubReleaseTypes.ts';
@@ -6,7 +6,7 @@ import { GITHUB_RELEASE_REASON_HELP } from '../githubReleaseProtocol.ts';
 import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
-const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'run' | 'recovery' | 'consent' | 'pending', HelpContent> = {
+const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'run' | 'recovery' | 'consent' | 'pending' | 'recoveryCopy', HelpContent> = {
   stage: { label: 'Release step', requiredness: 'required', requiredWhen: 'For every workflow review.',
     what: 'The existing protected release workflow to request for one platform.',
     why: 'A candidate builds once; later steps reuse its authenticated release evidence rather than rebuilding a different artifact.',
@@ -47,6 +47,12 @@ const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'ru
     where: 'Use the original failed workflow’s retained recovery evidence and its evidence-producing run ID.',
     format: 'Enable recovery, enter that original run ID, source and version. Optional predecessor IDs, if supplied, must also be the original producers.',
     failure: 'This is not permission to retry blindly or undo effects. Advanced Apple ambiguous-operation confirmation grants are not available in this UI; the existing core will refuse when they are required.' },
+  recoveryCopy: { label: 'Copy request declarations to recovery', requiredness: 'optional', requiredWhen: 'After assessing an exact original run that has finished.',
+    what: 'Copies this request’s saved choices into the recovery form. Nothing is sent or retried.',
+    why: 'Keeps the original source, version and known producer IDs together instead of recopying them by hand.',
+    where: 'Load this project’s original requests, then Track or Reconcile the exact run. Compare its retained release evidence before requesting recovery.',
+    format: 'Click Copy declarations to recovery form. This replaces only release-form inputs and clears previous approval; original records stay intact.',
+    failure: 'A finished run is not authenticated evidence or permission to retry. An existing original recovery producer is preserved, not replaced with a later dispatch. Review the fields and Prepare again.' },
   consent: { label: 'One-use Store-impacting workflow confirmation', requiredness: 'required', requiredWhen: 'After a successful Prepare, before Dispatch.',
     what: 'Permission to submit one exact protected release workflow that can sign, upload, change testing state or submit for review.',
     why: 'These are real remote effects, unlike offline checks. The short-lived native review is consumed once even if the acknowledgement is lost.',
@@ -70,7 +76,7 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
   state: GitHubReleaseView; controller: GitHubReleaseController; onHelp: (help: HelpContent) => void;
   compact?: boolean; onShow?: () => void; onGitHub?: () => void;
 }) {
-  const id = useId(), status = state.status, op = status?.operation, prepared = controller.currentPrepared();
+  const id = useId(), releaseStep = useRef<HTMLSelectElement>(null), status = state.status, op = status?.operation, prepared = controller.currentPrepared();
   const reason = controller.startReason(), prepareReason = controller.prepareReason(), dispatchReason = controller.dispatchReason();
   const original = state.stage !== null && (state.stage !== 'candidate' || state.recovery);
   const effects = state.stage && state.platform ? EFFECTS[state.stage][state.platform] : null;
@@ -98,7 +104,7 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
       </div></div>
       <h3>1. Choose one release step</h3>
       <div className="field-label-row"><label htmlFor={`${id}-stage`}>Release step</label><Badge>Required</Badge><HelpButton content={HELP.stage} onHelp={onHelp} /></div>
-      <select id={`${id}-stage`} value={state.stage ?? ''} onChange={(event) => controller.setStage(event.target.value === '' ? null : event.target.value as GitHubReleaseStage)}>
+      <select ref={releaseStep} id={`${id}-stage`} value={state.stage ?? ''} onChange={(event) => controller.setStage(event.target.value === '' ? null : event.target.value as GitHubReleaseStage)}>
         <option value="">Choose a release step…</option><option value="candidate">Internal candidate · build once</option><option value="external-testing">External testing · reuse candidate</option><option value="production-submit">Production submission · draft / manual release</option>
       </select>
       <div className="field-label-row"><label htmlFor={`${id}-platform`}>Release platform</label><Badge>Required</Badge><HelpButton content={HELP.platform} onHelp={onHelp} /></div>
@@ -157,12 +163,20 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
       <div className="inline-heading"><h3>4. Original requests and observations</h3><HelpButton content={HELP.pending} onHelp={onHelp} /></div>
       <button type="button" className="button secondary" disabled={reason !== null} onClick={() => controller.loadPending()}>Load this project’s release requests · local only</button>
       {status?.pending.length === 0 && <p className="save-note">No record is currently displayed. This does not prove that no remote release or Store effect exists.</p>}
-      {status?.pending.map((record) => <article className="github-environment" key={record.prepared.target.marker}>
-        <h4>{EFFECTS[record.prepared.target.selection.stage].title} · {record.prepared.target.platform}</h4>
-        <p className="save-note">{record.prepared.target.repository} · {record.prepared.target.branch}<br />Current dispatch source <code>{record.prepared.sourceSha}</code><br />Request <code>{record.prepared.displayTitle}</code><br />Run {record.runId ?? 'not yet resolved'} · original attempt 1.</p>
-        <button type="button" className="button small secondary" disabled={controller.recordReason(record) !== null} onClick={() => controller.observe(record)}>{record.runId === null ? 'Reconcile exact request · read GitHub' : 'Track original run · read GitHub'}</button>
-        {controller.recordReason(record) && <p className="save-note">{controller.recordReason(record)}</p>}
-      </article>)}
+      {status?.pending.map((record) => {
+        const copyReason = controller.recoveryPrefillReason(record);
+        return <article className="github-environment" key={record.prepared.target.marker}>
+          <h4>{EFFECTS[record.prepared.target.selection.stage].title} · {record.prepared.target.platform}</h4>
+          <p className="save-note">{record.prepared.target.repository} · {record.prepared.target.branch}<br />Current dispatch source <code>{record.prepared.sourceSha}</code><br />Request <code>{record.prepared.displayTitle}</code><br />Run {record.runId ?? 'not yet resolved'} · original attempt 1.</p>
+          <div className="button-row">
+            <button type="button" className="button small secondary" disabled={controller.recordReason(record) !== null} onClick={() => controller.observe(record)}>{record.runId === null ? 'Reconcile exact request · read GitHub' : 'Track original run · read GitHub'}</button>
+            <button type="button" className="button small secondary" disabled={copyReason !== null} aria-describedby={`${id}-copy-${record.prepared.target.marker}`}
+              onClick={() => { if (controller.prefillRecovery(record)) releaseStep.current?.focus(); }}>Copy declarations to recovery form</button>
+            <HelpButton content={HELP.recoveryCopy} onHelp={onHelp} />
+          </div>
+          <p className="save-note" id={`${id}-copy-${record.prepared.target.marker}`}>{copyReason ?? 'Local only. Replaces release-form inputs and clears approval. This is not authenticated evidence or permission to retry; assess the retained original evidence before Prepare.'}</p>
+        </article>;
+      })}
       {status?.run && <article className="github-environment" aria-label="Original protected workflow observation"><h4>Run {status.run.id} · attempt 1</h4><Badge tone={status.run.conclusion === 'failure' ? 'danger' : 'info'}>{status.run.status} · {status.run.conclusion ?? 'not concluded'}</Badge>
         <p className="review-caution">This is a GitHub workflow observation, not authenticated artifact evidence, complete release history or production readiness. Reports and private Store data are not downloaded by this view.</p>
         <p className="save-note">Observed <time dateTime={status.run.observedAt}>{status.run.observedAt}</time>.</p>

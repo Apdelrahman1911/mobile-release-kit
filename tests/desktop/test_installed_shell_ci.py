@@ -1053,7 +1053,8 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                     self.assertFalse(root.exists())
 
     def test_same_vm_workflow_requires_original_compile_upload_and_cleanup_handoff(self):
-        workflow = (SOURCE / S.WORKFLOW).read_text()
+        # The separate recovery-negative consumer is not this same-job route.
+        workflow = (SOURCE / S.WORKFLOW).read_text().split("\n  recovery-negative:\n", 1)[0]
         self.assertEqual(workflow.count("uses: actions/checkout@"), 1)
         self.assertNotIn("\n  native:\n", workflow)
         self.assertNotIn("needs.compile", workflow)
@@ -1070,7 +1071,16 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         self.assertIn("steps.compile.outputs.shell_transport == 'actions-artifact-v1'", download)
         compiler = workflow.split("      - name: Compile the normal shell and separate observer once without executing either", 1)[1].split("      - name:", 1)[0]
         self.assertIn("MRK_INSTALLED_SHELL_TRANSPORT: actions-artifact-v1", compiler)
-        self.assertIn("MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' && 'ordinary21-v1' || '' }}", compiler)
+        scope = ("MRK_INSTALLED_SHELL_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-installed-shell' "
+                 "&& 'session-apple-review1-v1' || github.ref == 'refs/heads/verify/desktop-project-recovery' "
+                 "&& 'project-recovery-native3-v1' || github.ref == 'refs/heads/verify/desktop-installed-github-release' "
+                 "&& 'github-release-native3-v1' || '' }}")
+        self.assertIn(scope, compiler)
+        self.assertEqual(workflow.count(scope), 2)  # Job admission and original compiler agree.
+        self.assertIn("if scope != 'session-apple-review1-v1' or transport != 'actions-artifact-v1':", native)
+        tools = workflow.split("      - name: Prepare the fixed JDK17 pair only on this disposable shell runner", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell' "
+                      "&& env.MRK_INSTALLED_SHELL_SCOPE != 'session-apple-review1-v1'", tools)
         self.assertIn("MRK_INSTALLED_SHELL_CASE: observe", native)
         # These ordering checks supplement the actual cleanup/transport controls
         # above; the real owner/native path still requires hosted verification.
@@ -2619,6 +2629,77 @@ class InstalledWorkflowApplyReceiptContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lifecycle.shell_workflow_receipt(malformed)
 
+    def test_canonical_update_preview_is_closed_without_apply_and_old_pin_conflict_receipts_are_rejected(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        current = lifecycle.SHELL_WORKFLOW_RECEIPT
+        self.assertEqual(current["requests"], {"open": 4, "prepare": 4, "apply": 2, "close": 1, "configuration": [0, 0, 0, 0]})
+        self.assertEqual(current["reviews"], {"fullText": True, "canonicalUpdates": 4, "updateClosedWithoutApply": True, "configBlocked": 4})
+        self.assertEqual(current["outcomes"][1], ["not_started", "not_created", "settled", "cancelled"])
+        self.assertEqual(current["nativeReasons"], ["none", "discarded", "none", "shutdown"])
+        self.assertEqual(current["originals"]["writerFrames"], [3, 2, 3, 2])
+        self.assertEqual(current["originals"]["stdoutFrames"], [3, 3, 3, 3])
+        self.assertEqual(current["confirmation"], {"opened": [2, 0, 1, 0], "keepReviewing": True, "acknowledged": 2})
+        # Exact historical changed-pin conflict receipt, not a new native result.
+        # A canonical update now has a retained plan and explicit UI Close; a
+        # genuine customized-newline conflict remains a separate hosted case.
+        historical = deepcopy(current)
+        historical["requests"]["close"] = 0
+        historical["reviews"] = {"fullText": True, "conflictNoToken": True,
+                                  "conflictReason": "existing_workflow_differs", "configBlocked": 4}
+        historical["outcomes"][1][-1] = "none"
+        historical["nativeReasons"][1] = "none"
+        historical["originals"]["stdoutFrames"][1] = 2
+        with self.assertRaises(ValueError):
+            lifecycle.shell_workflow_receipt(lifecycle.canonical(historical))
+        for target in ("case", "combined", "both"):
+            changed = closed_project_draft_data(lifecycle)
+            if target in ("case", "both"):
+                changed["cases"]["workflow-apply"]["workflowApply"] = deepcopy(historical)
+            if target in ("combined", "both"):
+                changed["workflowApply"]["native"] = deepcopy(historical)
+            with self.subTest(target=target), self.assertRaises((S.D.Refused, ValueError)):
+                S.shell_project_draft_observation(changed, lifecycle)
+
+    def test_update_preview_uses_native_before_after_text_and_the_existing_ui_close_route(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        review = source.split("fn workflow_review_sample(", 1)[1].split("fn workflow_original_final(", 1)[0]
+        self.assertIn("workflow::Action::Update", review)
+        self.assertIn("let previous = file.previous.as_ref()?;", review)
+        self.assertIn("previous.content != original", review)
+        self.assertIn("previous.byte_length as usize != size", review)
+        self.assertIn("previous.sha256 != original_digest", review)
+        self.assertIn("content.replace(WORKFLOW_UPDATE_SHA, TOOLKIT_SHA) != original", review)
+        self.assertIn("section(file.previous.as_ref()?.content.as_str(), '-')", review)
+        self.assertIn("Full before / after text", review)
+        self.assertIn("original and proposed diff", review)
+        self.assertNotIn("workflow_conflict_sample", source)
+        hook = source.split("pub(super) fn workflow_close_request(&self)", 1)[1].split("pub(super) fn workflow_status(", 1)[0]
+        self.assertIn("r.workflow.requests != [2, 2, 1, 0]", hook)
+        self.assertIn("s.review_visible && s.live_review()", hook)
+        self.assertIn("s.confirmation_opened == 0", hook)
+        self.assertIn("!s.apply_requested && !s.apply_returned && !s.close_requested", hook)
+        self.assertIn("r.workflow.sessions[1].close_requested = true", hook)
+        state = source.split("fn workflow_dom(", 1)[1].split("pub(super) fn path_request(", 1)[0]
+        self.assertIn("WorkflowStep::Start(index) => WorkflowStep::OpenText(index)", state)
+        self.assertIn("else if index == 1 { WorkflowStep::Close }", state)
+        self.assertIn("WorkflowStep::Close => WorkflowStep::ReadResult(1)", state)
+        script = source.split("fn workflow_script(", 1)[1].split("fn script(", 1)[0]
+        close = script.split('WorkflowStep::Close => r#"', 1)[1].split('WorkflowStep::ReadResult(index)', 1)[0]
+        self.assertIn("Close workflow review / keep draft", close)
+        self.assertIn("rows[0].click()", close)
+        self.assertNotIn("controller.", close)
+        self.assertIn("e.textContent.length>4096", script)
+        self.assertIn("e.textContent.length>6038", script)
+        self.assertIn("content:diffText(pre.querySelector('code'))", script)
+        ui = (SOURCE / "desktop/src/components/GitHubWorkflowApply.tsx").read_text()
+        for literal in ("Create absent or update canonical callers only", "Updates retain original permissions.",
+                        "Full before / after text", "Update canonical caller",
+                        "I reviewed all four paths and complete before/after text. This only creates, updates or preserves local callers; it does not save configuration, contact GitHub or execute a release."):
+            self.assertIn(literal, source)
+            self.assertIn(literal, ui)
+        # Source correspondence only. Real native preview/discard, update Apply
+        # and rollback remain distinct evidence obligations.
+
     def test_each_workflow_receipt_leaf_requires_exact_types_on_both_projections(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         expected = closed_project_draft_data(lifecycle)
@@ -2877,6 +2958,166 @@ class InstalledVersionSaveReceiptContracts(unittest.TestCase):
                 else: row["qualified"] = True
                 with self.subTest(phase=phase, change=change), self.assertRaises((S.D.Refused, ValueError, KeyError)):
                     S.shell_project_draft_observation(changed, lifecycle)
+
+
+def closed_apple_review_observation_data(lifecycle):
+    """Invented receipt/export DATA, never an installed-native result."""
+    case = "session-apple-review"; selection = lifecycle.shell_apple_review_selection()
+    receipt = deepcopy(lifecycle.SHELL_SESSION_RECEIPTS[case])
+    maps = [{"role": role, "path": "/inert/" + role, "deviceMajor": 8, "deviceMinor": 2, "inode": index + 1}
+            for index, role in enumerate(sorted(lifecycle.PRIVATE_SONAMES | {"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}))]
+    fixture = {"fixture": "apple-review-session-v1", "case": case, "rootRetained": True, "originalsAccounted": True,
+        "projectUnchanged": True, "sourcesOutsideProject": True, "noUnexpectedEntries": True, "noPendingState": True,
+        "beforeCount": 6, "afterCount": 6, "mutations": [],
+        "before": {"size": 2300, "sha256": "7" * 64}, "after": {"size": 2300, "sha256": "7" * 64}}
+    cases = {case: {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                    "maps": [deepcopy(maps), deepcopy(maps)], "sessionInputs": receipt}}
+    names = {"lifecycle-" + name for name in lifecycle.public_files({"shell": {"appleReview": selection}})
+             | {"client.stdout", "client.stderr"}}
+    files = {name: {"path": name, "size": 0, "sha256": hashlib.sha256(b"").hexdigest()} for name in sorted(names)}
+    for phase in ("before", "after"):
+        name = "lifecycle-shell-" + case + "-" + phase + ".json"; files[name] = {"path": name, **fixture[phase]}
+    raw = S.D.canonical(cases)
+    files["lifecycle-shell-cases.json"] = {"path": "lifecycle-shell-cases.json", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    return {"state": "installed-apple-review-session-observed", "appleReview": selection, "productQualified": False,
+        "packageLifecycleQualified": False, "shellPackageBuilt": False, "ordinaryActivation": False,
+        "cases": cases, "sessionInputs": {case: {"native": deepcopy(receipt), "fixture": fixture}}, "files": list(files.values())}
+
+
+class InstalledAppleReviewContracts(unittest.TestCase):
+    """Reuse the existing pure admission/export seams, not another runner."""
+
+    def setUp(self):
+        self.lifecycle = S.local("ubuntu_publication_lifecycle"); self.selection = self.lifecycle.shell_apple_review_selection()
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.guards = []
+        for module, names in ((self.lifecycle, ("shell_android_materials", "shell_android_compile_environment",
+                "shell_android_publication_data", "service_argv", "verify_service_result")),
+                (S, ("Check", "prepare", "resumed_preparation", "package_inputs", "installed_u_inputs", "shell_native_inputs",
+                     "installed_shell_os_inputs", "shell_tools_inputs_for_observation"))):
+            for name in names:
+                self.guards.append(self.stack.enter_context(patch.object(module, name,
+                    side_effect=AssertionError("No owner, process, build, native or unrelated preparation in scalar DATA tests"))))
+        self.guards.append(self.stack.enter_context(patch.object(S.subprocess, "Popen", side_effect=AssertionError("No subprocess"))))
+
+    def tearDown(self):
+        for guard in self.guards: guard.assert_not_called()
+
+    def environment(self):
+        return {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+            "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.SHELL_REF, "GITHUB_JOB": "compile", "MRK_UBUNTU_PUBLICATION_VERIFY": "1",
+            "GITHUB_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "MRK_INSTALLED_SHELL_CASE": "compile",
+            "MRK_INSTALLED_SHELL_SCOPE": "session-apple-review1-v1", "MRK_INSTALLED_SHELL_TRANSPORT": "actions-artifact-v1",
+            "MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256": hashlib.sha256((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()).hexdigest()}
+
+    def artifact(self, work, missing=None):
+        env, elf, inputs = transport_data(work); artifact = work / "admitted-shell"
+        for name in ("source.json", "compiler.json", "result.json"):
+            record = S.D.decode((artifact / name).read_bytes())
+            if name != missing: record["appleReview"] = deepcopy(self.selection)
+            if name != "source.json": record.update(androidBuildMaterials=None, androidBuildBindings={}, androidBuildPublication=None)
+            (artifact / name).write_bytes(S.D.canonical(record))
+        roster = S.D.decode((artifact / "shell-roster.json").read_bytes())
+        roster["files"] = [S.D.file_record(path) for path in sorted(artifact.iterdir()) if path.name != "shell-roster.json"]
+        raw = S.D.canonical(roster); (artifact / "shell-roster.json").write_bytes(raw)
+        return {**self.environment(), **env, "MRK_INSTALLED_SHELL_ROSTER_SHA256": hashlib.sha256(raw).hexdigest()}, elf, inputs
+
+    def test_source_scope_requires_explicit_profile_and_existing_artifact_route(self):
+        env = self.environment()
+        with patch.dict(S.os.environ, env, clear=True):
+            self.assertEqual(S.installed_shell_scope(self.lifecycle), self.selection)
+            self.assertEqual(S.preparation_route()["appleReview"], self.selection)
+        for change in ({"MRK_INSTALLED_SHELL_SCOPE": "session-apple-review"}, {"MRK_INSTALLED_SHELL_TRANSPORT": "android-same-job-local-v1"},
+                       {"MRK_INSTALLED_SHELL_LOCAL_TRANSPORT_SHA256": "1" * 64}, {"GITHUB_REF": S.SHELL_GITHUB_REF},
+                       {"GITHUB_REF": S.SHELL_RECOVERY_REF}, {"GITHUB_REF": "refs/heads/main"}):
+            with self.subTest(change=change), patch.dict(S.os.environ, {**env, **change}, clear=True), self.assertRaises(S.D.Refused):
+                S.installed_shell_scope(self.lifecycle)
+        for absent in ({}, {"MRK_INSTALLED_SHELL_SCOPE": ""}):
+            with patch.dict(S.os.environ, absent, clear=True): self.assertIsNone(S.installed_shell_scope(self.lifecycle))
+        self.assertEqual(S.installed_shell_scope_fields(self.selection, self.lifecycle), {"appleReview": self.selection})
+        for wrong in ({**self.selection, "cases": []}, {**self.selection, "cases": ["session-ios-firebase"]},
+                      {**self.selection, "cases": ["session-apple-review", "session-ios-firebase"]},
+                      {**self.selection, "androidExecution": 0}, {**self.selection, "remainingRequiredCases": []}):
+            with self.subTest(wrong=wrong), self.assertRaises(S.D.Refused): S.installed_shell_scope_fields(wrong, self.lifecycle)
+
+    def test_closed_source_compiler_result_contracts_cannot_mix_or_drop_scopes(self):
+        record = {"appleReview": deepcopy(self.selection), "androidBuildMaterials": None,
+                  "androidBuildBindings": {}, "androidBuildPublication": None}
+        S.installed_shell_scope_record(record, self.lifecycle, self.selection, android_contract=True)
+        for key, item in (("appleReview", None), ("appleReview", self.lifecycle.shell_ordinary_selection()),
+                          ("ordinary21", {}), ("projectRecovery", {}), ("githubPreflight", {}), ("githubRelease", {}),
+                          ("remainingRequiredCases", []), ("androidBuildMaterials", {}), ("androidBuildBindings", []),
+                          ("androidBuildPublication", {}), ("androidPreparation", None), ("localTransport", {})):
+            with self.subTest(key=key), self.assertRaises(S.D.Refused):
+                S.installed_shell_scope_record({**record, key: item}, self.lifecycle, self.selection, android_contract=True)
+        for key in record:
+            changed = deepcopy(record); changed.pop(key)
+            with self.subTest(missing=key), self.assertRaises(S.D.Refused):
+                S.installed_shell_scope_record(changed, self.lifecycle, self.selection, android_contract=True)
+        with self.assertRaises(S.D.Refused): S.installed_shell_scope_record(record, self.lifecycle, None)
+        with self.assertRaises(S.D.Refused): S.installed_shell_scope_record(record, self.lifecycle, self.lifecycle.shell_ordinary_selection())
+        for reader, name, select in ((S.installed_shell_preflight_record, "githubPreflight", self.lifecycle.shell_github_preflight_selection()),
+                                     (S.installed_shell_release_record, "githubRelease", self.lifecycle.shell_github_release_selection())):
+            with self.subTest(other=name), self.assertRaises(S.D.Refused): reader({**record, name: select}, self.lifecycle, select)
+
+    def test_actual_artifact_admission_binds_all_three_records_without_android_preparation(self):
+        for missing in (None, "source.json", "compiler.json", "result.json"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                work = Path(temporary); env, elf, inputs = self.artifact(work, missing)
+                with patch.dict(S.os.environ, env, clear=True), patch.object(S, "elf_dependencies", return_value=elf), \
+                     patch.object(S, "shell_source_manifest", return_value=inputs):
+                    if missing is not None:
+                        with self.assertRaises(S.D.Refused): S.installed_shell_candidate(work, "a" * 40, lifecycle=self.lifecycle, ordinary=self.selection)
+                    else:
+                        binaries, compiler, _, digest, producer, artifact = S.installed_shell_candidate(work, "a" * 40,
+                            lifecycle=self.lifecycle, ordinary=self.selection)
+                        self.assertEqual(set(binaries), {"normal", "observer"})
+                        self.assertEqual((compiler["appleReview"], digest, producer, artifact),
+                                         (self.selection, env["MRK_INSTALLED_SHELL_ROSTER_SHA256"], "1", "17"))
+                        with self.assertRaises(S.D.Refused): S.installed_shell_candidate(work, "a" * 40, lifecycle=self.lifecycle)
+
+    def test_singleton_consumer_cannot_relabel_scopes_maps_finality_or_original_exports(self):
+        case = "session-apple-review"; original = closed_apple_review_observation_data(self.lifecycle)
+        result = S.shell_apple_review_observation(original, self.lifecycle, self.selection)
+        self.assertEqual(result["cases"], [case]); self.assertIs(result["qualified"], False)
+        self.assertEqual(set(original["sessionInputs"]), {case}); self.assertIs(result["ordinaryActivation"], False)
+        with self.assertRaises(S.D.Refused): S.shell_project_draft_observation(original, self.lifecycle)
+        for fault in ("scope", "case", "ordinary", "family", "activation", "qualification", "file-missing", "file-extra", "file-duplicate", "case-pin",
+                      "receipt", "source-original", "map-missing", "map-role", "map-extra", "map-inode", "fixture-count", "fixture-label", "fixture-pin"):
+            observed = deepcopy(original); record = observed["cases"][case]; pair = observed["sessionInputs"][case]
+            if fault == "scope": observed.pop("appleReview")
+            elif fault == "case": observed["cases"]["session-inputs"] = deepcopy(record)
+            elif fault == "ordinary": observed["ordinary21"] = self.lifecycle.shell_ordinary_selection()
+            elif fault == "family": observed["projectDraft"] = {}
+            elif fault == "activation": observed["ordinaryActivation"] = True
+            elif fault == "qualification": observed["productQualified"] = True
+            elif fault == "file-missing": observed["files"].pop()
+            elif fault == "file-extra": observed["files"].append({"path": "lifecycle-shell-session-inputs.stdout", "size": 0, "sha256": "0" * 64})
+            elif fault == "file-duplicate": observed["files"][-1] = deepcopy(observed["files"][0])
+            elif fault == "receipt":
+                record["sessionInputs"]["behavior"]["privateEmailFormatChecked"] = False
+                pair["native"] = deepcopy(record["sessionInputs"])
+            elif fault == "source-original":
+                record["sessionInputs"]["originals"]["sourceClosed"] = False
+                pair["native"] = deepcopy(record["sessionInputs"])
+            elif fault == "map-missing": record["maps"].pop()
+            elif fault == "map-role": record["maps"][0][0]["role"] = "unexpected"
+            elif fault == "map-extra": record["maps"][0][0]["privateInput"] = "must-not-be-exported"
+            elif fault == "map-inode": record["maps"][0][0]["inode"] = True
+            elif fault == "fixture-count": pair["fixture"]["beforeCount"] = 9
+            elif fault == "fixture-label": pair["fixture"]["fixture"] = "four-kind-session-v1"
+            elif fault == "fixture-pin": pair["fixture"]["after"]["sha256"] = "0" * 64
+            # Keep the synthetic cases pin internally consistent so nested
+            # receipt/map mutations exercise their parser, not only the hash gate.
+            cases_pin = next((row for row in observed["files"] if row["path"] == "lifecycle-shell-cases.json"), None)
+            if cases_pin is not None:
+                raw = S.D.canonical(observed["cases"])
+                cases_pin.update(size=len(raw), sha256="0" * 64 if fault == "case-pin" else hashlib.sha256(raw).hexdigest())
+            with self.subTest(fault=fault), self.assertRaises((S.D.Refused, self.lifecycle.Refused, KeyError)):
+                S.shell_apple_review_observation(observed, self.lifecycle, self.selection)
+        with self.assertRaises(S.D.Refused):
+            S.shell_apple_review_observation(original, self.lifecycle, self.lifecycle.shell_ordinary_selection())
 
 
 class InstalledSessionReceiptContracts(unittest.TestCase):
@@ -3712,7 +3953,7 @@ class InstalledToolsNamespaceContracts(unittest.TestCase):
 
     def test_source_pins_read_only_the_two_fixed_original_bounded_leaves(self):
         self.assertEqual(S.SHELL_TOOLS_NAMESPACE_SOURCES,
-                         {".github/workflows/desktop-ubuntu-publication.yml": 65536, "desktop/tools/ci_ubuntu_publication.py": 1048576})
+                         {".github/workflows/desktop-ubuntu-publication.yml": 96 << 10, "desktop/tools/ci_ubuntu_publication.py": 1048576})
         calls = []
         expected = tools_namespace_source_data()
         def record(path, limit):
@@ -3722,6 +3963,34 @@ class InstalledToolsNamespaceContracts(unittest.TestCase):
         with patch.object(S.D, "file_record", side_effect=record):
             self.assertEqual(S._shell_tools_namespace_sources(), expected)
         self.assertEqual(calls, list(S.SHELL_TOOLS_NAMESPACE_SOURCES.items()))
+
+    def test_workflow_source_size_boundary_is_checked_before_lifecycle_loading(self):
+        self.assertEqual(S.WORKFLOW_SOURCE_LIMIT, 96 << 10)
+        reached = RuntimeError("lifecycle reached after bounded workflow")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow = root / S.WORKFLOW
+            workflow.parent.mkdir(parents=True)
+            with patch.object(S, "SOURCE", root), patch.object(S, "route", return_value="a" * 40), \
+                 patch.dict(S.os.environ, {"MRK_INSTALLED_SHELL_CASE": "compile"}, clear=True), \
+                 patch.object(S, "local", side_effect=reached) as lifecycle:
+                with workflow.open("xb") as created:
+                    created.write(b"#" * S.WORKFLOW_SOURCE_LIMIT)
+                for extra in (0, 1):
+                    with self.subTest(bytes=S.WORKFLOW_SOURCE_LIMIT + extra):
+                        if extra:
+                            with workflow.open("ab") as expanded:
+                                expanded.write(b"#")
+                        lifecycle.reset_mock()
+                        if extra:
+                            with self.assertRaisesRegex(S.D.Refused, "^Nonordinary or oversized DATA file$"):
+                                S.installed_shell_source_admission()
+                            lifecycle.assert_not_called()
+                        else:
+                            with self.assertRaises(RuntimeError) as caught:
+                                S.installed_shell_source_admission()
+                            self.assertIs(caught.exception, reached)
+                            lifecycle.assert_called_once_with("ubuntu_publication_lifecycle")
 
     def test_pre_apt_check_binds_actual_current_namespace_and_never_runs_the_constructor(self):
         env, root, identity, _, files = tools_namespace_data("preserve-create")

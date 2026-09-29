@@ -49,6 +49,17 @@ impl AndroidBuildOwner {
     pub(crate) fn prepare(&self, input: Prepare, registration: u32, project: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
         self.saved.prepare_android(input, registration, project, gate)
     }
+    pub(crate) fn prepare_material(&self, input: Prepare, registration: u32, project: RegisteredRoot, gate: Availability,
+        material: Option<std::sync::Arc<crate::asset_session::AndroidSigningMaterial>>) -> Result<Status, BridgeError> {
+        self.saved.prepare_android_material(input, registration, project, gate, material)
+    }
+    pub(crate) fn prepared_material(&self, operation: &str, generation: &str) -> Result<Option<std::sync::Arc<crate::asset_session::AndroidSigningMaterial>>, BridgeError> {
+        self.saved.prepared_android_material(operation, generation)
+    }
+    pub(crate) fn start_material(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability,
+        material: Option<std::sync::Arc<crate::asset_session::AndroidSigningMaterial>>) -> Result<Admitted, BridgeError> {
+        self.saved.start_android_material(input, admitted_at, registered, gate, material)
+    }
     pub(crate) fn start(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability) -> Result<Admitted, BridgeError> {
         self.saved.start_android(input, admitted_at, registered, gate)
     }

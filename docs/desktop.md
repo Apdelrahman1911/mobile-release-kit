@@ -433,6 +433,56 @@ session acquisition/assessment/storage/assignment gates are unchanged; native
 qualification, unsupported pickers, persistent vault storage, protected service
 checks and releases are not enabled by guidance or pure frontend tests.
 
+### Private Apple review contact and demo login
+
+The guided private-input session includes **Apple review contact** (first name,
+last name, email, phone) and a separate **Apple review demo account** (username,
+password). Choose iOS, External testing or Production preparation, and All
+selected input roles or Store access only. The core selects contact requirements;
+the demo group is required only when the draft's
+`ios.review.demoAccountRequired` setting is true. They are not signing inputs.
+
+Enter the values directly in the existing masked, write-only form. Each field's
+Help button explains what it is, where to obtain it, its requiredness and the
+effect of a wrong value. No JSON/environment file, file picker, terminal command
+or copy into a project folder is needed. Prepare shows only safe field findings;
+Keep and Assign remain separate explicit decisions for the submitted context.
+Replacement never reads old values back into the form. Changed contexts retire
+reviews and assignments, and an uncertain original cleanup blocks further use.
+
+The review contact's email remains private even though the core checks its
+existing syntax rule. Other contact/demo fields receive bounded value admission,
+not a naming rule, phone call or login check. No contact value or demo credential
+is returned in status, displayed in a saved record label, written to the
+repository or sent to a Store by this flow. Labels, where supported, must be
+user-supplied nonsecret descriptions; perfect memory erasure is not promised.
+
+Collection still requires the existing qualified native profile. macOS full/
+store contexts admit these scalar kinds and the recovery-key pair alongside ASC P8; iOS signing rosters and
+Windows availability are unchanged. Encrypted storage is unavailable in this
+build; this slice does not enable a keyring/provider or claim packaged/native
+qualification.
+
+The same preparation and explicit Keep/Assign path includes **Apple operation
+recovery key**: the original retained commitment key plus its matching version.
+Its Help buttons explain where to obtain the pair from the release owner's
+secure backup or secret manager. GitHub cannot reveal a saved secret. The key
+accepts standard base64 decoding to exactly 32 bytes under the existing core
+policy; the version accepts 1–64 ASCII letters, digits, underscores, dots or
+hyphens. The key stays masked and private; the typed version is visible while
+editing, but neither value is read back from a native record.
+
+Do not generate, rotate or substitute a new pair in this session. The unchanged
+core selects the pair for iOS external testing/production and full/store roles,
+independently of a demo login; it is not a signing input. Format validation does
+not prove randomness, retained version correspondence or a match to an unfinished
+operation. Back up the original pair securely before relying on recovery.
+
+This completes only preparation and assignment of these three scalar groups.
+Private review-note editing and authorized Store consumption remain separate
+work. It does not establish that Apple can reach the contact, log in to the app,
+resume an operation or accept a release.
+
 ### Supplied-input credential assessment (no renderer routing)
 
 The R1 pure contract uses exactly:
@@ -462,12 +512,14 @@ are accepted outside that unchanged draft schema.
 | `ios-firebase` | ios | none (`{}`) | Firebase plist projection |
 | `google-wif` | android | `provider`, `serviceAccount` | none; observation must be null |
 | `project-read-token` | project | `token` | none; observation must be null |
+| `apple-review-contact` | ios | `firstName`, `lastName`, `email`, `phone` | none; observation must be null |
+| `apple-review-demo-account` | ios | `username`, `password` | none; observation must be null |
 
 Scalars are null or UTF-8 strings, at most 4,096 decoded bytes each and 65,536
 bytes in aggregate. Null/empty means missing. Nonempty NUL-containing values
 fail value admission, not password verification. Whitespace is not trimmed;
 shared core identifier rules remain unchanged, as do all CLI readers and bool
-policy seams. The closed union currently has at most three scalar companions.
+policy seams. The closed union currently has at most four scalar fields.
 
 File observation null means no submitted selection. Common nonnull variants are
 `{status:"unavailable",reason}` with `not-run`, `incomplete`, `unsupported-format`,
@@ -536,8 +588,10 @@ Presence describes the submitted value/assertion, not actual file existence.
 - Recognized JKS/PFX/CMS/P8 envelopes are at most `configured`. Each file is
   assessed independently of scalar companions: a missing/invalid password or
   identifier never becomes a file/password failure.
-- Scalars use `value-admission` and, for alias/ASC/WIF identifiers only,
-  `identifier-format` with actual `passed`/`failed` outcomes over supplied data.
+- Scalars use `value-admission` and, for alias/ASC/WIF identifiers and the one
+  private review email, `identifier-format` with actual `passed`/`failed`
+  outcomes over supplied data. Email's secret role is unchanged; this scope
+  never claims reachability, a working password or Store access.
 - File rejection checks (`file-nonempty`, `suffix-consistency`, `container-parse`)
   are `asserted-fail`; observed envelope/document checks are `asserted-pass`.
   Pure P8 `ec-p256-identifiers` and Firebase `firebase-shape`/

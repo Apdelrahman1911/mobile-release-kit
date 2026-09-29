@@ -1,4 +1,4 @@
-"""Private one-shot, create-or-exact-preserve editing of four workflow callers.
+"""Private one-shot editing of four fixed, canonical workflow callers.
 
 The passive proposal service supplies bytes, never filesystem authority. Only
 the original workflow-profile lease and its settled scopes can capture/recheck
@@ -8,14 +8,14 @@ configuration save, CLI, credentials, remote setup or dispatch operation.
 Shared configuration-edit helpers retain the concrete native seam, immutable
 snapshots and orthogonal outcome/close handling. Their failure carrier/reason
 enum is unchanged; its exception text is not a workflow UI message. A differing
-workflow is a separate no-token result, not an invented configuration reason.
+noncanonical workflow is a no-token result, not a configuration reason.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
 
 from . import config_edit as _shared
 from .api import _github_setup as _setup
@@ -24,7 +24,7 @@ from .api.contracts import ApiError, GitHubTemplateSet, GitHubToolingReference
 from .config_edit import ConfigEditFailure, CoreEditOutcome
 from .errors import ConfigurationError
 from .init_transaction import TypedEditProfile
-from .workflow_payloads import GITHUB_WORKFLOWS
+from .workflow_payloads import GITHUB_WORKFLOWS, canonical_workflow_reference
 
 if TYPE_CHECKING:
     from .init_workspace_custody import InitRootLease, RootedRevision
@@ -64,9 +64,10 @@ class GeneratedWorkflowView(TypedDict):
 class WorkflowFileView(TypedDict):
     id: WorkflowId
     path: str
-    action: Literal["create", "preserve"]
+    action: Literal["create", "preserve", "update"]
     observed: AbsentWorkflowObservation | PresentWorkflowObservation
     generated: GeneratedWorkflowView
+    previous: NotRequired[GeneratedWorkflowView]
 
 
 class PreparedWorkflowView(TypedDict):
@@ -117,11 +118,12 @@ class WorkflowCheckout(_shared._PrivateAuthority):
 class PreparedWorkflowEdit(_shared._PrivateAuthority):
     """One immutable generated plan bound to its original workflow checkout."""
 
-    __slots__ = ("_identity", "_checkout", "_token", "_payloads", "_view_json", "_state")
+    __slots__ = ("_identity", "_checkout", "_token", "_payloads", "_resource_sha256", "_view_json", "_state")
     _identity: PreparedWorkflowEdit
     _checkout: WorkflowCheckout
     _token: str
     _payloads: tuple[bytes | None, ...]
+    _resource_sha256: str
     _view_json: bytes
     _state: str
 
@@ -260,7 +262,7 @@ def capture_github_workflow_edit(lease: InitRootLease) -> WorkflowCheckout:
         raise ConfigEditFailure(_shared._pure_failure(error)) from None
 
 
-def _proposal(draft: object, repository: object, sha: object) -> dict[str, Any]:
+def _proposal(draft: object, repository: object, sha: object) -> tuple[dict[str, Any], dict[str, bytes]]:
     if type(draft) is not dict:
         _shared._reject("invalid_params")
     try:
@@ -271,7 +273,7 @@ def _proposal(draft: object, repository: object, sha: object) -> dict[str, Any]:
     except (ConfigurationError, ValueError, TypeError, UnicodeError, RecursionError):
         _shared._reject("invalid_params")
     try:
-        result = _setup.propose_github_setup(frozen, repository, sha, None)
+        result, templates = _setup._propose_with_templates(frozen, repository, sha, None)
     except ApiError as error:
         _shared._reject("invalid_params" if error.code == "invalid_params" else "filesystem_error")
     if (type(result) is not dict or type(result.get("schemaVersion")) is not int
@@ -280,15 +282,18 @@ def _proposal(draft: object, repository: object, sha: object) -> dict[str, Any]:
     if result.get("state") == "invalid":
         _shared._reject("invalid_config")
     if (result.get("state") != "proposed" or type(result.get("validation")) is not dict
-            or result["validation"].get("valid") is not True):
+            or result["validation"].get("valid") is not True
+            or type(templates) is not dict or set(templates) != {identity for identity, _ in GITHUB_WORKFLOWS}
+            or any(type(value) is not bytes or not 0 < len(value) <= _setup.MAX_WORKFLOW_BYTES
+                   for value in templates.values())):
         _shared._reject("filesystem_error")
-    return cast(dict[str, Any], result)
+    return cast(dict[str, Any], result), templates
 
 
 def _derive(checkout: WorkflowCheckout, draft: object, repository: object, sha: object
-            ) -> tuple[tuple[bytes | None, ...] | None, bytes]:
+            ) -> tuple[tuple[bytes | None, ...] | None, bytes, str]:
     """None payload tuple means closed conflict data, never a prepared plan."""
-    proposed = _proposal(draft, repository, sha)
+    proposed, templates = _proposal(draft, repository, sha)
     try:
         # Admit only projection/integrity facts here. The shared service alone
         # owns pin grammar, schema policy, packaged resource choice and rendering.
@@ -317,28 +322,35 @@ def _derive(checkout: WorkflowCheckout, draft: object, repository: object, sha: 
                             and row["byteLength"] == len(content) and type(row["sha256"]) is str
                             and row["sha256"] == hashlib.sha256(content).hexdigest())
             observed = _observed(original)
-            if original.data is not None and original.data != content:
+            differs = original.data is not None and original.data != content
+            if differs and canonical_workflow_reference(templates[identity], original.data) is None:
                 conflicts.append({"id": cast(WorkflowId, identity),
                                   "observed": cast(PresentWorkflowObservation, observed)})
                 continue
-            payloads.append(content if original.data is None else None)
-            files.append({"id": cast(WorkflowId, identity), "path": path,
-                          "action": "create" if original.data is None else "preserve",
-                          "observed": observed,
-                          "generated": {"content": row["content"], "byteLength": len(content),
-                                        "sha256": row["sha256"]}})
+            payloads.append(content if original.data is None or differs else None)
+            file: WorkflowFileView = {
+                "id": cast(WorkflowId, identity), "path": path,
+                "action": "create" if original.data is None else "update" if differs else "preserve",
+                "observed": observed,
+                "generated": {"content": row["content"], "byteLength": len(content), "sha256": row["sha256"]},
+            }
+            if differs:
+                assert original.data is not None
+                file["previous"] = {"content": original.data.decode("utf-8"), "byteLength": len(original.data),
+                                    "sha256": hashlib.sha256(original.data).hexdigest()}
+            files.append(file)
         if conflicts:
             conflict: WorkflowConflictView = {"schemaVersion": 1, "reason": "existing_workflow_differs",
                                              "conflicts": conflicts}
             return None, bounded_json_text(conflict, max_bytes=_SMALL_VIEW_BYTES,
-                                           max_nodes=256, max_depth=8).encode("utf-8")
+                                           max_nodes=256, max_depth=8).encode("utf-8"), template["resourceSha256"]
         view: PreparedWorkflowView = {
             "schemaVersion": 1, "files": files,
             "createDirectories": list(checkout._revision.missing_workflow_directories),
             "templateSet": cast(GitHubTemplateSet, template), "tooling": cast(GitHubToolingReference, tooling),
         }
         return tuple(payloads), bounded_json_text(view, max_bytes=_setup.MAX_RESULT_BYTES,
-                                                  max_nodes=8_000, max_depth=16).encode("utf-8")
+                                                  max_nodes=8_000, max_depth=16).encode("utf-8"), template["resourceSha256"]
     except (KeyError, ValueError, TypeError, UnicodeError, RecursionError, ConfigurationError):
         raise ConfigEditFailure(_shared._not_started("filesystem_error")) from None
 
@@ -365,7 +377,7 @@ def prepare_github_workflow_edit(lease: InitRootLease, checkout: WorkflowCheckou
         if not _lease_matches(native, lease):
             _shared._reject("invalid_params")
         _admit_revision(native, checkout._revision, checkout._files)
-        payloads, view_json = _derive(checkout, draft, tooling_repository, tooling_sha)
+        payloads, view_json, resource_sha256 = _derive(checkout, draft, tooling_repository, tooling_sha)
         try:
             with lease.workspace_scope(checkout._revision) as workspace:
                 if type(workspace) is not native.workspace:
@@ -385,7 +397,8 @@ def prepare_github_workflow_edit(lease: InitRootLease, checkout: WorkflowCheckou
             _shared._reject("custody_unknown")
         plan = object.__new__(PreparedWorkflowEdit)
         for name, value in (("_identity", plan), ("_checkout", checkout), ("_token", token),
-                            ("_payloads", payloads), ("_view_json", view_json), ("_state", _shared._PREPARED)):
+                            ("_payloads", payloads), ("_resource_sha256", resource_sha256),
+                            ("_view_json", view_json), ("_state", _shared._PREPARED)):
             object.__setattr__(plan, name, value)
         object.__setattr__(checkout, "_prepared", plan)
         object.__setattr__(checkout, "_state", _shared._PREPARED)
@@ -421,7 +434,7 @@ def apply_github_workflow_edit(lease: InitRootLease, plan: PreparedWorkflowEdit)
             if type(workspace) is not native.workspace:
                 raise _shared._ContractViolation()
             changes = [(item.observed(), payload) for item, payload in zip(checkout._files, plan._payloads)]
-            native_result = workspace.apply_workflows_typed(changes)
+            native_result = workspace.apply_workflows_typed(changes, resource_sha256=plan._resource_sha256)
     except BaseException as error:
         try:
             provisional = _workflow_outcome(_shared._native_outcome(native, native_result))

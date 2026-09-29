@@ -37,10 +37,10 @@ enum Purpose { Full, Signing, Store }
 enum PolicyVersion { #[serde(rename = "credential-policy-v1")] V1 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken }
+enum Kind { AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8, IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemoAccount, AppleOperationCommitment }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-enum FieldId { File, StorePassword, KeyAlias, KeyPassword, Password, KeyId, IssuerId, Provider, ServiceAccount, Token }
+enum FieldId { File, StorePassword, KeyAlias, KeyPassword, Password, KeyId, IssuerId, Provider, ServiceAccount, Token, FirstName, LastName, Email, Phone, Username, KeyBase64, KeyVersion }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum Requirement {
     #[serde(rename = "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64")] AndroidKeystore,
@@ -58,6 +58,14 @@ enum Requirement {
     #[serde(rename = "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER")] GoogleProvider,
     #[serde(rename = "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT")] GoogleServiceAccount,
     #[serde(rename = "MOBILE_RELEASE_PROJECT_READ_TOKEN")] ProjectToken,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME")] AppleReviewFirstName,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME")] AppleReviewLastName,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL")] AppleReviewEmail,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE")] AppleReviewPhone,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME")] AppleDemoUsername,
+    #[serde(rename = "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD")] AppleDemoPassword,
+    #[serde(rename = "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64")] OperationCommitmentKey,
+    #[serde(rename = "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION")] OperationCommitmentVersion,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role { File, Secret, Identifier }
@@ -67,12 +75,12 @@ impl Kind {
     fn platform(self) -> Platform {
         match self {
             Self::AndroidKeystore | Self::AndroidFirebase | Self::GoogleWif => Platform::Android,
-            Self::AppleP12 | Self::AppleProfile | Self::AscP8 | Self::IosFirebase => Platform::Ios,
+            Self::AppleP12 | Self::AppleProfile | Self::AscP8 | Self::IosFirebase | Self::AppleReviewContact | Self::AppleReviewDemoAccount | Self::AppleOperationCommitment => Platform::Ios,
             Self::ProjectReadToken => Platform::Project,
         }
     }
     fn firebase(self) -> bool { matches!(self, Self::AndroidFirebase | Self::IosFirebase) }
-    fn has_file(self) -> bool { !matches!(self, Self::GoogleWif | Self::ProjectReadToken) }
+    fn has_file(self) -> bool { !matches!(self, Self::GoogleWif | Self::ProjectReadToken | Self::AppleReviewContact | Self::AppleReviewDemoAccount | Self::AppleOperationCommitment) }
     fn material_limit(self) -> u64 {
         // Fixed version-one wire bounds, not a reader, size claim or selector.
         // Canonical material_size_limit and all requiredness remain in Python.
@@ -114,6 +122,20 @@ impl Kind {
                 LayoutField { id: F::ServiceAccount, requirement: R::GoogleServiceAccount, role: T::Identifier },
             ],
             Self::ProjectReadToken => &[LayoutField { id: F::Token, requirement: R::ProjectToken, role: T::Secret }],
+            Self::AppleReviewContact => &[
+                LayoutField { id: F::FirstName, requirement: R::AppleReviewFirstName, role: T::Secret },
+                LayoutField { id: F::LastName, requirement: R::AppleReviewLastName, role: T::Secret },
+                LayoutField { id: F::Email, requirement: R::AppleReviewEmail, role: T::Secret },
+                LayoutField { id: F::Phone, requirement: R::AppleReviewPhone, role: T::Secret },
+            ],
+            Self::AppleReviewDemoAccount => &[
+                LayoutField { id: F::Username, requirement: R::AppleDemoUsername, role: T::Secret },
+                LayoutField { id: F::Password, requirement: R::AppleDemoPassword, role: T::Secret },
+            ],
+            Self::AppleOperationCommitment => &[
+                LayoutField { id: F::KeyBase64, requirement: R::OperationCommitmentKey, role: T::Secret },
+                LayoutField { id: F::KeyVersion, requirement: R::OperationCommitmentVersion, role: T::Identifier },
+            ],
         }
     }
 }
@@ -223,6 +245,14 @@ struct WifFields { provider: Option<String>, service_account: Option<String> }
 #[derive(Serialize)]
 struct TokenFields { token: Option<String> }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewContactFields { first_name: Option<String>, last_name: Option<String>, email: Option<String>, phone: Option<String> }
+#[derive(Serialize)]
+struct ReviewDemoAccountFields { username: Option<String>, password: Option<String> }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitmentFields { key_base64: Option<String>, key_version: Option<String> }
+#[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Input {
     AndroidKeystore { fields: KeystoreFields, observation: Option<FileObservation> },
@@ -233,6 +263,9 @@ enum Input {
     IosFirebase { fields: EmptyFields, observation: Option<FileObservation> },
     GoogleWif { fields: WifFields, observation: () },
     ProjectReadToken { fields: TokenFields, observation: () },
+    AppleReviewContact { fields: ReviewContactFields, observation: () },
+    AppleReviewDemoAccount { fields: ReviewDemoAccountFields, observation: () },
+    AppleOperationCommitment { fields: CommitmentFields, observation: () },
 }
 #[derive(Serialize)]
 struct RequestContext { draft: Value, platform: Platform, stage: Stage, purpose: Purpose }
@@ -623,6 +656,9 @@ fn input(value: &Value) -> Result<Input, AssessmentError> {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AppleP12 => &["password"], Kind::AscP8 => &["keyId", "issuerId"],
         Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
+        Kind::AppleReviewContact => &["firstName", "lastName", "email", "phone"],
+        Kind::AppleReviewDemoAccount => &["username", "password"],
+        Kind::AppleOperationCommitment => &["keyBase64", "keyVersion"],
         _ => &[],
     };
     let fields = exact(&object["fields"], keys)?;
@@ -644,6 +680,16 @@ fn input(value: &Value) -> Result<Input, AssessmentError> {
             provider: scalar(&fields["provider"], &mut total)?, service_account: scalar(&fields["serviceAccount"], &mut total)?,
         }, observation: () },
         Kind::ProjectReadToken => Input::ProjectReadToken { fields: TokenFields { token: scalar(&fields["token"], &mut total)? }, observation: () },
+        Kind::AppleReviewContact => Input::AppleReviewContact { fields: ReviewContactFields {
+            first_name: scalar(&fields["firstName"], &mut total)?, last_name: scalar(&fields["lastName"], &mut total)?,
+            email: scalar(&fields["email"], &mut total)?, phone: scalar(&fields["phone"], &mut total)?,
+        }, observation: () },
+        Kind::AppleReviewDemoAccount => Input::AppleReviewDemoAccount { fields: ReviewDemoAccountFields {
+            username: scalar(&fields["username"], &mut total)?, password: scalar(&fields["password"], &mut total)?,
+        }, observation: () },
+        Kind::AppleOperationCommitment => Input::AppleOperationCommitment { fields: CommitmentFields {
+            key_base64: scalar(&fields["keyBase64"], &mut total)?, key_version: scalar(&fields["keyVersion"], &mut total)?,
+        }, observation: () },
     })
 }
 
@@ -792,6 +838,11 @@ impl AssessmentRequest {
             Input::IosFirebase { observation, .. } => (Kind::IosFirebase, vec![E::file(observation)]),
             Input::GoogleWif { fields, .. } => (Kind::GoogleWif, vec![E::scalar(&fields.provider), E::scalar(&fields.service_account)]),
             Input::ProjectReadToken { fields, .. } => (Kind::ProjectReadToken, vec![E::scalar(&fields.token)]),
+            Input::AppleReviewContact { fields, .. } => (Kind::AppleReviewContact, vec![
+                E::scalar(&fields.first_name), E::scalar(&fields.last_name), E::scalar(&fields.email), E::scalar(&fields.phone),
+            ]),
+            Input::AppleReviewDemoAccount { fields, .. } => (Kind::AppleReviewDemoAccount, vec![E::scalar(&fields.username), E::scalar(&fields.password)]),
+            Input::AppleOperationCommitment { fields, .. } => (Kind::AppleOperationCommitment, vec![E::scalar(&fields.key_base64), E::scalar(&fields.key_version)]),
         };
         let scalar_values_processed = fields.iter().any(|field| matches!(field, E::Scalar { processed: true, .. }));
         let file_observations_processed = fields.iter().any(|field| matches!(field, E::File(fact) if !matches!(fact, FileFact::Missing)));
@@ -809,12 +860,15 @@ fn scalar_result(field: &FieldResult, role: Role, presence: Presence, nul: bool)
     use Scope::{IdentifierFormat, ValueAdmission};
     if presence == Presence::Missing { return field_is(field, State::Missing, &[IssueCode::RequiredMissing], &[]); }
     if nul { return field_is(field, State::Invalid, &[IssueCode::ValueNul], &[(ValueAdmission, Failed)]); }
-    match role {
-        Role::Secret => field_is(field, State::Configured, &[], &[(ValueAdmission, Passed)]),
-        Role::Identifier => field_is(field, State::Configured, &[], &[(ValueAdmission, Passed), (IdentifierFormat, Passed)])
-            || field_is(field, State::Invalid, &[IssueCode::ScalarFormat], &[(ValueAdmission, Passed), (IdentifierFormat, Failed)]),
-        Role::File => false,
+    // Only these exact private fields have existing core format rules. Their
+    // secret role is unchanged; no other secret acquires a format/password claim.
+    let format_expected = role == Role::Identifier || (role == Role::Secret && matches!((field.id, field.requirement),
+        (FieldId::Email, Requirement::AppleReviewEmail) | (FieldId::KeyBase64, Requirement::OperationCommitmentKey)));
+    if format_expected {
+        return field_is(field, State::Configured, &[], &[(ValueAdmission, Passed), (IdentifierFormat, Passed)])
+            || field_is(field, State::Invalid, &[IssueCode::ScalarFormat], &[(ValueAdmission, Passed), (IdentifierFormat, Failed)]);
     }
+    role == Role::Secret && field_is(field, State::Configured, &[], &[(ValueAdmission, Passed)])
 }
 fn unavailable_issue(reason: UnavailableReason) -> IssueCode {
     match reason {
@@ -992,8 +1046,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const KINDS: [Kind; 8] = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
-        Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken];
+    const KINDS: [Kind; 11] = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
+        Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken, Kind::AppleReviewContact, Kind::AppleReviewDemoAccount, Kind::AppleOperationCommitment];
 
     fn client(package: Value) -> Value {
         json!({"clientInfo": {"androidClientInfo": {"packageName": package}}})
@@ -1005,6 +1059,9 @@ mod tests {
             Kind::AscP8 => json!({"keyId":"FIXTURE123", "issuerId":"12345678-1234-1234-1234-123456789abc"}),
             Kind::GoogleWif => json!({"provider":"projects/123/locations/global/workloadIdentityPools/fixture/providers/fixture", "serviceAccount":"fixture@fixture-project.iam.gserviceaccount.com"}),
             Kind::ProjectReadToken => json!({"token":"fictional-read-token"}),
+            Kind::AppleReviewContact => json!({"firstName":"fictional-first","lastName":"fictional-last","email":"reviewer@example.test","phone":"+00 fictional phone"}),
+            Kind::AppleReviewDemoAccount => json!({"username":"fictional-demo-user","password":"fictional-demo-password"}),
+            Kind::AppleOperationCommitment => json!({"keyBase64":format!("{}=", "A".repeat(43)),"keyVersion":"retained-v1"}),
             _ => json!({}),
         };
         let observation = match kind {
@@ -1062,7 +1119,10 @@ mod tests {
                 }
                 FieldExpectation::Scalar { .. } => {
                     checks.push(check(Scope::ValueAdmission, Outcome::Passed));
-                    if layout.role == Role::Identifier { checks.push(check(Scope::IdentifierFormat, Outcome::Passed)); }
+                    if layout.role == Role::Identifier || matches!((layout.id, layout.requirement),
+                        (FieldId::Email, Requirement::AppleReviewEmail) | (FieldId::KeyBase64, Requirement::OperationCommitmentKey)) {
+                        checks.push(check(Scope::IdentifierFormat, Outcome::Passed));
+                    }
                 }
                 _ => panic!("fictional baseline must be supplied"),
             }
@@ -1098,11 +1158,56 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_request_unions_roundtrip_without_native_authority() {
+    fn all_closed_request_unions_roundtrip_without_native_authority() {
         for kind in KINDS {
             let body = request(kind);
             assert_eq!(roundtrip(&body), body);
             accepts(&body, response(kind));
+        }
+    }
+
+
+    #[test]
+    fn private_apple_scalars_have_no_file_and_format_checks_are_not_recovery_or_password_claims() {
+        for kind in [Kind::AppleReviewContact, Kind::AppleReviewDemoAccount, Kind::AppleOperationCommitment] {
+            assert!(!kind.has_file());
+            assert!(kind.layout().iter().all(|field| field.role == if field.id == FieldId::KeyVersion { Role::Identifier } else { Role::Secret }));
+            let body = request(kind);
+            assert_eq!(roundtrip(&body), body);
+            let value = response(kind);
+            accepts(&body, value.clone());
+            for observation in [json!({}), json!({"status":"unavailable","reason":"not-run"})] {
+                let mut wrong = body.clone(); wrong["input"]["observation"] = observation;
+                request_error(&wrong, "assessment_invalid_request");
+            }
+            for field in kind.layout() {
+                let name = serde_json::to_value(field.id).unwrap().as_str().unwrap().to_owned();
+                let mut wrong = body.clone(); wrong["input"]["fields"][&name] = json!("é".repeat(2049));
+                request_error(&wrong, "assessment_limit");
+            }
+            let mut reflected = value.clone(); reflected["fields"][0]["value"] = json!("private-canary");
+            refuses(&body, reflected);
+            for assurance in ["nativeValidation", "serviceValidation", "releaseReadiness"] {
+                let mut forged = value.clone(); forged["assurance"][assurance] = json!("verified");
+                refuses(&body, forged);
+            }
+        }
+        for (kind, index) in [(Kind::AppleReviewContact, 2), (Kind::AppleOperationCommitment, 0), (Kind::AppleOperationCommitment, 1)] {
+            let body = request(kind); let good = response(kind);
+            let mut missing_format = good.clone(); missing_format["fields"][index]["checks"].as_array_mut().unwrap().pop();
+            refuses(&body, missing_format);
+            let mut wrong_role = good.clone(); wrong_role["fields"][index]["requirement"] = json!("MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME");
+            refuses(&body, wrong_role);
+            let mut failed = good.clone();
+            failed["state"] = json!("invalid"); failed["fields"][index]["state"] = json!("invalid");
+            failed["fields"][index]["issues"] = json!(["scalar-format"]);
+            failed["fields"][index]["checks"][1]["outcome"] = json!("failed");
+            accepts(&body, failed); // Only the core judges syntax, never historical recovery correspondence.
+        }
+        for (kind, index) in [(Kind::AppleReviewContact, 0), (Kind::AppleReviewDemoAccount, 1)] {
+            let mut forged = response(kind);
+            forged["fields"][index]["checks"].as_array_mut().unwrap().push(check(Scope::IdentifierFormat, Outcome::Passed));
+            refuses(&request(kind), forged);
         }
     }
 

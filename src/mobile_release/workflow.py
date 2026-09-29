@@ -49,7 +49,7 @@ from .build_inputs import (
 from .cancellation import CleanupScope, DefaultCancellation, cancellation_owner
 from ._profile_callers import fatal_cancellation_error
 from .owned_process import ProcessCleanupError
-from .errors import MobileReleaseError, ValidationError
+from .errors import CredentialError, MobileReleaseError, ValidationError
 from .provenance import (
     WORKFLOW_PATHS,
     _authority_for_stage,
@@ -1900,8 +1900,9 @@ def package_final(app_root: Path, evidence_dir: Path, raw_receipt: Path, destina
         original.check()
 
 
-def _outputs(result: Mapping[str, Any]) -> None:
-    values = {"mode": result["mode"], "source_sha": result["source"]["commit"], "source_tree": result["source"]["tree"], "source_ref": result["source"]["ref"], "authorization_run_id": result["authorizationRunId"], "evidence_run_id": result["evidenceRunId"], "evidence_artifact_id": result["evidenceArtifactId"]}
+def _write_public_outputs(values: Mapping[str, str]) -> None:
+    _require(all(isinstance(name, str) and re.fullmatch(r"[a-z_]+", name) for name in values),
+             "workflow output contains an invalid name")
     _require(all(isinstance(value, str) and len(value) <= 512 and not any(ord(char) < 32 for char in value) for value in values.values()), "workflow output contains invalid text")
     print(json.dumps(values, sort_keys=True))
     output = os.environ.get("GITHUB_OUTPUT")
@@ -1912,9 +1913,23 @@ def _outputs(result: Mapping[str, Any]) -> None:
             handle.write("".join(f"{name}={value}\n" for name, value in values.items()))
 
 
+def _outputs(result: Mapping[str, Any]) -> None:
+    values = {"mode": result["mode"], "source_sha": result["source"]["commit"], "source_tree": result["source"]["tree"], "source_ref": result["source"]["ref"], "authorization_run_id": result["authorizationRunId"], "evidence_run_id": result["evidenceRunId"], "evidence_artifact_id": result["evidenceArtifactId"]}
+    _write_public_outputs(values)
+
+
+def _google_wif_outputs() -> None:
+    from .credential_group_envelope import google_wif_inputs
+    try:
+        values = google_wif_inputs(os.environ)
+    except CredentialError:
+        raise WorkflowError("Google WIF inputs must provide a complete valid group envelope or legacy public pair") from None
+    _write_public_outputs(values)
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("google-wif-inputs", help="validate the complete Google WIF public pair before authentication")
     resolve = commands.add_parser("resolve", help="authenticate existing immutable evidence before deciding whether work remains")
     stage = commands.add_parser("stage", help="copy a private authenticated resolution into a clean application checkout")
     seal_parser = commands.add_parser("seal-intent", help="create the protected job's complete intent inventory; does not sign or upload")
@@ -1946,6 +1961,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # These finite local operations run from verified pinned tooling but do
         # not parse release authority or construct a GitHub/Store client. Setup
         # success is not authority for any later publisher to reopen a path.
+        if args.command == "google-wif-inputs":
+            _google_wif_outputs()
+            return 0
         if args.command == "prepare-app-private":
             prepare_app_private(args.app_root, role=args.role)
             return 0

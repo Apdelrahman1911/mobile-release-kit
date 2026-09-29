@@ -157,6 +157,8 @@ class _SavedCommandInput:
         role = operation._pending
         if self.domain is SavedCommandDomain.AndroidBuild:
             maxima = {"gradle": 2700, "bundletool": 60, "jarsigner": 120, "keytool": 30}
+            if operation.signing is not None:
+                maxima.update({"keytool-validate": 30, "jarsigner-sign": 120})
             self._require(role in maxima and capture is (role != "gradle"))
         elif self.domain is SavedCommandDomain.IOSArchive:
             maxima = {"xcode-version": 30, "ios-sdk": 30, "prepare": 600, "archive": 3600}
@@ -189,7 +191,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain is SavedCommandDomain.IOSArchive and self.material_pending
+        material_phase = self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive} and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -208,6 +210,15 @@ class _SavedCommandInput:
                 # The original bounded private reader drains this buffer before
                 # another read. A large body is not a large public JSON frame.
                 return
+            if not self.active and not material_phase:
+                position = self.buffer.find(b"\n")
+                if position >= 0:
+                    # A prior poll may have prefetched the complete request and
+                    # bounded private bytes. Parse that first frame before any
+                    # further read; the original input was still checked above.
+                    if position + 1 > _protocol(self.domain).REQUEST_LIMIT:
+                        self.stop()
+                    return
             limit = 1 if active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
             self._require(limit > 0)
             try:
@@ -218,8 +229,11 @@ class _SavedCommandInput:
                 self.stop()
                 return
             self.buffer.extend(chunk)
-            if len(self.buffer) > _protocol(self.domain).REQUEST_LIMIT:
-                self.stop()
+            if not self.active and not material_phase:
+                position = self.buffer.find(b"\n")
+                public_bytes = len(self.buffer) if position < 0 else position + 1
+                if public_bytes > _protocol(self.domain).REQUEST_LIMIT:
+                    self.stop()
         except BaseException as error:
             # A read/identity failure is not successful EOF or finality. Keep
             # it on the actual guard even if closing another resource works.
@@ -235,12 +249,12 @@ class _SavedCommandInput:
             if position >= 0:
                 raw = bytes(self.buffer[:position + 1])
                 del self.buffer[:position + 1]
-                if self.domain is SavedCommandDomain.IOSArchive:
+                if self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive}:
                     request = _protocol(self.domain).parse_request(raw)
                     self._request_material(request)
                 self.active = True  # Signed pending input remains inert until account/project admission.
                 self.guard.check()
-                if self.domain is not SavedCommandDomain.IOSArchive:
+                if self.domain not in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive}:
                     request = _protocol(self.domain).parse_request(raw)
                 self.request_returned = True
                 return request

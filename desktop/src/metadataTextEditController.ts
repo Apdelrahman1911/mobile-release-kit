@@ -1,14 +1,16 @@
 // App-retained observer/draft orchestration. This class never owns a child,
 // filesystem handle, journal or write token independently of the native owner.
-import { sameJson } from './catalog.ts';
+import { getValue, sameJson } from './catalog.ts';
 import { methodReason } from './certainty.ts';
 import { isU32, U32_MAX } from './configEditProtocol.ts';
 import { METADATA_TEXT_CACHE_BUNDLES, METADATA_TEXT_CACHE_BYTES, METADATA_TEXT_FIELD_BYTES,
   metadataCacheBytes, metadataCompareRetainedDraft, metadataConfiguredChoices, metadataConfigReason, metadataDraftFields, metadataObservedBaseline, metadataValidationFresh } from './metadataText.ts';
 import type { MetadataConfiguredContext, MetadataDisplayBinding, MetadataDraftBaseline, MetadataFieldId, MetadataTextBaseline, MetadataTextDraft,
-  MetadataRetainedDraftChange, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide } from './metadataText.ts';
+  MetadataRetainedDraftChange, MetadataTextEditProjection, MetadataTextEditStatus, MetadataTextField, MetadataTextGuide, MetadataTextValidation } from './metadataText.ts';
 import { metadataProjectionProgress, metadataStatusProgress, metadataTextError, metadataTextRequestFits,
   normalMetadataTextResult, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
+import { parseSavedConfigContent, sameSavedConfig } from './offlinePreflightProtocol.ts';
+import type { SavedConfigContent } from './offlinePreflightTypes.ts';
 import type { ProjectSession } from './drafts.ts';
 import type { ApiError, AppInfo, BridgeMode, DesktopApi, EditAvailability, JsonValue } from './types.ts';
 
@@ -70,6 +72,68 @@ interface MetadataOwnerState {
   recoveryProjects: readonly string[];
   attempt: MetadataAttempt | null;
 }
+export type MetadataLocaleCheckStop = 'user' | 'context-changed' | 'time-limit' | 'failed';
+interface MetadataLocaleCheckBinding {
+  requestId: number;
+  projectId: string;
+  projectName: string;
+  configRevision: number;
+  configBaselineGeneration: number;
+  configObservationGeneration: number;
+  serviceGeneration: number;
+  selectionGeneration: number;
+  savedConfig: SavedConfigContent;
+  choices: MetadataConfiguredContext[];
+}
+export interface MetadataLocaleCheckResult {
+  context: MetadataConfiguredContext;
+  baseline: MetadataTextBaseline['fields'];
+  validation: MetadataTextValidation;
+}
+export interface MetadataLocaleChecks {
+  binding: MetadataLocaleCheckBinding;
+  active: boolean;
+  stale: boolean;
+  stopReason: MetadataLocaleCheckStop | null;
+  complete: boolean;
+  current: { index: number; step: 'observe' | 'validate' } | null;
+  results: MetadataLocaleCheckResult[];
+  error: ApiError | null;
+}
+interface MetadataLocaleCheckAttempt {
+  binding: MetadataLocaleCheckBinding;
+  api: DesktopApi;
+  started: number;
+  deadline: number;
+  active: boolean;
+  retired: boolean;
+  stop: MetadataLocaleCheckStop | null;
+}
+const LOCALE_CHECK_BUSY = 'Saved public-text checks still own an original passive request. Stop checking and wait for it to settle before another operation.';
+const LOCALE_CHECK_MAX = 500;
+const LOCALE_CHECK_MS = 120_000;
+
+// The existing helper is a display convenience and can omit malformed lists.
+// Check the complete enabled roster's shape, not a second locale grammar.
+function completeLocaleChoices(project: ProjectSession | null): MetadataConfiguredContext[] | null {
+  if (!project?.baseline) return null;
+  const choices = metadataConfiguredChoices(project), root = getValue(project.baseline, 'metadata.root');
+  if (!choices.length || choices.length > LOCALE_CHECK_MAX || typeof root !== 'string') return null;
+  let index = 0;
+  for (const platform of ['android', 'ios'] as const) {
+    if (getValue(project.baseline, platform + '.enabled') !== true) continue;
+    const locales = getValue(project.baseline, 'metadata.' + platform + 'Locales');
+    if (!Array.isArray(locales) || !locales.length || locales.length > 250 ||
+        !locales.every((locale) => typeof locale === 'string') || new Set(locales).size !== locales.length) return null;
+    for (const locale of locales) {
+      const choice = choices[index++];
+      if (!choice || choice.projectId !== project.project.id || choice.metadataRoot !== root || choice.platform !== platform ||
+          choice.locale !== locale || choice.configBaselineGeneration !== project.baselineGeneration) return null;
+    }
+  }
+  return index === choices.length ? choices : null;
+}
+
 export interface MetadataTextState {
   mode: BridgeMode;
   serviceGeneration: number;
@@ -82,6 +146,7 @@ export interface MetadataTextState {
   validateReason: string | null;
   help: MetadataTextGuide | null;
   cacheError: ApiError | null;
+  localeChecks: MetadataLocaleChecks | null;
   edit: MetadataOwnerState;
 }
 interface Context {
@@ -112,12 +177,15 @@ const availabilityCopy: Record<EditAvailability, string> = {
   shutdown: 'The native application is stopping. No new text edit can be opened.',
   other_edit_active: 'A configuration or workflow edit owns the shared native service. Finish or close that original session first.',
 };
-export function metadataOwnerReason(state: MetadataTextState, projectId: string): string | null {
+function metadataEditOwnerReason(state: MetadataTextState, projectId: string): string | null {
   const owner = state.edit;
   if (owner.nativeBlocked || owner.integrityFailed || owner.generationLost || owner.observationIssue) return 'Metadata edit ownership is unverified. Observe the original native status, not a competing edit.';
   if (owner.status?.active || !settled(owner.attempt) || owner.attempt && !owner.attempt.handled) return 'A metadata-text edit is still owned or awaiting settlement. Finish or close that original session before another file edit.';
   if (owner.recoveryProjects.includes(projectId)) return 'This project needs separate metadata transaction recovery. Another edit domain cannot reset or bypass its journal.';
   return null;
+}
+export function metadataOwnerReason(state: MetadataTextState, projectId: string): string | null {
+  return metadataEditOwnerReason(state, projectId) ?? (state.localeChecks?.active ? LOCALE_CHECK_BUSY : null);
 }
 export function metadataRetainsDraft(state: MetadataTextState, projectId: string): boolean {
   const edit = state.edit;
@@ -144,7 +212,7 @@ export function currentMetadataApplyBinding(state: MetadataTextState): MetadataA
 export class MetadataTextEditController {
   private state: MetadataTextState = freeze<MetadataTextState>({
     mode: 'unavailable', serviceGeneration: 0, selectionGeneration: 0, projectId: null, choices: [], selectedKey: null, entries: {},
-    observeReason: 'Desktop capabilities are not loaded.', validateReason: 'Desktop capabilities are not loaded.', help: null, cacheError: null,
+    observeReason: 'Desktop capabilities are not loaded.', validateReason: 'Desktop capabilities are not loaded.', help: null, cacheError: null, localeChecks: null,
     edit: { mode: 'unavailable', listening: false, initialized: false, readPending: false, status: null, buffered: null, observationIssue: null,
       integrityFailed: false, generationLost: false, nativeBlocked: false, unknownEvidence: null, recoveryProjects: [], attempt: null },
   });
@@ -157,6 +225,7 @@ export class MetadataTextEditController {
   private fingerprint = '';
   private nextRequest = 0;
   private passivePending = 0;
+  private localeCheck: MetadataLocaleCheckAttempt | null = null;
   private processing = false;
   private processAgain = false;
   private disposed = false;
@@ -192,13 +261,14 @@ export class MetadataTextEditController {
     this.nextRequest += 1; return this.nextRequest;
   }
   private retirePassive(): void {
+    const localeChecks = this.retireLocaleChecks();
     const entries = { ...this.state.entries };
     for (const [key, entry] of Object.entries(entries)) if (entry.loadRequest || entry.validationRequest) entries[key] = {
       ...entry, loadRequest: null, validationRequest: null,
       loadError: entry.loadRequest ? metadataTextError({ code: 'MetadataTextContextChanged' }) : entry.loadError,
       validationError: entry.validationRequest ? metadataTextError({ code: 'MetadataTextContextChanged' }) : entry.validationError,
     };
-    this.publish({ ...this.state, entries });
+    this.publish({ ...this.state, entries, localeChecks });
   }
   beginConnection(): void {
     this.passiveApi = null;
@@ -208,13 +278,16 @@ export class MetadataTextEditController {
   }
   setConnection(api: DesktopApi, info: AppInfo): void {
     if (this.disposed) return;
+    const observeReason = methodReason(info, 'metadata.text.observe', api.mode), validateReason = methodReason(info, 'metadata.text.validate', api.mode);
+    const localeChecks = this.passiveApi !== api || this.state.mode !== api.mode || this.state.observeReason !== observeReason || this.state.validateReason !== validateReason
+      ? this.retireLocaleChecks() : this.state.localeChecks;
     this.passiveApi = api;
-    this.publish({ ...this.state, mode: api.mode, observeReason: methodReason(info, 'metadata.text.observe', api.mode), validateReason: methodReason(info, 'metadata.text.validate', api.mode) });
+    this.publish({ ...this.state, mode: api.mode, observeReason, validateReason, localeChecks });
     this.syncProject(); this.process();
   }
   setHelp(guide: unknown): void {
-    const help = parseMetadataTextGuide(guide);
-    this.publish({ ...this.state, help: help ? structuredClone(help) : null });
+    const help = parseMetadataTextGuide(guide), localeChecks = same(help, this.state.help) ? this.state.localeChecks : this.retireLocaleChecks();
+    this.publish({ ...this.state, help: help ? structuredClone(help) : null, localeChecks });
     this.process();
   }
   setSelectionPending(value: boolean): void {
@@ -257,14 +330,159 @@ export class MetadataTextEditController {
     if ([this.state.serviceGeneration, this.state.selectionGeneration, this.nextRequest].some((counter) => counter >= U32_MAX)) return 'A metadata binding counter is exhausted. No generation or request ID will be reused.';
     return null;
   }
+  private localeReadOwnerReason(projectId: string): string | null {
+    const edit = this.state.edit;
+    if (edit.mode !== 'native' || !edit.initialized || !edit.listening || !edit.status || edit.readPending)
+      return 'Read the original native metadata status before checking saved locale text.';
+    const reason = edit.status.capability.reason;
+    if (reason === 'shutdown' || reason === 'other_edit_active' || reason === 'cleanup_unknown') return availabilityCopy[reason];
+    // Unavailable writer-only profiles do not grant or deny passive reading.
+    return metadataEditOwnerReason(this.state, projectId) ?? this.context.otherEditReason(projectId) ?? this.context.otherOperationReason?.() ?? null;
+  }
+  checkSavedLocalesReason(): string | null {
+    if (this.disposed || !this.passiveApi || this.state.mode !== 'native') return metadataTextError(null).message;
+    if (this.localeCheck?.active || this.passivePending) return LOCALE_CHECK_BUSY;
+    if (this.state.observeReason || this.state.validateReason) return this.state.observeReason ?? this.state.validateReason;
+    if (!this.state.help) return metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message;
+    if (this.selectionPending) return 'Finish choosing the original project before checking its saved public text.';
+    if ([this.state.serviceGeneration, this.state.selectionGeneration, this.nextRequest].some((value) => value >= U32_MAX - 1))
+      return 'A public-text check binding counter is exhausted. No request or context ID will be reused.';
+    const project = this.context.selectedProject(), reason = metadataConfigReason(project);
+    if (reason || !project) return reason ?? 'Choose a saved project first.';
+    if (!parseSavedConfigContent(project.savedConfigContent)) return 'Refresh the saved project configuration first. These checks need its observed exact byte count and digest, not a serialized draft.';
+    const choices = completeLocaleChoices(project);
+    if (!choices) return 'Each enabled platform needs its complete saved list of 1–250 unique locale strings. Correct and save the locale settings; no partial roster will be checked.';
+    if (project.project.id !== this.state.projectId || !same(choices, this.state.choices)) return metadataTextError({ code: 'MetadataTextContextChanged' }).message;
+    return this.localeReadOwnerReason(project.project.id);
+  }
+  private localeContextMatches(attempt: MetadataLocaleCheckAttempt): boolean {
+    const binding = attempt.binding, project = this.context.selectedProject();
+    return !this.disposed && !attempt.retired && this.localeCheck === attempt && this.passiveApi === attempt.api &&
+      this.state.mode === 'native' && !this.state.observeReason && !this.state.validateReason && !!this.state.help && !this.selectionPending &&
+      !!project && !metadataConfigReason(project) && project.project.id === binding.projectId && this.state.projectId === binding.projectId &&
+      project.revision === binding.configRevision && project.baselineGeneration === binding.configBaselineGeneration &&
+      project.observationGeneration === binding.configObservationGeneration && this.state.serviceGeneration === binding.serviceGeneration &&
+      this.state.selectionGeneration === binding.selectionGeneration && sameSavedConfig(parseSavedConfigContent(project.savedConfigContent), binding.savedConfig) &&
+      same(completeLocaleChoices(project), binding.choices) && same(this.state.choices, binding.choices);
+  }
+  savedLocaleChecksCurrent(): boolean {
+    if (!this.localeCheck) return false;
+    if (this.localeContextMatches(this.localeCheck)) return true;
+    // A query may observe an unsynchronized getter change. Retire permanently,
+    // without publishing from a render; equal values cannot revive old rows.
+    this.retireLocaleChecks(); return false;
+  }
+  private stopLocaleCheck(attempt: MetadataLocaleCheckAttempt, reason: MetadataLocaleCheckStop, error: ApiError | null = null): void {
+    if (this.localeCheck !== attempt || !attempt.active || attempt.stop) return;
+    attempt.stop = reason;
+    if (reason === 'context-changed') attempt.retired = true;
+    const current = this.state.localeChecks;
+    if (current?.binding === attempt.binding) this.publish({ ...this.state, localeChecks: {
+      ...current, stopReason: reason, stale: current.stale || attempt.retired, error,
+    } });
+  }
+  private retireLocaleChecks(): MetadataLocaleChecks | null {
+    const attempt = this.localeCheck, current = this.state.localeChecks;
+    if (!attempt || attempt.retired) return current;
+    attempt.retired = true;
+    if (attempt.active && !attempt.stop) attempt.stop = 'context-changed';
+    // The caller publishes this in its existing atomic context transition.
+    return current?.binding === attempt.binding ? { ...current, stale: true, stopReason: attempt.stop } : current;
+  }
+  stopSavedLocales(): boolean {
+    const attempt = this.localeCheck;
+    if (this.disposed || !attempt?.active || attempt.stop) return false;
+    this.stopLocaleCheck(attempt, 'user'); return true;
+  }
+  private localeStepAllowed(attempt: MetadataLocaleCheckAttempt): boolean {
+    if (attempt.stop || !attempt.active) return false;
+    if (!this.localeContextMatches(attempt) || this.localeReadOwnerReason(attempt.binding.projectId)) {
+      this.stopLocaleCheck(attempt, 'context-changed'); return false;
+    }
+    const now = this.now();
+    if (!Number.isFinite(now) || now < attempt.started || now >= attempt.deadline) {
+      this.stopLocaleCheck(attempt, 'time-limit'); return false;
+    }
+    return true;
+  }
+  async checkSavedLocales(): Promise<boolean> {
+    if (this.checkSavedLocalesReason()) return false;
+    const project = this.context.selectedProject(), api = this.passiveApi;
+    const savedConfig = parseSavedConfigContent(project?.savedConfigContent), choices = completeLocaleChoices(project);
+    const started = this.now();
+    if (!project || !api || !savedConfig || !choices || !Number.isFinite(started)) return false;
+    const requestId = this.counter(); if (requestId === null) return false;
+    const binding: MetadataLocaleCheckBinding = freeze({ requestId, projectId: project.project.id, projectName: project.project.name,
+      configRevision: project.revision, configBaselineGeneration: project.baselineGeneration, configObservationGeneration: project.observationGeneration,
+      serviceGeneration: this.state.serviceGeneration, selectionGeneration: this.state.selectionGeneration, savedConfig, choices: structuredClone(choices) });
+    const attempt: MetadataLocaleCheckAttempt = { binding, api, started, deadline: started + LOCALE_CHECK_MS, active: true, retired: false, stop: null };
+    // One original batch owns the pending slot until its last promise settles.
+    this.localeCheck = attempt; this.passivePending += 1;
+    let complete = false;
+    try {
+      this.publish({ ...this.state, localeChecks: { binding, active: true, stale: false, stopReason: null, complete: false, current: null, results: [], error: null } });
+      for (const [index, choice] of binding.choices.entries()) {
+        if (!this.localeStepAllowed(attempt)) break;
+        this.publish({ ...this.state, localeChecks: { ...this.state.localeChecks!, current: { index, step: 'observe' } } });
+        if (!this.localeStepAllowed(attempt)) break;
+        const observed = await api.observeMetadataText({ projectId: binding.projectId, platform: choice.platform, locale: choice.locale });
+        if (!this.localeStepAllowed(attempt)) break;
+        const value = parseMetadataTextObservation(observed);
+        if (!value || value.platform !== choice.platform || value.locale !== choice.locale) throw { code: 'MetadataTextResponseInvalid' };
+        if (value.metadataRoot !== choice.metadataRoot || value.baseline.config.byteLength !== savedConfig.bytes || value.baseline.config.sha256 !== savedConfig.sha256)
+          throw { code: 'MetadataTextContextChanged' };
+        const fields = value.fields.map((field) => ({ id: field.id, text: field.state === 'present' ? field.text : '' }));
+        this.publish({ ...this.state, localeChecks: { ...this.state.localeChecks!, current: { index, step: 'validate' } } });
+        if (!this.localeStepAllowed(attempt)) break;
+        const validated = await api.validateMetadataText({ platform: choice.platform, fields });
+        if (!this.localeStepAllowed(attempt)) break;
+        const result = parseMetadataTextValidation(validated);
+        if (!result || result.platform !== choice.platform) throw { code: 'MetadataTextResponseInvalid' };
+        const row: MetadataLocaleCheckResult = { context: choice, baseline: structuredClone(value.baseline.fields), validation: structuredClone(result) };
+        // No raw observation or second text cache is kept in the batch result.
+        this.publish({ ...this.state, localeChecks: { ...this.state.localeChecks!, current: null, results: [...this.state.localeChecks!.results, row] } });
+      }
+      complete = this.localeStepAllowed(attempt) && this.state.localeChecks?.results.length === binding.choices.length;
+    } catch (error) {
+      // Rejection is an awaited outcome too: check the original context and
+      // already-latched Stop before accepting an error from that request.
+      if (this.localeStepAllowed(attempt)) {
+        const safe = metadataTextError(error);
+        this.stopLocaleCheck(attempt, safe.code === 'MetadataTextContextChanged' ? 'context-changed' : 'failed', safe);
+      }
+    }
+    finally {
+      attempt.active = false; this.passivePending -= 1;
+      const current = this.state.localeChecks;
+      if (!this.disposed && current?.binding === binding) {
+        this.publish({ ...this.state, localeChecks: { ...current, active: false, current: null, complete: complete && !attempt.stop,
+          stopReason: attempt.stop, stale: current.stale || attempt.retired } }); this.process();
+      }
+    }
+    return complete && !attempt.stop;
+  }
+  checkedLocaleReason(key: string): string | null {
+    if (!this.state.localeChecks || !this.savedLocaleChecksCurrent()) return 'This is an earlier project or service context. Check the current saved locales again before selecting a result.';
+    if (this.localeCheck?.active || this.passivePending) return LOCALE_CHECK_BUSY;
+    if (!this.state.localeChecks.results.some((row) => row.context.key === key) || !this.state.choices.some((choice) => choice.key === key))
+      return 'This result is not one of the current saved public locales.';
+    return this.localeReadOwnerReason(this.state.localeChecks.binding.projectId);
+  }
+  selectCheckedLocale(key: string): boolean {
+    if (this.checkedLocaleReason(key)) return false;
+    // Selection only. Loading, draft reconciliation and Save remain explicit.
+    return key === this.state.selectedKey || this.selectContext(key);
+  }
   passiveBusyReason(): string | null { return this.passivePending > 0 ? 'An original public-text observation or validation is still pending.' : null; }
   loadReason(): string | null {
+    if (this.localeCheck?.active) return LOCALE_CHECK_BUSY;
     const other = this.context.otherOperationReason?.(); if (other) return other;
     return this.state.mode !== 'native' ? metadataTextError(null).message : this.state.observeReason ?? (!this.state.help ? metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message : null) ??
       this.liveContextReason() ?? (this.passivePending >= 2 ? 'Two bounded passive requests are already in flight. Wait for them to settle; no queue or replacement request is created.' : null) ??
       (this.selectedEntry()?.loadRequest ? 'The original text observation is still pending.' : null);
   }
   validateReason(): string | null {
+    if (this.localeCheck?.active) return LOCALE_CHECK_BUSY;
     const other = this.context.otherOperationReason?.(); if (other) return other;
     if (this.state.mode !== 'native') return metadataTextError(null).message;
     if (this.state.validateReason) return this.state.validateReason;
@@ -563,8 +781,9 @@ export class MetadataTextEditController {
     const binding: MetadataReviewBinding = freeze({ ...display, context: structuredClone(entry.context), windowGeneration: status.windowGeneration,
       startStatusRevision: status.statusRevision, previousTerminalId: status.lastTerminal?.sessionId ?? null,
       expectedBaseline: structuredClone(entry.baseline.assertion), originals: structuredClone(entry.baseline.originals), fields: structuredClone(entry.fields) });
-    this.edit({ ...this.state.edit, attempt: { binding, sessionId: null, projection: null, projectionRevision: status.statusRevision,
-      prepareClaimed: false, applyClaimed: false, submittedPlanToken: null, closeRequested: false, closeClaimed: false, invalidated: false, handled: false } });
+    const localeChecks = this.retireLocaleChecks();
+    this.publish({ ...this.state, localeChecks, edit: { ...this.state.edit, attempt: { binding, sessionId: null, projection: null, projectionRevision: status.statusRevision,
+      prepareClaimed: false, applyClaimed: false, submittedPlanToken: null, closeRequested: false, closeClaimed: false, invalidated: false, handled: false } } });
     // Synchronous claim precedes invoke, blocking both other edit domains.
     if (this.state.edit.attempt?.binding !== binding) return false;
     void this.command('open', binding, () => this.api!.openMetadataTextEdit({ projectId: binding.projectId, platform: binding.context.platform, locale: binding.context.locale }));
@@ -666,6 +885,7 @@ export class MetadataTextEditController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.retireLocaleChecks();
     const attempt = this.state.edit.attempt;
     if (this.api?.mode === 'native' && attempt?.sessionId && attempt.projection && !attempt.closeClaimed && !this.state.edit.generationLost &&
         attempt.projection.ownerGeneration === this.state.edit.status?.windowGeneration && !['final', 'unknown'].includes(attempt.projection.phase)) {

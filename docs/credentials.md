@@ -16,6 +16,81 @@ The shared repository contains no application credential, private key, account i
 
 ## GitHub environments
 
+### Complete input-group secrets
+
+The envelope-aware toolkit also accepts one **complete input group in one
+environment secret**, using protocol `mrk-github-input-group/1`.
+All members, including formerly public variables, travel together. An applicable
+nonempty group secret wins over the entire legacy group below; missing members
+are never filled from a legacy password, identifier or file path. A malformed
+applicable envelope refuses before use, including when a credentials file was
+explicitly selected. With no envelope, the existing legacy behavior is unchanged.
+
+| Group | Canonical environment secret | Complete fields |
+|---|---|---|
+| Android keystore | `MOBILE_RELEASE_INPUT_ANDROID_KEYSTORE_V1` | file, storePassword, keyAlias, keyPassword |
+| Android Firebase | `MOBILE_RELEASE_INPUT_ANDROID_FIREBASE_V1` | file |
+| Apple distribution P12 | `MOBILE_RELEASE_INPUT_APPLE_P12_V1` | file, password |
+| Apple provisioning profile | `MOBILE_RELEASE_INPUT_APPLE_PROFILE_V1` | file |
+| App Store Connect P8 | `MOBILE_RELEASE_INPUT_ASC_P8_V1` | file, keyId, issuerId |
+| iOS Firebase | `MOBILE_RELEASE_INPUT_IOS_FIREBASE_V1` | file |
+| Google WIF | `MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1` | provider, serviceAccount |
+| Project dependency token | `MOBILE_RELEASE_INPUT_PROJECT_READ_TOKEN_V1` | token |
+| Apple review contact | `MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1` | firstName, lastName, email, phone |
+| Apple review demo account | `MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1` | username, password |
+| Apple operation commitment | `MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1` | keyBase64, keyVersion |
+
+The JSON object contains exactly `protocol`, `kind` and `values`;
+`kind` is the existing credential-guide kind (for example,
+`android-keystore`), and `values` contains exactly the field IDs
+in the table. File fields contain canonical Base64, never local filenames.
+The exact UTF-8 JSON envelope is limited to **48,000 bytes**. Larger files may
+still be valid for local signing but cannot use this GitHub channel; nothing is
+truncated, split or silently omitted.
+
+Only groups selected by the existing stage/platform/purpose policy are decoded.
+Candidate signing/Firebase/dependency inputs never enter promotion jobs; Store
+credentials never enter project build jobs. Disabled Firebase/demo-account
+groups are ignored. Offline preflight may use the explicitly required dependency
+token, but does not acquire signing or Store groups. CLI environment mode still
+requires `--credentials-from-env`; merely selecting a credentials file
+does not grant access to ambient envelopes. GitHub's empty expansion for an
+absent secret is treated as absence; whitespace or otherwise malformed JSON is
+not an absence fallback.
+
+A credentials-file override of an active group must supply every member of that
+group and pass the existing private-path and scalar/material checks. A complete
+local file alternative is permitted, but a password-only override is refused.
+Without an active envelope, legacy file-over-environment behavior is unchanged.
+
+All seven Google authentication steps validate one complete public WIF pair
+before the existing pinned auth action. They read an applicable group envelope,
+or validate both legacy variables together when no envelope exists. Only those
+two public identifiers become action outputs. Local online/Store consumers keep
+using their existing authenticated ADC file; they do not acquire the unused WIF
+envelope themselves. Private decoded scalar/Base64
+values are registered individually with GitHub's escaped masking command before
+use. The group decoder does not write private values to runner output/environment
+files, project files, journals or artifacts; later materialization remains inside
+the existing core's owned private-file lifecycle. Group envelopes are also removed
+by the existing child-environment credential scrubbing. Native certificate/keystore/API validation
+still belongs to the existing signing/Store consumers, not to this JSON decoder.
+
+The credential name inventory can recognize an envelope's secret name, but
+**cannot read or certify its contents**. Support at this consumer boundary is
+not proof that an older pinned workflow understands the protocol. Desktop remote
+provisioning must remain unavailable until the exact reviewed toolkit revision,
+canonical caller, assigned record and native action path are qualified. This
+consumer change does not itself enable remote writes or provide release consent.
+
+Each confirmed group update is a separate ordinary secret upsert, not a
+cross-group transaction, compare-and-swap or proof of a release-wide snapshot.
+Legacy values remain untouched. Commitment input support does not generate,
+rotate or back up a key, or prove compatibility with an older operation.
+
+The following environment tables describe the retained **legacy fallback names**
+and the same underlying field requirements.
+
 ### `mobile-candidate`
 
 This is the only environment that receives build-signing material.
@@ -168,6 +243,57 @@ Keep each incomplete operation's original key **and version** available througho
 retention window. Changing either is not an evidence migration: restore the original protected
 configuration to reconcile that operation. Completed authenticated final reuse needs neither the
 key nor Store credentials. Key generation, rotation and retention are administrator responsibilities.
+
+## Desktop private review inputs
+
+In the Desktop **Credentials** screen, select iOS and the intended external-
+testing or production-preparation context, then choose **Apple review contact**
+or **Apple review demo account**. The contact group has four private fields:
+first name, last name, email and phone. The demo group has a dedicated in-app
+username and password; it is selected by the core only when
+`ios.review.demoAccountRequired` is true. An Apple Developer password is
+never a demo login.
+
+Each masked field has contextual help explaining where to obtain its value.
+Enter values directly; do not create a private JSON/.env file or copy anything
+into the repository. Prepare checks bounded original values (4,096 UTF-8 bytes
+per field, no NUL); only the email additionally receives the existing core
+syntax check. It does not contact the person, call the phone number or test
+a login. Missing values matter only for core-selected requirements.
+
+Review the safe findings, explicitly Keep the private input, then explicitly
+Assign it to the submitted context. Changing the draft or context invalidates
+prior authority. Replacements never expose stored values and failed/cancelled
+replacement cannot automatically restore an assignment. Session-only records
+last for the current launch. Encrypted storage is unavailable in this build;
+no new vault/keyring/provider is enabled by these scalar kinds.
+
+The existing authenticated vault descriptor format can represent these
+closed scalar layouts without private values in descriptors or persisted
+approvals. No format migration, reset or deletion is introduced. An older
+application may not understand a new kind: preserve the vault rather than
+resetting it, and reopen only with a compatible qualified application.
+
+**Apple operation recovery key** uses the same separate Prepare, Keep and Assign
+steps for the existing retained commitment key/version pair. Obtain the original
+pair from the release owner's secure backup or secret manager; GitHub cannot
+reveal a secret already saved there. This is not an Apple password, P8 or P12.
+The key accepts standard base64 decoding to exactly 32 bytes under the unchanged
+core policy, including its existing legacy pad-bit acceptance. The matching
+version is 1–64 ASCII letters, digits, underscores, dots or hyphens. The key is
+masked; the version is visible while editing, but neither is read back from
+native records. The same per-field bounds and context/finality gates apply.
+
+Do not generate or rotate a key through this session. Format checks cannot prove
+randomness, correspondence to a retained key/version or a match to an unfinished
+operation. Keep the original pair securely backed up. Core requiredness selects
+this pair independently of demo-login requirements for iOS external testing and
+production preparation with full/store roles, never signing.
+
+This UI slice does not configure the private review-note files, GitHub environment
+secrets or a Store consumer. Those remain separate lifecycle steps. Nothing is
+uploaded, published or added to an iOS signing input by preparing or assigning
+these values.
 
 ## Local credential file
 

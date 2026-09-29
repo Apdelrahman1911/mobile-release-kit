@@ -12,7 +12,7 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, Child
     all(target_os = "macos", target_arch = "aarch64")))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire, ios_archive_protocol as ios_wire,
-    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile, asset_session::IOSSigningMaterial};
+    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile, asset_session::{AndroidSigningMaterial, IOSSigningMaterial}};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::{android_toolchain::AndroidToolchainCustody,
     installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody, OfflinePreflightRuntimeSlots, ProjectRecoveryRuntimeSlots}};
@@ -24,6 +24,8 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 const ANDROID_NATIVE_QUALIFIED: bool = false;
 const ANDROID_RUNTIME_QUALIFIED: bool = false;
 const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;
+// An unsigned observation or importer/supplier receipt cannot qualify signing.
+const ANDROID_SIGNED_NATIVE_QUALIFIED: bool = false;
 const RECOVERY_NATIVE_QUALIFIED: bool = false;
 const RECOVERY_RUNTIME_QUALIFIED: bool = false;
 const RECOVERY_WORK: Duration = Duration::from_secs(120);
@@ -82,12 +84,41 @@ enum Context { OfflinePreflight(wire::Context), AndroidBuild(android_wire::Conte
 impl Context {
     fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
-    fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), _ => self.domain().frame_limit() } }
+    fn signed_android(&self) -> bool { matches!(self, Self::AndroidBuild(context) if context.signed()) }
+    fn any_signed(&self) -> bool { self.signed_ios() || self.signed_android() }
+    fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), _ => self.domain().frame_limit() } }
     fn domain(&self) -> SavedCommandDomain { match self {
         Self::OfflinePreflight(_) => SavedCommandDomain::OfflinePreflight, Self::AndroidBuild(_) => SavedCommandDomain::AndroidBuild, Self::ProjectRecovery(_) => SavedCommandDomain::ProjectRecovery, Self::IOSArchive(_) => SavedCommandDomain::IOSArchive,
     } }
     fn project_id(&self) -> &str { match self {
         Self::OfflinePreflight(c) => &c.project_id, Self::AndroidBuild(c) => &c.project_id, Self::ProjectRecovery(c) => &c.project_id, Self::IOSArchive(c) => &c.project_id,
+    } }
+}
+// Closed original-payload borrowers, not a generic transport or executor.
+#[derive(Clone)]
+enum SigningMaterial { Android(Arc<AndroidSigningMaterial>), Ios(Arc<IOSSigningMaterial>) }
+impl SigningMaterial {
+    fn matches(&self, context: &Context, registration: u32, project: &RegisteredRoot) -> bool { match (self, context) {
+        (Self::Android(material), Context::AndroidBuild(context)) => context.signed() && material.matches(context, registration, project),
+        (Self::Ios(material), Context::IOSArchive(context)) => context.signed() && material.matches(context, registration, project),
+        _ => false,
+    } }
+    fn same_original(&self, other: &Self) -> bool { match (self, other) {
+        (Self::Android(a), Self::Android(b)) => Arc::ptr_eq(a, b),
+        (Self::Ios(a), Self::Ios(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    } }
+    fn retirement_exclusive(&self) -> bool { match self {
+        // Every Android writer/request borrower must actually return before the
+        // retained memory reservation can be released. iOS policy is unchanged.
+        Self::Android(material) => AndroidSigningMaterial::retirement_exclusive(material),
+        Self::Ios(_) => true,
+    } }
+    fn header(&self) -> Result<Vec<u8>, BridgeError> { match self { Self::Android(m) => m.header(), Self::Ios(m) => m.header() } }
+    fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> { match self { Self::Android(m) => m.parts(), Self::Ios(m) => m.parts() } }
+    fn framing(&self) -> (&'static [u8], &'static [u8]) { match self {
+        Self::Android(_) => (crate::asset_session::ANDROID_MATERIAL_PREFIX, crate::asset_session::ANDROID_MATERIAL_SUFFIX),
+        Self::Ios(_) => (crate::asset_session::IOS_MATERIAL_PREFIX, crate::asset_session::IOS_MATERIAL_SUFFIX),
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +213,7 @@ enum Reason {
     WorkRetained, CleanupUnknown, ContainerRequired, SchemeRequired, ContainerMissing, ArchiveValidationFailed, ProjectChanged, ReviewStale, ManualRequired, ProjectBusy, ProjectConflict, RecoveryIncomplete,
     SigningPolicyRequired, SigningInputMissing, SigningInputInvalid, SigningValidationFailed,
     AccountAdmissionRefused, ArtifactValidationFailed, SymbolsUploadNotRequested, RecoveryAttention,
+    SigningInputsRequired, SigningInvalid, SigningFailed, SigningIncomplete,
 }
 impl Reason {
     fn recovery(self) -> Result<recovery_wire::Reason, BridgeError> { Ok(match self {
@@ -251,6 +283,8 @@ impl Reason {
             android_wire::Reason::ArtifactAmbiguous => Self::ArtifactAmbiguous, android_wire::Reason::ArtifactUnsafe => Self::ArtifactUnsafe, android_wire::Reason::ArtifactChanged => Self::ArtifactChanged,
             android_wire::Reason::InputLimit => Self::InputLimit, android_wire::Reason::ResultLimit => Self::ResultLimit, android_wire::Reason::WorkRetained => Self::WorkRetained,
             android_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
+            android_wire::Reason::SigningInputsRequired => Self::SigningInputsRequired, android_wire::Reason::SigningInvalid => Self::SigningInvalid,
+            android_wire::Reason::SigningFailed => Self::SigningFailed, android_wire::Reason::SigningIncomplete => Self::SigningIncomplete,
     } }
     fn from_ios(value: ios_wire::Reason) -> Self { match value {
         ios_wire::Reason::None => Self::None,
@@ -350,7 +384,8 @@ impl Reason {
         Self::WorkRetained => ios_wire::Reason::WorkRetained,
         Self::CleanupUnknown => ios_wire::Reason::CleanupUnknown,
         Self::ModuleRequired | Self::ArtifactAmbiguous | Self::ProjectChanged | Self::ReviewStale |
-        Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete => return Err(BridgeError::protocol()),
+        Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete
+        | Self::SigningInputsRequired | Self::SigningInvalid | Self::SigningFailed | Self::SigningIncomplete => return Err(BridgeError::protocol()),
     }) }
     fn offline(self) -> Result<wire::Reason, BridgeError> {
         Ok(match self {
@@ -368,7 +403,8 @@ impl Reason {
             Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete | Self::ArtifactUnsafe | Self::ArtifactChanged | Self::WorkRetained | Self::ContainerRequired | Self::SchemeRequired
             | Self::ContainerMissing | Self::ArchiveValidationFailed | Self::SigningPolicyRequired | Self::SigningInputMissing
             | Self::SigningInputInvalid | Self::SigningValidationFailed | Self::AccountAdmissionRefused
-            | Self::ArtifactValidationFailed | Self::SymbolsUploadNotRequested | Self::RecoveryAttention => return Err(BridgeError::protocol()),
+            | Self::ArtifactValidationFailed | Self::SymbolsUploadNotRequested | Self::RecoveryAttention
+            | Self::SigningInputsRequired | Self::SigningInvalid | Self::SigningFailed | Self::SigningIncomplete => return Err(BridgeError::protocol()),
         })
     }
     fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
@@ -385,6 +421,8 @@ impl Reason {
             Self::ArtifactAmbiguous => android_wire::Reason::ArtifactAmbiguous, Self::ArtifactUnsafe => android_wire::Reason::ArtifactUnsafe, Self::ArtifactChanged => android_wire::Reason::ArtifactChanged,
             Self::InputLimit => android_wire::Reason::InputLimit, Self::ResultLimit => android_wire::Reason::ResultLimit, Self::WorkRetained => android_wire::Reason::WorkRetained,
             Self::CleanupUnknown => android_wire::Reason::CleanupUnknown,
+            Self::SigningInputsRequired => android_wire::Reason::SigningInputsRequired, Self::SigningInvalid => android_wire::Reason::SigningInvalid,
+            Self::SigningFailed => android_wire::Reason::SigningFailed, Self::SigningIncomplete => android_wire::Reason::SigningIncomplete,
         Self::ProjectChanged | Self::ReviewStale | Self::ManualRequired | Self::ProjectBusy | Self::ProjectConflict | Self::RecoveryIncomplete | Self::ContainerRequired | Self::SchemeRequired | Self::ContainerMissing | Self::ArchiveValidationFailed
         | Self::SigningPolicyRequired | Self::SigningInputMissing | Self::SigningInputInvalid | Self::SigningValidationFailed
         | Self::AccountAdmissionRefused | Self::ArtifactValidationFailed | Self::SymbolsUploadNotRequested | Self::RecoveryAttention => return Err(BridgeError::protocol()),
@@ -564,7 +602,7 @@ struct Registry {
     recovery: Option<Arc<IOSRecoveryObservation>>,
 }
 struct Prepared { projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
-    material: Option<Arc<IOSSigningMaterial>>, recovery: Option<Arc<IOSRecoveryObservation>> }
+    material: Option<SigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>> }
 struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
 struct Active {
     owner: Arc<Session>, projection: RunProjection, first_stop: Option<Instant>, work_expired: bool,
@@ -678,7 +716,7 @@ impl RunProjection {
 struct Session {
     domain: SavedCommandDomain, id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
     registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>, request: AsyncMutex<Option<Vec<u8>>>,
-    material: Mutex<Option<Arc<IOSSigningMaterial>>>, material_retired: AtomicBool,
+    material: Mutex<Option<SigningMaterial>>, material_retired: AtomicBool,
     recovery: Option<Arc<IOSRecoveryObservation>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
     native_audit_cutoff: watch::Sender<Instant>,
@@ -1052,8 +1090,20 @@ impl SavedCommandOwner {
     }
     pub(crate) fn prepare_android(&self, input: android_wire::Prepare, registration: u32, project: RegisteredRoot,
         gate: android_wire::Availability) -> Result<android_wire::Status, BridgeError> {
+        self.prepare_android_material(input, registration, project, gate, None)
+    }
+    pub(crate) fn prepare_android_material(&self, input: android_wire::Prepare, registration: u32, project: RegisteredRoot,
+        gate: android_wire::Availability, material: Option<Arc<AndroidSigningMaterial>>) -> Result<android_wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::AndroidBuild)?;
-        self.prepare(Context::AndroidBuild(input.context()), registration, project, Availability::from_android(gate))?.android()
+        self.prepare_bound(Context::AndroidBuild(input.context()), registration, project, Availability::from_android(gate), material.map(SigningMaterial::Android))?.android()
+    }
+    pub(crate) fn prepared_android_material(&self, operation: &str, generation: &str) -> Result<Option<Arc<AndroidSigningMaterial>>, BridgeError> {
+        self.require_domain(SavedCommandDomain::AndroidBuild)?;
+        let registry = self.inner.lock();
+        let prepared = registry.prepared.as_ref().filter(|p| p.projection.operation_id == operation && p.projection.owner_generation == generation)
+            .ok_or_else(|| self.inner.domain.invalid_owner())?;
+        match &prepared.material { None => Ok(None), Some(SigningMaterial::Android(material)) => Ok(Some(material.clone())),
+            _ => Err(self.inner.domain.invalid_owner()) }
     }
     pub(crate) fn prepare_ios(&self, input: ios_wire::Prepare, registration: u32, project: RegisteredRoot,
         gate: ios_wire::Availability) -> Result<ios_wire::Status, BridgeError> {
@@ -1062,18 +1112,25 @@ impl SavedCommandOwner {
     pub(crate) fn prepare_ios_material(&self, input: ios_wire::Prepare, registration: u32, project: RegisteredRoot,
         gate: ios_wire::Availability, material: Option<Arc<IOSSigningMaterial>>) -> Result<ios_wire::Status, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
-        self.prepare_bound(Context::IOSArchive(input.context()), registration, project, Availability::from_ios(gate), material)?.ios()
+        self.prepare_bound(Context::IOSArchive(input.context()), registration, project, Availability::from_ios(gate), material.map(SigningMaterial::Ios))?.ios()
     }
     pub(crate) fn prepared_ios_material(&self, operation: &str, generation: &str) -> Result<Option<Arc<IOSSigningMaterial>>, BridgeError> {
         self.require_domain(SavedCommandDomain::IOSArchive)?;
-        self.inner.lock().prepared.as_ref().filter(|p| p.projection.operation_id == operation && p.projection.owner_generation == generation)
-            .map(|p| p.material.clone()).ok_or_else(|| self.inner.domain.invalid_owner())
+        let registry = self.inner.lock();
+        let prepared = registry.prepared.as_ref().filter(|p| p.projection.operation_id == operation && p.projection.owner_generation == generation)
+            .ok_or_else(|| self.inner.domain.invalid_owner())?;
+        match &prepared.material { None => Ok(None), Some(SigningMaterial::Ios(material)) => Ok(Some(material.clone())),
+            _ => Err(self.inner.domain.invalid_owner()) }
     }
     pub(crate) fn start_android(&self, input: android_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
         gate: android_wire::Availability) -> Result<crate::android_build_owner::Admitted, BridgeError> {
+        self.start_android_material(input, admitted_at, registered, gate, None)
+    }
+    pub(crate) fn start_android_material(&self, input: android_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
+        gate: android_wire::Availability, material: Option<Arc<AndroidSigningMaterial>>) -> Result<crate::android_build_owner::Admitted, BridgeError> {
         self.require_domain(SavedCommandDomain::AndroidBuild)?;
-        let admitted = self.start(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
-            admitted_at, registered, Availability::from_android(gate))?;
+        let admitted = self.start_bound(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
+            admitted_at, registered, Availability::from_android(gate), material.map(SigningMaterial::Android))?;
         Ok(crate::android_build_owner::Admitted::new(admitted.status.android()?, admitted.release))
     }
     pub(crate) fn start_ios(&self, input: ios_wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
@@ -1092,7 +1149,7 @@ impl SavedCommandOwner {
             }
         }
         let admitted = self.start_bound(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
-            admitted_at, registered, Availability::from_ios(gate), material)?;
+            admitted_at, registered, Availability::from_ios(gate), material.map(SigningMaterial::Ios))?;
         Ok(crate::ios_archive_owner::Admitted::new(admitted.status.ios()?, admitted.release))
     }
     pub(crate) fn status_android(&self, gate: android_wire::Availability) -> Result<android_wire::Status, BridgeError> {
@@ -1178,14 +1235,14 @@ impl SavedCommandOwner {
         self.prepare_bound(context, registration, project, gate, None)
     }
     fn prepare_bound(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
-        material: Option<Arc<IOSSigningMaterial>>) -> Result<Status, BridgeError> {
+        material: Option<SigningMaterial>) -> Result<Status, BridgeError> {
         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
         if context.domain() != self.inner.domain { return Err(self.inner.domain.invalid_owner()); }
         if !self.inner.ios_mode_qualified(&context, None) {
             return Err(prepare_refusal(self.inner.domain, Availability::RuntimeUnqualified));
         }
-        if context.signed_ios() != material.is_some() || material.as_ref().is_some_and(|original|
-            !matches!(&context, Context::IOSArchive(c) if original.matches(c, registration, &project))) {
+        if context.any_signed() != material.is_some() || material.as_ref().is_some_and(|original|
+            !original.matches(&context, registration, &project)) {
             return Err(self.inner.domain.invalid_owner());
         }
         self.reconcile(); let mut r = self.inner.lock();
@@ -1247,7 +1304,7 @@ impl SavedCommandOwner {
         self.start_bound(input, admitted_at, registered, gate, None)
     }
     fn start_bound(&self, input: Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>, gate: Availability,
-        material: Option<Arc<IOSSigningMaterial>>) -> Result<Admitted, BridgeError> {
+        material: Option<SigningMaterial>) -> Result<Admitted, BridgeError> {
         let mut r = self.inner.lock();
         if !r.prepared.as_ref().is_some_and(|p| p.projection.operation_id == input.operation_id && p.projection.owner_generation == input.owner_generation) {
             return Err(self.inner.domain.invalid_owner()); // Foreign/replayed Start never stops another owner.
@@ -1263,9 +1320,9 @@ impl SavedCommandOwner {
             Clocks::installed_ios_signed(admitted_at)
         } else { clocks };
         let material_matches = match (&prepared.material, &material) {
-            (None, None) => !prepared.projection.context.signed_ios(),
-            (Some(original), Some(current)) => Arc::ptr_eq(original, current) && matches!(&prepared.projection.context,
-                Context::IOSArchive(context) if context.signed() && original.matches(context, prepared.registration, &prepared.project)),
+            (None, None) => !prepared.projection.context.any_signed(),
+            (Some(original), Some(current)) => original.same_original(current)
+                && original.matches(&prepared.projection.context, prepared.registration, &prepared.project),
             _ => false,
         };
         let recovery_matches = match (&prepared.projection.context, &prepared.recovery) {
@@ -1304,11 +1361,12 @@ impl SavedCommandOwner {
         let (native_audit_cutoff, audit_cutoff) = watch::channel(clocks.audit_end(None));
         let (frames, receiver) = mpsc::channel(2);
         let context = prepared.projection.context;
+        let material_absent = !context.any_signed();
         let projection = RunProjection { operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         let owner = Arc::new(Session { domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff,
-            material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!clocks.signed),
+            material: Mutex::new(prepared.material), material_retired: AtomicBool::new(material_absent),
             recovery: prepared.recovery,
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
@@ -1464,7 +1522,8 @@ impl SavedCommandOwner {
             // final Ready result is recorded and the original hard clock is
             // clear. Unknown/lost joins retain it; Drop is not settlement.
             if let Ok(mut material) = owner.material.lock() {
-                if owner.clocks.signed != material.is_some() || owner.material_retired.load(Ordering::SeqCst) == owner.clocks.signed {
+                if owner.context.any_signed() != material.is_some() || owner.material_retired.load(Ordering::SeqCst) == owner.context.any_signed()
+                    || material.as_ref().is_some_and(|original| !original.retirement_exclusive()) {
                     owner.resource_unknown.store(true, Ordering::SeqCst); self.inner.unknown_locked(&mut r, &owner); return;
                 }
                 material.take();
@@ -1572,7 +1631,7 @@ impl Inner {
             && self.runtime.project_recovery_installed_profile_available()
     }
     fn ios_mode_qualified(&self, context: &Context, original: Option<&Session>) -> bool {
-        if context.domain() != self.domain { return false; }
+        if context.domain() != self.domain || context.signed_android() && !ANDROID_SIGNED_NATIVE_QUALIFIED { return false; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         {
             let Ok(slot) = self.ios_observation.lock() else { return false; };
@@ -1797,6 +1856,8 @@ impl Inner {
         };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
         let mut signed_inputs_bound = false;
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let mut saved_android_signing = None;
         let Some(a) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         match incoming {
             Incoming::Accepted(stage) if !a.accepted && !a.terminal => {
@@ -1806,6 +1867,25 @@ impl Inner {
             Incoming::Progress(stage) if a.accepted && !a.terminal
                 && a.projection.stage.is_some_and(|previous| stage.after(previous)) => {
                 a.projection.stage = Some(stage); self.bump(&mut r);
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if stage == Stage::AndroidBuild(android_wire::Stage::Signing) && owner.context.signed_android() {
+                    // Original accepted typed Progress only. A generic Status
+                    // sample or terminal stage can never call this observation.
+                    let eligible = original_session(&r, owner) && r.active.as_ref().is_some_and(|a|
+                        a.accepted && !a.terminal && a.first_stop.is_none() && !a.unknown
+                            && a.projection.phase == Phase::Running);
+                    let (slot, unpoisoned) = match self.observation.lock() {
+                        Ok(slot) => (slot, true), Err(poisoned) => (poisoned.into_inner(), false),
+                    };
+                    if let Some(observation) = slot.as_ref().filter(|o| o.control.case.saved_signing()) {
+                        let original = observation.original.clone();
+                        let same = unpoisoned && eligible && !observation.retired
+                            && original.as_ref().is_some_and(|original| std::ptr::eq(original.as_ref(), owner));
+                        saved_android_signing = Some((observation.control.clone(), original, same));
+                    }
+                    // Absent and non-saved observations are a no-op. No
+                    // observation lock or registry guard crosses the callback.
+                }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
                 {
                     signed_inputs_bound = stage == Stage::IOSArchive(ios_wire::Stage::InputsBound)
@@ -1841,6 +1921,15 @@ impl Inner {
             // A witness callback may fail the observation. Do not keep the
             // registry (or any native/document borrow) across that callback.
             drop(r); observe_installed_ios_signed_inputs(self, owner);
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            drop(r);
+            if let Some((control, original, same)) = saved_android_signing {
+                if let Some(original) = original.filter(|_| same) {
+                    control.saved_signing_dispatched(&original.id, &original.generation);
+                } else { control.unavailable_witness(); }
+            }
         }
         owner.wake.notify_waiters();
     }
@@ -1895,9 +1984,8 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         Err(_) => { failed = true; None },
     } };
     let header = material.as_ref().map(|value| value.header()).transpose();
-    if owner.context.signed_ios() != material.is_some() || header.is_err()
-        || material.as_ref().is_some_and(|value| !matches!(&owner.context, Context::IOSArchive(context)
-            if value.matches(context, owner.registration, &owner.project))) { failed = true; }
+    if owner.context.any_signed() != material.is_some() || header.is_err()
+        || material.as_ref().is_some_and(|value| !value.matches(&owner.context, owner.registration, &owner.project)) { failed = true; }
     if !*stop.borrow() {
         match (input.io.as_mut(), request.as_ref()) {
             (Some(writer), Some(bytes)) if !failed && bytes.len() <= owner.domain.request_limit() => {
@@ -1909,10 +1997,11 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                             let header = header.as_ref().ok().and_then(Option::as_ref)
                                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
                             let parts = material.parts().map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
-                            writer.write_all(crate::asset_session::IOS_MATERIAL_PREFIX).await?;
+                            let (prefix, suffix) = material.framing();
+                            writer.write_all(prefix).await?;
                             writer.write_all(header).await?;
                             for (_, bytes) in parts { writer.write_all(bytes).await?; }
-                            writer.write_all(crate::asset_session::IOS_MATERIAL_SUFFIX).await?;
+                            writer.write_all(suffix).await?;
                         }
                         Ok::<(), std::io::Error>(())
                     } => Some(result),
@@ -2650,8 +2739,19 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             {
                 let binding = book.native.as_ref().and_then(|native| native.lock().ok())
                     .and_then(|native| native.request_binding(&runtime).ok());
-                match binding { Some(binding) => android_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding),
-                    None => Err(owner.domain.unavailable()) }
+                let construct = || {
+                    let binding = binding.ok_or_else(|| owner.domain.unavailable())?;
+                    if context.signed() {
+                        let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                        let Some(SigningMaterial::Android(original)) = material.as_ref() else { return Err(owner.domain.invalid_owner()); };
+                        if !original.matches(context, owner.registration, &owner.project) { return Err(owner.domain.invalid_owner()); }
+                        android_wire::request_signed(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd,
+                            &binding, &original.context_data())
+                    } else {
+                        android_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding)
+                    }
+                };
+                construct()
             }
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             { let _ = (context, profile); Err(owner.domain.unavailable()) }
@@ -2672,8 +2772,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     if context.signed() {
                         let tools = native.signing_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
                         let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                        let original = material.as_ref().filter(|value| value.matches(context, owner.registration, &owner.project))
-                            .ok_or_else(|| owner.domain.invalid_owner())?;
+                        let Some(SigningMaterial::Ios(original)) = material.as_ref() else { return Err(owner.domain.invalid_owner()); };
+                        if !original.matches(context, owner.registration, &owner.project) { return Err(owner.domain.invalid_owner()); }
                         ios_wire::request_signed(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd,
                             &binding, &tools, &original.context_data())
                     } else {
@@ -2926,7 +3026,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && a.projection.result.as_ref().is_some_and(Terminal::settled))
                 && book.out_end.as_ref().is_some_and(|r| r.decoder_settled && !r.failed && match owner.domain {
                     SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery => r.frames == 2,
-                    SavedCommandDomain::AndroidBuild => (2..=8).contains(&r.frames),
+                    SavedCommandDomain::AndroidBuild => (2..=owner.context.frame_limit()).contains(&r.frames),
                     SavedCommandDomain::IOSArchive => (2..=owner.context.frame_limit()).contains(&r.frames),
                 })
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
@@ -3027,6 +3127,15 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
         (Some(owner.clocks.cleanup.duration_since(owner.clocks.admitted).as_millis().try_into().ok()?),
             Some(owner.material_retired.load(Ordering::SeqCst)), Some(material.is_some()))
     } else { (None, None, None) };
+    // Finish each original join-result read in this statement so its
+    // try_lock temporary drops before the owner at the tail return.
+    let driver_joined = owner.driver_joined.load(Ordering::SeqCst) && !owner.driver_failed.load(Ordering::SeqCst)
+        && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(())));
+    let manager_joined = !owner.manager_failed.load(Ordering::SeqCst)
+        && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(())));
+    let observer_joined = matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true)));
+    let watchdog_joined = owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
+        && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true)));
     Some(Snapshot { facts: OriginalFacts {
         operation_id: owner.id.clone(), owner_generation: owner.generation.clone(),
         inspection_joined: book.inspection_started && book.inspection_joined && !book.inspection_failed
@@ -3048,13 +3157,10 @@ fn installed_ios_snapshot(inner: &Inner) -> Option<crate::shell::installed_obser
         runtime_ledger_settled: native.runtime.settled(), tools_ledger_settled: native.tools.settled(), native_settlement_joined,
         native_integrity: native_settlement_joined && native.settled() && native.failure.is_none()
             && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true }))),
-        driver_joined: owner.driver_joined.load(Ordering::SeqCst) && !owner.driver_failed.load(Ordering::SeqCst)
-            && matches!(owner.driver_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
-        manager_joined: !owner.manager_failed.load(Ordering::SeqCst)
-            && matches!(owner.manager_return.try_lock().ok()?.as_ref(), Some(Ok(()))),
-        observer_joined: matches!(owner.observer_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
-        watchdog_joined: owner.watchdog_joined.load(Ordering::SeqCst) && !owner.watchdog_failed.load(Ordering::SeqCst)
-            && matches!(owner.watchdog_return.try_lock().ok()?.as_ref(), Some(Ok(true))),
+        driver_joined,
+        manager_joined,
+        observer_joined,
+        watchdog_joined,
         retired_before_cutoff: retired, active_retained: active.is_some(),
         resource_unknown: owner.resource_unknown.load(Ordering::SeqCst) || active.is_some_and(|a| a.unknown)
             || registry.disabled || registry.exhausted || inner.poisoned.load(Ordering::SeqCst),

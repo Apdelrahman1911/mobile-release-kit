@@ -112,6 +112,25 @@ def _read_initial(fd: int, end: float) -> bytes:
 def encode_result(request: Initial, result: dict[str, Any] | None,
                   pending: list[dict[str, Any]] | None = None) -> bytes:
     policy = policy_for(request.family)
+    if request.family is Family.INPUT_GROUP:
+        if request.kind == "pending":
+            _require(result is None and type(pending) is list and len(pending) <= MAX_RECORDS
+                     and request.pending_scope is not None)
+            markers = set()
+            for item in pending:
+                record = policy.parse_record(item)
+                target = policy.Prepared.parse(record["prepared"]).target
+                _require(target.marker not in markers)
+                markers.add(target.marker)
+                _require(all(target.value()[key] == expected for key, expected in request.pending_scope.items()))
+        else:
+            _require(pending is None and request.action is not None)
+            policy.validate_result(request.action, result)
+        envelope = {"protocol": policy.PROTOCOL, "id": request.id, "result": result, "pending": pending}
+        _check_values(envelope, nodes=20_000, depth=16)
+        raw = policy.canonical(envelope) + b"\n"
+        _require(len(raw) <= MAX_RESULT_BYTES)
+        return raw
     if request.kind == "pending":
         _require(result is None and type(pending) is list and len(pending) <= MAX_RECORDS)
         for row in pending:
@@ -150,6 +169,242 @@ def encode_result(request: Initial, result: dict[str, Any] | None,
     return raw
 
 
+
+MAX_INPUT_READ_BYTES = 8 * 1024
+MAX_INPUT_RECHECK_BYTES = 8 * 1024
+MAX_INPUT_GO_BYTES = 96 * 1024
+MAX_INPUT_OUTCOME_BYTES = 1024
+MAX_INPUT_STDOUT_BYTES = 271872
+
+
+def _input_policy():
+    return policy_for(Family.INPUT_GROUP)
+
+
+def input_ready_frame(request: Initial) -> bytes:
+    _require(request.family is Family.INPUT_GROUP)
+    journal = {"prepare": "not-applicable", "apply": "opened", "reconcile": "matched-intent",
+               "pending": "loaded"}[request.kind]
+    raw = _input_policy().canonical({"protocol": _input_policy().PROTOCOL, "id": request.id,
+            "ready": {"requestSha256": request.digest, "phase": "observe", "journal": journal}}) + b"\n"
+    _require(len(raw) <= MAX_READY_BYTES)
+    return raw
+
+
+def parse_input_read(raw: bytes, request: Initial) -> str | None:
+    _require(request.family is Family.INPUT_GROUP)
+    row = _object(_frame(raw, MAX_INPUT_READ_BYTES, nodes=32, depth=4), {"protocol", "id", "read"})
+    _require(row["protocol"] == _input_policy().PROTOCOL and row["id"] == request.id)
+    read = _object(row["read"], {"requestSha256", "token"})
+    _require(read["requestSha256"] == request.digest)
+    token = read["token"]
+    if request.kind == "pending":
+        _require(token is None)
+    else:
+        _require(type(token) is str and 1 <= len(token) <= 4096
+                 and all(0x21 <= ord(char) <= 0x7e for char in token))
+    return token
+
+
+def input_rechecked_frame(request: Initial, snapshot, intent_sha256: str) -> tuple[bytes, str]:
+    policy = _input_policy()
+    _require(request.family is Family.INPUT_GROUP and request.kind == "apply"
+             and request.action is not None and request.action.prepared is not None)
+    _require(intent_sha256 == policy.intent_digest(request.action.prepared))
+    admitted = policy.Prepared.parse(snapshot.value())
+    policy.compare_prepared(request.action.prepared, admitted)
+    digest = hashlib.sha256(policy.canonical(admitted.value())).hexdigest()
+    raw = policy.canonical({"protocol": policy.PROTOCOL, "id": request.id, "rechecked": {
+        "requestSha256": request.digest, "snapshotSha256": digest,
+        "intentSha256": _match(intent_sha256, _DIGEST), "snapshot": admitted.value()}}) + b"\n"
+    _require(len(raw) <= MAX_INPUT_RECHECK_BYTES)
+    return raw, digest
+
+
+def parse_input_go(raw: bytes, request: Initial, snapshot_sha256: str, intent_sha256: str) -> bytes:
+    import base64
+    import binascii
+
+    policy = _input_policy()
+    _require(request.family is Family.INPUT_GROUP and request.kind == "apply"
+             and request.action is not None and request.action.prepared is not None)
+    row = _object(_frame(raw, MAX_INPUT_GO_BYTES, nodes=32, depth=4), {"protocol", "id", "go"})
+    _require(row["protocol"] == policy.PROTOCOL and row["id"] == request.id)
+    go = _object(row["go"], {"requestSha256", "snapshotSha256", "intentSha256", "putBodyBase64"})
+    _require(go["requestSha256"] == request.digest and go["snapshotSha256"] == snapshot_sha256
+             and go["intentSha256"] == intent_sha256)
+    encoded = go["putBodyBase64"]
+    _require(type(encoded) is str and 0 < len(encoded) <= 4 * ((policy.MAX_PUT_BODY + 2) // 3))
+    try:
+        body = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ProtocolError("Invalid fixed sealed input-group frame") from None
+    _require(base64.b64encode(body).decode("ascii") == encoded)
+    return policy.validate_put_body(body, request.action.prepared.public_key_id)
+
+
+def input_outcome_frame(request: Initial, snapshot_sha256: str, intent_sha256: str,
+                        write: object, control: object) -> bytes:
+    policy = _input_policy()
+    _require(request.family is Family.INPUT_GROUP and request.kind == "apply")
+    raw = policy.canonical({"protocol": policy.PROTOCOL, "id": request.id, "outcome": {
+        "requestSha256": request.digest, "snapshotSha256": _match(snapshot_sha256, _DIGEST),
+        "intentSha256": _match(intent_sha256, _DIGEST),
+        "write": policy.parse_write(write), "control": _check_control(control)}}) + b"\n"
+    _require(len(raw) <= MAX_INPUT_OUTCOME_BYTES)
+    return raw
+
+
+def _read_input_phase(fd: int, end: float, maximum: int, *, eof: bool) -> bytes:
+    """Original reader only. No read-chunk boundary is a message boundary."""
+    value = bytearray()
+    while True:
+        if time.monotonic() >= end:
+            raise ProtocolError("Fixed input-group original endpoint elapsed")
+        part = os.read(fd, min(4096, maximum + 1 - len(value)))
+        if time.monotonic() >= end:
+            raise ProtocolError("Fixed input-group original endpoint elapsed")
+        if not part:
+            _frame(bytes(value), maximum)
+            return bytes(value)
+        value.extend(part)
+        if len(value) > maximum:
+            raise ProtocolError("Fixed input-group frame exceeded its bound")
+        if not eof and b"\n" in value:
+            # A final GO cannot legally be pre-sent with READ: RECHECKED and
+            # native sealing have not occurred. For final GO require EOF.
+            _frame(bytes(value), maximum)
+            return bytes(value)
+
+
+class _InputOutput:
+    """Small phase/byte ledger around the original already-owned stdout FD."""
+    def __init__(self, request: Initial, output: int) -> None:
+        self.request = request
+        self.output = output
+        self.phase = "initial"
+        self.total = 0
+        self.go_accepted = False
+        self.failed = False
+
+    def emit(self, phase: str, raw: bytes) -> None:
+        legal = ((phase == "ready" and self.phase == "initial")
+                 or phase == "rechecked" and self.phase == "ready" and self.request.kind == "apply"
+                 or phase == "outcome" and self.phase == "rechecked" and self.go_accepted
+                 or phase == "result" and self.phase in {"ready", "rechecked", "outcome"})
+        limits = {"ready": MAX_READY_BYTES, "rechecked": MAX_INPUT_RECHECK_BYTES,
+                  "outcome": MAX_INPUT_OUTCOME_BYTES, "result": MAX_RESULT_BYTES}
+        _require(not self.failed and legal and phase in limits and len(raw) <= limits[phase]
+                 and self.total + len(raw) <= MAX_INPUT_STDOUT_BYTES)
+        self.phase = phase
+        self.total += len(raw)  # Claim before write, including partial failure.
+        try:
+            _write_response(self.output, raw)
+        except BaseException:
+            self.failed = True
+            raise
+
+
+def _run_input_group(request: Initial, control: int, writer: _InputOutput, journal: Journal | None,
+                     *, started: float, runtime_dir: str) -> dict[str, Any] | None:
+    from datetime import datetime, timezone
+    from ._github_connection_transport import _InputWriteResult
+
+    policy = _input_policy()
+    end = started + READ_SECONDS
+    token = None
+    reader = None
+    body = None
+    result = None if request.kind == "pending" else policy.result_value(request.kind)
+    intent = None
+    if request.kind == "reconcile":
+        _require(journal is not None and request.action is not None and request.action.prepared is not None)
+        result["record"] = journal.input_record(request.action.prepared)
+    try:
+        writer.emit("ready", input_ready_frame(request))
+        token = parse_input_read(_read_input_phase(control, end, MAX_INPUT_READ_BYTES,
+                                                  eof=request.kind != "apply"), request)
+        if request.action is None:
+            return None
+        _require(token is not None and result is not None)
+        reader = policy._make_live_reader(request.action, token, started=started, runtime_dir=runtime_dir)
+        observed = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        result = policy.observe_reads(request.action, reader, observed_at=observed)
+        if request.kind == "reconcile":
+            _require(journal is not None and request.action.prepared is not None)
+            result["record"] = journal.input_record(request.action.prepared)
+        if request.kind != "apply":
+            return result
+        current = result["prepared"]
+        result["prepared"] = None
+        if result["reason"] != "none":
+            return result
+        _require(journal is not None and request.action.prepared is not None)
+        snapshot = policy.Prepared.parse(current)
+        current = None
+        # Retain ORIGINAL consent snapshot, never the freshly timed recheck.
+        intent = journal.create_intent(request.action.prepared)
+        result["record"] = policy.record_value(request.action.prepared, {"state": "not-attempted"}, intent)
+        ready, snapshot_digest = input_rechecked_frame(request, snapshot, intent)
+        snapshot = None
+        writer.emit("rechecked", ready)
+        ready = None
+        body = parse_input_go(_read_input_phase(control, end, MAX_INPUT_GO_BYTES, eof=True),
+                              request, snapshot_digest, intent)
+        if time.monotonic() >= end:
+            raise ProtocolError("Fixed input-group final GO missed its original endpoint")
+        writer.go_accepted = True
+        result["record"] = policy.record_value(request.action.prepared,
+                                               {"state": "attempted-outcome-unknown"}, intent)
+        result["networkCleanup"] = "unknown"
+
+        def observed_outcome(write, safe_control) -> None:
+            # Remote acknowledgement is latched before output/close/fsync.
+            result["record"] = policy.record_value(request.action.prepared, write, intent)
+            result["control"] = _check_control(safe_control)
+            writer.emit("outcome", input_outcome_frame(request, snapshot_digest, intent,
+                                                       write, safe_control))
+
+        reply = reader.put(body, observed_outcome)
+        body = None
+        _require(type(reply) is _InputWriteResult and reply.cleanup in {"confirmed", "unknown"})
+        result["record"] = policy.record_value(request.action.prepared, reply.write, intent)
+        result["control"] = _check_control(reply.control)
+        result["networkCleanup"] = reply.cleanup
+        write = result["record"]["write"]
+        result["reason"] = (reply.control["reason"] if reply.control["reason"] != "none"
+                            else "network-unavailable" if reply.cleanup != "confirmed"
+                            else write["reason"] if write["state"] == "explicitly-rejected"
+                            else "none" if write["state"] in {"acknowledged-created", "acknowledged-updated"}
+                            and reply.observation_sent else "network-unavailable")
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as error:
+        if result is None:
+            raise
+        # No exception text, token, body, local path or key is reflected.
+        from ._github_preflight_journal import JournalError
+        result["reason"] = "journal-incomplete" if isinstance(error, JournalError) else "response-invalid"
+        result["prepared"] = None
+        result["observation"] = None
+        if intent is not None and result["record"] is None:
+            result["record"] = policy.record_value(request.action.prepared,
+                {"state": "attempted-outcome-unknown" if writer.go_accepted else "not-attempted"}, intent)
+    finally:
+        body = None
+        reader = None
+        token = None
+        # At most one immutable outcome attempt, on the original owner. A
+        # partial/colliding output is preserved; never repair/retry/delete it.
+        if intent is not None and result is not None and result["record"] is not None:
+            try:
+                journal.bind_outcome(request.action.prepared, result["record"]["write"])
+            except BaseException:
+                result["journal"] = "unknown"
+                result["reason"] = "journal-incomplete"
+    return result
+
+
 def main(*, started: float, runtime_dir: str, family: Family = Family.PREFLIGHT) -> int:
     owned: list[int] = []
     journal: Journal | None = None
@@ -168,47 +423,73 @@ def main(*, started: float, runtime_dir: str, family: Family = Family.PREFLIGHT)
         os.dup2(2, 1, inheritable=False)
         request = parse_initial(_read_initial(control, end), family=family)
         pending = None
+        is_input = family is Family.INPUT_GROUP
         if request.home is not None:
             journal = Journal(request.home, end=end, family=family)
             journal.open()
             if request.action is None:
                 _require(request.pending_scope is not None)
                 pending = journal.pending(request.pending_scope)
-                journal.close()
+                if not is_input:
+                    journal.close()
             else:
                 _require(request.action.prepared is not None)
-                if request.kind == "dispatch":
+                if is_input:
+                    if request.kind == "apply":
+                        # Readiness grants observations only, not intent/PUT.
+                        journal.admit_input_intent(request.action.prepared)
+                    else:
+                        journal.match_intent(request.action.prepared)
+                elif request.kind == "dispatch":
                     journal.create_intent(request.action.prepared)
                 else:
                     journal.match_intent(request.action.prepared, request.action.run_id)
-        # No token or network client exists before durable intent/readback and
-        # the original writer's checked close. Native final GO is still owed.
-        _write_response(output, ready_frame(request))
-        token = parse_go(_read_request(control, end), request)
-        if time.monotonic() >= end:
-            raise ProtocolError("Fixed preflight GO arrived after the original endpoint")
-        result = None
-        if request.action is not None:
-            _require(token is not None)
-            from datetime import datetime, timezone
+        if is_input:
+            writer = _InputOutput(request, output)
+            result = _run_input_group(request, control, writer, journal,
+                                      started=started, runtime_dir=runtime_dir)
+            if journal is not None and not journal.closed:
+                try:
+                    journal.close()
+                    if result is not None and result["journal"] != "unknown":
+                        result["journal"] = "confirmed"
+                except BaseException:
+                    status = 74
+                    if result is None:
+                        raise
+                    result["journal"] = "unknown"
+                    result["reason"] = "journal-incomplete"
+                    if request.kind == "reconcile":
+                        result["observation"] = None
+            if result is not None and result["networkCleanup"] == "unknown":
+                status = status or 74
+            writer.emit("result", encode_result(request, result, pending))
+        else:
+            # Original workflow/device profiles keep their existing two frames,
+            # request limits, intent chronology and GO-to-EOF token flow.
+            _write_response(output, ready_frame(request))
+            token = parse_go(_read_request(control, end), request)
+            if time.monotonic() >= end:
+                raise ProtocolError("Fixed preflight GO arrived after the original endpoint")
+            result = None
+            if request.action is not None:
+                _require(token is not None)
+                from datetime import datetime, timezone
 
-            reader = policy._make_live_reader(request.action, token, started=started, runtime_dir=runtime_dir)
-            observed = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-            result = policy.execute(request.action, reader, observed_at=observed)
-            if result["runId"] is not None:
-                _require(journal is not None and request.action.prepared is not None)
-                journal.bind_run(request.action.prepared, result["runId"])
-        token = None
-        if journal is not None and not journal.closed:
-            journal.close()
-        # No successful result precedes the journal's actual original closes.
-        # Channel-close failure below still changes the child exit disposition;
-        # the native parent does not accept an earlier result over that failure.
-        _write_response(output, encode_result(request, result, pending))
+                reader = policy._make_live_reader(request.action, token, started=started, runtime_dir=runtime_dir)
+                observed = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                result = policy.execute(request.action, reader, observed_at=observed)
+                if result["runId"] is not None:
+                    _require(journal is not None and request.action.prepared is not None)
+                    journal.bind_run(request.action.prepared, result["runId"])
+            token = None
+            if journal is not None and not journal.closed:
+                journal.close()
+            _write_response(output, encode_result(request, result, pending))
     except (KeyboardInterrupt, SystemExit):
         status = 130
     except Exception:
-        status = 70
+        status = status or 70
         try:
             os.write(2, b"Mobile Release Kit private preflight action failed.\n")
         except OSError:

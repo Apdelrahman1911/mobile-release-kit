@@ -42,6 +42,16 @@ pub(crate) fn sid_at(raw: &[u8], offset: usize, end: usize) -> Result<Sid> { Obs
 pub struct AceFact { pub allow: bool, pub flags: u8, pub mask: u32, pub sid: Sid }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecurityFacts { pub owner: Sid, pub control: u16, pub revision: u8, pub aces: Vec<AceFact> }
+impl SecurityFacts {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut total = self.owner.bytes.capacity()
+            .checked_add(self.aces.capacity().checked_mul(size_of::<AceFact>())?)?;
+        for ace in &self.aces { total = total.checked_add(ace.sid.bytes.capacity())?; }
+        Some(total)
+    }
+}
+#[derive(Clone, Copy)]
+enum DescriptorPurpose<'a> { Runtime(FileKind, AuthorityScope), PrivateCredential(&'a Sid) }
 impl Observed<'_> {
 fn expand(self, mask: u32) -> Result<u32> {
     let generic = F::GENERIC_READ | F::GENERIC_WRITE | F::GENERIC_EXECUTE | F::GENERIC_ALL;
@@ -53,20 +63,33 @@ fn expand(self, mask: u32) -> Result<u32> {
     }
     Ok(effective)
 }
-fn safe_ace(self, ace: &AceFact, kind: FileKind, scope: AuthorityScope) -> Result<()> {
+fn ace_rights(self, ace: &AceFact) -> Result<u32> {
     let allowed_flags = S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE | S::NO_PROPAGATE_INHERIT_ACE | S::INHERIT_ONLY_ACE | S::INHERITED_ACE;
     let flags = ace.flags as u32;
     if flags & !allowed_flags != 0 { return Err(self.0.unsafe_at(C::AceFlags)); }
     if flags & (S::NO_PROPAGATE_INHERIT_ACE | S::INHERIT_ONLY_ACE) != 0
         && flags & (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE) == 0 { return Err(self.0.unsafe_at(C::AceInheritance)); }
-    let effective = self.expand(ace.mask)?; // reject unknown mask even for deny/inherit-only
-    if !ace.allow || flags & S::INHERIT_ONLY_ACE != 0 || ace.sid.trusted() { return Ok(()); }
+    self.expand(ace.mask) // Reject unknown masks even for deny/inherit-only.
+}
+fn safe_ace(self, ace: &AceFact, kind: FileKind, scope: AuthorityScope) -> Result<()> {
+    let effective = self.ace_rights(ace)?;
+    if !ace.allow || ace.flags as u32 & S::INHERIT_ONLY_ACE != 0 || ace.sid.trusted() { return Ok(()); }
     let mut dangerous = FS::DELETE | FS::FILE_DELETE_CHILD | FS::WRITE_DAC | FS::WRITE_OWNER
         | FS::FILE_WRITE_EA | FS::FILE_WRITE_ATTRIBUTES;
     if kind == FileKind::File || scope == AuthorityScope::ImmutableVersion {
         dangerous |= FS::FILE_WRITE_DATA | FS::FILE_APPEND_DATA; // directory ADD_FILE/ADD_SUBDIRECTORY
     }
     if effective & dangerous != 0 { Err(self.0.unsafe_at(C::AceDangerousRights)) } else { Ok(()) }
+}
+fn private_ace(self, ace: &AceFact, user: &Sid) -> Result<()> {
+    let effective = self.ace_rights(ace)?;
+    if !ace.allow || ace.flags as u32 & S::INHERIT_ONLY_ACE != 0 || ace.sid == *user || ace.sid.trusted() {
+        return Ok(());
+    }
+    // Like ordinary POSIX metadata, these rights disclose no credential content
+    // and cannot modify it. Extended-attribute reads are deliberately excluded.
+    let metadata_only = FS::READ_CONTROL | FS::SYNCHRONIZE | FS::FILE_READ_ATTRIBUTES;
+    if effective & !metadata_only != 0 { Err(self.0.unsafe_at(C::AceDangerousRights)) } else { Ok(()) }
 }
 }
 fn overlap(a: (usize, usize), b: (usize, usize)) -> bool { a.0 < b.1 && b.0 < a.1 }
@@ -75,6 +98,12 @@ pub(crate) fn descriptor(raw: &[u8], kind: FileKind, scope: AuthorityScope) -> R
 }
 impl Observed<'_> {
 pub(crate) fn descriptor(self, raw: &[u8], kind: FileKind, scope: AuthorityScope) -> Result<SecurityFacts> {
+    self.descriptor_for(raw, DescriptorPurpose::Runtime(kind, scope))
+}
+pub(crate) fn credential_descriptor(self, raw: &[u8], user: &Sid) -> Result<SecurityFacts> {
+    self.descriptor_for(raw, DescriptorPurpose::PrivateCredential(user))
+}
+fn descriptor_for(self, raw: &[u8], purpose: DescriptorPurpose<'_>) -> Result<SecurityFacts> {
     let d = super::decode::Observed::new(self.0);
     if raw.len() > BUFFER || raw.len() < size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>() { return Err(self.0.unsafe_at(C::DescriptorSize)); }
     let header = size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>();
@@ -93,7 +122,11 @@ pub(crate) fn descriptor(self, raw: &[u8], kind: FileKind, scope: AuthorityScope
     if owner_at < header || owner_at % 4 != 0 { return Err(self.0.unsafe_at(C::OwnerOffset)); }
     if acl_at < header || acl_at % 4 != 0 { return Err(self.0.unsafe_at(C::AclOffset)); }
     let owner = self.sid_at(raw, owner_at, raw.len())?;
-    if !owner.trusted() { return Err(self.0.unsafe_at(C::OwnerTrust)); }
+    let owner_allowed = match purpose {
+        DescriptorPurpose::Runtime(_, _) => owner.trusted(),
+        DescriptorPurpose::PrivateCredential(user) => owner == *user,
+    };
+    if !owner_allowed { return Err(self.0.unsafe_at(C::OwnerTrust)); }
     let acl = d.span(raw, acl_at, size_of::<S::ACL>())?;
     let acl_revision = acl[offset_of!(S::ACL, AclRevision)];
     if !matches!(acl_revision, 2 | 4) { return Err(self.0.unsafe_at(C::AclRevision)); }
@@ -132,7 +165,10 @@ pub(crate) fn descriptor(self, raw: &[u8], kind: FileKind, scope: AuthorityScope
         if offset + sid_offset + sid.bytes.len() != end { return Err(trace.unsafe_at(C::AceSidSize)); }
         let ace = AceFact { allow, flags: head[offset_of!(S::ACE_HEADER, AceFlags)],
             mask: d.u32_at(raw, offset + offset_of!(S::ACCESS_ALLOWED_ACE, Mask))?, sid };
-        observed.safe_ace(&ace, kind, scope)?;
+        match purpose {
+            DescriptorPurpose::Runtime(kind, scope) => observed.safe_ace(&ace, kind, scope)?,
+            DescriptorPurpose::PrivateCredential(user) => observed.private_ace(&ace, user)?,
+        }
         aces.push(ace); offset = end;
     }
     // Remaining bytes belong to ACL free space, not implicit extra ACEs. The
@@ -161,6 +197,15 @@ pub(crate) fn statistics(self, raw: &[u8]) -> Result<TokenIdentity> {
 pub struct GroupFact { pub sid: Sid, pub attributes: u32 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenFacts { pub identity: TokenIdentity, pub user: Sid, pub elevation_type: u32, pub groups: Vec<GroupFact>, pub privileges: Vec<(u64, u32)> }
+impl TokenFacts {
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.user.bytes.capacity()
+            .checked_add(self.groups.capacity().checked_mul(size_of::<GroupFact>())?)?
+            .checked_add(self.privileges.capacity().checked_mul(size_of::<(u64, u32)>())?)?;
+        for group in &self.groups { bytes = bytes.checked_add(group.sid.bytes.capacity())?; }
+        Some(bytes)
+    }
+}
 fn pointed_sid(raw: &[u8], field: usize, minimum: usize) -> Result<Sid> {
     let pointer = usize::try_from(u64_at(raw, field)?).map_err(|_| Error::Unsafe)?;
     let offset = pointer.checked_sub(raw.as_ptr() as usize).ok_or(Error::Unsafe)?;
@@ -219,4 +264,106 @@ pub(crate) fn token_facts(identity: TokenIdentity, token_type: u32, elevated: u3
     if !label.is(16, &[8192]) || attributes != (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32 { return Err(Error::Unsafe); }
     Ok(TokenFacts { identity, user: user_sid, elevation_type, groups: groups(group_bytes, identity.groups)?,
         privileges: privileges(privilege_bytes, identity.privileges, allowed)? })
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    fn sid(authority: u8, sub: &[u32]) -> Sid {
+        let mut bytes = vec![1, sub.len() as u8, 0, 0, 0, 0, 0, authority];
+        for value in sub { bytes.extend_from_slice(&value.to_le_bytes()); }
+        sid_at(&bytes, 0, bytes.len()).unwrap()
+    }
+    fn account() -> Sid { sid(5, &[21, 11, 22, 33, 1001]) }
+    fn descriptor_bytes(owner: &Sid, aces: &[(bool, u8, u32, Sid)]) -> Vec<u8> {
+        let header = size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>();
+        let acl_at = header + owner.bytes.len();
+        let acl_size = size_of::<S::ACL>() + aces.iter().map(|ace| 8 + ace.3.bytes.len()).sum::<usize>();
+        let mut raw = vec![0u8; acl_at + acl_size];
+        raw[0] = 1;
+        raw[2..4].copy_from_slice(&(S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT).to_le_bytes());
+        raw[4..8].copy_from_slice(&(header as u32).to_le_bytes());
+        raw[16..20].copy_from_slice(&(acl_at as u32).to_le_bytes());
+        raw[header..acl_at].copy_from_slice(&owner.bytes);
+        raw[acl_at] = 2;
+        raw[acl_at + 2..acl_at + 4].copy_from_slice(&(acl_size as u16).to_le_bytes());
+        raw[acl_at + 4..acl_at + 6].copy_from_slice(&(aces.len() as u16).to_le_bytes());
+        let mut offset = acl_at + size_of::<S::ACL>();
+        for (allow, flags, mask, sid) in aces {
+            let size = 8 + sid.bytes.len();
+            raw[offset] = if *allow { SS::ACCESS_ALLOWED_ACE_TYPE as u8 } else { SS::ACCESS_DENIED_ACE_TYPE as u8 };
+            raw[offset + 1] = *flags;
+            raw[offset + 2..offset + 4].copy_from_slice(&(size as u16).to_le_bytes());
+            raw[offset + 4..offset + 8].copy_from_slice(&mask.to_le_bytes());
+            raw[offset + 8..offset + size].copy_from_slice(&sid.bytes);
+            offset += size;
+        }
+        raw
+    }
+    fn private(raw: &[u8], user: &Sid) -> Result<SecurityFacts> {
+        Observed::new(Refusal::none()).credential_descriptor(raw, user)
+    }
+    #[test]
+    fn credential_owner_policy_does_not_relax_immutable_runtime_policy() {
+        let user = account(); let system = sid(5, &[18]);
+        let raw = descriptor_bytes(&user, &[(true, 0, FS::FILE_ALL_ACCESS, user.clone()),
+            (true, 0, FS::FILE_ALL_ACCESS, system.clone())]);
+        assert!(private(&raw, &user).is_ok());
+        assert!(descriptor(&raw, FileKind::File, AuthorityScope::ImmutableVersion).is_err());
+        let raw = descriptor_bytes(&system, &[(true, 0, FS::FILE_GENERIC_READ, user.clone())]);
+        assert!(descriptor(&raw, FileKind::File, AuthorityScope::ImmutableVersion).is_ok());
+        assert!(private(&raw, &user).is_err());
+        assert!(private(&descriptor_bytes(&user, &[]), &sid(5, &[21, 11, 22, 33, 1002])).is_err());
+    }
+    #[test]
+    fn private_acl_rejects_foreign_content_and_control_even_after_a_deny() {
+        let user = account(); let everyone = sid(1, &[0]);
+        let harmless = FS::READ_CONTROL | FS::SYNCHRONIZE | FS::FILE_READ_ATTRIBUTES;
+        assert!(private(&descriptor_bytes(&user, &[(true, 0, harmless, everyone.clone())]), &user).is_ok());
+        for right in [FS::FILE_READ_DATA, FS::FILE_READ_EA, FS::FILE_WRITE_DATA, FS::FILE_APPEND_DATA,
+            FS::FILE_WRITE_EA, FS::FILE_EXECUTE, FS::FILE_DELETE_CHILD, FS::FILE_WRITE_ATTRIBUTES,
+            FS::DELETE, FS::WRITE_DAC, FS::WRITE_OWNER, F::GENERIC_READ, F::GENERIC_WRITE, F::GENERIC_EXECUTE, F::GENERIC_ALL] {
+            let raw = descriptor_bytes(&user, &[(false, 0, right, everyone.clone()), (true, 0, right, everyone.clone())]);
+            assert!(private(&raw, &user).is_err(), "foreign right {right:x}");
+        }
+    }
+    #[test]
+    fn private_acl_still_checks_unsupported_deny_and_inherit_only_records() {
+        let user = account(); let everyone = sid(1, &[0]);
+        let inherited = (S::OBJECT_INHERIT_ACE | S::INHERIT_ONLY_ACE) as u8;
+        assert!(private(&descriptor_bytes(&user, &[(true, inherited, FS::FILE_ALL_ACCESS, everyone.clone())]), &user).is_ok());
+        for (allow, flags, mask) in [(false, 0, 0x02000000), (true, inherited, 0x02000000), (false, 0x80, 0)] {
+            assert!(private(&descriptor_bytes(&user, &[(allow, flags, mask, everyone.clone())]), &user).is_err());
+        }
+        let mut raw = descriptor_bytes(&user, &[(false, inherited, 0, everyone)]);
+        let ace = size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>() + user.bytes.len() + size_of::<S::ACL>();
+        raw[ace] = SS::ACCESS_ALLOWED_OBJECT_ACE_TYPE as u8;
+        assert!(private(&raw, &user).is_err());
+        let mut no_dacl = descriptor_bytes(&user, &[]);
+        no_dacl[16..20].fill(0); assert!(private(&no_dacl, &user).is_err());
+    }
+    #[test]
+    fn security_retention_accounts_for_ace_and_sid_capacities() {
+        let user = account();
+        let facts = private(&descriptor_bytes(&user, &[(true, 0, FS::FILE_ALL_ACCESS, user.clone())]), &user).unwrap();
+        assert_eq!(facts.retained_heap_bytes(), Some(facts.owner.bytes.capacity()
+            + facts.aces.capacity() * size_of::<AceFact>() + facts.aces[0].sid.bytes.capacity()));
+    }
+}
+
+#[cfg(test)]
+mod token_retained_capacity_data_tests {
+    use super::*;
+    #[test]
+    fn token_retention_charges_actual_group_privilege_and_private_sid_capacities() {
+        // Allocation DATA only. No token acquisition or admission is fabricated.
+        let mut groups = Vec::with_capacity(4);
+        groups.push(GroupFact { sid: Sid { bytes: Vec::with_capacity(64) }, attributes: 0 });
+        let facts = TokenFacts { identity: TokenIdentity { token_id: 0, authentication_id: 0, modified_id: 0, groups: 0, privileges: 0 },
+            user: Sid { bytes: Vec::with_capacity(32) }, elevation_type: 0, groups, privileges: Vec::with_capacity(8) };
+        assert_eq!(facts.retained_heap_bytes(), Some(facts.user.bytes.capacity()
+            + facts.groups.capacity() * size_of::<GroupFact>()
+            + facts.privileges.capacity() * size_of::<(u64, u32)>()
+            + facts.groups[0].sid.bytes.capacity()));
+    }
 }

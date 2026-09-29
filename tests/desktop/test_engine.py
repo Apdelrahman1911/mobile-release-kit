@@ -5,6 +5,7 @@ Real supervisor/channel/finality checks belong on disposable hosted runners.
 
 import json
 import unittest
+from pathlib import Path
 
 from mobile_release import _desktop_engine as engine
 
@@ -31,6 +32,9 @@ class EngineContractTests(unittest.TestCase):
         lifecycle_params = {**evidence_params, "stage": "external-testing"}
         lifecycle = engine.parse_request(frame(method="release.evidence.observe", params=lifecycle_params))
         self.assertEqual((lifecycle.method, lifecycle.params), ("release.evidence.observe", lifecycle_params))
+        metadata_params = {"root": "/selected/project", "platform": "ios"}
+        metadata = engine.parse_request(frame(method="metadata.validate", params=metadata_params))
+        self.assertEqual((metadata.method, metadata.params), ("metadata.validate", metadata_params))
         for changes in (
             {"protocol": True}, {"protocol": 2}, {"id": "../other"}, {"id": ""},
             {"id": "x" * 65}, {"method": "run"}, {"method": []}, {"params": []},
@@ -88,6 +92,39 @@ class EngineContractTests(unittest.TestCase):
         engine.encode_response(request, result=nested)
         with self.assertRaises(engine.ProtocolError):
             engine.encode_response(request, result=[nested])
+
+    def test_metadata_response_cross_language_fixture_preserves_ordinary_limits(self):
+        # Shared synthetic DATA only. Rust consumes these exact encoded bytes
+        # through decode_envelope -> result; this is not a native observation.
+        raw = (Path(__file__).with_name("fixtures") / "metadata-validation-250-locales-response.json").read_bytes()
+        envelope = json.loads(raw)
+        report = envelope["result"]
+        self.assertEqual((len(report["locales"]), len(report["files"])), (250, 1253))
+        request = engine.parse_request(frame(id=envelope["id"], method="metadata.validate",
+                                             params={"root": "/selected/project", "platform": "ios"}))
+        self.assertEqual(engine.encode_response(request, result=report), raw)
+        self.assertLessEqual(len(raw), engine.MAX_METADATA_RESPONSE_BYTES)
+        # Every previously admitted method still uses the ordinary 20k budget.
+        for method in sorted(engine.METHODS - {"metadata.validate"}):
+            with self.subTest(method=method), self.assertRaises(engine.ProtocolError):
+                engine.encode_response(engine.parse_request(frame(method=method)), result=report)
+        self.assertEqual(engine.MAX_VALUES, 20_000)
+        self.assertEqual(engine.MAX_METADATA_VALUES, 32_768)
+        # Exactly 32768 result nodes fit; the eight envelope nodes are separate.
+        at_limit = [None] * (engine.MAX_METADATA_VALUES - 1)
+        engine.encode_response(request, result=at_limit)
+        with self.assertRaises(engine.ProtocolError):
+            engine.encode_response(request, result=at_limit + [None])
+        with self.assertRaises(engine.ProtocolError):
+            engine.parse_request(frame(method="metadata.validate", params={"x": [0] * engine.MAX_VALUES}))
+        nested = 0
+        for _ in range(engine.MAX_METADATA_DEPTH):
+            nested = [nested]
+        engine.encode_response(request, result=nested)
+        with self.assertRaises(engine.ProtocolError):
+            engine.encode_response(request, result=[nested])
+        with self.assertRaises(engine.ProtocolError):
+            engine.encode_response(request, result="x" * engine.MAX_METADATA_RESPONSE_BYTES)
 
 
 if __name__ == "__main__":

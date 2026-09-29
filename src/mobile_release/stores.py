@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .config import ConfigurationError, ReleaseConfig, ReleaseVersion
+from .credential_requirements import local_requirements
 from .credentials import (
     SelectedStoreMaterial,
     _selected_store_material,
@@ -684,6 +685,17 @@ def _raw_readback(*, record: StoreLaneCallEvidence, cancellation: DefaultCancell
     return StoreLaneReadback(record, output, content, document)
 
 
+def _store_credential_values(
+    config: ReleaseConfig, request: StoreRequest, environ: Mapping[str, str],
+) -> dict[str, str]:
+    # Select before any private tool invocation; unused signing/demo groups
+    # are not decoded merely because they exist in the ambient environment.
+    stage = "production" if request.stage == "production-submit" else request.stage
+    return credential_values_from_environment(
+        environ, required=local_requirements(config, stage, purpose="store", platforms=(request.platform,)),
+    )
+
+
 def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest,
                      operation_intent: Mapping[str, object] | None,
                      lane_evidence: StoreLaneCallEvidence | None,
@@ -731,6 +743,7 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                                              request=request, operation_intent=operation_intent)
                 else:
                     source_environment = dict(os.environ)
+                    credential_values = _store_credential_values(config, request, source_environment)
                     authority = workflow_authority(request.stage)
                     tooling_root = resolve_tooling_root()
                     if tooling_root is None or not _complete_tooling_root(tooling_root):
@@ -738,7 +751,7 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                     _require_fastlane_bundle(tooling_root, cancellation=guard,
                                              source_environment=source_environment)
                     material = resources.enter_context(_selected_store_material(config,
-                        values=credential_values_from_environment(source_environment), platforms=(request.platform,),
+                        values=credential_values, platforms=(request.platform,),
                         stage="production" if request.stage == "production-submit" else request.stage,
                         invocation=invocation, cancellation=guard, lane_evidence=record))
                     findings = material.validate()

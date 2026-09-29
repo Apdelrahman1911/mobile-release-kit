@@ -5,13 +5,14 @@ import { isDirty } from './drafts.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import { parseReleaseVersionObservation } from './releaseVersion.ts';
 import type { ReleaseVersionState } from './releaseVersion.ts';
+import type { AssetDisplayState } from './assetSessionTypes.ts';
 import { savedConfigFromSnapshot } from './offlinePreflightProtocol.ts';
 import type { ApiError, BridgeMode, HelpContent } from './types.ts';
 import type { AndroidBuildApi, AndroidBuildArtifactValidation, AndroidBuildContext, AndroidBuildIdentity, AndroidBuildOperation, AndroidBuildSavedConfig,
-  AndroidBuildSavedVersion, AndroidBuildSelection, AndroidBuildStatus, PrepareAndroidBuild } from './androidBuildTypes.ts';
+  AndroidBuildSavedVersion, AndroidBuildSelection, AndroidBuildStatus, AndroidBuildSigningAssignment, AndroidBuildSigningPolicy, PrepareAndroidBuild } from './androidBuildTypes.ts';
 import { ANDROID_BUILD_CONSENT, ANDROID_BUILD_CONSENT_MS, ANDROID_BUILD_COUNTER_MAX, androidBuildAvailabilityText,
   androidBuildCounter, androidBuildError, androidBuildOperationProgress, copyAndroidBuildRequest, parseAndroidBuildSavedConfig,
-  parseAndroidBuildArtifactValidation, parseAndroidBuildSavedVersion, parseAndroidBuildStatus, sameAndroidBuildData, sameAndroidBuildIdentity, sameAndroidBuildSavedPair } from './androidBuildProtocol.ts';
+  parseAndroidBuildSigningPolicy, parseAndroidBuildArtifactValidation, parseAndroidBuildSavedVersion, parseAndroidBuildStatus, sameAndroidBuildData, sameAndroidBuildIdentity, sameAndroidBuildSavedPair } from './androidBuildProtocol.ts';
 
 export type AndroidBuildSavedSelection = Pick<AndroidBuildSelection, 'module' | 'variant' | 'applicationId'>;
 interface VersionObservationBinding {
@@ -29,8 +30,9 @@ export interface AndroidBuildBinding {
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
 }
 export interface AndroidBuildConsent extends AndroidBuildIdentity { binding: AndroidBuildBinding; acknowledged: boolean; deadline: number }
+export interface AndroidBuildSigningObservation { policy: AndroidBuildSigningPolicy | null; issue: string | null }
 export interface AndroidBuildState {
-  mode: BridgeMode; project: AndroidBuildProject | null; visible: boolean; selectionPending: boolean; verifyUploadSignature: boolean;
+  mode: BridgeMode; project: AndroidBuildProject | null; visible: boolean; selectionPending: boolean; verifyUploadSignature: boolean; signWithAssignedKey: boolean; signing: AndroidBuildSigningObservation;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
   listening: boolean; initialized: boolean; readPending: boolean; status: AndroidBuildStatus | null;
   consent: AndroidBuildConsent | null; pending: 'prepare' | 'start' | null; originalUnconfirmed: boolean;
@@ -46,6 +48,7 @@ interface Attempt {
 }
 interface Context {
   selectedProject: () => ProjectSession | null; releaseVersion: () => ReleaseVersionState | null;
+  assetSession?: () => AssetDisplayState | null;
   otherOperationReason: () => string | null; now?: () => number;
 }
 function freeze<T>(value: T): T {
@@ -77,6 +80,33 @@ function savedSelection(data: unknown): AndroidBuildSavedSelection | null {
       typeof applicationId !== 'string' || applicationId.length > 255 || /[^A-Za-z0-9_.]/.test(applicationId) ||
       !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$/.test(applicationId)) return null;
   return { module, variant, applicationId };
+}
+function signingObservation(project: AndroidBuildProject | null, assets: AssetDisplayState | null): AndroidBuildSigningObservation {
+  const unavailable = (issue: string): AndroidBuildSigningObservation => ({ policy: null, issue });
+  if (!project?.uploadCertificateSha256) return unavailable('Save the upload-certificate SHA-256 in Project settings → Android, then refresh the saved configuration. Use the upload key, not Play’s app-signing key.');
+  if (project.dirtyDraft) return unavailable('Signing inputs must match the saved configuration. Save or explicitly revert your unsaved draft, refresh, read the saved version, then assign the current inputs in Credentials.');
+  const status = assets?.status, context = status?.context, operation = status?.operation;
+  if (!assets || assets.mode !== 'native' || !status || status.mode !== 'session' || !status.capability.available ||
+      assets.blocked || assets.observationFailed || assets.originPending || assets.busy || assets.updatingContext || !assets.contextCurrent ||
+      operation && (operation.phase !== 'idle' || operation.settlement !== 'known'))
+    return unavailable('In Credentials, open the admitted session and finish selection, assessment, Keep and Assign. An active, stale or unverified session cannot provide signing inputs.');
+  if (!context || context.projectId !== project.projectId || context.platform !== 'android' || context.stage !== 'candidate' || context.purpose !== 'signing' ||
+      assets.scope.platform !== 'android' || assets.scope.stage !== 'candidate' || assets.scope.purpose !== 'signing')
+    return unavailable('In Credentials, submit this saved project with Android · Candidate / internal testing · Build / signing only, then keep and assign its inputs.');
+  const assignments: AndroidBuildSigningAssignment[] = [];
+  for (const kind of ['android-keystore', 'android-firebase', 'project-read-token'] as const) {
+    const row = status.assignments.find((assignment) => assignment.kind === kind);
+    if (!row) {
+      if (kind === 'android-keystore') return unavailable('Keep and assign the existing upload keystore, store password, key alias and key password to this Android signing context in Credentials.');
+      continue;
+    }
+    if (row.availability !== 'available' || row.contextRevision !== context.revision || !status.records.some((record) =>
+      record.kind === kind && record.recordId === row.recordId && record.revision === row.recordRevision && record.availability === 'assigned'))
+      return unavailable('A selected signing/build-input assignment is stale, unavailable or being replaced. Review and assign the current original record before preparing the signed build.');
+    assignments.push({ kind, recordId: row.recordId, recordRevision: row.recordRevision, contextRevision: row.contextRevision });
+  }
+  const policy = parseAndroidBuildSigningPolicy({ source: 'assigned-session', contextRevision: context.revision, assignments });
+  return policy ? { policy, issue: null } : unavailable('These assignment revisions do not identify one current signing context. Check the original credential-session status.');
 }
 function projectObservation(session: ProjectSession, version: ReleaseVersionState | null): AndroidBuildProject {
   const project: AndroidBuildProject = { projectId: session.project.id, draftRevision: session.revision, baselineGeneration: session.baselineGeneration,
@@ -132,6 +162,7 @@ export function androidBuildOwnerReason(state: AndroidBuildState): string | null
 
 export class AndroidBuildController {
   private state: AndroidBuildState = freeze<AndroidBuildState>({ mode: 'unavailable', project: null, visible: false, selectionPending: false, verifyUploadSignature: false,
+    signWithAssignedKey: false, signing: { policy: null, issue: 'Configure current Android signing inputs in Credentials.' },
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, requestGeneration: 0, listening: false, initialized: false, readPending: false,
     status: null, consent: null, pending: null, originalUnconfirmed: false, historical: false, cancelClaimed: null, error: null,
     observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
@@ -186,8 +217,15 @@ export class AndroidBuildController {
   }
   versionIntent(): void { if (!this.disposed) this.retire(this.advance('contextGeneration')); }
   setVerifyUploadSignature(verifyUploadSignature: boolean): void {
-    if (!this.disposed && typeof verifyUploadSignature === 'boolean' && verifyUploadSignature !== this.state.verifyUploadSignature)
+    if (this.disposed || this.attempt?.startSent && !this.attempt.settled || this.state.signWithAssignedKey && !verifyUploadSignature) return;
+    if (typeof verifyUploadSignature === 'boolean' && verifyUploadSignature !== this.state.verifyUploadSignature)
       this.retire({ ...this.advance('contextGeneration'), verifyUploadSignature });
+  }
+  setSignWithAssignedKey(signWithAssignedKey: boolean): boolean {
+    if (this.disposed || typeof signWithAssignedKey !== 'boolean' || this.attempt?.startSent && !this.attempt.settled) return false;
+    if (signWithAssignedKey !== this.state.signWithAssignedKey) this.retire({ ...this.advance('contextGeneration'), signWithAssignedKey,
+      verifyUploadSignature: signWithAssignedKey || this.state.verifyUploadSignature });
+    return true;
   }
   private artifactValidation(): AndroidBuildArtifactValidation | null {
     return this.state.verifyUploadSignature ? parseAndroidBuildArtifactValidation({ mode: 'upload-signature',
@@ -196,6 +234,8 @@ export class AndroidBuildController {
   // Subscribe synchronously to ReleaseVersionController; a React effect after
   // rendering is too late to retire consent at read-pending/replacement time.
   syncReleaseVersion = (): void => { this.syncProject(); };
+  // Synchronous session notifications retire only unstarted signing consent.
+  syncAssetSession = (): void => { this.syncProject(); };
   setSelectionPending(selectionPending: boolean): void {
     if (!this.disposed && selectionPending !== this.state.selectionPending) this.retire({ ...this.advance('selectionGeneration'), selectionPending });
   }
@@ -203,12 +243,21 @@ export class AndroidBuildController {
     if (this.disposed) return;
     const session = this.context.selectedProject(), version = this.context.releaseVersion();
     const next = session ? projectObservation(session, version) : null, draft = session?.draft ?? null, snapshot = session?.snapshot ?? null;
+    const signing = signingObservation(next, this.context.assetSession?.() ?? null);
     const result = version?.result ?? null, binding = version?.resultBinding ?? null;
-    if (sameAndroidBuildData(next, this.state.project) && this.draftReference === draft && this.snapshotReference === snapshot &&
-        this.versionReference === result && this.versionBindingReference === binding) return;
+    const projectChanged = !sameAndroidBuildData(next, this.state.project) || this.draftReference !== draft || this.snapshotReference !== snapshot ||
+      this.versionReference !== result || this.versionBindingReference !== binding;
+    if (!projectChanged && sameAndroidBuildData(signing, this.state.signing)) return;
+    const signingRelevant = this.attempt && !this.attempt.settled ? this.attempt.binding.context.signing !== null : this.state.signWithAssignedKey;
+    if (!projectChanged && (!signingRelevant || this.attempt?.startSent && !this.attempt.settled)) {
+      // The started native owner keeps its immutable original loan; a changing
+      // public session display cannot replace it or replay Start. Native finality
+      // and the existing original Status/Cancel still govern that run.
+      this.update({ signing }); return;
+    }
     this.draftReference = draft; this.snapshotReference = snapshot; this.versionReference = result; this.versionBindingReference = binding;
     const badCounter = next !== null && ![next.draftRevision, next.baselineGeneration, next.observationGeneration].every(androidBuildCounter);
-    this.retire({ ...this.advance('contextGeneration'), project: next, generationLost: this.state.generationLost || badCounter ||
+    this.retire({ ...this.advance('contextGeneration'), project: next, signing, generationLost: this.state.generationLost || badCounter ||
       this.state.contextGeneration === ANDROID_BUILD_COUNTER_MAX });
   }
   setVisible(visible: boolean): void {
@@ -259,6 +308,7 @@ export class AndroidBuildController {
       sameAndroidBuildData(b.selection, p.selection) && b.context.projectId === p.projectId && b.context.draftRevision === p.draftRevision &&
       b.context.baselineGeneration === p.baselineGeneration && p.savedConfig !== null && p.savedVersion !== null &&
       sameAndroidBuildData(b.context.artifactValidation, this.artifactValidation()) &&
+      (attempt.startSent || sameAndroidBuildData(b.context.signing, this.state.signWithAssignedKey ? this.state.signing.policy : null)) &&
       sameAndroidBuildSavedPair(b.context, { savedConfig: p.savedConfig, savedVersion: p.savedVersion });
   }
   private originCandidate(attempt: Attempt, status: AndroidBuildStatus): boolean {
@@ -356,7 +406,8 @@ export class AndroidBuildController {
     if (project.snapshotPending) return 'Wait for the current saved-configuration refresh to settle.';
     if (project.versionPending) return 'Wait for the original saved-version read to settle; an earlier result cannot stand in.';
     return project.inputIssue ?? (this.artifactValidation() === null ?
-      'Save android.uploadCertificateSha256, then refresh the saved configuration and version before reviewing upload-signature inspection.' : null) ?? this.context.otherOperationReason();
+      'Save the upload-certificate SHA-256 in Project settings → Android, then refresh the saved configuration and version.' : null) ??
+      (this.state.signWithAssignedKey ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
   }
   prepareReason = (): string | null => this.commonReason() ?? androidBuildOwnerReason(this.state) ??
     (this.state.status?.availability === 'busy' ? androidBuildAvailabilityText.busy : null);
@@ -385,7 +436,7 @@ export class AndroidBuildController {
     if (this.prepareReason() || !this.observer || !project?.savedConfig || !project.savedVersion || !project.selection || !project.versionObservation) return;
     const request = copyAndroidBuildRequest('prepare_android_build', { projectId: project.projectId, draftRevision: project.draftRevision,
       baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
-      artifactValidation: this.artifactValidation() }) as PrepareAndroidBuild | null;
+      artifactValidation: this.artifactValidation(), signing: this.state.signWithAssignedKey ? this.state.signing.policy : null }) as PrepareAndroidBuild | null;
     const now = this.now();
     if (!request || !Number.isFinite(now) || now < 0 || !Number.isFinite(now + ANDROID_BUILD_CONSENT_MS)) { this.fail({ code: 'android_build_invalid' }, true); return; }
     const counters = this.advance('requestGeneration'); if (counters.generationLost) { this.retire(counters); return; }
@@ -495,7 +546,7 @@ export const androidBuildHelp: HelpContent = {
   label: 'Build saved Android app and inspect AAB', requiredness: 'optional', requiredWhen: 'Use only for an explicitly reviewed local Android build; it is separate from candidate evidence and Store release.',
   what: 'Uses a compatible user-installed JDK and Android SDK with the selected protected Gradle and pinned bundletool to build the saved app and inspect its required post-run AAB. It installs no tools and accepts no licenses.',
   why: 'Observe a known task outcome and bounded local AAB findings without mistaking completion for freshness, signing or release readiness.',
-  where: 'Save android.enabled, android.applicationId, explicit android.module and optional android.variant in release/mobile-release.json. Use Environment Requirements for setup guidance; fix app or Gradle code in Android Studio or your editor.',
+  where: 'Use Project settings → Android to enable Android and save its application ID, explicit module and variant. Use Environment Requirements for setup guidance; fix app or Gradle code in Android Studio or your editor.',
   format: 'The initial Linux GNU x86_64 profile still requires separate native qualification. Tools diagnostics observe only Git, Java and Javac: they do not inspect the SDK, establish Gradle readiness or authorize a build.',
   failure: 'Missing, unselected, unsupported, not inspected and unqualified are different states. A closed native gate does not mean your SDK is missing. Known nonzero exit is command failure; check private Build Output and wait for original cleanup before new consent.',
 };
@@ -512,16 +563,24 @@ export const androidBuildOutputHelp: HelpContent = {
   what: 'Displays redacted local bytes, digest, ABI observations and exact core finding statuses only after native terminal completion.',
   why: 'An AAB may be incremental, reused or stale despite exit zero. A digest identifies observed bytes, not current source or current-file custody.',
   where: 'Use the original operation Status for disposition. Compiler details remain in private Build Output in Android Studio or your editor.',
-  format: 'Signer is not inspected by default. Optional upload-signature inspection checks integrity and the saved upload certificate separately; toolkit signing/Store work are not requested and source binding/freshness/readiness remain unestablished.',
+  format: 'Signer is not inspected by default. Optional upload-signature inspection checks integrity and the saved upload certificate separately; toolkit signing is a separate explicit choice, no Store work is requested, and source binding/freshness/readiness remain unestablished.',
   failure: 'Complete may contain FAIL findings. No open-file link, upload, publication, substitute scan, automatic rerun or blanket cleanup is authorized by this result.',
 };
 export const androidBuildSignatureHelp: HelpContent = {
-  label: 'Verify the saved upload certificate', requiredness: 'optional', requiredWhen: 'Choose before reviewing saved inputs when this project already produces a signed AAB.',
+  label: 'Verify the saved upload certificate', requiredness: 'conditional', requiredWhen: 'Optional for an existing project-signed AAB; required when you choose toolkit signing.',
   what: 'Verifies signed content and compares the same captured AAB’s leaf signer with saved android.uploadCertificateSha256. This does not sign or upload the file.',
   why: 'A successful build may still produce an unsigned, tampered or wrong-signer AAB. Signature integrity and saved-certificate match are separate findings.',
   where: 'Find the SHA-256 under Upload key certificate in Play Console → App integrity, or inspect the public upload certificate. Do not use the separate App signing key certificate.',
-  format: 'Save the upload-certificate SHA-256 as 64 hexadecimal characters without colons in release/mobile-release.json, then refresh configuration and read the saved version. No private key, password or keystore is needed here.',
+  format: 'In Project settings → Android, save the upload-certificate SHA-256 as 64 hexadecimal characters without colons, refresh configuration and read the saved version. Inspection alone needs no private key; toolkit signing additionally requires assigned Credentials.',
   failure: 'Missing or changed saved values refuse the run. A rejected signature skips signer comparison; a match does not prove Play enrollment, fresh source outputs or release readiness.',
+};
+export const androidBuildSigningHelp: HelpContent = {
+  label: 'Build and sign with assigned upload key', requiredness: 'optional', requiredWhen: 'Choose before review when the toolkit should sign the captured local AAB with your existing upload key.',
+  what: 'Uses the current Android signing session: upload keystore, store password, key alias, key password and any build inputs required by the saved core policy. The final AAB must also be inspected against your saved upload certificate.',
+  why: 'Keeping a file in Credentials is not assignment or permission to use it. The exact saved configuration and current assignments are reviewed together once.',
+  where: 'Ask the authorized signing-key owner for the existing JKS or PKCS#12 upload keystore, alias and both passwords. In Credentials choose Android · Candidate / internal testing · Build / signing only, select the file, enter the values, Keep and Assign. Do not replace an enrolled upload key.',
+  format: 'Default off. Select a .jks, .keystore, .p12 or .pfx file with the native picker. Enter both original passwords even if equal. Save the draft first; no secret belongs in Project settings. Trusted Gradle/project code receives selected signing inputs.',
+  failure: 'Missing signing inputs or a failed store/alias preflight stop before Gradle. An incorrect key password may be detected only during final signing. Signing or restoration failure never becomes a verified artifact. Check original Status and recovery guidance before retrying; Cancel is not rollback. The separate native signing gate must be qualified.',
 };
 export const androidBuildCancelHelp: HelpContent = {
   label: 'Cancel original Android build', requiredness: 'optional', requiredWhen: 'To stop further original work, including from another page while a build is active.',

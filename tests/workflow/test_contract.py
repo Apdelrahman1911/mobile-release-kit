@@ -42,38 +42,56 @@ CALLERS = {
 
 MUTATING = ("candidate", "external-testing", "production-submit")
 PROMOTION_ONLY = ("external-testing", "production-submit")
-ENVIRONMENT_SECRETS = {
-    "candidate": {
-        "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64",
-        "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64",
-        "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
-        "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
-        "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
-        "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
-        "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
-        "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
-        "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
-        "MOBILE_RELEASE_PROJECT_READ_TOKEN",
+ENVIRONMENT_SECRETS={
+    'candidate': {
+        'MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64',
+        'MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64',
+        'MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD',
+        'MOBILE_RELEASE_ANDROID_KEY_PASSWORD',
+        'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64',
+        'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD',
+        'MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64',
+        'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64',
+        'MOBILE_RELEASE_INPUT_ANDROID_FIREBASE_V1',
+        'MOBILE_RELEASE_INPUT_ANDROID_KEYSTORE_V1',
+        'MOBILE_RELEASE_INPUT_APPLE_P12_V1',
+        'MOBILE_RELEASE_INPUT_APPLE_PROFILE_V1',
+        'MOBILE_RELEASE_INPUT_ASC_P8_V1',
+        'MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1',
+        'MOBILE_RELEASE_INPUT_IOS_FIREBASE_V1',
+        'MOBILE_RELEASE_INPUT_PROJECT_READ_TOKEN_V1',
+        'MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64',
+        'MOBILE_RELEASE_PROJECT_READ_TOKEN',
     },
-    "external-testing": {
-        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
-        "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
-        "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
-        "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
+    'external-testing': {
+        'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD',
+        'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE',
+        'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64',
+        'MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1',
+        'MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1',
+        'MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1',
+        'MOBILE_RELEASE_INPUT_ASC_P8_V1',
+        'MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1',
+        'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64',
     },
-    "production-submit": {
-        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
-        "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
-        "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME",
-        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
-        "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
+    'production-submit': {
+        'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD',
+        'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME',
+        'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE',
+        'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64',
+        'MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1',
+        'MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1',
+        'MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1',
+        'MOBILE_RELEASE_INPUT_ASC_P8_V1',
+        'MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1',
+        'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64',
     },
 }
 FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -108,6 +126,65 @@ def external_uses_reference_is_immutable(reference: str) -> bool:
 
 
 class ReusableWorkflowContractTests(unittest.TestCase):
+    def test_all_seven_google_auth_sites_use_the_complete_pre_auth_public_pair(self) -> None:
+        sites = 0
+        for name in MUTATING:
+            text = read(REUSABLE[name])
+            blocks = re.findall(r"(?ms)^    - name:.*?(?=^    - name:|\Z)", text)
+            for index, auth in enumerate(blocks):
+                if "uses: google-github-actions/auth@" not in auth:
+                    continue
+                sites += 1
+                phase = re.search(r"(?m)^      id: google_(online|prepare|execute)_auth$", auth).group(1)
+                decoder = blocks[index - 1]
+                condition = re.findall(r"(?m)^      if: (.*)$", auth)
+                self.assertEqual(re.findall(r"(?m)^      if: (.*)$", decoder), condition)
+                self.assertIn(f"      id: google_{phase}_inputs\n", decoder)
+                self.assertIn("      working-directory: tooling\n", decoder)
+                self.assertIn("      run: python -P -m mobile_release.workflow google-wif-inputs\n", decoder)
+                self.assertEqual(set(re.findall(r"(?m)^        (MOBILE_RELEASE_[A-Z0-9_]+):", decoder)), {
+                    "MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1", "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
+                    "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT",
+                })
+                for field, output in (("workload_identity_provider", "provider"), ("service_account", "service_account")):
+                    self.assertIn(f"        {field}: ${{{{ steps.google_{phase}_inputs.outputs.{output} }}}}", auth)
+                self.assertNotIn("vars.", auth)
+                self.assertNotIn("secrets.", auth)
+                self.assertNotIn("GITHUB_ENV", decoder)
+        self.assertEqual(sites, 7)
+
+    def test_atomic_group_envelopes_are_step_scoped_to_existing_capabilities(self) -> None:
+        by_workflow = {
+            "candidate": {
+                "android_online": {"GOOGLE_WIF"},
+                "android_build": {"ANDROID_KEYSTORE", "ANDROID_FIREBASE", "PROJECT_READ_TOKEN"},
+                "android_store": {"GOOGLE_WIF"},
+                "ios_online": {"ASC_P8"},
+                "ios_build": {"APPLE_P12", "APPLE_PROFILE", "IOS_FIREBASE", "PROJECT_READ_TOKEN"},
+                "ios_store": {"ASC_P8"},
+            },
+            "external-testing": {
+                "android": {"GOOGLE_WIF"},
+                "ios": {"ASC_P8", "APPLE_REVIEW_CONTACT", "APPLE_REVIEW_DEMO_ACCOUNT", "APPLE_OPERATION_COMMITMENT"},
+            },
+            "production-submit": {
+                "android": {"GOOGLE_WIF"},
+                "ios": {"ASC_P8", "APPLE_REVIEW_CONTACT", "APPLE_REVIEW_DEMO_ACCOUNT", "APPLE_OPERATION_COMMITMENT"},
+            },
+        }
+        for name, expected in by_workflow.items():
+            text = read(REUSABLE[name])
+            self.assertNotRegex(text, r"(?m)^[ ]{0,7}MOBILE_RELEASE_INPUT_")
+            jobs = text.split("\njobs:\n", 1)[1]
+            observed_jobs = re.findall(r"(?m)^  ([A-Za-z0-9_-]+):$", jobs)
+            for job in observed_jobs:
+                with self.subTest(workflow=name, job=job):
+                    window = job_block(jobs, job)
+                    actual = set(re.findall(r"(?m)^        MOBILE_RELEASE_INPUT_([A-Z0-9_]+)_V1:", window))
+                    self.assertEqual(actual, expected.get(job, set()))
+            self.assertTrue(set(expected) <= set(observed_jobs))
+        self.assertNotIn("MOBILE_RELEASE_INPUT_", read(REUSABLE["preflight"]))
+
     def test_required_reusable_workflows_exist(self) -> None:
         for name, path in REUSABLE.items():
             with self.subTest(workflow=name):

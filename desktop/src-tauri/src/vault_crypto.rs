@@ -321,7 +321,13 @@ impl<'de> DeserializeSeed<'de> for ScalarSeed {
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str("the exact scalar field object") }
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> std::result::Result<Self::Value, M::Error> {
                 let names = commands::field_names(self.kind);
-                let mut object = PrivateScalars(Value::Object(Map::new())); let mut seen = [false; 3];
+                // The current closed kinds have at most four scalar fields. A
+                // future larger layout must refuse, never index past this bound.
+                let mut seen = [false; 4];
+                let Some(seen) = seen.get_mut(..names.len()) else {
+                    return Err(de::Error::custom("unsupported scalar field count"));
+                };
+                let mut object = PrivateScalars(Value::Object(Map::new()));
                 while let Some(key) = map.next_key::<PrivateText>()? {
                     let index = names.iter().position(|name| *name == key.0.as_str())
                         .filter(|index| !seen[*index]).ok_or_else(|| de::Error::custom("unknown or repeated scalar key"))?;
@@ -330,7 +336,7 @@ impl<'de> DeserializeSeed<'de> for ScalarSeed {
                     let value = match value { Some(mut text) => Value::String(std::mem::take(&mut *text.0)), None => Value::Null };
                     if let Value::Object(object) = &mut object.0 { object.insert(names[index].to_owned(), value); }
                 }
-                if seen[..names.len()].contains(&false) { return Err(de::Error::custom("missing scalar key")); }
+                if seen.contains(&false) { return Err(de::Error::custom("missing scalar key")); }
                 Ok(object)
             }
         }
@@ -476,6 +482,180 @@ mod tests {
             assert_eq!(opened.file.as_ref().unwrap().bytes(), b"synthetic-file");
             assert!(opened.file.unwrap().retained_bytes().unwrap() > b"synthetic-file".len());
         }
+    }
+
+
+    #[test]
+    fn private_review_authenticated_payloads_preserve_four_and_two_scalar_fields_without_files() {
+        let key = key();
+        for (kind, values) in [
+            (commands::Kind::AppleReviewContact, serde_json::json!({
+                "firstName":"  ORIGINAL_FIRST_CANARY  ", "lastName":null,
+                "email":"not-an-email", "phone":"ORIGINAL_PHONE_CANARY\0é",
+            })),
+            (commands::Kind::AppleReviewDemoAccount, serde_json::json!({
+                "username":" ORIGINAL_DEMO_CANARY ", "password":"ORIGINAL_PASSWORD_CANARY\0é",
+            })),
+            (commands::Kind::AppleOperationCommitment, serde_json::json!({
+                "keyBase64":" ORIGINAL_KEY_CANARY ", "keyVersion":"ORIGINAL_VERSION_CANARY\0é",
+            })),
+        ] {
+            // The codec preserves supplied values. Authentication is not core
+            // syntax, contact reachability, demo login, recovery match or saved approval.
+            let fields = commands::own_fields(kind, &values).ok().unwrap();
+            let presence = fields.vault_presence();
+            assert_eq!(presence.len(), commands::field_names(kind).len());
+            let descriptor = Descriptor::new(kind, None, presence.clone(), false).unwrap();
+            let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, None, ALLOWANCE, &mut Fixed::at(20)).unwrap();
+            let revision = sealed.revision();
+            let listed = key.open_descriptor(&sealed.bytes[..216 + sealed.prefix.descriptor_length + 16], ALLOWANCE).unwrap();
+            assert!(listed.descriptor.kind == kind && listed.revision == revision);
+            assert_eq!(listed.descriptor.presence(), presence);
+            let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+            assert!(opened.descriptor.kind == kind && opened.record == id(3) && opened.revision == revision);
+            assert!(opened.file.is_none());
+            assert_eq!(opened.fields.into_value(), values);
+
+            let nulls: Map<String, Value> = commands::field_names(kind).iter().map(|name| ((*name).into(), Value::Null)).collect();
+            let nulls = Value::Object(nulls);
+            let missing = Descriptor::new(kind, None, vec![false; presence.len()], false).unwrap();
+            let (decoded, file) = decode_payload(&missing, &payload(&serde_json::to_vec(&nulls).unwrap(), &[])).unwrap();
+            assert_eq!(decoded.into_value(), nulls); assert!(file.is_none());
+        }
+    }
+
+    #[test]
+    fn private_review_payload_decoder_refuses_inexact_maps_presence_and_oversized_values() {
+        for (kind, values, escaped_last_key) in [
+            (commands::Kind::AppleReviewContact, serde_json::json!({
+                "firstName":"fictional", "lastName":"contact", "email":"reviewer@example.test", "phone":"fictional-phone",
+            }), r"pho\u006ee"),
+            (commands::Kind::AppleReviewDemoAccount, serde_json::json!({
+                "username":"fictional-demo", "password":"fictional-password",
+            }), r"passw\u006frd"),
+            (commands::Kind::AppleOperationCommitment, serde_json::json!({
+                "keyBase64":"fictional-supplied-key", "keyVersion":"retained-v1",
+            }), r"keyVersi\u006fn"),
+        ] {
+            let names = commands::field_names(kind);
+            let descriptor = Descriptor::new(kind, None, vec![true; names.len()], false).unwrap();
+            let raw = serde_json::to_vec(&values).unwrap();
+            assert!(decode_payload(&descriptor, &payload(&raw, &[])).is_ok());
+            assert!(decode_payload(&descriptor, &payload(&raw, b"unexpected-file")).is_err());
+            for name in names {
+                let mut missing = values.clone(); missing.as_object_mut().unwrap().remove(*name);
+                assert!(decode_payload(&descriptor, &payload(&serde_json::to_vec(&missing).unwrap(), &[])).is_err());
+                for bad in [Value::Null, serde_json::json!({"nested":"private-canary"}), serde_json::json!("é".repeat(2049))] {
+                    let mut wrong = values.clone(); wrong[*name] = bad;
+                    assert!(decode_payload(&descriptor, &payload(&serde_json::to_vec(&wrong).unwrap(), &[])).is_err());
+                }
+            }
+            let text = serde_json::to_string(&values).unwrap();
+            for repeated in [*names.last().unwrap(), escaped_last_key] {
+                let duplicate = format!("{},\"{}\":\"repeated\"}}", &text[..text.len() - 1], repeated);
+                assert!(decode_payload(&descriptor, &payload(duplicate.as_bytes(), &[])).is_err());
+            }
+            let mut extra = values.clone(); extra["file"] = Value::Null;
+            assert!(decode_payload(&descriptor, &payload(&serde_json::to_vec(&extra).unwrap(), &[])).is_err());
+            assert!(decode_payload(&descriptor, &payload(b"{}", &[])).is_err());
+            assert!(decode_payload(&descriptor, &payload(format!("{text} {{}}").as_bytes(), &[])).is_err());
+        }
+    }
+
+    fn asc_file() -> Vec<u8> {
+        use der_07::{asn1::ObjectIdentifier, Any, Encode, Tag};
+        // Deliberately not an EC scalar. Authentication/envelope recognition
+        // must never be presented as mathematical key or account validation.
+        let mut identifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1").to_der().unwrap();
+        identifier.extend_from_slice(&ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7").to_der().unwrap());
+        let mut fields = 0u8.to_der().unwrap();
+        fields.extend_from_slice(&Any::new(Tag::Sequence, identifier).unwrap().to_der().unwrap());
+        fields.extend_from_slice(&Any::new(Tag::OctetString, b"PRIVATE_P8_PAYLOAD_CANARY".to_vec()).unwrap().to_der().unwrap());
+        Any::new(Tag::Sequence, fields).unwrap().to_der().unwrap()
+    }
+
+    #[test]
+    fn asc_authenticated_round_trip_retains_original_bytes_and_requires_fresh_observation() {
+        use crate::credential_format::{inspect, FileKind};
+        let key = key(); let der = asc_file();
+        let pem = der_07::pem::encode_string("PRIVATE KEY", der_07::pem::LineEnding::CRLF, &der).unwrap().into_bytes();
+        // Raw companion spelling is preserved. Core semantics, not this codec,
+        // decide that whitespace/NUL/non-identifier values are unusable.
+        let values = serde_json::json!({"keyId":" RAW_ASC_KEY_CANARY\0é ", "issuerId":"MixedCase-ASC-ISSUER-CANARY\n"});
+        let fields = commands::own_fields(commands::Kind::AscP8, &values).ok().unwrap();
+        let descriptor = Descriptor::new(commands::Kind::AscP8, None, vec![true, true], true).unwrap();
+        for (encoding, file) in [("der", der), ("pem", pem)] {
+            let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, Some(&file), ALLOWANCE, &mut Fixed::at(20)).unwrap();
+            let original_revision = sealed.revision();
+            let listed = key.open_descriptor(&sealed.bytes[..216 + sealed.prefix.descriptor_length + 16], ALLOWANCE).unwrap();
+            assert!(listed.descriptor.kind == commands::Kind::AscP8 && listed.revision == original_revision);
+            assert_eq!(listed.descriptor.presence(), &[true, true]);
+            let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+            assert!(opened.record == id(3) && opened.revision == original_revision);
+            let stored = opened.file.as_ref().unwrap();
+            assert_eq!(stored.bytes(), file);
+            let observed = inspect(FileKind::AscP8, stored.bytes(), &mut || false).ok().unwrap();
+            assert_eq!(serde_json::to_value(observed).unwrap(), serde_json::json!({
+                "status":"observed","byteCount":file.len(),"format":"pkcs8","encoding":encoding,"algorithm":"ec","curve":"p256"}));
+            assert!(inspect(FileKind::AscP8, stored.bytes(), &mut || true).is_err());
+            assert_eq!(opened.fields.into_value(), values);
+
+            let replacement = key.seal_record_with(id(3), Some(original_revision), &descriptor, &fields, Some(&file), ALLOWANCE, &mut Fixed::at(40)).unwrap();
+            let opened = key.open_record(replacement.bytes, ALLOWANCE).unwrap();
+            assert_eq!(opened.revision.counter, 2);
+            assert!(opened.revision != original_revision && opened.revision.random != original_revision.random);
+            assert_eq!(opened.file.as_ref().unwrap().bytes(), file);
+        }
+        let missing = serde_json::json!({"keyId":null,"issuerId":null});
+        let fields = commands::own_fields(commands::Kind::AscP8, &missing).ok().unwrap();
+        let descriptor = Descriptor::new(commands::Kind::AscP8, None, vec![false, false], true).unwrap();
+        let malformed = b"not-a-private-key-envelope";
+        let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, Some(malformed), ALLOWANCE, &mut Fixed::at(20)).unwrap();
+        let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+        assert_eq!(opened.fields.into_value(), missing);
+        let observation = inspect(FileKind::AscP8, opened.file.as_ref().unwrap().bytes(), &mut || false).ok().unwrap();
+        assert_ne!(serde_json::to_value(observation).unwrap()["status"], "observed",
+            "authenticated storage never persists parser approval");
+    }
+
+    #[test]
+    fn asc_payload_refuses_wrong_kind_presence_duplicate_companions_and_over_cap_before_entropy() {
+        let key = key(); let kind = commands::Kind::AscP8; let file = asc_file();
+        let descriptor = Descriptor::new(kind, None, vec![true, true], true).unwrap();
+        let values = serde_json::json!({"keyId":"A1B2C3D4E5","issuerId":"00112233-4455-6677-8899-AABBCCDDEEFF"});
+        let fields = commands::own_fields(kind, &values).ok().unwrap();
+        for invalid in [
+            br#"{"keyId":"a"}"#.as_slice(), br#"{"keyId":"a","issuerId":"b","keyId":"a"}"#,
+            br#"{"keyId":"a","issuerId":"b","key\u0049d":"a"}"#,
+            br#"{"keyId":"a","issuerId":"b","extra":null}"#, br#"{"keyId":"a","issuerId":[]}"#,
+            br#"{"keyId":null,"issuerId":"b"}"#, br#"{"keyId":"a","issuerId":"b"} {}"#,
+        ] { assert!(decode_payload(&descriptor, &payload(invalid, &file)).is_err()); }
+        for oversized in ["x".repeat(4097), "é".repeat(2049)] {
+            let raw = serde_json::to_vec(&serde_json::json!({"keyId":oversized,"issuerId":"b"})).unwrap();
+            assert!(decode_payload(&descriptor, &payload(&raw, &file)).is_err());
+        }
+        let nullable = Descriptor::new(kind, None, vec![false, true], true).unwrap();
+        assert!(decode_payload(&nullable, &payload(br#"{"keyId":null,"issuerId":"b"}"#, &file)).is_ok());
+        let wrong_kind = super::tests::fields();
+        for (descriptor, fields, source) in [
+            (&descriptor, &wrong_kind, Some(file.as_slice())),
+            (&nullable, &fields, Some(file.as_slice())),
+            (&descriptor, &fields, None),
+        ] {
+            let mut random = Fixed::at(20);
+            assert!(key.seal_record_with(id(3), None, descriptor, fields, source, ALLOWANCE, &mut random).is_err());
+            assert_eq!(random.call, 20);
+        }
+        let limit = asset_source::material_limit(crate::credential_format::FileKind::AscP8);
+        assert_eq!(limit, 4 * 1024 * 1024);
+        let over = vec![b'x'; limit + 1];
+        let mut random = Fixed::at(20);
+        assert!(key.seal_record_with(id(3), None, &descriptor, &fields, Some(&over), ALLOWANCE, &mut random).is_err());
+        assert_eq!(random.call, 20);
+        assert!(decode_payload(&descriptor, &payload(&serde_json::to_vec(&values).unwrap(), &over)).is_err());
+        let sealed = key.seal_record_with(id(3), None, &descriptor, &fields, Some(&over[..limit]), ALLOWANCE, &mut random).unwrap();
+        let opened = key.open_record(sealed.bytes, ALLOWANCE).unwrap();
+        assert_eq!(opened.file.as_ref().unwrap().bytes(), &over[..limit]);
     }
 
     #[test]

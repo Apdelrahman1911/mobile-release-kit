@@ -20,8 +20,13 @@ MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_DEPTH = 32
 MAX_VALUES = 20_000
+# Closed saved-metadata output allowance; ordinary methods and requests retain
+# their existing limits. The successful envelope adds eight nodes/one depth.
+MAX_METADATA_VALUES = 32_768
+MAX_METADATA_DEPTH = 12
+MAX_METADATA_RESPONSE_BYTES = 256 * 1024 + 4096
 METHODS = frozenset({"capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-                     "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate",
+                     "github.setup.propose", "credentials.assess", "metadata.validate", "metadata.text.observe", "metadata.text.validate",
                      "environment.requirements", "release.version.observe", "artifacts.candidate.observe", "release.evidence.observe"})
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 
@@ -72,27 +77,27 @@ def _check_depth(text: str) -> None:
             depth -= 1
 
 
-def _check_values(value: Any) -> None:
+def _check_values(value: Any, *, max_values: int = MAX_VALUES, max_depth: int = MAX_DEPTH) -> None:
     pending = [(value, 0)]
     count = 0
     while pending:
         item, depth = pending.pop()
         count += 1
-        if count > MAX_VALUES or depth > MAX_DEPTH:
+        if count > max_values or depth > max_depth:
             raise ProtocolError("JSON value limit exceeded")
         if isinstance(item, dict):
-            if depth >= MAX_DEPTH:
+            if depth >= max_depth:
                 raise ProtocolError("JSON nesting limit exceeded")
-            if count + len(pending) + 2 * len(item) > MAX_VALUES:
+            if count + len(pending) + 2 * len(item) > max_values:
                 raise ProtocolError("JSON value limit exceeded")
             for key, child in item.items():
                 if not isinstance(key, str):
                     raise ProtocolError("Object keys must be strings")
                 pending.extend(((key, depth + 1), (child, depth + 1)))
         elif isinstance(item, list):
-            if depth >= MAX_DEPTH:
+            if depth >= max_depth:
                 raise ProtocolError("JSON nesting limit exceeded")
-            if count + len(pending) + len(item) > MAX_VALUES:
+            if count + len(pending) + len(item) > max_values:
                 raise ProtocolError("JSON value limit exceeded")
             pending.extend((child, depth + 1) for child in item)
         elif isinstance(item, str):
@@ -164,12 +169,14 @@ def encode_response(request: Request, *, result: Any = None, error: dict[str, An
         ):
             raise ProtocolError("Invalid error contract")
         value["error"] = error
-    _check_values(value)
+    metadata_result = request.method == "metadata.validate" and error is None
+    _check_values(value, max_values=MAX_METADATA_VALUES + 8 if metadata_result else MAX_VALUES,
+                  max_depth=MAX_METADATA_DEPTH + 1 if metadata_result else MAX_DEPTH)
     try:
         raw = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") + b"\n"
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise ProtocolError("Invalid service result") from None
-    if len(raw) > MAX_RESPONSE_BYTES:
+    if len(raw) > (MAX_METADATA_RESPONSE_BYTES if metadata_result else MAX_RESPONSE_BYTES):
         raise ProtocolError("Response size limit exceeded")
     return raw
 

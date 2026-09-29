@@ -1,6 +1,100 @@
 # GitHub connection and read-only observations
 
-## Current status: unpublished installed-Linux integration candidate
+## Read-only environment/input metadata source update (2026-09-28)
+
+The GitHub screen now has a source-authored **Environment inputs** view.
+It is not a remote setup writer, a native verification result or a delivered
+feature. Native selectors, runtime/packaging qualification and protected
+delivery remain separate requirements.
+
+1. Save/reload the project configuration and check it in Project settings.
+   Only current core requirements matching that observed saved snapshot appear
+   as saved-local input requirements. An unsaved draft is not relabelled saved.
+2. Connect the application repository and finish its account/repository checks.
+3. Choose one named environment input and **Check remote metadata — read-only**.
+   Contextual help explains its purpose, expected location, input type and
+   limitations. No value, file, URL or token is entered for this check.
+4. Review the actual selected input and observation time under **Last requested
+   remote observation**. Environment name/ID and field name/type/created/updated
+   dates are metadata only, not credential validation or release readiness.
+
+The existing native connection owns the original Inspect ticket, identity pins,
+deadline, cooldown, retirement and finality. Its fixed helper makes at most5 GETs
+and receives no project root or saved configuration. It cannot establish that
+the remote workflows/configuration match the local snapshot. The reads are
+sequential, not an atomic view of an environment. Refresh/retirement make prior
+metadata stale. After a lost acknowledgement, use Status/Disconnect rather
+than replaying Inspect.
+
+Environment metadata needs Actions read access; environment secret/variable
+metadata needs Environments read access. A publisher App without that optional
+grant or a restricted token can return forbidden/inaccessible; no grant is
+expanded automatically. GitHub returns no secret value. Variable responses do
+include a value, but it is bounded and discarded before native/UI output.
+404 is ambiguous, not proof an input is absent. The view does not assess
+effective grants, protection sufficiency, credential correctness or readiness.
+
+P1 uses the documented owner/repository environment routes and REST version
+2026-03-10; ordinary account/workflow listing behavior is unchanged. Official
+references: [environment metadata](https://docs.github.com/en/rest/deployments/environments),
+[environment secrets](https://docs.github.com/en/rest/actions/secrets),
+[environment variables](https://docs.github.com/en/rest/actions/variables).
+See the [closed contract](../desktop/github-connection-contract.md#read-only-environmentinput-metadata-p1)
+for exact request/projection/lifecycle bounds. Local DATA regressions are not
+real service, TLS, installed native, macOS/Windows or public-delivery evidence.
+
+Remote provisioning remains unimplemented. Multiple independent field writes
+must not be presented as safe atomic updates of a credential/commitment group.
+That later functionality needs a separately reviewed atomic consumption design.
+
+## Device sign-in source update (2026-09-28)
+
+The new source implements publisher GitHub App device sign-in alongside the
+advanced session-only token route; **it is not yet native-qualified or delivered**.
+The checked-in publisher configuration is deliberately null. A real registration
+with device flow enabled and exact-source native verification remain separate
+requirements. Missing registration does not block synthetic engineering, but no
+successful real login is claimed by these source changes.
+
+When available, select the application repository and choose **Sign in with
+GitHub**. The app requests a code and offers **Open GitHub**, or the fixed manual
+URL `https://github.com/login/device`. Enter the displayed code on GitHub and
+confirm that its publisher name matches the app. Your GitHub password never goes
+into the desktop app. If the organization requires App installation or approval,
+an administrator must approve access for that selected repository.
+
+The screen explains the code, repository, permissions, session memory and remote
+revocation through contextual help. The publisher App's fixed contract is
+Metadata read, Contents read and Actions write for supported explicit workflow
+actions. Authentication alone never authorizes an action or public release.
+The ordinary read-only connection facts and separate action guards are unchanged.
+
+One native authorization lasts at most15 minutes and has at most180 sequential
+polls; waiting keeps no helper process alive. Polling follows original settled
+receipts and GitHub's interval, never a UI clock or a Status request. A token is
+not a connected account until the existing final identity bracket settles.
+The private credential ceiling begins at flow admission, is at most60 minutes,
+and never renews. Refresh tokens are discarded, not persisted or used.
+
+Cancel/Disconnect retires only the original local flow; it is not GitHub grant
+revocation. After a lost Start reply, use Status/Cancel rather than replaying
+Sign in. Failed Authorize cannot Refresh; a new deliberate Sign in requires
+settled Disconnect. Cleanup-unknown remains absorbing. The fixed browser handoff
+revalidates current origin/revision/expiry on the actual OS main-thread callback;
+its success means only OS handoff acceptance, not approval or login success.
+
+The status is schema2 with required nullable `authorization` and publisher/device
+capability fields; core help/read facts stay schema1. See the
+[closed connection contract](../desktop/github-connection-contract.md) for exact
+phase, deadline, private-protocol and source-binding details. The public publisher
+JSON is compiled Rust-only, not copied into the Python runtime. The device native
+selector remains explicitly unactivated; no old passive/read-only receipt is
+borrowed for the changed source.
+
+The sections below record the prior read-only design and historical evidence.
+They are not new device-flow, browser, updated-runtime or packaging verification.
+
+## Prior status: unpublished installed-Linux integration candidate
 
 The candidate connects the existing guided UI to a **separate installed Linux
 session-only, read-only GitHub profile**. This is source integration, **not yet
@@ -18,8 +112,8 @@ connection is not enabled by this change.
 
 No GitHub App/publisher registration or GNOME credential vault is required for
 a session-only token. The selected project's original native registration and
-generation still are required. App/device login and persistent credential
-storage remain separate, unavailable features.
+generation still are required. Device flow now has the separate unqualified
+source update above; it does not enable persistent credential storage.
 
 The exact commit `d84a15db77e4776c5d89e23b87b868e21fb3a314` passed the
 [focused Linux native job](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/35299903903)
@@ -104,7 +198,7 @@ stale; they must not be silently relabelled fresh after failure.
 The TypeScript and registered pure Rust modules describe this closed status:
 
 ```text
-schemaVersion, revision, capability, session, operation,
+schemaVersion: 2, revision, capability, session, operation, authorization,
 account, repository, automation, facts
 ```
 
@@ -123,7 +217,7 @@ grants or authorization of a future mutation.
 Sessions are checking, connected, expired, disconnecting, failed or
 cleanup-unknown. Connected requires an observed account and explicit expiry; it
 does not imply repository access or automation administration. Operations carry
-their original ID, connect/refresh/disconnect kind and running/settled/
+their original ID, connect/authorize/refresh/disconnect kind and running/settled/
 cleanup-unknown phase. Checking and retiring states cannot carry fresh observed
 facts. Cleanup-unknown requires unavailable capability and matching operation
 uncertainty, and cannot be cleared by a late positive result.
@@ -134,17 +228,21 @@ an unavailable child fact.
 The fixed disclaimer is
 `facts.repositoryActionsSettingsObservation: "not-run"`: repository Actions
 **settings/policy** are unobserved even when workflow metadata has been listed.
-Environment, secret, variable, protection and runner observations remain not-run;
+Without a separate P1 input check, environment, secret and variable observations
+remain not-run; protection and runner observations remain not-run in either case;
 remote mutation/dispatch remain false and readiness/compatibility remain unknown.
 
-Exactly four fixed commands are registered in the native shell. Registration
+Exactly seven fixed commands are registered in the native shell. Registration
 does not bypass the closed runtime and connection gates:
 
 | Command | Exact arguments |
 | --- | --- |
 | `github_connection_status` | `{}` |
 | `github_connection_connect_token` | `{projectId, repository, token}` |
+| `github_connection_start_device` | `{projectId, repository}` |
+| `github_connection_open_device_page` | `{sessionId, expectedRevision}` (returns null) |
 | `github_connection_refresh` | `{sessionId, expectedRevision}` |
+| `github_connection_inspect` | `{sessionId, expectedRevision, stage, name}` |
 | `github_connection_disconnect` | `{sessionId}` |
 
 Requests are at most 8 KiB. An advanced session-only token is nonempty printable ASCII
@@ -160,7 +258,7 @@ the renderer cannot choose a helper, command line or destination.
 ## UI coordination and gated native handoff
 
 `GitHubConnectionController` accepts only an explicitly supplied observation
-port. The observation interface has Status, Refresh, Disconnect and subscription
+port. The observation interface has Status, Refresh, Inspect, Disconnect and subscription
 methods, but no token field. A separate one-shot native handoff implements
 Connect; the controller never stores its token in public state. The fixed native
 port is wired, while preview/unavailable ports are never called. The exported
@@ -174,8 +272,8 @@ change an actual runtime capability.
 The controller subscribes before its first retained Status read. Document,
 project-generation, target and service changes invalidate callbacks before
 asynchronous work, including away-and-back changes and late listener teardown.
-Admission is also rechecked immediately before invoking a queued Status or
-Refresh: a synchronous subscriber can retire the context, disconnect, invalidate
+Admission is also rechecked immediately before invoking a queued Status,
+Refresh or Inspect: a synchronous subscriber can retire the context, disconnect, invalidate
 help or deliver a newer status before the original call has even been sent.
 Older revisions cannot replace newer events; equal revisions must be immutable.
 Old read rejections and malformed old read replies cannot erase newer valid

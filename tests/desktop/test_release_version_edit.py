@@ -1,7 +1,7 @@
 """Focused SOURCE tests: pure spans and the existing inert custody/facade seams.
 
 No native qualification, actual project IO, process or recovery is implied.
-The metadata seam remains seven-only; this separate profile requires all ten.
+The metadata seam remains seven-only; this separate profile requires all thirteen.
 """
 from __future__ import annotations
 
@@ -140,15 +140,18 @@ class VersionTextTests(unittest.TestCase):
             with self.assertRaises(text.VersionTextInputError):
                 text.public_version_selection(json.dumps(data))
 
-    def test_ten_rule_migration_and_explicit_seven_rule_metadata_proof(self):
+    def test_thirteen_rule_migration_and_explicit_seven_rule_metadata_proof(self):
         with no_io():
-            self.assertEqual(len(tx.IGNORE_LINES), 10)
+            self.assertEqual(len(tx.IGNORE_LINES), 13)
             self.assertEqual(len(tx.METADATA_IGNORE_LINES), 7)
             self.assertFalse(sufficient_ignore_rules(SEVEN))
             self.assertTrue(sufficient_ignore_rules(SEVEN, tx.METADATA_IGNORE_LINES))
             after, additions = prepare_edit_ignore(SEVEN)
-            self.assertEqual(additions, tuple(name + "/" for name in tx.VERSION_STATE_NAMES))
+            self.assertEqual(additions, tuple(name + "/" for name in (*tx.VERSION_STATE_NAMES, *tx.IMAGE_STATE_NAMES)))
             self.assertEqual(after, COVERED)
+            ten = ("\n".join(tx.IGNORE_LINES[:10]) + "\n").encode()
+            self.assertFalse(sufficient_ignore_rules(ten))
+            self.assertEqual(prepare_edit_ignore(ten), (COVERED, tuple(name + "/" for name in tx.IMAGE_STATE_NAMES)))
             self.assertFalse(sufficient_ignore_rules(COVERED + b"!later-intent\n"))
             self.assertTrue(sufficient_ignore_rules(b"!earlier-intent\n" + COVERED))
 

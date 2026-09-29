@@ -8,13 +8,14 @@ const privateValueFormat = 'Enter the original value, at most 4,096 UTF-8 bytes.
 const noRestore = 'Starting a replacement or removal makes affected assignments unavailable. Failure or Cancel may preserve old record bytes, but never restores assignment automatically. Prepare and assign again explicitly; unknown cleanup prevents further use.';
 const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
   'android-keystore/file': {
-    where: 'Obtain the existing upload-key keystore from its authorized signing-key owner. Select the private original outside registered project folders. The app will not change its contents or permissions, move it, or generate a replacement key.',
-    format: 'An original .jks or .keystore file, at most 32 MiB. This importer recognizes only the JKS header; .p12/.pfx are not supported. A filename is not proof of format or key identity.',
-    failure: 'A changed, overlapping, unsupported, oversized or insufficiently private source is refused without changing the original. A recognized JKS header does not verify a password, private-key entry, digest or signing identity.',
-    suffixes: ['.jks', '.keystore'],
+    where: 'Obtain the existing upload-key keystore from its authorized signing-key owner. On an admitted Linux or Apple-silicon Mac session, select the private original outside registered project folders. The app will not change its contents or permissions, move it, or generate a replacement key.',
+    format: 'An original .jks, .keystore, .p12 or .pfx file, at most 32 MiB. JKS headers and supported PKCS#12 envelopes are recognized from bytes, not filenames. PKCS#12 signed-data envelopes also have a 4 MiB parser limit. Recognition is not key or password validation.',
+    failure: 'A changed, overlapping, unsupported, oversized or insufficiently private source is refused without changing the original. A recognized container does not verify a password, private-key entry or signing identity. The separately admitted signed build checks the store, alias and saved certificate before Gradle and checks the final AAB against your saved upload certificate.',
+    suffixes: ['.jks', '.keystore', '.p12', '.pfx'],
   },
-  'android-keystore/storePassword': { format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. The private-input flow accepts the write-only value for assessment and separately confirmed storage; it does not unlock the keystore.' },
-  'android-keystore/keyPassword': { format: privateValueFormat, failure: 'Missing input is not a password failure. This session does not test the password or perform signing. No value is displayed back to you.' },
+  'android-keystore/keyAlias': { where: 'Ask the authorized signing-key owner, or use the alias recorded in the Android Studio signing configuration for this existing upload key.', format: 'The existing alias: 1–255 ASCII letters, digits, underscores, dots or hyphens; it must not begin with a hyphen. Do not rename it to satisfy this form. ' + privateValueFormat, failure: 'A missing or different alias cannot select the intended private-key entry. Ask the signing-key owner for the correct value.' },
+  'android-keystore/storePassword': { where: 'Use the existing keystore password from its authorized owner or Android Studio signing setup. It opens this container, not your Google Play account. Do not replace an enrolled upload key.', format: privateValueFormat, failure: 'A missing value is a missing companion field, not a failed password test. The private-input flow accepts the write-only value for assessment and separately confirmed storage; it does not unlock the keystore.' },
+  'android-keystore/keyPassword': { where: 'Use the password for the selected private-key alias. For PKCS#12 it is often the same as the store password, but enter both explicitly and preserve them exactly.', format: privateValueFormat, failure: 'Missing input is not a password failure. This session does not test the password or perform signing. No value is displayed back to you.' },
   'apple-p12/file': {
     where: 'Ask the authorized Apple Distribution signing-key owner for a P12 export containing the existing certificate and private key, with its password. On a separately admitted Apple-silicon Mac, select the private original outside registered project folders. Do not generate or replace a signing identity just to satisfy this screen.',
     format: 'An original .p12 or .pfx file, at most 32 MiB, with a supported PKCS#12 version-3 envelope. Signed-data authSafe variants have a separate 4 MiB parser ceiling. These are mechanical observations, not password or trust checks.',
@@ -32,8 +33,16 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
     failure: 'CMS format is not proof of Apple authenticity, valid dates, entitlements or team/bundle/signer correspondence. Those checks belong to core signing validation; session assessment cannot authorize a release.',
     suffixes: ['.mobileprovision'],
   },
+  'asc-p8/file': {
+    where: 'Obtain the original downloaded API private key from its authorized App Store Connect account owner. On an admitted Linux or Apple-silicon Mac session, select the private original outside registered projects; the app does not move, rename, change permissions or generate keys.',
+    format: 'An original .p8 file, at most 4 MiB: one unencrypted PRIVATE KEY PEM block with strict 64-column wrapping, or complete DER PKCS#8 version 0. Envelope and named EC/P-256 identifiers only. Encrypted, SEC1-only, version-1, attributes and explicit-curve variants are unsupported.',
+    failure: 'A recognized envelope and identifiers do not prove mathematical private-key validity, account ownership, revocation or App Store Connect permissions. No key derivation, signing or Store request occurs. Keep/Save and Assign remain separate reviews.',
+    suffixes: ['.p8'],
+  },
+  'asc-p8/keyId': { format: 'Exactly 10 uppercase ASCII letters or digits, as judged by the core. ' + privateValueFormat },
+  'asc-p8/issuerId': { format: 'UUID spelling: 8-4-4-4-12 hexadecimal characters with hyphens, as judged by the core. ' + privateValueFormat },
   'android-firebase/file': {
-    where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. Select that private original outside registered project folders. Do not use an exported service-account private key.',
+    where: 'In Firebase Console, open Project settings, choose the intended Android app under Your apps, and download google-services.json. On an admitted Linux or Apple-silicon Mac session, select that private original outside registered project folders. Do not use an exported service-account private key.',
     format: 'An original UTF-8 .json file, at most 4 MiB, within this importer’s document/complexity limits. Decoded duplicate names are refused. The core checks every supported client structure and the configured application ID; CLI parsing rules are unchanged.',
     failure: 'Malformed clients or an application-ID mismatch prevent a usable review. A parser-limit refusal is not proof that the original is malformed. No Firebase service is contacted and the original is never changed.',
   },
@@ -46,6 +55,14 @@ const fieldHelp: Record<string, Partial<CredentialGuideField>> = {
   'google-wif/provider': { failure: 'Identifier syntax does not prove provider existence, repository binding or token exchange. This session does not log in, request an identity token or import Google ADC.' },
   'google-wif/serviceAccount': { failure: 'An email with the expected format is not proof of impersonation or Google Play permissions. No account or service is contacted.' },
   'project-read-token/token': { format: privateValueFormat, failure: 'Missing input matters only when selected by core requirements. This session does not fetch source or check token permissions. Never use a Store or administrator credential for this field.' },
+  'apple-review-contact/firstName': { format: privateValueFormat },
+  'apple-review-contact/lastName': { format: privateValueFormat },
+  'apple-review-contact/email': { format: privateValueFormat + ' The existing core also checks email syntax; it does not verify delivery or ownership.' },
+  'apple-review-contact/phone': { format: privateValueFormat + ' Include a country code when possible; no phone or reachability check is performed.' },
+  'apple-review-demo-account/username': { format: privateValueFormat },
+  'apple-review-demo-account/password': { format: privateValueFormat },
+  'apple-operation-commitment/keyBase64': { format: 'Accepted standard base64 decoding to exactly 32 bytes, as judged by the existing core policy. ' + privateValueFormat },
+  'apple-operation-commitment/keyVersion': { format: '1–64 ASCII letters, digits, underscores, dots or hyphens. Keep the original matching version. ' + privateValueFormat },
 };
 
 export function sessionKindHelp(kind: CredentialKind): CredentialKind {
@@ -77,11 +94,11 @@ const controls: Record<string, Partial<HelpContent>> = {
   },
   mode: {
     requiredWhen: 'Explicit consent is required before the app keeps any private input.',
-    what: 'Choose memory-only inputs for this launch, or an available authenticated encrypted vault for later launches.',
+    what: 'Use a memory-only session for this launch when native input collection is available. Encrypted storage for later launches is unavailable in this build.',
     why: 'Saving, unlocking and assigning are separate decisions. Neither storage mode authorizes a build or release.',
-    where: 'Choose Start session or Open encrypted vault in this panel. Only an independently qualified native profile can enable collection.',
-    format: 'Memory-only: 32 records / 64 MiB. Encrypted: 128 descriptors / 1 GiB on disk, with bounded private memory and a qualified OS keyring. No vault-password field, plaintext disk or silent mode fallback.',
-    failure: 'Use only a trusted operating system, desktop account and original Secret Service session. Profile checks detect observed changes; they are not atomic process protection or protection from a compromised account. Unavailable or denied access fails closed, without replacing a key or weakening OS permissions. Perfect memory/disk erasure is not promised.',
+    where: 'Choose Start session in this panel after checking the current native status. Open encrypted vault cannot enable unavailable encrypted storage. Only an independently qualified native profile can enable collection.',
+    format: 'Memory-only: 32 records / 64 MiB. Encrypted vault (unavailable in this build): 128 descriptors / 1 GiB on disk, with bounded private memory and a qualified OS keyring. No vault-password field, plaintext disk or silent mode fallback.',
+    failure: 'Use only a trusted operating system and the original desktop account and session. Profile checks detect observed changes; they are not atomic process protection or protection from a compromised account. Unavailable or denied access fails closed, without replacing a key or weakening OS permissions. Perfect memory/disk erasure is not promised.',
   },
   label: {
     label: 'Optional vault label', requiredness: 'optional', requiredWhen: 'Only when saving a new or replacement encrypted record.',
@@ -110,7 +127,7 @@ const controls: Record<string, Partial<HelpContent>> = {
   choose: {
     requiredWhen: 'For a supported file input after submitting the current context.',
     where: 'Click Select file and use the native picker. No manual registration, internal directory copying, path entry or renaming is required.',
-    format: 'One private original outside all registered projects on the separately admitted local filesystem. Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, and macOS-only P12 / DER CMS profile envelopes; native availability is a separate gate. Apple authenticity and password correctness are not format observations. P8 and binary plist are not enabled.',
+    format: 'One private original outside all registered projects on the separately admitted local filesystem. Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, unencrypted P8 PKCS#8 envelopes, and macOS-only P12 / DER CMS profile envelopes; native availability is a separate gate. P8 envelope/EC-P256 identifiers are not mathematical key, ownership, revocation or Store-access validation. Apple authenticity and password correctness are not format observations. Binary plist is not enabled.',
   },
   prepare: {
     requiredWhen: 'After file selection and companion entry, or when reviewing a scalar or retained record.',

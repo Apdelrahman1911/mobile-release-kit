@@ -138,7 +138,9 @@ class _SavedCommandEngine:
             # Preserve a slot for the one terminal. Each original build DATA
             # encoder separately enforces accepted/stage/terminal sequencing.
             maximum = (len(wire.stages(self.request.context)) + 2
-                       if self.domain is SavedCommandDomain.IOSArchive and self.request is not None else wire.MAX_FRAMES)
+                       if self.domain is SavedCommandDomain.IOSArchive and self.request is not None else
+                       wire.frame_limit(self.request.context)
+                       if self.domain is SavedCommandDomain.AndroidBuild and self.request is not None else wire.MAX_FRAMES)
             self._require(1 <= self.frames < maximum if terminal else self.frames < maximum - 1)
         else:
             self._require(False)

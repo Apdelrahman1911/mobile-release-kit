@@ -248,13 +248,22 @@ jobs:
         ruby-version: 3.3.12
         bundler-cache: true
         working-directory: tooling
+    - name: Validate the complete Google WIF input group
+      id: google_prepare_inputs
+      if: success() && (steps.resolve.outputs.mode == 'prepare')
+      working-directory: tooling
+      env:
+        MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1: ${{ secrets.MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1 }}
+        MOBILE_RELEASE_GOOGLE_WIF_PROVIDER: ${{ vars.MOBILE_RELEASE_GOOGLE_WIF_PROVIDER }}
+        MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT: ${{ vars.MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT }}
+      run: python -P -m mobile_release.workflow google-wif-inputs
     - name: Authenticate to Google Play for prepare
       id: google_prepare_auth
       if: success() && (steps.resolve.outputs.mode == 'prepare')
       uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
       with:
-        workload_identity_provider: ${{ vars.MOBILE_RELEASE_GOOGLE_WIF_PROVIDER }}
-        service_account: ${{ vars.MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT }}
+        workload_identity_provider: ${{ steps.google_prepare_inputs.outputs.provider }}
+        service_account: ${{ steps.google_prepare_inputs.outputs.service_account }}
         create_credentials_file: true
         export_environment_variables: true
     - name: Restrict prepare Google credential file
@@ -359,13 +368,22 @@ jobs:
         include-hidden-files: true
         if-no-files-found: error
         retention-days: 90
+    - name: Validate the complete Google WIF input group
+      id: google_execute_inputs
+      if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
+      working-directory: tooling
+      env:
+        MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1: ${{ secrets.MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1 }}
+        MOBILE_RELEASE_GOOGLE_WIF_PROVIDER: ${{ vars.MOBILE_RELEASE_GOOGLE_WIF_PROVIDER }}
+        MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT: ${{ vars.MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT }}
+      run: python -P -m mobile_release.workflow google-wif-inputs
     - name: Authenticate to Google Play for execute
       id: google_execute_auth
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
       uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
       with:
-        workload_identity_provider: ${{ vars.MOBILE_RELEASE_GOOGLE_WIF_PROVIDER }}
-        service_account: ${{ vars.MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT }}
+        workload_identity_provider: ${{ steps.google_execute_inputs.outputs.provider }}
+        service_account: ${{ steps.google_execute_inputs.outputs.service_account }}
         create_credentials_file: true
         export_environment_variables: true
     - name: Restrict execute Google credential file
@@ -637,15 +655,19 @@ jobs:
         MOBILE_RELEASE_RECOVERY_CONFIRMATION: ${{ inputs.recovery_confirmation }}
         MOBILE_RELEASE_DISPATCH_SHA: ${{ github.sha }}
         MOBILE_RELEASE_DISPATCH_REF: ${{ github.ref }}
+        MOBILE_RELEASE_INPUT_ASC_P8_V1: ${{ secrets.MOBILE_RELEASE_INPUT_ASC_P8_V1 }}
         MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 }}
         MOBILE_RELEASE_ASC_KEY_ID: ${{ vars.MOBILE_RELEASE_ASC_KEY_ID }}
         MOBILE_RELEASE_ASC_ISSUER_ID: ${{ vars.MOBILE_RELEASE_ASC_ISSUER_ID }}
+        MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1: ${{ secrets.MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1 }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE }}
+        MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1: ${{ secrets.MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1 }}
         MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME: ${{ secrets.MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME }}
         MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD: ${{ secrets.MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD }}
+        MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1: ${{ secrets.MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1 }}
         MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64: ${{ secrets.MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64 }}
         MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION: ${{ vars.MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION }}
       run: |
@@ -719,15 +741,19 @@ jobs:
         MOBILE_RELEASE_DISPATCH_SHA: ${{ github.sha }}
         MOBILE_RELEASE_DISPATCH_REF: ${{ github.ref }}
         GH_TOKEN: ${{ github.token }}
+        MOBILE_RELEASE_INPUT_ASC_P8_V1: ${{ secrets.MOBILE_RELEASE_INPUT_ASC_P8_V1 }}
         MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 }}
         MOBILE_RELEASE_ASC_KEY_ID: ${{ vars.MOBILE_RELEASE_ASC_KEY_ID }}
         MOBILE_RELEASE_ASC_ISSUER_ID: ${{ vars.MOBILE_RELEASE_ASC_ISSUER_ID }}
+        MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1: ${{ secrets.MOBILE_RELEASE_INPUT_APPLE_REVIEW_CONTACT_V1 }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL }}
         MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE }}
+        MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1: ${{ secrets.MOBILE_RELEASE_INPUT_APPLE_REVIEW_DEMO_ACCOUNT_V1 }}
         MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME: ${{ secrets.MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME }}
         MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD: ${{ secrets.MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD }}
+        MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1: ${{ secrets.MOBILE_RELEASE_INPUT_APPLE_OPERATION_COMMITMENT_V1 }}
         MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64: ${{ secrets.MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64 }}
         MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION: ${{ vars.MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION }}
       run: |

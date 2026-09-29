@@ -23,7 +23,10 @@ from mobile_release import android, android_manifest, android_zip_integrity
 from mobile_release import desktop_android_build as service
 from mobile_release import _desktop_android_build_protocol as wire
 from mobile_release._desktop_android_build_control import AndroidBuildInput
-from mobile_release._desktop_android_build_files import AndroidBuildFiles, AndroidFileError, OriginalAndroidArtifact
+from mobile_release._desktop_android_signed_inputs import SignedAndroidInputs
+from mobile_release._desktop_android_build_files import (
+    AndroidBuildFiles, AndroidFileError, OriginalAndroidArtifact, OriginalAndroidSigningInput,
+)
 from mobile_release._desktop_android_build_selection import SavedAndroidConfiguration, SavedAndroidSelection
 from mobile_release._desktop_preflight_control import PreflightInput
 from mobile_release._desktop_saved_command_control import SavedCommandDomain
@@ -41,6 +44,7 @@ from mobile_release.reporting import Finding, Report, Status
 
 VERIFY_JAR_SIGNATURE = android._verify_jar_signature
 SIGNER_FINGERPRINT = android._signer_fingerprint
+CANONICALIZE_AAB_SIGNATURE = android._canonicalize_aab_signature
 
 NAMES = ("BundleConfig.pb", "base/manifest/AndroidManifest.xml", "base/dex/classes.dex")
 
@@ -73,6 +77,7 @@ def values(*, signature=False):
                                             "sha256": hashlib.sha256(version).hexdigest(), "name": release.name,
                                             "build": release.build},
                            "platform": "android", "operation": "android-build-inspect",
+                           "signing": None,
                            "artifactValidation": {"mode": "upload-signature" if signature else "structure-and-version",
                                                   "uploadCertificateSha256": selected.upload_certificate_sha256 if signature else None}},
                "native": {"profile": "linux-gnu-x86_64", "projectRoot": str(root), "cwd": "/inert/cwd",
@@ -120,13 +125,14 @@ class _InertCase(unittest.TestCase):
             (android, ("run_owned", "discover_project", "selected_android_module", "private_build_directory",
                        "finite_scratch", "copy_bundletool", "read_external_bytes", "_validation_environment",
                        "_canonicalize_aab_signature", "_verify_jar_signature", "_signer_fingerprint", "_validate_zip")),
-            (service, ("invocation_custody", "run_android_build", "validate_aab")),
+            (service, ("invocation_custody", "run_android_build", "validate_aab",
+                       "validate_signing_material", "materialize_build_inputs")),
             (android.zipfile, ("ZipFile",)), (android.shutil, ("copy2",)),
             (android_manifest, ("validate_android_manifest",)), (android_zip_integrity, ("inspect_zip_integrity",)),
             (ReleaseConfig, ("project_path", "release_version")),
             (Path, ("open", "stat", "lstat", "is_file", "is_symlink", "glob", "rglob", "mkdir", "resolve")),
             (DefaultCancellation, ("install", "activate", "restore")),
-            (AndroidBuildInput, ("acquire", "request", "poll", "close", "progress")),
+            (AndroidBuildInput, ("acquire", "request", "poll", "close", "progress", "receive_material")),
         ):
             for name in names:
                 self.forbidden(target, name)
@@ -164,6 +170,8 @@ class _InertRun:
                                work_end=4000.0, fd=None, identity=None, acquired=True, active=True,
                                request_returned=True, close_claimed=False, closed=False, stop_reason="none",
                                first_failure=None, custody_unknown=False, buffer=bytearray(), _engine=None)
+        source.signed = source.material_receiving = source.material_pending = False
+        source.material = None
         guard._saved_command_source = source
         case.patched(guard, "check", return_value=None)
         case.patched(source, "poll", return_value=None)
@@ -174,9 +182,11 @@ class _InertRun:
                            invocation_attempted=False, counters={}, failure=None, prepared=True, close_claimed=False,
                            resources_closed=False, work_finish_attempted=False, cleanup_errors=[], _pending=None,
                            _roles={"gradle": "new", "bundletool": "new"}, _command_before={}, _returned={},
-                           zip_metadata=None, stage="accepted", _signature_passed=False)
+                           zip_metadata=None, stage="accepted", _signature_passed=False,
+                           signing=None, command_failure_role=None)
         if signature:
             op._roles.update(jarsigner="new", keytool="new")
+        op._dispatch = {role: False for role in op._roles}
         source.operation = op
         self.invocation = invocation = object.__new__(InvocationCustody)
         invocation.root, invocation.cancellation, invocation.signing_lease = op.root, guard, None
@@ -352,6 +362,186 @@ class _InertRun:
                     artifact=self.artifact, tools=self.tools)
         args.update(changes)
         return android.validate_aab(self.artifact.path, **args)
+
+
+def signed_selection(f):
+    """Only fabricated retained-context DATA; never a credential/owner receipt."""
+    f.request.context["signing"] = {"source": "assigned-session", "contextRevision": 3, "assignments": [
+        {"kind": "android-keystore", "recordId": "e" * 32, "recordRevision": 2, "contextRevision": 3}]}
+    canonical = json.dumps(f.bound.config.data, sort_keys=True, ensure_ascii=False,
+                           separators=(",", ":"), allow_nan=False).encode("utf-8")
+    f.request.native["signingContext"] = {"bytes": len(canonical), "sha256": hashlib.sha256(canonical).hexdigest()}
+    f.source.signed = f.source.material_pending = True
+    f.operation._roles = {role: "new" for role in
+                          ("keytool-validate", "gradle", "jarsigner-sign", "bundletool", "jarsigner", "keytool")}
+    f.operation._dispatch = {role: False for role in f.operation._roles}
+    f.operation.signing = SignedAndroidInputs(f.operation)
+    return canonical
+
+
+class SignedAndroidServiceTests(_InertCase):
+    def test_raw_saved_and_canonical_native_context_are_independent_comparisons(self):
+        from mobile_release._desktop_android_build_selection import AndroidSelectionRefused
+        from mobile_release._desktop_android_signing_material import PrivateAndroidMaterial
+        for change in ("formatting-only", "stale-raw", "different-canonical"):
+            with self.subTest(change=change):
+                f = _InertRun(self, signature=True)
+                canonical = signed_selection(f)
+                raw = f.bound.saved.configuration.raw
+                self.assertNotEqual(hashlib.sha256(raw).hexdigest(), hashlib.sha256(canonical).hexdigest())
+                if change == "stale-raw":
+                    raw += b" "
+                if change == "different-canonical":
+                    f.request.native["signingContext"]["sha256"] = "0" * 64
+                f.operation.inputs = None
+                read = self.patched(f.files, "read_input", side_effect=(raw, f.bound.saved.version_raw))
+                private_bind = self.patched(PrivateAndroidMaterial, "bind")
+                if change == "formatting-only":
+                    bound = AndroidBuildOperation.bind_inputs(f.operation)
+                    self.assertEqual(bound.config.data, f.bound.config.data)
+                    self.assertTrue(f.operation.signing.config_bound)
+                else:
+                    error_type = AndroidSelectionRefused if change == "stale-raw" else AndroidBuildError
+                    with self.assertRaises(error_type) as rejected:
+                        AndroidBuildOperation.bind_inputs(f.operation)
+                    self.assertEqual(rejected.exception.reason,
+                                     "saved-config-changed" if change == "stale-raw" else "stale-intent")
+                    self.assertFalse(f.operation.signing.config_bound)
+                self.assertEqual(read.call_count, 1 if change == "stale-raw" else 2)
+                private_bind.assert_not_called()
+                f.operation.prepare.assert_not_called()
+                f.build_call.assert_not_called()
+
+    def signed_run(self, *, validation_ok=True, signing_error=False, restore_error=False):
+        f = _InertRun(self, signature=True)
+        signed_selection(f)
+        operation, signing = f.operation, f.operation.signing
+        signing.config_bound = True  # The separate comparison regression exercises real bind_inputs.
+        signing.values = {"PRIVATE_SCALAR": "PRIVATE_VALUE"}
+        f.flags["signing-inputs"] = True
+        self.patched(signing, "bind_values", return_value=None)
+        self.patched(signing, "bind_materialized", return_value=None)
+        self.patched(signing, "inputs_closed", side_effect=lambda: f.flags["signing-inputs"])
+        receive = self.patched(f.source, "receive_material", side_effect=lambda owner: f.events.append("material-received"))
+
+        def validate(config, **kwargs):
+            self.assertIs(config, f.bound.config)
+            self.assertEqual(kwargs["platforms"], ("android",))
+            self.assertIs(kwargs["values"], signing.values)
+            self.assertIs(kwargs["android_operation"], operation)
+            self.assertIs(kwargs["cancellation"], f.guard)
+            f.events.append("signing-validation")
+            operation._returned["keytool-validate"] = 0 if validation_ok else 7
+            operation._roles["keytool-validate"] = "returned"
+            f.ledger._commands, f.ledger._command_dispatched = 1, True
+            rows = [Finding("credential-material.android", Status.PASS if validation_ok else Status.INVALID,
+                            "PRIVATE_VALIDATION", details={"password": "PRIVATE_VALUE"})]
+            signing.validation_finished(rows)
+            return rows
+
+        @contextmanager
+        def materialization(*, signing_lease):
+            self.assertIsNone(signing_lease)
+            f.events.append("materialization-enter")
+            child = SimpleNamespace(claimed=False)
+            signing.materialization = child
+            f.flags["signing-inputs"] = False
+            try:
+                yield child
+            finally:
+                if signing_error:
+                    self.assertIsNotNone(f.run.primary)  # Original failure precedes restoration.
+                    self.assertIsNotNone(f.source.first_failure)
+                f.events.append("materialization-restore")
+                child.claimed = True
+                if restore_error:
+                    raise ProcessCleanupError("PRIVATE restoration failure")
+                f.flags["signing-inputs"] = True
+
+        @contextmanager
+        def materialize(config, **kwargs):
+            self.assertIs(config, f.bound.config)
+            self.assertEqual(kwargs["platforms"], ("android",))
+            self.assertIsNone(kwargs["signing_lease"])
+            self.assertIs(kwargs["build_inputs"], signing.materialization)
+            self.assertIs(kwargs["values"], signing.values)
+            yield object()
+
+        def build(config, **kwargs):
+            self.assertIs(config, f.bound.config)
+            self.assertIs(kwargs["signed"], True)
+            self.assertIs(kwargs["build_inputs"], signing.materialization)
+            self.assertIs(kwargs["operation"], operation)
+            f.events.append("build")
+            operation._returned["gradle"] = 0
+            operation._roles["gradle"] = "returned"
+            f.ledger._commands = 2
+            f.disposition.update(work="retained-work", artifacts="retained-incomplete")
+            operation.advance("capturing")
+            operation.advance("signing")
+            operation._returned["jarsigner-sign"] = 7 if signing_error else 0
+            operation._roles["jarsigner-sign"] = "returned"
+            f.ledger._commands = 3
+            if signing_error:
+                operation.fail("signing-failed")
+            return {}
+
+        def inspect(*args, **kwargs):
+            self.assertTrue(f.flags["signing-inputs"])
+            f.events.append("inspect")
+            f.ledger._commands = 6
+            operation.zip_metadata = f.metadata
+            return f.findings
+
+        self.patched(service, "validate_signing_material", side_effect=validate)
+        self.patched(f.invocation, "materialization", side_effect=materialization)
+        self.patched(service, "materialize_build_inputs", side_effect=materialize)
+        f.build_call.side_effect = build
+        f.inspect_call.side_effect = inspect
+        return f, receive
+
+    def test_signed_service_restores_before_inspection_and_projects_no_private_data(self):
+        f, receive = self.signed_run()
+        f.run.run()
+        receive.assert_called_once_with(f.operation)
+        self.assertEqual([event for event in f.events if event.startswith("stage:")],
+                         ["stage:" + stage for stage in wire.SIGNED_STAGES])
+        self.assertLess(f.events.index("materialization-restore"), f.events.index("inspect"))
+        self.assertEqual(f.run.terminal()["outcome"], "unknown")
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["lifetime"]["commands"]), ("complete", 6))
+        self.assertEqual(terminal["result"]["assurances"]["toolkitSigning"], "verified")
+        self.assertNotIn("PRIVATE_", json.dumps(terminal))
+
+    def test_known_validation_failure_stops_before_gradle_and_is_not_refused(self):
+        f, _ = self.signed_run(validation_ok=False)
+        with self.assertRaises(AndroidBuildError):
+            f.run.run()
+        f.build_call.assert_not_called()
+        f.inspect_call.assert_not_called()
+        f.invocation.materialization.assert_not_called()
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["reason"]), ("failed", "signing-invalid"))
+        self.assertEqual(terminal["activity"]["command"]["outcome"], "not-dispatched")
+        self.assertEqual(terminal["lifetime"]["commands"], 1)
+        self.assertNotIn("PRIVATE_", json.dumps(terminal))
+
+    def test_signing_failure_latches_before_cleanup_and_unknown_restore_vetoes_success(self):
+        for signing_error, restore_error in ((True, False), (False, True), (True, True)):
+            with self.subTest(signing=signing_error, restore=restore_error):
+                f, _ = self.signed_run(signing_error=signing_error, restore_error=restore_error)
+                with self.assertRaises((AndroidBuildError, ProcessCleanupError)):
+                    f.run.run()
+                f.inspect_call.assert_not_called()
+                self.assertIsNone(f.run._candidate)
+                self.assertEqual(f.operation.stage, "signing" if signing_error else "restoring-signing")
+                f.settle_outer()
+                terminal = f.run.terminal()
+                self.assertEqual(terminal["outcome"], "unknown" if restore_error else "failed")
+                self.assertIsNone(terminal["result"])
+                self.assertNotIn("PRIVATE_", json.dumps(terminal))
 
 
 class AndroidCliCompatibilityTests(_InertCase):
@@ -668,6 +858,138 @@ def self_signed_output():
         "Warning:\nThis jar contains signatures that do not include a timestamp.\n"
         "POSIX file permission and/or symlink attributes detected. These attributes "
         "are ignored when signing and are not protected by the signature.\n"))
+
+
+class SignedAndroidOwnedSeamTests(_InertCase):
+    def signed_build(self, *, signer_code=0, signer_error=None, after_return=None):
+        # Existing orchestration fixture only: all command, material and file
+        # effects remain explicit fabricated seams, never native qualification.
+        f = _InertRun(self, signature=True)
+        signed_selection(f)
+        operation, signing = f.operation, f.operation.signing
+        operation.stage, operation._artifact = "building", None
+        operation._returned["keytool-validate"] = 0
+        operation._roles["keytool-validate"] = "returned"
+        operation._dispatch["keytool-validate"] = True
+        f.ledger._commands, f.ledger._command_dispatched = 1, True
+        signing.validation_passed = True
+        child = SimpleNamespace(scratch=SimpleNamespace(require_input=Mock(return_value="inert-snapshot"),
+                    require=Mock(return_value=Path("/inert/private/keystore"))))
+        signing.materialization = child
+        self.patched(signing, "require_materialized", return_value=None)
+        selected = object.__new__(OriginalAndroidSigningInput)
+        selected.files, selected._native = f.files, False
+        f.files.signing_input = selected
+        staging, output = Path("/inert/work/signing-input.aab"), Path("/inert/artifacts/app-release.aab")
+        self.patched(OriginalAndroidSigningInput, "path", new_callable=PropertyMock, return_value=staging)
+        self.patched(f.files, "signing_output", return_value=output)
+
+        @contextmanager
+        def borrow():
+            f.events.append("signing-borrow-enter")
+            selected._native = True
+            try:
+                yield staging
+            finally:
+                selected._native = False
+                f.events.append("signing-borrow-exit")
+
+        def gradle():
+            operation._arm("gradle")
+            return ("/inert/gradle", "--no-daemon", f.bound.task)
+
+        def signer(path, destination, materialization):
+            self.assertEqual((path, destination), (staging, output))
+            self.assertIs(materialization, child)
+            self.assertTrue(selected._native)
+            operation._arm("jarsigner-sign")
+            return ("/inert/jdk/bin/jarsigner", "-signedjar", str(output), str(staging), "inert-upload")
+
+        def dispatch(argv, **kwargs):
+            role = operation._pending
+            self.assertIn(role, ("gradle", "jarsigner-sign"))
+            operation.command_limits(kwargs["timeout"], kwargs["capture"], kwargs.get("output_limit", 2 * 1024 * 1024))
+            f.events.append("dispatch:" + role)
+            f.ledger._commands += 1
+            f.ledger._command_dispatched = True
+            if role == "jarsigner-sign":
+                self.assertEqual(argv, ("/inert/jdk/bin/jarsigner", "-signedjar", str(output), str(staging), "inert-upload"))
+                self.assertEqual((kwargs["cwd"], kwargs["capture"], kwargs["timeout"], kwargs["output_limit"]),
+                                 (f.bound.config.root, True, 120, 2 * 1024 * 1024))
+                self.assertIs(kwargs["cancellation"], f.guard)
+                if signer_error is not None:
+                    # Missing return with an explicitly unknown ledger fact;
+                    # this DATA is not a native ownership/settlement receipt.
+                    f.ledger._fatal, f.ledger._command_contained = True, None
+                    raise signer_error
+            return SimpleNamespace(returncode=signer_code if role == "jarsigner-sign" else 0)
+
+        def check_tools():
+            f.events.append("tools-check")
+            if "jarsigner-sign" in operation._returned and after_return is not None:
+                self.assertEqual(operation._returned["jarsigner-sign"], 0)
+                raise after_return
+
+        def capture():
+            self.assertEqual(operation._returned["jarsigner-sign"], 0)
+            self.assertFalse(selected._native)
+            f.events.append("capture-final")
+            operation._artifact = f.artifact
+            return f.artifact
+
+        self.patched(selected, "native_input", side_effect=borrow)
+        operation.gradle_command.side_effect = gradle
+        self.patched(signing, "signing_command", side_effect=signer)
+        self.patched(operation, "capture_for_signing", side_effect=lambda: selected)
+        self.patched(operation, "capture_signed", side_effect=capture)
+        self.patched(android, "_canonicalize_aab_signature", side_effect=CANONICALIZE_AAB_SIGNATURE)
+        self.patched(android, "run_owned", side_effect=dispatch)
+        f.tools.check.side_effect = check_tools
+        return f, child
+
+    def test_actual_owned_signed_branch_uses_reserved_output_and_never_captures_rejected_signer(self):
+        unknown = ProcessError("PRIVATE unknown signer", dispatched=True, cleanup_complete=False)
+        for code, error in ((0, None), (7, None), (0, unknown)):
+            with self.subTest(code=code, unknown=error is not None):
+                f, child = self.signed_build(signer_code=code, signer_error=error)
+                args = dict(signed=True, cancellation=f.guard, build_inputs=child, operation=f.operation)
+                if code == 0 and error is None:
+                    result = android.run_android_build(f.bound.config, **args)
+                    self.assertEqual(result, {"android-aab": f.artifact.path})
+                    f.operation.capture_signed.assert_called_once_with()
+                    self.assertLess(f.events.index("returned:jarsigner-sign"), f.events.index("signing-borrow-exit"))
+                    self.assertLess(f.events.index("signing-borrow-exit"), f.events.index("capture-final"))
+                    child.scratch.require.assert_called_once_with("inert-snapshot")
+                else:
+                    with self.assertRaises(ProcessError if error is not None else AndroidBuildError) as raised:
+                        android.run_android_build(f.bound.config, **args)
+                    if error is not None:
+                        self.assertIs(raised.exception, error)
+                        self.assertEqual(f.operation.role_outcome("jarsigner-sign"), {"outcome": "unknown", "exitCode": None})
+                        self.assertNotIn("returned:jarsigner-sign", f.events)
+                    else:
+                        self.assertEqual(raised.exception.reason, "signing-failed")
+                        self.assertEqual(f.operation.role_outcome("jarsigner-sign"), {"outcome": "exited", "exitCode": code})
+                    self.assertIsNotNone(f.source.first_failure)
+                    f.operation.capture_signed.assert_not_called()
+                    child.scratch.require.assert_not_called()
+                f.operation.capture_after.assert_not_called()
+                self.assertEqual(f.operation.command_outcome(), {"outcome": "exited", "exitCode": 0})
+                self.assertEqual([event for event in f.events if event.startswith("dispatch:")],
+                                 ["dispatch:gradle", "dispatch:jarsigner-sign"])
+
+    def test_original_signer_return_survives_late_stop_without_final_artifact(self):
+        for error in (KeyboardInterrupt(), ProcessCleanupError("PRIVATE late owner check")):
+            with self.subTest(error=type(error).__name__):
+                f, child = self.signed_build(after_return=error)
+                with self.assertRaises(type(error)) as raised:
+                    android.run_android_build(f.bound.config, signed=True, cancellation=f.guard,
+                                              build_inputs=child, operation=f.operation)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(f.operation.role_outcome("jarsigner-sign"), {"outcome": "exited", "exitCode": 0})
+                self.assertIsNone(f.operation._artifact)
+                f.operation.capture_signed.assert_not_called()
+                f.operation.capture_after.assert_not_called()
 
 
 class AndroidUploadSignatureTests(_InertCase):

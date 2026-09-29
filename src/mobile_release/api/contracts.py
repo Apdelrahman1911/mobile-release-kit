@@ -270,9 +270,11 @@ class CredentialHelp(TypedDict):
 
 
 CredentialKindId = Literal["android-keystore", "android-firebase", "apple-p12", "apple-profile",
-                           "asc-p8", "ios-firebase", "google-wif", "project-read-token"]
+                           "asc-p8", "ios-firebase", "google-wif", "project-read-token",
+                           "apple-review-contact", "apple-review-demo-account", "apple-operation-commitment"]
 CredentialFieldId = Literal["file", "storePassword", "keyAlias", "keyPassword", "password", "keyId",
-                            "issuerId", "provider", "serviceAccount", "token"]
+                            "issuerId", "provider", "serviceAccount", "token",
+                            "firstName", "lastName", "email", "phone", "username", "keyBase64", "keyVersion"]
 CredentialControlId = Literal["project", "platform", "stage", "purpose", "mode", "label", "choose",
                               "prepare", "review", "save", "assign", "replace", "delete", "cancel",
                               "discard", "lock"]
@@ -359,6 +361,10 @@ AssessmentRequirement = Literal[
     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", "MOBILE_RELEASE_ASC_KEY_ID", "MOBILE_RELEASE_ASC_ISSUER_ID",
     "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64", "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
     "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT", "MOBILE_RELEASE_PROJECT_READ_TOKEN",
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME", "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME",
+    "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL", "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
+    "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME", "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64", "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION",
 ]
 
 
@@ -474,6 +480,23 @@ class AssessmentTokenFields(TypedDict):
     token: str | None
 
 
+class AssessmentReviewContactFields(TypedDict):
+    firstName: str | None
+    lastName: str | None
+    email: str | None
+    phone: str | None
+
+
+class AssessmentReviewDemoAccountFields(TypedDict):
+    username: str | None
+    password: str | None
+
+
+class AssessmentCommitmentFields(TypedDict):
+    keyBase64: str | None
+    keyVersion: str | None
+
+
 class AssessmentNoScalarFields(TypedDict):
     pass
 
@@ -526,9 +549,28 @@ class AssessmentTokenInput(TypedDict):
     observation: None
 
 
+class AssessmentReviewContactInput(TypedDict):
+    kind: Literal["apple-review-contact"]
+    fields: AssessmentReviewContactFields
+    observation: None
+
+
+class AssessmentReviewDemoAccountInput(TypedDict):
+    kind: Literal["apple-review-demo-account"]
+    fields: AssessmentReviewDemoAccountFields
+    observation: None
+
+
+class AssessmentCommitmentInput(TypedDict):
+    kind: Literal["apple-operation-commitment"]
+    fields: AssessmentCommitmentFields
+    observation: None
+
+
 AssessmentInput = (
     AssessmentKeystoreInput | AssessmentAndroidFirebaseInput | AssessmentP12Input | AssessmentProfileInput
     | AssessmentP8Input | AssessmentIosFirebaseInput | AssessmentWifInput | AssessmentTokenInput
+    | AssessmentReviewContactInput | AssessmentReviewDemoAccountInput | AssessmentCommitmentInput
 )
 
 
@@ -1016,3 +1058,37 @@ def issue(code: str, message: str, *, partial: bool = False) -> Issue:
             if partial else "Correct the input and validate again; no changes were saved."
         ),
     }
+
+
+class SavedMetadataFile(TypedDict):
+    kind: Literal["public-text", "android-note", "ios-note", "image"]
+    id: str
+    path: str | None
+    locale: str | None
+    required: bool
+    state: Literal["checked", "missing", "invalid"]
+    issues: list[str]
+
+
+class SavedMetadataImageSet(TypedDict):
+    locale: str
+    id: str
+    count: int
+    required: Literal[False]
+    issues: list[str]
+
+
+class SavedMetadataValidationResult(TypedDict):
+    schemaVersion: Literal[1]
+    platform: MetadataPlatform
+    metadataRoot: str
+    locales: list[str]
+    androidBuild: int | None
+    savedConfig: SavedConfigContent
+    scope: Literal["configured-locales-canonical-images-fixed-notes"]
+    observationScope: Literal["single-request-non-atomic"]
+    valid: bool
+    state: Literal["checked", "issues"]
+    files: list[SavedMetadataFile]
+    imageSets: list[SavedMetadataImageSet]
+    assurance: Assurance

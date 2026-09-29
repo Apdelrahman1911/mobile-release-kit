@@ -21,8 +21,8 @@ const EOF_SCOPE: &str = "configuration-transaction-eof-hosted-v1";
 const OBSERVATION: Duration = Duration::from_secs(45);
 const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
     "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
-const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n";
-const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n/.mobile-release-metadata-text-prepare/\r\n/.mobile-release-metadata-text/\r\n/.mobile-release-metadata-text-cleanup/\r\n/.mobile-release-version-prepare/\r\n/.mobile-release-version/\r\n/.mobile-release-version-cleanup/\r\n";
+const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n.mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n";
+const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n/.mobile-release-metadata-text-prepare/\r\n/.mobile-release-metadata-text/\r\n/.mobile-release-metadata-text-cleanup/\r\n/.mobile-release-version-prepare/\r\n/.mobile-release-version/\r\n/.mobile-release-version-cleanup/\r\n/.mobile-release-metadata-images-prepare/\r\n/.mobile-release-metadata-images/\r\n/.mobile-release-metadata-images-cleanup/\r\n";
 const UNRELATED: &[u8] = b"fixed synthetic unrelated content\n";
 const EOF_IGNORE_BASE: &[u8] = b"# fixed synthetic EOF ignore\n";
 static BATCH_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -304,6 +304,7 @@ impl GateGuard {
                 EditDomain::GitHubWorkflows => { let _ = self.owner.close_workflow("main", &id); },
                 EditDomain::MetadataText => { let _ = self.owner.close_metadata_text("main", &id); },
                 EditDomain::ReleaseVersion => { let _ = self.owner.close_release_version("main", &id); },
+                EditDomain::MetadataImages => { let _ = self.owner.close_metadata_images("main", &id); },
             }
         }
         self.schedule.release();
@@ -2945,6 +2946,7 @@ mod metadata {
                     // Metadata fixture never admits this writer. A foreign arm
                     // still stops through the SAME owner, not a metadata receipt.
                     EditDomain::ReleaseVersion => { let _=self.batch.owner.close_release_version("main",&id); let _=self.batch.owner.shutdown().await; },
+                    EditDomain::MetadataImages => { let _=self.batch.owner.close_metadata_images("main",&id); let _=self.batch.owner.shutdown().await; },
                     EditDomain::GitHubWorkflows => { let _=self.batch.owner.close_workflow("main",&id); let _=workflow_observed(&self.batch.owner,&id,Phase::Final).await; },
                 }
             }
@@ -4428,7 +4430,7 @@ mod version {
             && matches!(core.reason,CoreReason::Cancelled|CoreReason::None),Failure::UnexpectedOutcome)?;
         let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
         value["domain"]=json!(match session.domain { EditDomain::Configuration=>"configuration",EditDomain::GitHubWorkflows=>"github_workflows",
-            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion=>return Err(Failure::UnexpectedStatus) });
+            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion|EditDomain::MetadataImages=>return Err(Failure::UnexpectedStatus) });
         value["nativePhase"]=json!(phase); value["nativeFinality"]=json!(finality); value["nativeReason"]=json!(native);
         value["applySubmitted"]=json!(applied); value["lateSettled"]=json!(late); value["outcome"]=json!(core); value["terminalSeq"]=json!(0);
         Ok(value)

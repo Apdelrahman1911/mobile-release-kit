@@ -28,6 +28,41 @@ running the CLI or parsing console output.
   integrity and compare the captured bundle's signer with the saved upload
   certificate SHA-256 fingerprint. The same protected JDK must also supply
   `jarsigner` and `keytool`; their presence alone does not qualify this mode.
+- **Optional signing:** **Build and sign with assigned upload key** is also off
+  by default. It uses the selected Credentials session, requires upload-signature
+  inspection and the saved upload certificate, and never silently creates a new
+  key. Signing remains unavailable until this exact operation is natively qualified.
+
+## Select signing inputs without moving files
+
+Open **Credentials** and use **Select File** for the existing Android upload
+keystore. Supported container choices are JKS (`.jks` / `.keystore`) and PKCS#12
+(`.p12` / `.pfx`); the bytes, not the filename, determine the format. The app
+retains selected private input through its native session, so you do not need to
+copy it into the project or rename it. A recognized container is not yet proof
+that its passwords, key or certificate are valid.
+
+The short help beside each companion field explains:
+
+| Input | Where to get it / what to enter | Why it is required |
+|---|---|---|
+| Keystore | The upload-key file from your authorized signing-key owner or existing Android Studio signing setup; maximum32MiB. | Contains the private key used to sign your upload. Do not replace an enrolled key to fix a password error. |
+| Keystore password | The original file password from that same signing setup; enter it exactly. | Opens the keystore. Spaces are preserved; a wrong password stops validation before Gradle. |
+| Key alias | The existing key-entry name from the signing setup; 1–255 letters, digits, `_`, `.` or `-`, but not a leading `-`. | Selects the private key. It is not the app name, package name or a new alias to create. |
+| Key password | The original password protecting that private-key entry. | Required for signing. PKCS#12 commonly uses the same password for both fields, but enter both explicitly; the app does not assume equality. |
+| Firebase Android file, when required | Use the picker for the app's `google-services.json` from Firebase project settings; maximum4MiB. | The shared core validates the configured app and temporarily places the selected bytes where the build expects them. It restores existing project bytes afterward. |
+| Project read token, when required | The narrowly scoped token required by your project's existing private-dependency configuration. | Only the trusted build receives it; it is not an upload or publication credential. |
+
+Password/token fields are write-only and bounded to4096 UTF-8 bytes each.
+Invalid container, missing alias, wrong password, expired certificate or a saved
+fingerprint mismatch produces an actionable validation result, not a generic
+“build failed”. Initial keytool validation confirms the private-key entry and
+certificate policy; actual signing separately confirms the key password works.
+
+Save configuration changes before Review. The selected signing session must
+describe that same saved configuration; formatting differences alone are not a
+change of meaning. Changed file contents, assignment revisions or signing choices
+require a new Review. A renderer-supplied hash cannot authorize a changed session.
 
 ## Which certificate fingerprint to save
 
@@ -88,11 +123,14 @@ Building runs the project's Gradle scripts and plugins. Use only a project you
 trust: those programs can change files, access same-user resources, start helpers
 and make network requests. A private working directory is **not a sandbox**.
 
-The toolkit does not request signing, read signing credentials, contact a Store,
-or publish a release in this action. Project code may nevertheless sign the
-bundle itself. Without the optional checkbox, its signature and signer are
-explicitly **not inspected**. Offline checks remain a separate build-free action
-and never implicitly start this build.
+With **Build and sign** off, the toolkit does not request signing or read signing
+credentials. Project code may nevertheless sign the bundle itself. Without
+upload-signature inspection, its signature and signer are explicitly **not
+inspected**. With signing selected, trusted Gradle/project code receives the
+assigned signing inputs and can have other same-user effects; this is not
+protection against a malicious selected project. Neither choice contacts a Store
+or publishes a release through the toolkit. Offline checks remain a separate
+build-free action and never implicitly start this build.
 
 ## Reading a result
 
@@ -109,6 +147,14 @@ Failed signature verification skips the signer comparison; it is not a match.
 These checks do not establish that the saved upload certificate is enrolled in
 Play or that the bundle is ready for Store submission. Results are shown only
 after the original native operation and cleanup have settled.
+
+For a signed build, **Toolkit signing verified** additionally requires an actual
+successful final signing command, valid signature and saved-certificate match on
+the captured final bundle. Validation, Gradle, signing, input restoration and
+inspection have separate statuses; a preflight failure must not look like a
+Gradle attempt. A known manifest/version failure still allows independent
+signature inspection, but a source/ZIP safety or unconfirmed-lifetime failure
+does not. A negative manifest result can never become release readiness.
 
 The captured bundle may be incremental, reused or stale output. A zero-exit
 Gradle task and a matching version do not establish that the bytes were produced
@@ -133,6 +179,45 @@ to settle. Until then, the application must keep showing the original status.
   Uncertain leftovers are retained and reported, not silently deleted.
 - A complete local result intentionally retains its captured artifact. An
   incomplete retained artifact is not promoted into a successful result.
+- Signing inputs and any temporarily replaced Firebase file must finish their
+  original restoration before artifact inspection. A conflict/unknown restoration
+  retains recovery records and blocks reuse; never delete the journal or retry
+  signing just to clear the UI. Use the app's recovery/status guidance after the
+  original process has settled. Password buffers are released only after their
+  original consumers close; ordinary memory release is not guaranteed erasure.
+
+## Signed-operation engineering contract
+
+The closed `mrk-android-build/3` contract distinguishes unsigned `signing:null`
+from an exact assigned Android session. Native context comparison is separate
+from the raw saved-file comparison. The private body has fixed Android framing,
+an at-most1024-byte header and at most37,765,120 material bytes. It uses the same
+original input channel; ending the body is not closing the STOP channel.
+
+The signed command order is fixed: keytool validation30s → Gradle2700s →
+jarsigner signing120s → bundletool60s → jarsigner verification120s → keytool
+certificate inspection30s. Each role is once-only and shares the original
+3000-second work /3010-second finality endpoints and first-failure cleanup cutoff;
+adding roles never extends those endpoints. Android uses no Apple account lease.
+Only signing-input validation, the trusted Gradle build, and signing receive
+selected private env values; public inspectors do not. Status/history and evidence
+do not receive those selected private values.
+
+Stages are inputs-bound → validating-signing → materializing-signing → building →
+capturing → signing → restoring-signing → inspecting → disposing-work. Failure
+cleanup does not pretend later work stages ran. The final output is a separate
+reserved0600 file with its held original descriptor and inode; immutable staging
+is never re-signed in place. Only a settled zero-exit signer, unchanged source and
+staging, exact output namespace and bounded same-inode final bytes may construct
+the immutable artifact. No reopening/resetting an artifact digest excuses drift.
+
+**Remaining qualification:** source/inert tests are not evidence that the admitted
+JDK preserves a pre-created output inode with `jarsigner -signedjar`. Real
+synthetic JKS and PKCS#12 signing, reserved-output identity, the complete signed
+flow, failure/cancellation and retained-input recovery require the existing safe
+native owner. The actual admitted tool/OS roster must fit the unchanged aggregate
+checkpoint cap for the additional signing roles. These requirements do not
+authorize live credentials, Store mutations or enabling a platform flag.
 
 The UI keeps the original build's Status and Cancel controls available when
 navigating elsewhere. Its result also appears in Artifacts without being promoted

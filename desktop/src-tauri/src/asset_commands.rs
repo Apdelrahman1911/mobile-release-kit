@@ -2,7 +2,7 @@
 //! Tauri has already materialized Json bodies. These are admitted-payload limits,
 //! not a pre-IPC allocation/RSS guarantee. No parser observation or path enters.
 use std::{io, sync::Arc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use crate::protocol;
 
@@ -11,11 +11,11 @@ pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;
 const SMALL_LIMIT: usize = 1024;
 const PREPARE_LIMIT: usize = 128 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Kind {
     AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8,
-    IosFirebase, GoogleWif, ProjectReadToken,
+    IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemoAccount, AppleOperationCommitment,
 }
 impl Kind {
     pub(crate) fn name(self) -> &'static str {
@@ -23,26 +23,31 @@ impl Kind {
             Self::AndroidKeystore => "android-keystore", Self::AndroidFirebase => "android-firebase",
             Self::AppleP12 => "apple-p12", Self::AppleProfile => "apple-profile", Self::AscP8 => "asc-p8",
             Self::IosFirebase => "ios-firebase", Self::GoogleWif => "google-wif", Self::ProjectReadToken => "project-read-token",
+            Self::AppleReviewContact => "apple-review-contact", Self::AppleReviewDemoAccount => "apple-review-demo-account",
+            Self::AppleOperationCommitment => "apple-operation-commitment",
         }
     }
     pub(crate) fn enabled(self) -> bool {
-        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken)
+        matches!(self, Self::AndroidKeystore | Self::AndroidFirebase | Self::IosFirebase | Self::GoogleWif | Self::ProjectReadToken
+            | Self::AppleReviewContact | Self::AppleReviewDemoAccount | Self::AppleOperationCommitment)
+            || (cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "macos", target_arch = "aarch64"))) && self == Self::AscP8)
             || (cfg!(all(target_os = "macos", target_arch = "aarch64")) && matches!(self, Self::AppleP12 | Self::AppleProfile))
     }
     pub(crate) fn file(self) -> Option<crate::credential_format::FileKind> {
         use crate::credential_format::FileKind;
         match self { Self::AndroidKeystore => Some(FileKind::AndroidKeystore), Self::AndroidFirebase => Some(FileKind::AndroidFirebase),
             Self::IosFirebase => Some(FileKind::IosFirebase), Self::AppleP12 => Some(FileKind::AppleP12),
-            Self::AppleProfile => Some(FileKind::AppleProfile), _ => None }
+            Self::AppleProfile => Some(FileKind::AppleProfile), Self::AscP8 => Some(FileKind::AscP8), _ => None }
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Platform { Android, Ios, Project }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Stage { Candidate, ExternalTesting, Production }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Purpose { Full, Signing, Store }
 
@@ -291,6 +296,8 @@ pub(crate) fn kind(value: &Value) -> Result<Kind, AssetError> {
         "android-keystore" => Ok(Kind::AndroidKeystore), "android-firebase" => Ok(Kind::AndroidFirebase),
         "apple-p12" => Ok(Kind::AppleP12), "apple-profile" => Ok(Kind::AppleProfile), "asc-p8" => Ok(Kind::AscP8),
         "ios-firebase" => Ok(Kind::IosFirebase), "google-wif" => Ok(Kind::GoogleWif), "project-read-token" => Ok(Kind::ProjectReadToken),
+        "apple-review-contact" => Ok(Kind::AppleReviewContact), "apple-review-demo-account" => Ok(Kind::AppleReviewDemoAccount),
+        "apple-operation-commitment" => Ok(Kind::AppleOperationCommitment),
         _ => Err(AssetError::invalid()),
     }
 }
@@ -306,7 +313,10 @@ pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile => &[],
         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
-        _ => &[],
+        Kind::AscP8 => &["keyId", "issuerId"],
+        Kind::AppleReviewContact => &["firstName", "lastName", "email", "phone"],
+        Kind::AppleReviewDemoAccount => &["username", "password"],
+        Kind::AppleOperationCommitment => &["keyBase64", "keyVersion"],
     }
 }
 pub(crate) fn validate_fields(kind: Kind, value: &Value) -> Result<(), AssetError> {
@@ -371,7 +381,11 @@ pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
 pub(crate) fn choose(body: &Value) -> Result<Choose<'_>, AssetError> {
     bounded(body, SMALL_LIMIT)?;
     let object = exact(body, &["contextRevision", "kind", "replacement"])?;
-    Ok(Choose { context_revision: number(&object["contextRevision"])?, kind: kind(&object["kind"])?, replacement: replacement(&object["replacement"])? })
+    let kind = kind(&object["kind"])?;
+    // Scalar-only inputs never grant native file-picker authority. Platform
+    // availability is deliberately left to the existing session-kind gate.
+    if kind.file().is_none() { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+    Ok(Choose { context_revision: number(&object["contextRevision"])?, kind, replacement: replacement(&object["replacement"])? })
 }
 pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
     bounded(body, PREPARE_LIMIT)?;
@@ -398,7 +412,7 @@ pub(crate) fn prepare(body: &Value) -> Result<Prepare<'_>, AssetError> {
             exact(body, new_keys)?;
             let object = exact(&root["source"], &["type", "kind", "replacement"])?;
             let kind = kind(&object["kind"])?;
-            if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken) { return Err(AssetError::invalid()); }
+            if !matches!(kind, Kind::GoogleWif | Kind::ProjectReadToken | Kind::AppleReviewContact | Kind::AppleReviewDemoAccount | Kind::AppleOperationCommitment) { return Err(AssetError::invalid()); }
             validate_fields(kind, &root["fields"])?;
             (Source::Scalar { kind, replacement: replacement(&object["replacement"])? }, Some(&root["fields"]))
         }
@@ -607,6 +621,48 @@ mod tests {
         assert!(validate_fields(Kind::GoogleWif, &json!({"provider":null})).is_err());
         assert!(validate_fields(Kind::AndroidFirebase, &json!({})).is_ok());
     }
+
+    #[test]
+    fn private_review_scalar_requests_keep_exact_roles_and_never_choose_a_file() {
+        for input_kind in [Kind::GoogleWif, Kind::ProjectReadToken] {
+            let error = choose(&json!({"contextRevision":1,"kind":input_kind.name(),"replacement":null})).err().expect("scalar has no file role");
+            assert_eq!(error.reason, Reason::UnsupportedFormat);
+        }
+        for input_kind in [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::IosFirebase, Kind::AppleP12, Kind::AppleProfile, Kind::AscP8] {
+            let request = json!({"contextRevision":1,"kind":input_kind.name(),"replacement":null});
+            let chosen = choose(&request).ok().expect("file role is independent of platform admission");
+            assert!(chosen.kind == input_kind);
+        }
+        for (input_kind, fields) in [
+            (Kind::AppleReviewContact, json!({"firstName":"  fictional  ","lastName":null,"email":"reviewer@example.test","phone":"+\0fictional"})),
+            (Kind::AppleReviewDemoAccount, json!({"username":"fictional-demo","password":null})),
+            (Kind::AppleOperationCommitment, json!({"keyBase64":"  original supplied value  ","keyVersion":null})),
+        ] {
+            assert!(input_kind.enabled() && input_kind.file().is_none());
+            let owned = own_fields(input_kind, &fields).ok().expect("closed private scalar fields");
+            assert_eq!(owned.into_value(), fields);
+            assert!(kind(&json!(input_kind.name())).ok() == Some(input_kind));
+            let request = json!({"contextRevision":1,"source":{"type":"scalar","kind":input_kind.name(),"replacement":null},"fields":fields});
+            assert!(prepare(&request).is_ok());
+            assert!(choose(&json!({"contextRevision":1,"kind":input_kind.name(),"replacement":null})).is_err());
+            for name in field_names(input_kind) {
+                let mut missing = request.clone(); missing["fields"].as_object_mut().unwrap().remove(*name);
+                assert!(prepare(&missing).is_err());
+                let mut large = request.clone(); large["fields"][*name] = json!("é".repeat(2049));
+                assert!(prepare(&large).is_err());
+            }
+            for extra in ["file", "token", "path", "observation"] {
+                let mut wrong = request.clone(); wrong["fields"][extra] = json!("private-canary");
+                assert!(prepare(&wrong).is_err());
+            }
+            let mut selected = request.clone(); selected["source"] = json!({"type":"selection","selectionToken":"a".repeat(32)});
+            // A selection's role is admitted against its retained original kind,
+            // not these user-supplied scalar fields.
+            assert!(validate_fields(Kind::AndroidFirebase, &selected["fields"]).is_err());
+            assert!(validate_fields(Kind::AscP8, &selected["fields"]).is_err());
+        }
+    }
+
     #[test]
     fn ios_firebase_is_one_file_kind_with_no_companion_or_renderer_observation() {
         let body = json!({"contextRevision":1,"kind":"ios-firebase","replacement":null});
@@ -624,7 +680,7 @@ mod tests {
         }
         assert!(validate_fields(chosen.kind, &json!({"storePassword":null,"keyAlias":null,"keyPassword":null})).is_err());
         assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"ios-firebase","replacement":null},"fields":{}})).is_err());
-        assert!(!Kind::AscP8.enabled() && Kind::AscP8.file().is_none());
+        assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
         for kind in [Kind::AppleP12, Kind::AppleProfile] {
             assert_eq!(kind.enabled(), cfg!(all(target_os = "macos", target_arch = "aarch64")));
             assert!(kind.file().is_some());
@@ -653,7 +709,44 @@ mod tests {
             assert!(validate_fields(Kind::AppleP12, &input).is_err());
         }
         assert!(validate_fields(Kind::AppleProfile, &json!({"password":null})).is_err());
-        assert!(!Kind::AscP8.enabled());
+        assert_eq!(Kind::AscP8.enabled(), cfg!(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64"))));
+    }
+    #[test]
+    fn asc_uses_the_original_file_selection_and_exact_write_only_identifiers() {
+        assert!(Kind::AscP8.file() == Some(crate::credential_format::FileKind::AscP8));
+        assert_eq!(field_names(Kind::AscP8), &["keyId", "issuerId"]);
+        let choice = json!({"contextRevision":1,"kind":"asc-p8","replacement":null});
+        assert!(choose(&choice).is_ok());
+        // Core owns identifier syntax and requiredness. Native admission must
+        // preserve every byte, including malformed spelling, NUL and Unicode.
+        for input in [json!({"keyId":null,"issuerId":null}),
+            json!({"keyId":"A1B2C3C4D5","issuerId":"12345678-1234-1234-1234-123456789abc"}),
+            json!({"keyId":" \0 KEY-CANARY ","issuerId":"é-\0-ISSUER-CANARY"}),
+            json!({"keyId":"","issuerId":" ".repeat(4096)})] {
+            let fields = own_fields(Kind::AscP8, &input);
+            if Kind::AscP8.enabled() {
+                let fields = fields.ok().unwrap();
+                assert_eq!(fields.into_value(), input);
+                assert_eq!(fields.borrow_value("keyId"), input["keyId"].as_str());
+                assert_eq!(fields.borrow_value("issuerId"), input["issuerId"].as_str());
+                assert!(fields.borrow_value("file").is_none());
+            } else { assert!(fields.is_err()); }
+        }
+        for input in [json!({}), json!({"keyId":null}), json!({"keyId":false,"issuerId":null}),
+            json!({"keyId":"x".repeat(4097),"issuerId":null}),
+            json!({"keyId":null,"issuerId":"é".repeat(2049)}),
+            json!({"keyId":null,"issuerId":null,"password":null})] {
+            assert!(validate_fields(Kind::AscP8, &input).is_err());
+        }
+        for extra in ["path", "filename", "bytes", "base64", "observation", "algorithm", "curve"] {
+            let mut input = choice.clone(); input[extra] = json!("PRIVATE-CANARY");
+            assert!(choose(&input).is_err());
+            let mut companion = json!({"keyId":null,"issuerId":null}); companion[extra] = json!("PRIVATE-CANARY");
+            assert!(validate_fields(Kind::AscP8, &companion).is_err());
+        }
+        assert!(prepare(&json!({"contextRevision":1,"source":{"type":"scalar","kind":"asc-p8","replacement":null},
+            "fields":{"keyId":null,"issuerId":null}})).is_err());
     }
     #[test]
     fn consumer_field_borrow_uses_original_backing_without_normalization_or_unknown_names() {

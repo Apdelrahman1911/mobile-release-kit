@@ -34,7 +34,7 @@ pub struct Fact<T> {
     pub reason: Reason,
 }
 impl<T> Fact<T> {
-    fn valid(&self, check: impl Fn(&T) -> bool) -> bool {
+    pub(crate) fn valid(&self, check: impl Fn(&T) -> bool) -> bool {
         match self.state {
             FactState::NotObserved | FactState::Unavailable => self.value.is_none() && self.observed_at.is_none()
                 && self.reason != Reason::None && (self.state != FactState::NotObserved || self.reason == Reason::NotConnected),
@@ -95,11 +95,22 @@ impl Automation {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum DeviceLogin { PublisherUnconfigured, NotQualified }
+pub enum DeviceLogin { PublisherUnconfigured, NotQualified, Available }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Capability {
     pub read_only_session_available: bool, pub reason: Reason, pub device_login: DeviceLogin, pub storage: String,
+    #[serde(deserialize_with = "nullable")] pub publisher_name: Option<String>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorizationPhase { RequestingCode, Waiting, SlowDown, CheckingAccess }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Authorization {
+    pub phase: AuthorizationPhase,
+    #[serde(deserialize_with = "nullable")] pub user_code: Option<String>,
+    #[serde(deserialize_with = "nullable")] pub expires_at: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -112,7 +123,7 @@ pub struct Session {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum OperationKind { Connect, Refresh, Disconnect }
+pub enum OperationKind { Connect, Authorize, Refresh, Inspect, Disconnect }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase { Running, Settled, CleanupUnknown }
@@ -132,7 +143,10 @@ pub struct Status {
     pub schema_version: u32, pub revision: u32, pub capability: Capability,
     #[serde(deserialize_with = "nullable")] pub session: Option<Session>,
     #[serde(deserialize_with = "nullable")] pub operation: Option<Operation>,
+    #[serde(deserialize_with = "nullable")] pub authorization: Option<Authorization>,
     pub account: Fact<Account>, pub repository: Fact<Repository>, pub automation: Fact<Automation>, pub facts: UnobservedFacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_metadata: Option<crate::github_environment_metadata::Observation>,
 }
 
 pub(crate) fn numeric_id(value: &str) -> bool {
@@ -147,7 +161,7 @@ pub(crate) fn coordinate(value: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || punctuation.contains(&b));
     part(owner, 39, b"-") && part(repository, 100, b"._-")
 }
-fn plain(value: &str, maximum: usize) -> bool {
+pub(crate) fn plain(value: &str, maximum: usize) -> bool {
     // Cc/Cf are excluded, including directional/zero-width controls. Unicode
     // Rust strings cannot contain the Cs lone surrogates rejected by TS/Python.
     !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(|c| c.is_control() || matches!(c,
@@ -190,14 +204,19 @@ pub(crate) fn bounds(value: &Value, bytes: usize, nodes_limit: usize, depth_limi
 impl Status {
     fn valid(&self) -> bool {
         let cap = &self.capability; let f = &self.facts;
-        if self.schema_version != 1 || self.revision == 0 || cap.storage != "session-only"
+        let flags = self.input_metadata.as_ref().map_or(("not-run", "not-run", "not-run"), |v| v.flags());
+        if self.schema_version != 2 || self.revision == 0 || cap.storage != "session-only"
+            || cap.publisher_name.as_ref().is_some_and(|v| !plain(v, 96))
+            || cap.device_login == DeviceLogin::PublisherUnconfigured && cap.publisher_name.is_some()
+            || cap.device_login == DeviceLogin::Available && cap.publisher_name.is_none()
             || cap.read_only_session_available != (cap.reason == Reason::None)
             || (cap.reason == Reason::CleanupUnknown) != self.session.as_ref().is_some_and(|s| s.state == SessionState::CleanupUnknown)
             || [self.account.reason, self.repository.reason, self.automation.reason].contains(&Reason::CleanupUnknown)
                 && !self.session.as_ref().is_some_and(|s| s.state == SessionState::CleanupUnknown)
             || f.remote_mutation_available || f.dispatch_available || f.template_compatibility != "unknown" || f.release_readiness != "unknown"
-            || [&f.repository_actions_settings_observation, &f.environment_observation, &f.secret_observation,
-                &f.variable_observation, &f.protection_observation, &f.runner_observation].iter().any(|v| v.as_str() != "not-run")
+            || [&f.repository_actions_settings_observation, &f.protection_observation, &f.runner_observation].iter().any(|v| v.as_str() != "not-run")
+            || f.environment_observation != flags.0 || f.secret_observation != flags.1 || f.variable_observation != flags.2
+            || self.input_metadata.as_ref().is_some_and(|v| !v.valid(&self.repository))
             || !self.account.valid(|v| numeric_id(&v.id) && plain(&v.login, 96))
             || !self.repository.valid(|v| numeric_id(&v.id) && coordinate(&v.full_name) && plain(&v.default_branch, 1024))
             || !self.automation.valid(Automation::valid)
@@ -205,8 +224,16 @@ impl Status {
             || self.automation.value.is_some() && self.repository.value.is_none()
             || self.repository.state == FactState::Observed && self.account.state != FactState::Observed
             || self.automation.state == FactState::Observed && self.repository.state != FactState::Observed { return false; }
-        let states = [self.account.state, self.repository.state, self.automation.state];
-        let Some(session) = &self.session else { return self.operation.is_none() && states.iter().all(|s| *s == FactState::NotObserved); };
+        let mut states = vec![self.account.state, self.repository.state, self.automation.state];
+        if let Some(metadata) = &self.input_metadata {
+            states.extend([metadata.environment.state, metadata.field.state]);
+            if [metadata.environment.reason, metadata.field.reason].contains(&Reason::CleanupUnknown)
+                && !self.session.as_ref().is_some_and(|s| s.state == SessionState::CleanupUnknown) { return false; }
+        }
+        let Some(session) = &self.session else { return self.operation.is_none() && self.authorization.is_none() && self.input_metadata.is_none() && states.iter().all(|s| *s == FactState::NotObserved); };
+        if self.input_metadata.is_some() && self.operation.as_ref().is_none_or(|op| matches!(op.kind, OperationKind::Connect | OperationKind::Authorize)) { return false; }
+        if self.operation.as_ref().is_some_and(|op| op.kind == OperationKind::Inspect && op.phase == Phase::Settled && op.reason == Reason::None)
+            && self.input_metadata.as_ref().is_none_or(|v| v.environment.state != FactState::Observed || v.field.state != FactState::Observed) { return false; }
         if !valid_id(&session.id) || !valid_id(&session.project_id) || !coordinate(&session.target_repository)
             || session.expires_at.as_ref().is_some_and(|v| !utc(v))
             || self.repository.value.as_ref().is_some_and(|v| !v.full_name.eq_ignore_ascii_case(&session.target_repository)) { return false; }
@@ -216,6 +243,18 @@ impl Status {
                 || op.phase == Phase::CleanupUnknown && session.state != SessionState::CleanupUnknown { return false; }
         }
         let op = self.operation.as_ref();
+        let authorizing = session.state == SessionState::Checking
+            && op.is_some_and(|v| v.kind == OperationKind::Authorize && v.phase == Phase::Running);
+        if self.authorization.is_some() != authorizing
+            || authorizing && states.iter().any(|state| *state != FactState::NotObserved) { return false; }
+        if let Some(auth) = &self.authorization {
+            if cap.device_login != DeviceLogin::Available || !match auth.phase {
+                AuthorizationPhase::RequestingCode => auth.user_code.is_none() && auth.expires_at.is_none(),
+                AuthorizationPhase::Waiting | AuthorizationPhase::SlowDown => auth.user_code.as_ref().is_some_and(|v| crate::github_device_protocol::user_code(v))
+                    && auth.expires_at.as_ref().is_some_and(|v| utc(v)),
+                AuthorizationPhase::CheckingAccess => auth.user_code.is_none() && auth.expires_at.as_ref().is_some_and(|v| utc(v)),
+            } { return false; }
+        }
         match session.state {
             SessionState::Checking => op.is_some_and(|v| v.kind != OperationKind::Disconnect && v.phase == Phase::Running)
                 && !states.contains(&FactState::Observed),
@@ -234,6 +273,7 @@ pub fn decode_status(bytes: &[u8]) -> Result<Status, BridgeError> {
     if bytes.len() > STATUS_LIMIT { return Err(BridgeError::protocol()); }
     let value = strict_json(bytes)?;
     if !bounds(&value, STATUS_LIMIT, 2000, 12) { return Err(BridgeError::protocol()); }
+    if value.get("inputMetadata").is_some_and(Value::is_null) { return Err(BridgeError::protocol()); }
     let status: Status = serde_json::from_value(value).map_err(|_| BridgeError::protocol())?;
     if !status.valid() { return Err(BridgeError::protocol()); }
     Ok(status)
@@ -263,6 +303,7 @@ pub(crate) struct GitHubReadControl {
 pub(crate) struct GitHubReadOutcome {
     pub(crate) facts: GitHubReadFacts,
     pub(crate) control: GitHubReadControl,
+    pub(crate) metadata: Option<crate::github_environment_metadata::Observation>,
 }
 fn private_reason(reason: Reason) -> bool {
     matches!(reason, Reason::None | Reason::Unauthorized | Reason::Forbidden
@@ -290,22 +331,23 @@ impl GitHubReadFacts {
         self.account.state == FactState::Observed && self.repository.state == FactState::Observed
             && self.automation.state == FactState::Observed
     }
-    fn coherent_with(&self, control: &GitHubReadControl) -> bool {
-        if control.reason == Reason::None && !self.all_observed() { return false; }
-        // A final failure/control may dominate earlier observations or cancelled
-        // dependents, so facts need not all repeat the overall disposition. But
-        // no fact veto may be weakened into a retryable credential/cooldown grant.
-        // ResponseInvalid is the stronger retiring refusal, not field salvage.
-        [self.account.reason, self.repository.reason, self.automation.reason].into_iter().all(|reason| match reason {
-            Reason::Unauthorized | Reason::TargetChanged | Reason::Expired =>
-                control.reason == reason || control.reason == Reason::ResponseInvalid,
-            Reason::ResponseInvalid => control.reason == Reason::ResponseInvalid,
-            Reason::RateLimited => matches!(control.reason, Reason::RateLimited | Reason::ResponseInvalid)
-                && (control.cooldown_seconds.is_some() || control.cooldown_blocked),
-            Reason::None | Reason::Forbidden | Reason::NotFoundOrInaccessible
-                | Reason::NetworkUnavailable | Reason::TlsFailed | Reason::ResponseLimit | Reason::Cancelled => true,
-            _ => false,
-        })
+    fn coherent_with(&self, control: &GitHubReadControl, metadata: bool) -> bool {
+        if control.reason == Reason::None && !(self.all_observed() || metadata
+            && self.account.state == FactState::Observed && self.repository.state == FactState::Observed) { return false; }
+        [self.account.reason, self.repository.reason, self.automation.reason].into_iter()
+            .all(|reason| coherent_fact_reason(reason, control))
+    }
+}
+pub(crate) fn coherent_fact_reason(reason: Reason, control: &GitHubReadControl) -> bool {
+    match reason {
+        Reason::Unauthorized | Reason::TargetChanged | Reason::Expired =>
+            control.reason == reason || control.reason == Reason::ResponseInvalid,
+        Reason::ResponseInvalid => control.reason == Reason::ResponseInvalid,
+        Reason::RateLimited => matches!(control.reason, Reason::RateLimited | Reason::ResponseInvalid)
+            && (control.cooldown_seconds.is_some() || control.cooldown_blocked),
+        Reason::None | Reason::Forbidden | Reason::NotFoundOrInaccessible
+            | Reason::NetworkUnavailable | Reason::TlsFailed | Reason::ResponseLimit | Reason::Cancelled => true,
+        _ => false,
     }
 }
 impl GitHubReadControl {
@@ -328,6 +370,7 @@ impl GitHubReadControl {
 #[serde(deny_unknown_fields)]
 struct PrivateResponse {
     protocol: String, id: String, facts: GitHubReadFacts, control: GitHubReadControl,
+    #[serde(default)] metadata: Option<crate::github_environment_metadata::Observation>,
 }
 pub(crate) fn decode_private_response(id: &str, bytes: &[u8]) -> Result<GitHubReadOutcome, BridgeError> {
     if !valid_id(id) || bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
@@ -336,13 +379,19 @@ pub(crate) fn decode_private_response(id: &str, bytes: &[u8]) -> Result<GitHubRe
         || body.iter().any(|b| matches!(*b, b'\n' | b'\r')) { return Err(BridgeError::protocol()); }
     let value = strict_json(body)?;
     if !bounds(&value, RESPONSE_LIMIT, 2000, 12) { return Err(BridgeError::protocol()); }
+    let metadata_key = value.as_object().is_some_and(|v| v.contains_key("metadata"));
     let response: PrivateResponse = serde_json::from_value(value).map_err(|_| BridgeError::protocol())?;
-    if response.protocol != PRIVATE_PROTOCOL || response.id != id || !response.facts.valid() || !response.control.valid()
-        || !response.facts.coherent_with(&response.control) { return Err(BridgeError::protocol()); }
+    let metadata = response.protocol == crate::github_environment_metadata::PROTOCOL;
+    if (!metadata && response.protocol != PRIVATE_PROTOCOL) || metadata != metadata_key || metadata != response.metadata.is_some()
+        || response.id != id || !response.facts.valid() || !response.control.valid()
+        || metadata && (response.facts.automation.state != FactState::Unavailable || response.facts.automation.reason != Reason::Cancelled)
+        || !response.facts.coherent_with(&response.control, metadata)
+        || response.metadata.as_ref().is_some_and(|v| !v.private_valid(&response.facts.repository, &response.control))
+        { return Err(BridgeError::protocol()); }
     // A canonical private timestamp is reserved data syntax, not evidence of a
     // GitHub header grammar. The current live helper emits null and refuses any
     // present unsupported expiry header instead of guessing its date format.
-    Ok(GitHubReadOutcome { facts: response.facts, control: response.control })
+    Ok(GitHubReadOutcome { facts: response.facts, control: response.control, metadata: response.metadata })
 }
 
 // PRIVATE inbound-only types: no Debug, Clone or Serialize. In particular no
@@ -355,8 +404,18 @@ pub(crate) struct ConnectTokenArgs { pub(crate) project_id: String, pub(crate) r
 pub(crate) struct RefreshArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InspectArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32,
+    pub(crate) stage: String, pub(crate) name: String }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DisconnectArgs { pub(crate) session_id: String }
-pub(crate) enum Command { Status, ConnectToken(ConnectTokenArgs), Refresh(RefreshArgs), Disconnect(DisconnectArgs) }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StartDeviceArgs { pub(crate) project_id: String, pub(crate) repository: String }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct OpenDeviceArgs { pub(crate) session_id: String, pub(crate) expected_revision: u32 }
+pub(crate) enum Command { Status, ConnectToken(ConnectTokenArgs), StartDevice(StartDeviceArgs), OpenDevicePage(OpenDeviceArgs), Refresh(RefreshArgs), Inspect(InspectArgs), Disconnect(DisconnectArgs) }
 fn private_token(value: &str) -> bool { !value.is_empty() && value.len() <= 4096 && value.bytes().all(|b| (0x21..=0x7e).contains(&b)) }
 fn quoted_size(value: &str, limit: usize) -> Option<usize> {
     let mut size = 2usize;
@@ -374,11 +433,13 @@ pub(crate) fn decode_command_value(name: &str, value: &Value) -> Result<Command,
     // The actual IPC already parsed JSON: original lexical duplicates cannot be
     // recovered here. Validate a tiny flat borrowed object before cloning any
     // credential. No serializer, unbounded traversal, token Debug or request
-    // Value copy is used. <=3 scalar fields implies <=7 nodes/depth1.
+    // Value copy is used. Original commands keep <=3 scalars; Inspect has exactly
+    // four public scalars, never a URL, path, type, credential or configuration.
     if !matches!(name, "github_connection_status" | "github_connection_connect_token"
-        | "github_connection_refresh" | "github_connection_disconnect") { return Err(BridgeError::invalid()); }
+        | "github_connection_start_device" | "github_connection_open_device_page"
+        | "github_connection_refresh" | "github_connection_inspect" | "github_connection_disconnect") { return Err(BridgeError::invalid()); }
     let object = value.as_object().ok_or_else(BridgeError::invalid)?;
-    if object.len() > 3 { return Err(BridgeError::invalid()); }
+    if object.len() > if name == "github_connection_inspect" { 4 } else { 3 } { return Err(BridgeError::invalid()); }
     let mut size = 2 + object.len().saturating_sub(1);
     for (key, value) in object {
         size = size.checked_add(quoted_size(key, REQUEST_LIMIT).ok_or_else(BridgeError::invalid)? + 1)
@@ -396,17 +457,33 @@ pub(crate) fn decode_command_value(name: &str, value: &Value) -> Result<Command,
     let text = |key: &str| object.get(key).and_then(Value::as_str).ok_or_else(BridgeError::invalid);
     match name {
         "github_connection_status" if object.is_empty() => Ok(Command::Status),
+        "github_connection_start_device" if exact(&["projectId", "repository"]) => {
+            let (project_id, repository) = (text("projectId")?, text("repository")?);
+            if !valid_id(project_id) || !coordinate(repository) { return Err(BridgeError::invalid()); }
+            Ok(Command::StartDevice(StartDeviceArgs { project_id: project_id.into(), repository: repository.into() }))
+        },
         "github_connection_connect_token" if exact(&["projectId", "repository", "token"]) => {
             let (project_id, repository, token) = (text("projectId")?, text("repository")?, text("token")?);
             if !valid_id(project_id) || !coordinate(repository) || !private_token(token) { return Err(BridgeError::invalid()); }
             Ok(Command::ConnectToken(ConnectTokenArgs { project_id: project_id.into(), repository: repository.into(), token: token.into() }))
         },
-        "github_connection_refresh" if exact(&["sessionId", "expectedRevision"]) => {
+        "github_connection_refresh" | "github_connection_open_device_page" if exact(&["sessionId", "expectedRevision"]) => {
             let session_id = text("sessionId")?;
             let revision = object.get("expectedRevision").and_then(Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok()).filter(|v| *v != 0).ok_or_else(BridgeError::invalid)?;
             if !valid_id(session_id) { return Err(BridgeError::invalid()); }
-            Ok(Command::Refresh(RefreshArgs { session_id: session_id.into(), expected_revision: revision }))
+            if name == "github_connection_open_device_page" {
+                Ok(Command::OpenDevicePage(OpenDeviceArgs { session_id: session_id.into(), expected_revision: revision }))
+            } else { Ok(Command::Refresh(RefreshArgs { session_id: session_id.into(), expected_revision: revision })) }
+        },
+        "github_connection_inspect" if exact(&["sessionId", "expectedRevision", "stage", "name"]) => {
+            let session_id = text("sessionId")?;
+            let revision = object.get("expectedRevision").and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok()).filter(|v| *v != 0).ok_or_else(BridgeError::invalid)?;
+            let selection = crate::github_environment_metadata::Selection { stage: text("stage")?.into(), name: text("name")?.into() };
+            if !valid_id(session_id) || !selection.valid() { return Err(BridgeError::invalid()); }
+            Ok(Command::Inspect(InspectArgs { session_id: session_id.into(), expected_revision: revision,
+                stage: selection.stage, name: selection.name }))
         },
         "github_connection_disconnect" if exact(&["sessionId"]) => {
             let session_id = text("sessionId")?;
@@ -423,11 +500,22 @@ pub(crate) fn decode_command(name: &str, bytes: &[u8]) -> Result<Command, Bridge
     if !bounds(&value, REQUEST_LIMIT, 128, 6) { return Err(BridgeError::invalid()); }
     match name {
         "github_connection_status" if value.as_object().is_some_and(|v| v.is_empty()) => Ok(Command::Status),
+        "github_connection_start_device" => {
+            let v: StartDeviceArgs = serde_json::from_value(value).map_err(|_| BridgeError::invalid())?;
+            if !valid_id(&v.project_id) || !coordinate(&v.repository) { return Err(BridgeError::invalid()); }
+            Ok(Command::StartDevice(v))
+        },
+        "github_connection_open_device_page" => {
+            let v: OpenDeviceArgs = serde_json::from_value(value).map_err(|_| BridgeError::invalid())?;
+            if !valid_id(&v.session_id) || v.expected_revision == 0 { return Err(BridgeError::invalid()); }
+            Ok(Command::OpenDevicePage(v))
+        },
         "github_connection_connect_token" => {
             let v: ConnectTokenArgs = serde_json::from_value(value).map_err(|_| BridgeError::invalid())?;
             if !valid_id(&v.project_id) || !coordinate(&v.repository) || !private_token(&v.token) { return Err(BridgeError::invalid()); }
             Ok(Command::ConnectToken(v))
         },
+        "github_connection_inspect" => decode_command_value(name, &value),
         "github_connection_refresh" => {
             let v: RefreshArgs = serde_json::from_value(value).map_err(|_| BridgeError::invalid())?;
             if !valid_id(&v.session_id) || v.expected_revision == 0 { return Err(BridgeError::invalid()); }
@@ -449,6 +537,8 @@ pub(crate) struct PrivateParams {
     #[serde(deserialize_with = "nullable")] pub(crate) expected_account_id: Option<String>,
     #[serde(deserialize_with = "nullable")] pub(crate) expected_repository_id: Option<String>,
     pub(crate) token: String,
+    #[serde(default)] pub(crate) stage: Option<String>,
+    #[serde(default)] pub(crate) name: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -457,25 +547,36 @@ pub(crate) fn decode_private_request(bytes: &[u8]) -> Result<PrivateRequest, Bri
     if bytes.len() > REQUEST_LIMIT { return Err(BridgeError::invalid()); }
     let value = strict_json(bytes).map_err(|_| BridgeError::invalid())?;
     if !bounds(&value, REQUEST_LIMIT, 128, 6) { return Err(BridgeError::invalid()); }
+    let metadata = value.get("protocol").and_then(Value::as_str) == Some(crate::github_environment_metadata::PROTOCOL);
+    let params = value.get("params").and_then(Value::as_object).ok_or_else(BridgeError::invalid)?;
+    let expected = if metadata { vec!["repository", "expectedAccountId", "expectedRepositoryId", "token", "stage", "name"] }
+        else { vec!["repository", "expectedAccountId", "expectedRepositoryId", "token"] };
+    if params.len() != expected.len() || expected.iter().any(|key| !params.contains_key(*key)) { return Err(BridgeError::invalid()); }
     let request: PrivateRequest = serde_json::from_value(value).map_err(|_| BridgeError::invalid())?;
     let p = &request.params;
-    if request.protocol != PRIVATE_PROTOCOL || !valid_id(&request.id) || !coordinate(&p.repository) || !private_token(&p.token)
+    if (!metadata && request.protocol != PRIVATE_PROTOCOL) || !valid_id(&request.id) || !coordinate(&p.repository) || !private_token(&p.token)
         || p.expected_account_id.as_ref().is_some_and(|v| !numeric_id(v)) || p.expected_repository_id.as_ref().is_some_and(|v| !numeric_id(v))
         || p.expected_repository_id.is_some() && p.expected_account_id.is_none() { return Err(BridgeError::invalid()); }
+    if metadata {
+        let selection = crate::github_environment_metadata::Selection { stage: p.stage.clone().ok_or_else(BridgeError::invalid)?,
+            name: p.name.clone().ok_or_else(BridgeError::invalid)? };
+        if !selection.valid() || p.expected_account_id.is_none() || p.expected_repository_id.is_none() { return Err(BridgeError::invalid()); }
+    }
     Ok(request)
 }
 
 // Dedicated one-buffer encoder. It never constructs a Serialize/Clone/Debug
 // request or a generic Value containing the token. Escaping counts toward the
 // same total budget, including the final newline.
-struct PrivateWriter { bytes: Vec<u8> }
+pub(crate) struct PrivateWriter { pub(crate) bytes: Vec<u8> }
+impl Drop for PrivateWriter { fn drop(&mut self) { zeroize::Zeroize::zeroize(&mut self.bytes); } }
 impl PrivateWriter {
-    fn append(&mut self, bytes: &[u8]) -> Result<(), BridgeError> {
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> Result<(), BridgeError> {
         if bytes.len() > (REQUEST_LIMIT - 1).saturating_sub(self.bytes.len()) { return Err(BridgeError::invalid()); }
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
-    fn string(&mut self, text: &str) -> Result<(), BridgeError> {
+    pub(crate) fn string(&mut self, text: &str) -> Result<(), BridgeError> {
         self.append(b"\"")?;
         for byte in text.bytes() {
             if matches!(byte, b'"' | b'\\') { self.append(b"\\")?; }
@@ -483,18 +584,31 @@ impl PrivateWriter {
         }
         self.append(b"\"")
     }
-    fn nullable_id(&mut self, value: Option<&str>) -> Result<(), BridgeError> {
+    pub(crate) fn nullable_id(&mut self, value: Option<&str>) -> Result<(), BridgeError> {
         match value { Some(value) => self.string(value), None => self.append(b"null") }
     }
 }
 pub(crate) fn encode_private_request(id: &str, repository: &str, expected_account_id: Option<&str>,
     expected_repository_id: Option<&str>, token: &str) -> Result<Vec<u8>, BridgeError> {
+    encode_private_request_selected(id, repository, expected_account_id, expected_repository_id, token, None)
+}
+pub(crate) fn encode_metadata_request(id: &str, repository: &str, expected_account_id: Option<&str>,
+    expected_repository_id: Option<&str>, token: &str, selection: &crate::github_environment_metadata::Selection) -> Result<Vec<u8>, BridgeError> {
+    encode_private_request_selected(id, repository, expected_account_id, expected_repository_id, token, Some(selection))
+}
+fn encode_private_request_selected(id: &str, repository: &str, expected_account_id: Option<&str>,
+    expected_repository_id: Option<&str>, token: &str, selection: Option<&crate::github_environment_metadata::Selection>) -> Result<Vec<u8>, BridgeError> {
     if !valid_id(id) || !coordinate(repository) || !private_token(token)
         || expected_account_id.is_some_and(|v| !numeric_id(v))
         || expected_repository_id.is_some_and(|v| !numeric_id(v))
         || expected_repository_id.is_some() && expected_account_id.is_none() { return Err(BridgeError::invalid()); }
+    if selection.is_some_and(|v| !v.valid()) || selection.is_some() && (expected_account_id.is_none() || expected_repository_id.is_none()) {
+        return Err(BridgeError::invalid());
+    }
     let mut writer = PrivateWriter { bytes: Vec::with_capacity(REQUEST_LIMIT) };
-    writer.append(b"{\"protocol\":\"mrk-github-readonly/1\",\"id\":")?;
+    writer.append(b"{\"protocol\":")?;
+    writer.string(if selection.is_some() { crate::github_environment_metadata::PROTOCOL } else { PRIVATE_PROTOCOL })?;
+    writer.append(b",\"id\":")?;
     writer.string(id)?;
     writer.append(b",\"params\":{\"repository\":")?;
     writer.string(repository)?;
@@ -502,11 +616,15 @@ pub(crate) fn encode_private_request(id: &str, repository: &str, expected_accoun
     writer.nullable_id(expected_account_id)?;
     writer.append(b",\"expectedRepositoryId\":")?;
     writer.nullable_id(expected_repository_id)?;
+    if let Some(selection) = selection {
+        writer.append(b",\"stage\":")?; writer.string(&selection.stage)?;
+        writer.append(b",\"name\":")?; writer.string(&selection.name)?;
+    }
     writer.append(b",\"token\":")?;
     writer.string(token)?;
     writer.append(b"}}")?;
     writer.bytes.push(b'\n');
-    Ok(writer.bytes)
+    Ok(std::mem::take(&mut writer.bytes))
 }
 
 #[cfg(test)]
@@ -516,8 +634,8 @@ mod tests {
 
     fn idle() -> Value {
         let fact = json!({"state":"not-observed","value":null,"observedAt":null,"reason":"not-connected"});
-        json!({"schemaVersion":1,"revision":1,"capability":{"readOnlySessionAvailable":false,"reason":"unqualified","deviceLogin":"publisher-unconfigured","storage":"session-only"},
-            "session":null,"operation":null,"account":fact.clone(),"repository":fact.clone(),"automation":fact,
+        json!({"schemaVersion":2,"revision":1,"capability":{"readOnlySessionAvailable":false,"reason":"unqualified","deviceLogin":"publisher-unconfigured","publisherName":null,"storage":"session-only"},
+            "session":null,"operation":null,"authorization":null,"account":fact.clone(),"repository":fact.clone(),"automation":fact,
             "facts":{"remoteMutationAvailable":false,"dispatchAvailable":false,"repositoryActionsSettingsObservation":"not-run","environmentObservation":"not-run",
                 "secretObservation":"not-run","variableObservation":"not-run","protectionObservation":"not-run","runnerObservation":"not-run","templateCompatibility":"unknown","releaseReadiness":"unknown"}})
     }
@@ -536,10 +654,89 @@ mod tests {
         value
     }
     fn accepts(value: &Value) -> bool { decode_status(&serde_json::to_vec(value).unwrap()).is_ok() }
+    fn metadata_private() -> Value {
+        let mut value = private_success();
+        value["protocol"] = json!(crate::github_environment_metadata::PROTOCOL);
+        value["facts"]["automation"] = json!({"state":"unavailable","value":null,"observedAt":null,"reason":"cancelled"});
+        let observed = |v: Value| json!({"state":"observed","value":v,"observedAt":"2026-09-17T12:00:00Z","reason":"none"});
+        value["metadata"] = json!({
+            "selection":{"stage":"production","name":"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION"},
+            "environment":observed(json!({"id":"33","name":"mobile-production"})),
+            "field":observed(json!({"name":"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION","kind":"variable",
+                "createdAt":"2026-09-17T12:00:00Z","updatedAt":"2026-09-17T12:00:00Z"}))
+        });
+        value
+    }
+    #[test]
+    fn environment_input_metadata_private_envelope_is_closed_and_not_a_workflow_observation() {
+        let original = metadata_private(); assert!(private_accepts(&original));
+        for (pointer, replacement) in [
+            ("/protocol", json!(PRIVATE_PROTOCOL)), ("/metadata", Value::Null),
+            ("/metadata/environment/value/name", json!("mobile-candidate")),
+            ("/metadata/field/value/name", json!("MOBILE_RELEASE_ANDROID_KEY_ALIAS")),
+            ("/metadata/field/value/updatedAt", json!("2026-02-30T00:00:00Z")),
+            ("/metadata/field/value/kind", json!("credential")),
+            ("/facts/automation/reason", json!("forbidden")),
+        ] {
+            let mut value = original.clone(); *value.pointer_mut(pointer).unwrap() = replacement;
+            assert!(!private_accepts(&value));
+        }
+        let mut reflected = original.clone(); reflected["metadata"]["field"]["value"]["value"] = json!("INERT_NOT_PUBLIC");
+        assert!(!private_accepts(&reflected));
+        let mut omitted = original; omitted.as_object_mut().unwrap().remove("metadata");
+        assert!(!private_accepts(&omitted));
+    }
+    #[test]
+    fn environment_input_metadata_public_flags_and_nullability_cannot_claim_readiness() {
+        let mut value = connected(); value["operation"]["id"] = json!("inspect-1"); value["operation"]["kind"] = json!("inspect");
+        value["inputMetadata"] = metadata_private()["metadata"].clone();
+        value["facts"]["environmentObservation"] = json!("metadata-only");
+        value["facts"]["variableObservation"] = json!("metadata-only");
+        assert!(accepts(&value));
+        for (pointer, replacement) in [
+            ("/inputMetadata", Value::Null), ("/facts/variableObservation", json!("not-run")),
+            ("/facts/secretObservation", json!("metadata-only")), ("/facts/releaseReadiness", json!("ready")),
+            ("/facts/remoteMutationAvailable", json!(true)), ("/operation/kind", json!("connect")),
+            ("/inputMetadata/environment/value/id", json!(33)),
+        ] {
+            let mut invalid = value.clone(); *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert!(!accepts(&invalid));
+        }
+        let mut without = value.clone(); without.as_object_mut().unwrap().remove("inputMetadata");
+        without["facts"]["environmentObservation"] = json!("not-run"); without["facts"]["variableObservation"] = json!("not-run");
+        assert!(!accepts(&without), "successful Inspect needs its actual metadata");
+        value["operation"]["id"] = json!("refresh-2"); value["operation"]["kind"] = json!("refresh");
+        for key in ["environment","field"] { value["inputMetadata"][key]["state"] = json!("stale"); value["inputMetadata"][key]["reason"] = json!("stale"); }
+        assert!(accepts(&value), "ordinary Refresh may retain only stale metadata");
+    }
+    #[test]
+    fn environment_input_inspect_admits_four_public_scalars_and_reuses_private_writer_bound() {
+        let args = json!({"sessionId":"s","expectedRevision":2,"stage":"production","name":"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION"});
+        assert!(decode_command_value("github_connection_inspect", &args).is_ok());
+        assert!(decode_command("github_connection_inspect", &serde_json::to_vec(&args).unwrap()).is_ok());
+        for key in ["root","url","kind","token","fields"] {
+            let mut invalid = args.clone(); invalid[key] = json!("not-admitted");
+            assert!(decode_command_value("github_connection_inspect", &invalid).is_err());
+        }
+        for (key, field) in [("stage",json!("other")),("expectedRevision",json!(true)),("name",json!("MOBILE_RELEASE_"))] {
+            let mut invalid = args.clone(); invalid[key] = field;
+            assert!(decode_command_value("github_connection_inspect", &invalid).is_err());
+        }
+        let selection = crate::github_environment_metadata::Selection { stage:"production".into(),
+            name:"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION".into() };
+        let bytes = encode_metadata_request("read-1","owner/app",Some("11"),Some("22"),"INERT_TOKEN",&selection).unwrap();
+        let parsed = decode_private_request(&bytes).unwrap();
+        assert_eq!(parsed.protocol, crate::github_environment_metadata::PROTOCOL);
+        assert_eq!(parsed.params.stage.as_deref(),Some("production"));
+        assert_eq!(parsed.params.name.as_deref(),Some(selection.name.as_str()));
+        assert!(encode_metadata_request("read-1","owner/app",None,Some("22"),"INERT_TOKEN",&selection).is_err());
+        assert!(encode_metadata_request("read-1","owner/app",Some("11"),Some("22"),&"\"".repeat(4096),&selection).is_err());
+    }
+
     #[test]
     fn nullable_keys_are_required_and_public_authority_stays_closed() {
         let original = idle(); assert!(accepts(&original));
-        for key in ["session", "operation"] {
+        for key in ["session", "operation", "authorization"] {
             let mut v = original.clone(); v.as_object_mut().unwrap().remove(key); assert!(!accepts(&v));
         }
         for key in ["value", "observedAt"] {
@@ -565,6 +762,39 @@ mod tests {
         }
         let mut value = original; value["repository"]["state"] = json!("stale"); value["repository"]["reason"] = json!("stale"); assert!(!accepts(&value));
         value["automation"]["state"] = json!("stale"); value["automation"]["reason"] = json!("stale"); assert!(accepts(&value));
+    }
+    #[test]
+    fn device_authorization_requires_one_coherent_redacted_public_phase() {
+        let mut value = idle(); value["capability"]["reason"] = json!("busy");
+        value["capability"]["deviceLogin"] = json!("available"); value["capability"]["publisherName"] = json!("Synthetic publisher");
+        value["session"] = json!({"id":"s","projectId":"p","targetRepository":"owner/app","state":"checking","expiresAt":"2026-09-17T13:00:00Z"});
+        value["operation"] = json!({"id":"authorize-original","kind":"authorize","phase":"running","reason":"none"});
+        value["authorization"] = json!({"phase":"requesting-code","userCode":null,"expiresAt":null});
+        assert!(accepts(&value));
+        for phase in ["waiting", "slow-down"] {
+            value["authorization"] = json!({"phase":phase,"userCode":"AB12-CD34","expiresAt":"2026-09-17T12:15:00Z"});
+            assert!(accepts(&value));
+        }
+        let mut bad = value.clone(); bad["authorization"]["deviceCode"] = json!("not-public"); assert!(!accepts(&bad));
+        let mut bad = value.clone(); bad["account"]["state"] = json!("unavailable"); assert!(!accepts(&bad));
+        let mut bad = value.clone(); bad["operation"]["kind"] = json!("connect"); assert!(!accepts(&bad));
+        let mut bad = value.clone(); bad["authorization"] = Value::Null; assert!(!accepts(&bad));
+        let mut bad = value.clone(); bad["capability"]["publisherName"] = Value::Null; assert!(!accepts(&bad));
+        value["authorization"]["phase"] = json!("checking-access"); assert!(!accepts(&value));
+        value["authorization"]["userCode"] = Value::Null; assert!(accepts(&value));
+        value["authorization"]["expiresAt"] = Value::Null; assert!(!accepts(&value));
+        for (command, args) in [
+            ("github_connection_start_device", json!({"projectId":"p","repository":"owner/app"})),
+            ("github_connection_open_device_page", json!({"sessionId":"s","expectedRevision":1}))] {
+            assert!(decode_command_value(command, &args).is_ok());
+            assert!(decode_command(command, &serde_json::to_vec(&args).unwrap()).is_ok());
+            for key in ["clientId", "scope", "url", "deviceCode", "token"] {
+                let mut bad = args.clone(); bad[key] = json!("not-admitted");
+                assert!(decode_command_value(command, &bad).is_err());
+                assert!(decode_command(command, &serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+        }
+        assert!(decode_command("github_connection_poll_device", b"{}").is_err());
     }
     #[test]
     fn dates_identifiers_and_private_requests_are_finite() {

@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 from mobile_release import _desktop_saved_command_control as control
 from mobile_release import _desktop_saved_command_engine as engine
 from mobile_release import _desktop_android_build_protocol as android_wire
+from mobile_release import _desktop_android_signing_material as android_material
 from mobile_release import _desktop_preflight_protocol as offline_wire
 from mobile_release import owned_process
 from mobile_release._desktop_android_build_control import AndroidBuildInput
@@ -62,6 +63,7 @@ def request_data(android=False):
     native = {"profile": "linux-gnu-x86_64", "projectRoot": "/inert/project", "cwd": "/inert/runtime",
               "rootIdentity": root}
     if android:
+        context["signing"] = None
         context["artifactValidation"] = {"mode": "structure-and-version", "uploadCertificateSha256": None}
         context["savedVersion"] = {"source": "release/version.properties", "bytes": 1,
                                    "sha256": "d" * 64, "name": "1.2.3", "build": 7}
@@ -83,8 +85,168 @@ def inert_operation(source):
     operation = object.__new__(AndroidBuildOperation)
     operation.source, operation.guard = source, source.guard
     operation._pending = "bundletool"
+    operation.signing = None
     source.bind_operation(operation)
     return operation
+
+
+def signed_android_request():
+    data = request_data(android=True)
+    data["context"]["artifactValidation"] = {"mode": "upload-signature", "uploadCertificateSha256": "a" * 64}
+    data["context"]["signing"] = {"source": "assigned-session", "contextRevision": 1, "assignments": [
+        {"kind": "android-keystore", "recordId": "f" * 32, "recordRevision": 1, "contextRevision": 1}]}
+    data["native"]["signingContext"] = {"bytes": 2, "sha256": "e" * 64}
+    return android_wire.parse_request(json.dumps(data).encode("ascii") + b"\n")
+
+
+def android_private_frame(*, keystore=b"KEYS"):
+    roles = ("android-keystore", "store-password", "key-alias", "key-password")
+    chunks = (keystore, b" store password ", b"upload", b" key password ")
+    header = {"schemaVersion": 1, "files": [{"role": role, "bytes": len(raw)} for role, raw in zip(roles, chunks)]}
+    raw_header = json.dumps(header, separators=(",", ":")).encode("ascii") + b"\n"
+    return roles, raw_header, chunks, android_material.PREFIX + raw_header + b"".join(chunks) + android_material.SUFFIX
+
+
+class AndroidPrivateInputTests(unittest.TestCase):
+    def test_exact_private_header_rejects_wrong_order_duplicates_extras_and_limits(self):
+        roles, header, chunks, _ = android_private_frame()
+        self.assertEqual(android_material.parse_header(header, roles), tuple(map(len, chunks)))
+        self.assertEqual(android_material.MATERIAL_LIMIT, 37_765_120)
+        for change in ("order", "extra", "oversize", "boolean", "duplicate-key"):
+            data = json.loads(header)
+            if change == "order":
+                data["files"].reverse()
+            elif change == "extra":
+                data["files"].append({"role": "project-read-token", "bytes": 1})
+            elif change == "oversize":
+                data["files"][0]["bytes"] = 32 * 1024**2 + 1
+            elif change == "boolean":
+                data["files"][0]["bytes"] = True
+            raw = json.dumps(data).encode("ascii") + b"\n"
+            if change == "duplicate-key":
+                raw = raw.replace(b'"schemaVersion": 1', b'"schemaVersion": 1, "schemaVersion": 1')
+            with self.subTest(change=change), self.assertRaises(android_wire.ProtocolError):
+                android_material.parse_header(raw, roles)
+
+    def test_reader_preserves_passwords_and_extra_bytes_are_still_stop(self):
+        guard, source = bound_source(AndroidBuildInput)
+        request = signed_android_request()
+        source._request_material(request)
+        source.material_receiving = True
+        _, _, chunks, frame = android_private_frame()
+        source.buffer.extend(frame + b"extra")
+        with patch.object(guard, "check"), patch.object(android_material.select, "select") as selected, \
+                patch.object(control.os, "read") as read:
+            material = android_material.read_material(source, request)
+            self.assertEqual(material._files["MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64"], chunks[0])
+            self.assertEqual(material._scalars["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"], chunks[1].decode())
+            self.assertEqual(material._scalars["MOBILE_RELEASE_ANDROID_KEY_PASSWORD"], chunks[3].decode())
+            self.assertEqual(source.buffer, b"extra")
+            self.assertIs(source.material, material)
+            source.material_pending = source.material_receiving = False
+            with patch.object(control.time, "monotonic", return_value=110):
+                source.poll(guard)
+        selected.assert_not_called()
+        read.assert_not_called()
+        self.assertEqual(source.stop_reason, "cancelled")
+        self.assertFalse(source.closed)
+        with self.assertRaises(android_wire.ProtocolError):
+            material.retire()
+        self.assertTrue(material._files)  # Stop alone does not retire private borrowers.
+
+    def test_partial_body_and_lost_material_constructor_return_remain_rooted(self):
+        guard, source = bound_source(AndroidBuildInput)
+        request = signed_android_request()
+        source._request_material(request)
+        source.material_receiving = True
+        _, header, _, _ = android_private_frame()
+        source.buffer.extend(android_material.PREFIX + header + b"KE")
+
+        def check():
+            if not source.buffer:
+                source.stop()
+                raise KeyboardInterrupt()
+
+        with patch.object(guard, "check", side_effect=check), \
+                patch.object(android_material.select, "select") as selected, \
+                patch.object(control.time, "monotonic", return_value=110):
+            with self.assertRaises(KeyboardInterrupt):
+                android_material.read_material(source, request)
+        selected.assert_not_called()
+        self.assertIsNotNone(source.material)
+        self.assertEqual(source.material._pending, b"KE")
+        self.assertFalse(source.material._ready or source.material._retired)
+        # The constructor roots itself before even context encoding can fail.
+        _, other = bound_source(AndroidBuildInput)
+        other._request_material(request)
+        other.material_receiving = True
+        with patch.object(android_material, "_encode", side_effect=ValueError("inert lost return")):
+            with self.assertRaises(ValueError):
+                android_material.PrivateAndroidMaterial(other, request.context)
+        self.assertIsNotNone(other.material)
+
+    def test_retirement_requires_original_input_command_operation_and_material_closure(self):
+        guard, source = bound_source(AndroidBuildInput)
+        request = signed_android_request()
+        source._request_material(request)
+        source.material_receiving = True
+        source.buffer.extend(android_private_frame()[3])
+        with patch.object(guard, "check"):
+            material = android_material.read_material(source, request)
+        source.material_receiving = source.material_pending = False
+        operation = inert_operation(source)
+        operation.signing = types.SimpleNamespace(inputs_closed=Mock(return_value=True), retire_values=Mock())
+        operation.commands_settled = Mock(return_value=True)
+        operation.closed = Mock(return_value=True)
+        for missing in ("input", "command", "operation", "material"):
+            source.closed = missing != "input"
+            operation.commands_settled.return_value = missing != "command"
+            operation.closed.return_value = missing != "operation"
+            operation.signing.inputs_closed.return_value = missing != "material"
+            with self.subTest(missing=missing), self.assertRaises(android_wire.ProtocolError):
+                material.retire()
+            self.assertTrue(material._files)
+        source.closed = True
+        operation.commands_settled.return_value = operation.closed.return_value = True
+        operation.signing.inputs_closed.return_value = True
+        material.retire()
+        material.retire()
+        self.assertTrue(material._retired)
+        self.assertFalse(material._files or material._scalars or material._pending)
+        self.assertIsNone(material._chunk)
+        operation.signing.retire_values.assert_called_once_with()
+
+    def test_captured_values_bind_same_operation_and_files_never_become_mapping_values(self):
+        guard, source = bound_source(AndroidBuildInput)
+        request = signed_android_request()
+        source._request_material(request)
+        source.material_receiving = True
+        source.buffer.extend(android_private_frame()[3])
+        with patch.object(guard, "check"):
+            material = android_material.read_material(source, request)
+        operation = inert_operation(source)
+        operation.request, operation.root = request, Path("/inert/project")
+        operation.signing = types.SimpleNamespace(materialization=None)
+        operation.checkpoint = Mock()
+        values = material.bind(operation)
+        self.assertEqual(dict(values), {"MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": " store password ",
+            "MOBILE_RELEASE_ANDROID_KEY_ALIAS": "upload", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": " key password "})
+        name = "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64"
+        self.assertNotIn(name, values)
+        self.assertEqual(values.material(name, root=operation.root, cancellation=guard), b"KEYS")
+        with self.assertRaises(android_wire.ProtocolError):
+            material.bind(operation)
+        with self.assertRaises(android_wire.ProtocolError):
+            values.material(name, root=Path("/inert/other"), cancellation=guard)
+        with self.assertRaises(android_wire.ProtocolError):
+            values.material(name, root=operation.root, cancellation=object())
+        child = types.SimpleNamespace(cancellation=guard)
+        operation.signing.materialization = child
+        operation.invocation = types.SimpleNamespace(signing_lease=None, child=child)
+        self.assertIs(values.for_invocation(operation.invocation), values)
+        operation.invocation.child = object()
+        with self.assertRaises(android_wire.ProtocolError):
+            values.for_invocation(operation.invocation)
 
 
 class SavedCommandBindingTests(unittest.TestCase):
@@ -93,7 +255,8 @@ class SavedCommandBindingTests(unittest.TestCase):
             control.SavedCommandDomain.OfflinePreflight, control.SavedCommandDomain.AndroidBuild,
             control.SavedCommandDomain.ProjectRecovery, control.SavedCommandDomain.IOSArchive})
         self.assertIs(PreflightInput.poll, AndroidBuildInput.poll)
-        self.assertIs(PreflightInput.close, AndroidBuildInput.close)
+        self.assertIs(PreflightInput.close, control._SavedCommandInput.close)
+        self.assertIsNot(PreflightInput.close, AndroidBuildInput.close)  # Android also retires bound private input.
         self.assertIs(PreflightEngine.run, AndroidEngine.run)
         self.assertIs(PreflightEngine.cleanup, AndroidEngine.cleanup)
         self.assertIs(PreflightEngine.close_output, AndroidEngine.close_output)
@@ -182,6 +345,58 @@ class SavedCommandInputTests(unittest.TestCase):
                 self.assertTrue(source.active and source.request_returned)
                 self.assertIs(source.guard, guard)
 
+    def test_signed_request_and_large_private_body_can_share_one_bounded_read(self):
+        request = signed_android_request()
+        public = json.dumps({"protocol": android_wire.PROTOCOL,
+                             **android_wire._request_binding(request)}, separators=(",", ":")).encode("ascii") + b"\n"
+        _, _, values, private = android_private_frame(keystore=b"K" * 65_537)
+        maximum = android_wire.REQUEST_LIMIT
+        stream = public + private
+        self.assertLess(len(public), maximum)
+        self.assertGreater(len(stream), 2 * (maximum + 1))
+        for prepolled in (False, True):
+            guard, source = bound_source(AndroidBuildInput)
+            source.active = source.request_returned = False
+            unread, read_sizes = bytearray(stream), []
+
+            def read(fd, size):
+                self.assertEqual(fd, 0)  # Inert original pipe number, never read.
+                self.assertTrue(0 < size <= maximum + 1)
+                if not unread:
+                    raise BlockingIOError()
+                chunk = bytes(unread[:size])
+                del unread[:size]
+                read_sizes.append(len(chunk))
+                return chunk
+
+            with self.subTest(prepolled=prepolled), patch.object(control.time, "monotonic", return_value=110), \
+                    patch.object(control.os, "fstat", return_value=pipe()), \
+                    patch.object(control.os, "read", side_effect=read) as reads, \
+                    patch.object(control.select, "select", side_effect=AssertionError("unexpected wait")) as selected:
+                if prepolled:
+                    guard.check()  # Complete request may precede request() itself.
+                parsed = source.request()
+                self.assertEqual(parsed, request)
+                self.assertTrue(source.active and source.request_returned and source.material_pending)
+                self.assertFalse(source.material_receiving)
+                self.assertEqual(source.buffer, stream[len(public):maximum + 1])
+                reads.assert_called_once_with(0, maximum + 1)
+                source.material_receiving = True  # Predicate DATA; no account/tool acquired.
+                material = android_material.read_material(source, parsed)
+                source.material_pending = source.material_receiving = False
+                guard.check()  # The held input remains open but has no extra byte.
+            selected.assert_not_called()
+            self.assertEqual(read_sizes[0], maximum + 1)
+            self.assertGreaterEqual(read_sizes.count(maximum + 1), 2)  # Large private reads are not public JSON.
+            self.assertFalse(unread or source.buffer or guard.cancelled or guard.lifetime_ledger.fatal)
+            self.assertEqual(source.stop_reason, "none")
+            self.assertIsNone(source.first_failure)
+            self.assertEqual(material._files["MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64"], values[0])
+            self.assertEqual(material._scalars["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"], values[1].decode())
+            self.assertEqual(material._scalars["MOBILE_RELEASE_ANDROID_KEY_PASSWORD"], values[3].decode())
+            self.assertTrue(material._ready)
+            self.assertFalse(source.closed or material._retired)  # No fabricated native finality.
+
     def test_held_eof_extra_bytes_and_read_failure_remain_distinct(self):
         for kind in SOURCES:
             for raw, fatal in ((b"", False), (b"unexpected", False), (OSError("inert read"), True)):
@@ -205,28 +420,35 @@ class SavedCommandInputTests(unittest.TestCase):
                 source.poll(guard)
             read.assert_not_called()
             self.assertTrue(guard.cancelled)
-        for kind in SOURCES:
-            guard, source = bound_source(kind)
-            source.active = source.request_returned = False
-            source.buffer.extend(request_bytes(kind is AndroidBuildInput) + b"extra")
-            with self.subTest(kind=kind), patch.object(control.time, "monotonic", return_value=110), \
-                    patch.object(control.os, "fstat", return_value=pipe()), \
-                    patch.object(control.os, "read", side_effect=BlockingIOError):
-                with self.assertRaises(KeyboardInterrupt):
-                    source.request()
-            self.assertFalse(source.request_returned)
+        for kind, maximum in ((PreflightInput, offline_wire.REQUEST_LIMIT), (AndroidBuildInput, android_wire.REQUEST_LIMIT)):
+            public = request_bytes(kind is AndroidBuildInput)
+            for leftover in (b"extra", b"x" * (maximum + 1 - len(public))):
+                guard, source = bound_source(kind)
+                source.active = source.request_returned = False
+                source.buffer.extend(public + leftover)
+                with self.subTest(kind=kind, prefetched=len(source.buffer)), \
+                        patch.object(control.time, "monotonic", return_value=110), \
+                        patch.object(control.os, "fstat", return_value=pipe()), \
+                        patch.object(control.os, "read", side_effect=AssertionError("unexpected prefetch")) as reads:
+                    with self.assertRaises(KeyboardInterrupt):
+                        source.request()
+                reads.assert_not_called()
+                self.assertFalse(source.request_returned)
+                self.assertTrue(guard.cancelled)
 
     def test_domain_request_limit_is_charged_before_larger_read(self):
         for kind, maximum in ((PreflightInput, 16 * 1024), (AndroidBuildInput, 32 * 1024)):
-            guard, source = bound_source(kind)
-            source.active = source.request_returned = False
-            with self.subTest(kind=kind), patch.object(control.time, "monotonic", return_value=110), \
-                    patch.object(control.os, "fstat", return_value=pipe()), \
-                    patch.object(control.os, "read", return_value=b"x" * (maximum + 1)) as read:
-                source.poll(guard)
-            read.assert_called_once_with(0, maximum + 1)
-            self.assertEqual(len(source.buffer), maximum + 1)
-            self.assertTrue(guard.cancelled)
+            for raw in (b"x" * (maximum + 1), b"x" * maximum + b"\n"):
+                guard, source = bound_source(kind)
+                source.active = source.request_returned = False
+                with self.subTest(kind=kind, newline=raw.endswith(b"\n")), \
+                        patch.object(control.time, "monotonic", return_value=110), \
+                        patch.object(control.os, "fstat", return_value=pipe()), \
+                        patch.object(control.os, "read", return_value=raw) as read:
+                    source.poll(guard)
+                read.assert_called_once_with(0, maximum + 1)
+                self.assertEqual(len(source.buffer), maximum + 1)
+                self.assertTrue(guard.cancelled)
 
     def test_identity_change_is_fatal_not_eof_and_never_closes_replacement(self):
         for kind in SOURCES:

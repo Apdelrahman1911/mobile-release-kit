@@ -146,6 +146,9 @@ impl Book {
             let mut offset = 0;
             while offset < used {
                 if used - offset < 11 { return Err(AdmissionFailure::Inventory); }
+                // The observer may inspect link metadata; payload rosters may
+                // not, including the otherwise skipped manifest entry.
+                if !matches!(buffer[offset+8], nix::libc::DT_DIR | nix::libc::DT_REG) { return Err(AdmissionFailure::Inventory); }
                 let inode = u64::from_ne_bytes(buffer[offset..offset+8].try_into().map_err(native_error)?);
                 let length = usize::from(u16::from_ne_bytes([buffer[offset+9],buffer[offset+10]]));
                 let next = offset.checked_add(11+length).filter(|n| *n <= used).ok_or(AdmissionFailure::Inventory)?;
@@ -381,17 +384,17 @@ impl IOSXcodeSlots {
         self.check_current(end, stop)
     }
     fn inspect_selected(&mut self, end: Instant, stop: &watch::Receiver<bool>, signed: bool) -> Result<()> {
-        use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, sibling_target};
+        use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, selection_alias_owner, sibling_target};
         if self.original.started { return Err(AdmissionFailure::AlreadyUsed); }
         self.original.records.try_reserve_exact(32).map_err(native_error)?;
         self.original.started = true;
         checkpoint(end, stop)?;
-        native::real_user().map_err(native_error)?;
+        let account = native::real_user().map_err(native_error)?;
         let applications = self.original.chain(Path::new(APPLICATIONS), end, stop)?;
         checkpoint(end, stop)?;
         let named = stat::fstatat(self.original.fd(applications)?, STANDARD_APP, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
         let app = if named.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFLNK.bits() {
-            if named.st_uid != 0 || named.st_nlink != 1 || !(1..=1024).contains(&named.st_size) {
+            if !selection_alias_owner(named.st_uid, account) || named.st_nlink != 1 || !(1..=1024).contains(&named.st_size) {
                 return Err(AdmissionFailure::Ownership);
             }
             checkpoint(end, stop)?;

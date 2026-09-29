@@ -1113,8 +1113,15 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
                     let (_, _, expected, kind) = output_result!(OutputUnexpectedChild, O::DirectoryEntry, Some(position), ExpectedChild, children.iter().find(|(p, name, _, _)| *p == index && *name == entry.name).ok_or(Error::Unsafe).map_err(|error| {
                         // Only DATA from this original failed exact lookup. The
                         // same Unsafe is returned; no offender is opened/read.
-                        if let Some(trace) = read_trace { trace.unexpected_entry(role, &entry,
-                            children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str())); }
+                        if let Some(trace) = read_trace {
+                            let relation = if position == 0 {
+                                observer_output_source_relation(output, index,
+                                    entries.get(parent).map(|(_, metadata, _)| metadata),
+                                    entries.get(index).map(|(_, metadata, _)| metadata), &children, &entry)
+                            } else { None };
+                            trace.unexpected_entry_with_relation(role, &entry,
+                                children.iter().filter(|(p, _, _, _)| *p == index).map(|(_, name, _, _)| name.as_str()), relation);
+                        }
                         error
                     }))?;
                     output_result!(OutputEntryBinding, O::DirectoryEntry, Some(position), HelperReturn, need(
@@ -1138,6 +1145,32 @@ fn output_poststate(native: &mut NativeBook, files: &mut Vec<OriginalFile>, fixt
     }))
 }
 
+// BEGIN OUTPUT SOURCE RELATION ADAPTER
+// The failed entry and these witnesses already exist in the original output
+// inventory. Optional lexical/metadata absence never acquires a replacement or
+// changes the owner Result. Only the four masks leave this stack frame.
+fn observer_output_source_relation<'a>(output: &'a Path, current_index: usize,
+    parent: Option<&Metadata>, current: Option<&Metadata>,
+    children: &'a [(usize, String, Stamp, FileKind)], entry: &DirectoryEntry)
+    -> Option<crate::ui_observer_diagnostic_data::OutputDirectoryRelation> {
+    use crate::ui_observer_diagnostic_data::{OutputDirectoryRelation, OutputDirectoryWitness};
+    let current = current?;
+    let witness = |name: &'a str, volume: u64, file_id: [u8; 16]| OutputDirectoryWitness {
+        name, volume, file_id,
+        roster: children.iter().any(|(parent, child, stamp, kind)| *parent == current_index
+            && *kind == FileKind::Directory && child == name && stamp.volume == volume && stamp.id == file_id),
+    };
+    let parent_witness = output.parent().and_then(Path::file_name).and_then(|name| name.to_str()).zip(parent)
+        .map(|(name, metadata)| witness(name, metadata.identity.volume_serial, metadata.identity.file_id));
+    let output_witness = output.file_name().and_then(|name| name.to_str())
+        .map(|name| witness(name, current.identity.volume_serial, current.identity.file_id));
+    let fixture = |fixed: &str| children.iter().find(|(_, name, _, kind)| *kind == FileKind::Directory && name == fixed)
+        .map(|(_, name, stamp, _)| witness(name.as_str(), stamp.volume, stamp.id));
+    Some(OutputDirectoryRelation::from_observed(&entry.name, current.identity.volume_serial, entry.file_id,
+        [parent_witness, output_witness, fixture("project"), fixture("app"), fixture("release")]))
+}
+
+// END OUTPUT SOURCE RELATION ADAPTER
 // Qualification-only, same-thread DATA. No caller text or native identity can
 // enter this companion diagnostic, and no release/finality decision reads it.
 macro_rules! smoke_labels {
@@ -3679,11 +3712,65 @@ mod contract_tests {
         Ok(())
     }
 
+    // BEGIN OUTPUT SOURCE RELATION OWNER TESTS
+    fn observer_output_source_relation_contract() -> Result<()> {
+        let volume = 0x8000_0000_0000_0042;
+        let metadata = |id| Metadata { identity: FileIdentity { volume_serial: volume, file_id: [id; 16] },
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY, size: 0,
+            allocation_size: 0, links: 1, creation: 1, write: 1, change: 1 };
+        let stamp = |id| Stamp { volume, id: [id; 16], creation: 1, write: 1, change: 1,
+            size: 0, allocation: 0, links: 1, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+        let output = Path::new(r"C:\private-task-root\normal-ui-project-draft-output");
+        let (parent, current) = (metadata(1), metadata(2));
+        let mut children = vec![(5, "project".to_owned(), stamp(3), FileKind::Directory),
+            (9, "app".to_owned(), stamp(4), FileKind::Directory), (9, "release".to_owned(), stamp(5), FileKind::Directory)];
+        let mut entry = DirectoryEntry { name: "app".to_owned(), file_id: [4; 16],
+            kind: FileKind::Directory, attributes: FS::FILE_ATTRIBUTE_DIRECTORY };
+        let relation = observer_output_source_relation(output, 5, Some(&parent), Some(&current), &children, &entry).expect("inert witnesses");
+        assert_eq!((relation.available_mask, relation.roster_mask, relation.exact_name_mask, relation.identity_mask), (31, 4, 8, 8));
+        assert!(relation.valid());
+        let absent_parent = observer_output_source_relation(output, 5, None, Some(&current), &children, &entry).unwrap();
+        assert_eq!((absent_parent.available_mask, absent_parent.roster_mask), (30, 4));
+        let absent_children = observer_output_source_relation(output, 5, Some(&parent), Some(&current), &[], &entry).unwrap();
+        assert_eq!((absent_children.available_mask, absent_children.roster_mask), (3, 0));
+        let absent_basename = observer_output_source_relation(Path::new("output"), 5, Some(&parent), Some(&current), &children, &entry).unwrap();
+        assert_eq!(absent_basename.available_mask, 30);
+        assert!(observer_output_source_relation(output, 5, Some(&parent), None, &children, &entry).is_none());
+        entry.name = "private-unrecognized".to_owned();
+        let renamed = observer_output_source_relation(output, 5, Some(&parent), Some(&current), &children, &entry).unwrap();
+        assert_eq!((renamed.exact_name_mask, renamed.identity_mask), (0, 8));
+        children.get_mut(1).unwrap().0 = 5;
+        let moved_roster = observer_output_source_relation(output, 5, Some(&parent), Some(&current), &children, &entry).unwrap();
+        assert_eq!(moved_roster.roster_mask, 12); // Actual parent tuples, not a spelling taxonomy.
+        children.get_mut(1).unwrap().3 = FileKind::File;
+        let missing_directory = observer_output_source_relation(output, 5, Some(&parent), Some(&current), &children, &entry).unwrap();
+        assert_eq!(missing_directory.available_mask, 23);
+        for role in [UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss] {
+            let mut capture = ObserverCapture::default();
+            capture.binding = Some(("a".repeat(40), "b".repeat(40), "123456".to_owned(), "c".repeat(64)));
+            let original = capture.reader.scope(ObserverCaptureOperation::DirectoryEntry, Some(0), || {
+                capture.reader.unexpected_entry_with_relation(role, &entry, std::iter::empty(), Some(renamed));
+                capture.reader.result::<()>(ObserverCaptureCheck::ExpectedChild, Err(Error::Unsafe))
+            });
+            let first = capture.reader.first(); let mut bytes = [0u8; 4096];
+            let length = observer_capture_frame(role, &capture, &mut bytes).expect("bounded fixed source relation");
+            let text = std::str::from_utf8(&bytes[..length]).unwrap();
+            assert!(text.contains("\"sourceRelation\":{\"availableMask\":31,\"rosterMask\":4,\"exactNameMask\":0,\"identityMask\":8}"));
+            assert!(text.contains("\"reason\":1")); assert!(text.contains("\"error\":\"Unsafe\""));
+            for private in ["private-task-root", "normal-ui-project-draft-output", "private-unrecognized", "0404040404040404"] { assert!(!text.contains(private)); }
+            assert!(!text.contains(&volume.to_string())); assert_eq!(original, Err(Error::Unsafe)); assert_eq!(capture.reader.first(), first);
+            assert_eq!(capture.projection, ObserverProjection::default());
+        }
+        Ok(())
+    }
+
+    // END OUTPUT SOURCE RELATION OWNER TESTS
     fn observer_capture_failure_contract() -> Result<()> {
         use ObserverCaptureCheck as C; use ObserverCaptureOperation as O;
         use crate::ui_observer_diagnostic_data::ChildFinality;
         ObserverCaptureTrace::reader_contract()?;
         ObserverCaptureTrace::unexpected_entry_contract()?;
+        observer_output_source_relation_contract()?;
         // Actual shared scalar decisions, not a child, clock or native fixture.
         for mask in 0..128u8 {
             let facts = ChildFinality { returned: mask & 1 != 0, created: mask & 2 != 0, signaled: mask & 4 != 0,

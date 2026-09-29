@@ -36,10 +36,10 @@ const ANDROID: [FieldId; 3] = [FieldId::Title, FieldId::ShortDescription, FieldI
 const IOS: [FieldId; 5] = [FieldId::Description, FieldId::Keywords, FieldId::PrivacyUrl, FieldId::SupportUrl, FieldId::ReleaseNotes];
 impl Platform {
     pub(crate) fn ids(self) -> &'static [FieldId] { match self { Self::Android => &ANDROID, Self::Ios => &IOS } }
-    fn name(self) -> &'static str { match self { Self::Android => "android", Self::Ios => "ios" } }
+    pub(crate) fn name(self) -> &'static str { match self { Self::Android => "android", Self::Ios => "ios" } }
 }
 impl FieldId {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Title => "title.txt", Self::ShortDescription => "short_description.txt", Self::FullDescription => "full_description.txt",
             Self::Description => "description.txt", Self::Keywords => "keywords.txt", Self::PrivacyUrl => "privacy_url.txt",
@@ -59,7 +59,7 @@ fn keys(value: &Value, names: &[&str]) -> bool {
 }
 fn hex(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
-fn relative(path: &str) -> bool {
+pub(crate) fn relative(path: &str) -> bool {
     if path.is_empty() || path.len() > 512 { return false; }
     let mut count = 0;
     for part in path.split('/') {
@@ -154,7 +154,7 @@ pub struct Assurance {
     pub git_observed: bool, pub store_contacted: bool, pub writes_performed: bool, pub release_readiness: String,
 }
 impl Assurance {
-    fn valid(&self, basis: &str) -> bool {
+    pub(crate) fn valid(&self, basis: &str) -> bool {
         self.basis == basis && !self.project_code_executed && !self.tools_probed && !self.credentials_read
             && !self.git_observed && !self.store_contacted && !self.writes_performed && self.release_readiness == "unknown"
     }

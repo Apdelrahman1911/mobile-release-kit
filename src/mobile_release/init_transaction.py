@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .errors import ValidationError
-from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS
+from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS, canonical_workflow_reference
 
 PREPARING = ".mobile-release-init-prepare"
 READY = ".mobile-release-init"
@@ -38,11 +38,16 @@ VERSION_PREPARING = ".mobile-release-version-prepare"
 VERSION_READY = ".mobile-release-version"
 VERSION_CLEANUP = ".mobile-release-version-cleanup"
 VERSION_STATE_NAMES = (VERSION_PREPARING, VERSION_READY, VERSION_CLEANUP)
+IMAGE_PREPARING = ".mobile-release-metadata-images-prepare"
+IMAGE_READY = ".mobile-release-metadata-images"
+IMAGE_CLEANUP = ".mobile-release-metadata-images-cleanup"
+IMAGE_STATE_NAMES = (IMAGE_PREPARING, IMAGE_READY, IMAGE_CLEANUP)
 METADATA_IGNORE_LINES = (".mobile-release/", *(name + "/" for name in (*STATE_NAMES, *METADATA_STATE_NAMES)))
-ALL_STATE_NAMES = (*STATE_NAMES, *METADATA_STATE_NAMES, *VERSION_STATE_NAMES)
+ALL_STATE_NAMES = (*STATE_NAMES, *METADATA_STATE_NAMES, *VERSION_STATE_NAMES, *IMAGE_STATE_NAMES)
 IGNORE_LINES = (".mobile-release/", *(name + "/" for name in ALL_STATE_NAMES))
 MAX_FILES = 256
 MAX_FILE_BYTES = 8 * 1024**2
+MAX_IMAGE_FILE_BYTES = 10 * 1024**2
 MAX_TOTAL_BYTES = 64 * 1024**2
 MAX_CONTROL_BYTES = 512 * 1024
 MAX_DIRECTORY_ENTRIES = 100_000
@@ -52,12 +57,13 @@ PROBES = {"probe-a", "probe-b", "probe-c"}
 
 
 class TypedEditProfile(Enum):
-    """Four internal native domains, never a caller-supplied path inventory."""
+    """Closed internal native domains, never a caller-supplied path inventory."""
 
     CONFIGURATION = "configuration"
     GITHUB_WORKFLOWS = "github-workflows"
     METADATA_TEXT = "metadata-text"
     RELEASE_VERSION = "release-version"
+    METADATA_IMAGES = "metadata-images"
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -309,7 +315,8 @@ def _fsync(fd: int) -> None:
 
 def _write(fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False,
            owner: InitWorkspace | None = None) -> None:
-    _require(len(data) <= MAX_FILE_BYTES, "staged file exceeds its byte bound")
+    _require(len(data) <= (owner._file_limit if owner is not None else MAX_FILE_BYTES),
+             "staged file exceeds its byte bound")
     with _descriptor(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      mode, dir_fd=fd, owner=owner) as handle:
         view = memoryview(data)
@@ -380,6 +387,9 @@ class InitWorkspace:
         self._typed_profile: TypedEditProfile | None = None
         self._metadata_targets: Any = None
         self._version_targets: Any = None
+        self._image_targets: Any = None
+        self._image_recovery: Any = None
+        self._image_recovery_journal = "unknown"
         self._rooted_revision: Any = None
         # Strong typed domains have original, in-memory authority. The legacy
         # workflow-prefixed storage/method names are shared only by the three
@@ -390,6 +400,7 @@ class InitWorkspace:
         self._workflow_header: bytes | None = None
         self._workflow_plan: bytes | None = None
         self._workflow_controls: dict[str, dict[str, Any]] = {}
+        self._workflow_updates: frozenset[str] = frozenset()
         self._workflow_complete = False
         self._creation = {"state": "NEW"}
         self._install_started = False
@@ -418,6 +429,8 @@ class InitWorkspace:
         workspace._typed_profile = scope.lease.profile
         workspace._metadata_targets = scope.lease._metadata_targets
         workspace._version_targets = scope.lease._version_targets
+        workspace._image_targets = scope.lease._image_targets
+        workspace._image_recovery = scope.lease._image_recovery
         workspace.fd = scope.fd
         workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
@@ -429,16 +442,39 @@ class InitWorkspace:
             return METADATA_STATE_NAMES
         if self._typed_profile is TypedEditProfile.RELEASE_VERSION:
             return VERSION_STATE_NAMES
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+            return IMAGE_STATE_NAMES
         return STATE_NAMES
 
     @property
+    def _file_limit(self) -> int:
+        return MAX_IMAGE_FILE_BYTES if self._typed_profile is TypedEditProfile.METADATA_IMAGES else MAX_FILE_BYTES
+
+    def _image_restoration(self):
+        if self._image_recovery is None:
+            return None
+        from .metadata_images_recovery import ImageRecoveryRevision
+        value = self._image_recovery
+        _require(type(value) is ImageRecoveryRevision and getattr(value, "_identity", None) is value,
+                 "an original inspected image restoration capability is required")
+        value._check_workspace(self)
+        return value
+
+    @property
     def _original_controls_required(self) -> bool:
-        return self._typed_profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
+        return self._typed_profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+                                       TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES)
 
 
     @property
     def _saved_text_profile(self) -> bool:
-        return self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
+        return self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION,
+                                       TypedEditProfile.METADATA_IMAGES)
+
+    @property
+    def _original_facts_required(self) -> bool:
+        return self._saved_text_profile or (self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS
+                                            and bool(self._workflow_updates))
 
     def _saved_text_targets(self):
         from .init_workspace_custody import MetadataTargets, VersionTargets
@@ -446,6 +482,9 @@ class InitWorkspace:
             targets, kind = self._metadata_targets, MetadataTargets
         elif self._typed_profile is TypedEditProfile.RELEASE_VERSION:
             targets, kind = self._version_targets, VersionTargets
+        elif self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+            from .metadata_images_custody import ImageTargets
+            targets, kind = self._image_targets, ImageTargets
         else:
             raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         _require(type(targets) is kind, "original saved-text targets are required")
@@ -458,16 +497,18 @@ class InitWorkspace:
             return "metadata_text"
         if self._typed_profile is TypedEditProfile.RELEASE_VERSION:
             return "release_version"
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+            return "metadata_images"
         raise ValueError("no saved-text journal domain")
 
     def _expect_unchanged(self, condition: bool, message: str) -> None:
-        """Only an actual comparison mismatch is a metadata stale conflict.
+        """Only an actual comparison mismatch is an original-facts stale conflict.
 
         Do not catch/relabel generic ValidationError or IO failures. Legacy
         domains retain their exact existing comparison exception behavior.
         """
-        if not condition and self._saved_text_profile:
-            raise InitConflict("saved text: " + message)
+        if not condition and self._original_facts_required:
+            raise InitConflict(("saved text: " if self._saved_text_profile else "workflow: ") + message)
         _require(condition, message)
 
     def _original_target_check(self, item: ObservedFile, message: str) -> None:
@@ -476,16 +517,20 @@ class InitWorkspace:
         This is never used to compare original ctime to writer-owned backups,
         installed replacements or restored objects after a rename.
         """
+        restoration = self._image_restoration()
+        if restoration is not None:
+            restoration.check_preserved(self, item.path)
+            return
         self._last_read_facts = None
         self._expect_unchanged(self._current(item.path) == item.before, message)
-        if self._saved_text_profile:
-            _require(self._rooted_revision is not None, "original metadata revision is required")
+        if self._original_facts_required:
+            _require(self._rooted_revision is not None, "original edit revision is required")
             original = dict(self._rooted_revision._raw)
-            _require(item.path in original, "original metadata raw observation is required")
+            _require(item.path in original, "original raw observation is required")
             self._expect_unchanged(self._last_read_facts == original[item.path],
-                                   "original metadata target facts changed")
+                                   "original target facts changed")
 
-    def _metadata_dependencies_check(self) -> None:
+    def _metadata_dependencies_check(self, *, changing: str | None = None) -> None:
         """Recheck original read-only bytes/facts, never reparse or retarget.
 
         Keep dependencies out of the staged/writable roster. Their original
@@ -493,8 +538,13 @@ class InitWorkspace:
         """
         if not self._saved_text_profile:
             return
+        restoration = self._image_restoration()
+        if restoration is not None:
+            restoration.check_context(self, changing=changing)
+            return
         targets = self._saved_text_targets()
-        dependency_limits = targets.observation_limits[:2]
+        dependency_limits = (targets.dependency_limits if self._typed_profile is TypedEditProfile.METADATA_IMAGES
+                             else targets.observation_limits[:2])
         original_raw = dict(targets._raw)
         for (path, before, raw), limit in zip(targets._dependencies, dependency_limits):
             self._last_read_facts = None
@@ -506,10 +556,15 @@ class InitWorkspace:
         for path, facts in targets._parent_facts:
             self._expect_unchanged(self._parent_facts.get(path) == facts,
                                    "original metadata dependency parent facts changed")
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+            targets.check_roster(self, changing=changing)
 
     def _dependency_only_parents(self) -> dict[str, dict[str, Any] | None]:
         if not self._saved_text_profile:
             return {}
+        restoration = self._image_restoration()
+        if restoration is not None:
+            return restoration.dependency_only_parents
         targets = self._saved_text_targets()
         return targets.dependency_only_parents
 
@@ -552,12 +607,12 @@ class InitWorkspace:
             from .build_inputs import _attempt_all
             _attempt_all(self._guard, [slot.close for slot in reversed(self._slots)])
 
-    def _read(self, fd: int, name: str, limit: int = MAX_FILE_BYTES):
-        return _read(fd, name, limit, owner=self)
+    def _read(self, fd: int, name: str, limit: int | None = None):
+        return _read(fd, name, self._file_limit if limit is None else limit, owner=self)
 
-    def _binding(self, fd: int, name: str, *, directory: bool = False, limit: int = MAX_FILE_BYTES):
+    def _binding(self, fd: int, name: str, *, directory: bool = False, limit: int | None = None):
         self._checkpoint()
-        return _binding(fd, name, directory=directory, limit=limit, owner=self)
+        return _binding(fd, name, directory=directory, limit=self._file_limit if limit is None else limit, owner=self)
 
     def _write(self, fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False):
         self._checkpoint()
@@ -677,6 +732,45 @@ class InitWorkspace:
                  "pending transaction; run mobile-release init --root <project> --recover before applying again")
 
     @contextmanager
+    def inspect_image_recovery_state(self) -> Iterator[tuple[str | None, int | None]]:
+        """Inspect the current image journal under this original recovery lock.
+
+        This only binds the currently opened private directory. Complete DATA,
+        target and control qualification lives in ImageRecoveryRevision; no
+        original transaction creation/staging receipt is manufactured here.
+        """
+        _require(self._typed_profile is TypedEditProfile.METADATA_IMAGES
+                 and self._scope is not None and self._scope.lease._image_recovery_mode,
+                 "image inspection requires the original explicit recovery scope")
+        state = self.state()
+        if state is None:
+            self._image_recovery_journal = "not_created"
+            yield None, None
+            return
+        # Existence is an observation, not authority to interpret or clean it.
+        # Keep this truthful even if private-directory or full-plan proof fails.
+        self._image_recovery_journal = "recovery_required"
+        with self._descriptor(state, self.flags, dir_fd=self.fd) as fd:
+            from .build_inputs import _directory
+            value = os.fstat(fd)
+            identity = _dir_identity(value)
+            facts = tuple(sorted(_directory(value).items()))
+            _require(value.st_uid == os.geteuid() and stat.S_IMODE(value.st_mode) == 0o700
+                     and identity["device"] == self.root_identity["device"],
+                     "image journal must be a private owned same-filesystem directory")
+            if self._image_recovery is None:
+                _require(self.private_identity is None and self._private_facts is None,
+                         "the current image journal can only be captured once")
+                self.private_identity, self._private_facts = identity, facts
+            else:
+                self._image_restoration()
+                self._expect_unchanged(identity == self.private_identity and facts == self._private_facts,
+                                       "inspected image journal changed")
+            self._private_check(fd, state)
+            yield state, fd
+            self._private_check(fd, state)
+
+    @contextmanager
     def _private(self, name: str) -> Iterator[int]:
         self._root_check()
         _require(name in self._state_names and self.state() == name,
@@ -735,10 +829,10 @@ class InitWorkspace:
                     if self._guard is not None:
                         from .build_inputs import _directory
                         facts = tuple(sorted(_directory(value).items())) if value is not None else None
-                        if self._saved_text_profile and self._rooted_revision is not None:
+                        if self._original_facts_required and self._rooted_revision is not None:
                             original = dict(self._rooted_revision._parent_facts).get(relative)
                             if original is not None:
-                                self._expect_unchanged(facts == original, "original metadata ancestor facts changed")
+                                self._expect_unchanged(facts == original, "original ancestor facts changed")
                         self._parent_facts[relative] = facts
                     _require(relative in self.parents, "destination ancestor is outside the original inventory")
                     self._expect_unchanged(identity == self.parents[relative],
@@ -783,19 +877,19 @@ class InitWorkspace:
 
     def _current(self, path: str, *, directory: bool = False) -> dict[str, Any] | None:
         with self._parent(path) as parent:
-            if directory and self._saved_text_profile and self._rooted_revision is not None:
+            if directory and self._original_facts_required and self._rooted_revision is not None:
                 from .build_inputs import _directory
                 expected = dict(self._rooted_revision._parent_facts).get(path)
                 if expected is not None:
                     current = _stat(parent, path.split("/")[-1]) if parent is not None else None
                     self._expect_unchanged(current is not None and stat.S_ISDIR(current.st_mode)
                                            and tuple(sorted(_directory(current).items())) == expected,
-                                           "original metadata target parent facts changed")
+                                           "original target parent facts changed")
             return self._binding(parent, path.split("/")[-1], directory=directory) if parent is not None else None
 
     def _namespace_check(self, *, changing: str | None = None) -> None:
         self._root_check()
-        self._metadata_dependencies_check()
+        self._metadata_dependencies_check(changing=changing)
         for path, expected in self.parents.items():
             if changing is not None and (path == changing or path.startswith(changing + "/")):
                 continue
@@ -841,6 +935,20 @@ class InitWorkspace:
                         self._expect_unchanged(not self._list(handle), "moved directory gained unrelated contents")
                 if self._publishing_terminal is not None:
                     self._terminal_seen = self._publishing_terminal
+                if directory_path is not None and self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+                    # This exact original-new directory has already moved.
+                    # Record that known owned transition before image sibling
+                    # traversal, including when rename lost its return. Never
+                    # substitute a later arbitrary pathname observation.
+                    _require(directory and directory_path in self.parents,
+                             "image directory transition is outside its admitted inventory")
+                    previous = self.parents[directory_path]
+                    _require(previous is None or previous == expected,
+                             "image directory transition has another original identity")
+                    actual = self._current(directory_path, directory=True)
+                    self._expect_unchanged(actual == (expected if previous is None else None),
+                                           "image directory handoff changed the wrong namespace")
+                    self.parents[directory_path] = actual
             except BaseException as error:
                 if self._publishing_terminal is not None:
                     # A genuine terminal decision is irreversible. Incomplete
@@ -855,7 +963,7 @@ class InitWorkspace:
                     self.rename(destination_fd, destination, source_fd, source)
                     self._fsync(source_fd)
                     self._fsync(destination_fd)
-                if self._saved_text_profile and isinstance(error, InitConflict):
+                if self._original_facts_required and isinstance(error, InitConflict):
                     raise
                 raise ValidationError("init transaction: source changed during move; captured user object preserved, reconcile before recovery") from error
         if failure is not None:
@@ -908,14 +1016,23 @@ class InitWorkspace:
     def _header(self, fd: int) -> dict[str, Any]:
         item = self._read(fd, "header.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing recovery header")
+        restoration = self._image_restoration()
         if self._original_controls_required:
             self._workflow_control("header.json", item[0])
-            self._expect_unchanged(item[1] == self._workflow_header, "original workflow header changed")
+            if restoration is None:
+                self._expect_unchanged(item[1] == self._workflow_header, "original workflow header changed")
         header = _parse(item[1])
         header_keys = {"schemaVersion", "transactionId", "root"}
         if self._saved_text_profile:
             header_keys.add("domain")
             _require(header.get("domain") == self._saved_text_domain, "metadata journal domain differs")
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+            header_keys.add("image")
+            if restoration is not None:
+                restoration.check_header(item[1], header)
+            else:
+                _require(header.get("image") == self._saved_text_targets().journal_context(),
+                         "image journal differs from the original saved context and complete sibling inventory")
         _require(set(header) == header_keys
                  and type(header["schemaVersion"]) is int and header["schemaVersion"] == 1
                  and isinstance(header["transactionId"], str)
@@ -925,22 +1042,16 @@ class InitWorkspace:
         return header
 
     @staticmethod
-    def _valid_identity(value: Any, *, directory: bool = False) -> bool:
+    def _valid_identity(value: Any, *, directory: bool = False, limit: int = MAX_FILE_BYTES) -> bool:
         keys = {"device", "inode", "mode"} | (set() if directory else {"size", "sha256"})
         return (type(value) is dict and set(value) == keys
                 and all(type(value[k]) is int and 0 <= value[k] < 2**64 for k in keys - {"sha256"})
                 and value["inode"] > 0 and value["mode"] <= 0o777
-                and (directory or (value["size"] <= MAX_FILE_BYTES and isinstance(value["sha256"], str)
+                and (directory or (value["size"] <= limit and isinstance(value["sha256"], str)
                                     and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is not None)))
 
-    def _load(self, fd: int) -> dict[str, Any]:
-        header = self._header(fd)
-        item = self._read(fd, "plan.json", MAX_CONTROL_BYTES)
-        _require(item is not None, "missing READY plan; preserve journal, do not guess")
-        if self._original_controls_required:
-            self._workflow_control("plan.json", item[0])
-            self._expect_unchanged(item[1] == self._workflow_plan, "original workflow plan changed")
-        plan = _parse(item[1])
+    def _validate_plan_data(self, header: dict[str, Any], plan: dict[str, Any]) -> None:
+        """Shared strict DATA checks; does not adopt journal/write authority."""
         _require(set(plan) == {*header, "directories", "files"}
                  and _json({k: plan[k] for k in header}) == _json(header), "plan/header binding differs")
         _require(type(plan["files"]) is list and type(plan["directories"]) is list
@@ -950,7 +1061,7 @@ class InitWorkspace:
             _require(type(entry) is dict and set(entry) == {"path", "before", "after"}
                      and type(entry["path"]) is str, "invalid recovery file entry")
             _require((entry["before"] is not None or entry["after"] is not None)
-                     and all(v is None or self._valid_identity(v) for v in (entry["before"], entry["after"])),
+                     and all(v is None or self._valid_identity(v, limit=self._file_limit) for v in (entry["before"], entry["after"])),
                      "invalid recovery file identity")
         validate_paths([entry["path"] for entry in plan["files"]])
         expected_dirs = {"/".join(e["path"].split("/")[:i]) for e in plan["files"]
@@ -972,26 +1083,68 @@ class InitWorkspace:
                  "recovery inode belongs to another filesystem")
         _require(sum(v["size"] for e in plan["files"] for v in (e["before"], e["after"]) if v) <= MAX_TOTAL_BYTES,
                  "recovery byte bound exceeded")
-        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+
+    def _load(self, fd: int) -> dict[str, Any]:
+        header = self._header(fd)
+        item = self._read(fd, "plan.json", MAX_CONTROL_BYTES)
+        _require(item is not None, "missing READY plan; preserve journal, do not guess")
+        restoration = self._image_restoration()
+        if self._original_controls_required:
+            self._workflow_control("plan.json", item[0])
+            if restoration is None:
+                self._expect_unchanged(item[1] == self._workflow_plan, "original workflow plan changed")
+        plan = _parse(item[1])
+        self._validate_plan_data(header, plan)
+        if restoration is not None:
+            restoration.check_plan(item[1], plan)
+        elif self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
             _require(tuple(e["path"] for e in plan["files"]) == self._typed_profile.paths
                      and tuple(e["path"] for e in plan["directories"]) == self._typed_profile.directories
-                     and all((e["before"] is None) != (e["after"] is None) for e in plan["files"]),
-                     "workflow recovery cannot replace or adopt another inventory")
+                     and all(e["path"] in self._captured
+                             and e["before"] == self._captured[e["path"]].before
+                             and (e["after"] is None or 0 < e["after"]["size"] <= limit)
+                             and (e["before"] is None or e["after"] is None
+                                  or e["after"]["mode"] == e["before"]["mode"])
+                             for e, limit in zip(plan["files"], self._typed_profile.payload_limits))
+                     and frozenset(e["path"] for e in plan["files"]
+                                   if e["before"] is not None and e["after"] is not None) == self._workflow_updates,
+                     "workflow recovery differs from the original validated inventory")
         elif self._saved_text_profile:
             targets = self._saved_text_targets()
-            target_limit = targets.observation_limits[2]
+            target_limit = (MAX_IMAGE_FILE_BYTES if self._typed_profile is TypedEditProfile.METADATA_IMAGES
+                            else targets.observation_limits[2])
             _require(tuple(e["path"] for e in plan["files"]) == targets.paths
                      and tuple(e["path"] for e in plan["directories"]) == targets.directories
                      and all(e["before"] == self._captured[e["path"]].before
                              and all(v is None or v["size"] <= target_limit for v in (e["before"], e["after"]))
                              for e in plan["files"]),
                      "metadata recovery cannot adopt another target or dependency inventory")
-        self.parents = {**self._dependency_only_parents(),
-                        **{e["path"]: e["before"] or e["after"] for e in plan["directories"]}}
+            if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+                _require(sum(len(raw) for _, _, raw in targets._dependencies)
+                         + sum(v["size"] for entry in plan["files"] for v in (entry["before"], entry["after"]) if v)
+                         <= MAX_TOTAL_BYTES, "image dependencies and transaction exceed combined bound")
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+            # Image sibling validation traverses the selected folder. A newly
+            # staged directory identity is not yet its public parent identity;
+            # preserve actual None/installed facts until _locations validates
+            # the complete corresponding journal relationship.
+            self.parents = self._dependency_only_parents()
+            for entry in plan["directories"]:
+                current = self._current(entry["path"], directory=True)
+                self._expect_unchanged(current == entry["before"] if entry["before"] is not None
+                                       else current is None or current == entry["after"],
+                                       "image destination ancestor differs from the admitted plan")
+                self.parents[entry["path"]] = current
+        else:
+            self.parents = {**self._dependency_only_parents(),
+                            **{e["path"]: e["before"] or e["after"] for e in plan["directories"]}}
         return plan
 
     def _workflow_control(self, name: str, identity: Any) -> dict[str, Any]:
         """Return only original control authority, including renamed markers."""
+        restoration = self._image_restoration()
+        if restoration is not None:
+            return restoration.control(name, identity)
         original = {"COMMITTED": "commit.pending", "ROLLED_BACK": "rollback.pending"}.get(name, name)
         expected = self._workflow_controls.get(original)
         self._expect_unchanged(expected is not None and identity == expected,
@@ -1090,8 +1243,11 @@ class InitWorkspace:
             before, after = entry["before"], entry["after"]
             if after is None:
                 self._expect_unchanged(current == before, "preserved input changed")
-                if self._saved_text_profile:
-                    self._original_target_check(self._captured[entry["path"]], "preserved metadata input changed")
+                restoration = self._image_restoration()
+                if restoration is not None:
+                    restoration.check_preserved(self, entry["path"])
+                elif self._original_facts_required:
+                    self._original_target_check(self._captured[entry["path"]], "preserved original input changed")
                 continue
             staged, backup = self._binding(fd, f"new-{i}"), self._binding(fd, f"old-{i}")
             old = current == before and staged == after and backup is None
@@ -1123,6 +1279,8 @@ class InitWorkspace:
             header = {"schemaVersion": 1, "transactionId": uuid.uuid4().hex, "root": self.root_identity}
             if self._saved_text_profile:
                 header["domain"] = self._saved_text_domain
+            if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
+                header["image"] = self._saved_text_targets().journal_context()
             self._write(fd, "header.tmp", _json(header))
             self._control_rename(fd, "header.tmp", fd, "header.json")
             self._fsync(fd)
@@ -1191,8 +1349,8 @@ class InitWorkspace:
                     _require(parent is not None, "file parent is missing")
                     leaf = entry["path"].split("/")[-1]
                     self._expect_unchanged(self._binding(parent, leaf) == entry["before"], "destination changed before installation")
-                    if self._saved_text_profile:
-                        self._original_target_check(self._captured[entry["path"]], "metadata destination changed before installation")
+                    if self._original_facts_required:
+                        self._original_target_check(self._captured[entry["path"]], "original destination changed before installation")
                     if entry["before"]:
                         self._move(parent, leaf, fd, f"old-{i}", entry["before"])
                     self._move(fd, f"new-{i}", parent, leaf, entry["after"])
@@ -1228,10 +1386,15 @@ class InitWorkspace:
     def _preparing_inventory(self, fd: int) -> None:
         names = set(self._list(fd))
         if self._original_controls_required:
-            _require(self._workflow_complete,
+            restoration = self._image_restoration()
+            _require(restoration is not None or self._workflow_complete,
                      "incomplete original workflow preparation must be retained")
             plan = self._load(fd)
-            expected = set(self._workflow_controls)
+            if restoration is not None and self.state() == self._state_names[2]:
+                restoration.check_preparing_cleanup(self, fd, plan)
+                return
+            expected = ({"header.json", "plan.json", "commit.pending", "rollback.pending"}
+                        if restoration is not None else set(self._workflow_controls))
             expected.update(f"new-{i}" for i, entry in enumerate(plan["files"]) if entry["after"])
             expected.update(f"directory-{i}" for i, entry in enumerate(plan["directories"]) if entry["after"])
             self._expect_unchanged(names == expected, "original workflow preparation inventory changed")
@@ -1258,7 +1421,7 @@ class InitWorkspace:
                 _require(name in CONTROLS - {"COMMITTED", "ROLLED_BACK"}
                          or slot(name, "new"),
                          "unrecognized preparation content; no original backup is legal here")
-                item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES)
+                item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else self._file_limit)
                 if name not in CONTROLS and item is not None:
                     staged_bytes += item[0]["size"]
                     _require(staged_bytes <= MAX_TOTAL_BYTES, "preparation byte bound exceeded")
@@ -1269,7 +1432,8 @@ class InitWorkspace:
         with self._private(self._state_names[2]) as fd:
             workflow_entries: dict[str, tuple[bool, dict[str, Any]]] = {}
             if self._original_controls_required:
-                _require(self._workflow_complete,
+                restoration = self._image_restoration()
+                _require(restoration is not None or self._workflow_complete,
                          "incomplete original workflow preparation must be retained")
                 # A single original in-session cleanup starts with complete
                 # control proof. Lost/modified control suffixes cannot be
@@ -1279,17 +1443,20 @@ class InitWorkspace:
                 self._terminal(fd, original)
                 # Derive only the original fixed proof, not fresh journal
                 # authority. Preserved files have no legal old/new staging slot.
-                workflow_entries = {name: (False, value) for name, value in self._workflow_controls.items()}
-                workflow_entries.update(COMMITTED=workflow_entries["commit.pending"],
-                                        ROLLED_BACK=workflow_entries["rollback.pending"])
-                workflow_entries.update({f"new-{i}": (False, entry["after"])
-                                         for i, entry in enumerate(original["files"]) if entry["after"]})
-                if self._saved_text_profile:
-                    workflow_entries.update({f"old-{i}": (False, entry["before"])
-                                             for i, entry in enumerate(original["files"])
-                                             if entry["before"] is not None and entry["after"] is not None})
-                workflow_entries.update({f"directory-{i}": (True, entry["after"])
-                                         for i, entry in enumerate(original["directories"]) if entry["after"]})
+                if restoration is not None:
+                    workflow_entries = restoration.cleanup_entries(self)
+                else:
+                    workflow_entries = {name: (False, value) for name, value in self._workflow_controls.items()}
+                    workflow_entries.update(COMMITTED=workflow_entries["commit.pending"],
+                                            ROLLED_BACK=workflow_entries["rollback.pending"])
+                    workflow_entries.update({f"new-{i}": (False, entry["after"])
+                                             for i, entry in enumerate(original["files"]) if entry["after"]})
+                    if self._saved_text_profile or self._workflow_updates:
+                        workflow_entries.update({f"old-{i}": (False, entry["before"])
+                                                 for i, entry in enumerate(original["files"])
+                                                 if entry["before"] is not None and entry["after"] is not None})
+                    workflow_entries.update({f"directory-{i}": (True, entry["after"])
+                                             for i, entry in enumerate(original["directories"]) if entry["after"]})
             names = set(self._list(fd))
             _require(len(names) <= 2 * MAX_FILES + len(CONTROLS) + len(PROBES), "cleanup inventory bound exceeded")
             # Capture before validating the phase/content, not afterward: a
@@ -1303,7 +1470,7 @@ class InitWorkspace:
                 if directory:
                     binding = _dir_identity(value)
                 else:
-                    item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES)
+                    item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else self._file_limit)
                     _require(item is not None, "cleanup entry disappeared")
                     binding = item[0]
                     observed_bytes += binding["size"]
@@ -1323,7 +1490,7 @@ class InitWorkspace:
                         _require(workflow_entries.get(name) == (directory, expected),
                                  "original workflow cleanup proof changed")
                     _require(self._binding(fd, name, directory=directory,
-                                      limit=MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES) == expected,
+                                      limit=MAX_CONTROL_BYTES if name in CONTROLS else self._file_limit) == expected,
                              "cleanup entry changed")
                 except (OSError, ValidationError) as error:
                     raise InitConflict("init transaction: cleanup entry changed or cannot be verified; preserve private state and user edits") from error
@@ -1413,6 +1580,27 @@ class InitWorkspace:
         No additional IO, observer reopens, or exception-text interpretation is
         performed. The outer scope/lease adds its own close evidence.
         """
+        # A new restoration has its own current-attempt accounting. It never
+        # claims that this workspace created/imported a persisted journal.
+        if self._image_recovery is not None:
+            from .metadata_images_recovery import ImageRecoveryRevision
+            _require(type(self._image_recovery) is ImageRecoveryRevision
+                     and getattr(self._image_recovery, "_identity", None) is self._image_recovery,
+                     "invalid image restoration outcome authority")
+            return self._image_recovery.outcome(self, reason)
+        if (self._typed_profile is TypedEditProfile.METADATA_IMAGES and self._scope is not None
+                and self._scope.lease._image_recovery_mode):
+            if self._reason == "none" and reason != "none":
+                self._reason = reason
+            resources = "unknown" if self._guard is not None and self._guard.lifetime_ledger.fatal else "settled"
+            journal = self._image_recovery_journal
+            current_reason = self._reason
+            if current_reason == "none":
+                current_reason = ("custody_unknown" if resources == "unknown" else
+                                  "pending_state" if journal == "recovery_required" else
+                                  "filesystem_error" if journal == "unknown" else "none")
+            self._outcome = InitApplyOutcome("not_started", journal, resources, current_reason)
+            return self._outcome
         if self._reason == "none" and reason != "none":
             self._reason = reason
         if self._terminal_seen == "COMMITTED":
@@ -1466,9 +1654,38 @@ class InitWorkspace:
         """Configuration-only facade; legacy CLI keeps its public API."""
         return self._apply_typed(changes, TypedEditProfile.CONFIGURATION)
 
-    def apply_workflows_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
-        """Four fixed generated callers: create absent or preserve, never replace."""
-        return self._apply_typed(changes, TypedEditProfile.GITHUB_WORKFLOWS)
+    def apply_workflows_typed(self, changes: list[tuple[ObservedFile, bytes | None]], *,
+                              resource_sha256: str | None = None) -> InitApplyOutcome:
+        """Four fixed callers; replacements require original canonical proof."""
+        return self._apply_typed(changes, TypedEditProfile.GITHUB_WORKFLOWS,
+                                 workflow_resource_sha256=resource_sha256)
+
+    def _admit_workflow_updates(self, changes: list[tuple[ObservedFile, bytes | None]],
+                                resource_sha256: str | None) -> None:
+        updates = [(identity, item, payload) for (identity, _), (item, payload) in zip(WORKFLOWS, changes)
+                   if item.before is not None and payload is not None]
+        if not updates:
+            return  # Keep the existing create/preserve-only facade unchanged.
+        _require(type(resource_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", resource_sha256) is not None,
+                 "canonical workflow updates require the prepared resource identity")
+        from .api import _github_setup
+        from .init_workspace_custody import RootedRevision
+        _require(type(self._rooted_revision) is RootedRevision
+                 and self._rooted_revision.profile is TypedEditProfile.GITHUB_WORKFLOWS
+                 and self._scope.lease._revision is self._rooted_revision,
+                 "workflow updates require their original rechecked revision")
+        raw, resource = _github_setup._resource()
+        _require(hashlib.sha256(raw).hexdigest() == resource_sha256,
+                 "bundled workflow resource changed since preparation")
+        for identity, item, payload in updates:
+            template = resource["workflows"][identity].encode("utf-8")
+            _require(item.data != payload
+                     and canonical_workflow_reference(template, item.data) is not None
+                     and canonical_workflow_reference(template, payload) is not None,
+                     "workflow update is not an exact current canonical caller")
+        # Derivative finite paths only. Original captured bytes, rooted facts
+        # and later original controls remain the authority for the transaction.
+        self._workflow_updates = frozenset(item.path for _, item, _ in updates)
 
     def apply_metadata_text_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
         """Only original config-bound public text targets; never dependencies."""
@@ -1478,25 +1695,43 @@ class InitWorkspace:
         """Exactly one original config-derived version source, never dependencies."""
         return self._apply_typed(changes, TypedEditProfile.RELEASE_VERSION)
 
+    def apply_metadata_images_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
+        """Only selected image targets; fixed config and other images remain dependencies."""
+        return self._apply_typed(changes, TypedEditProfile.METADATA_IMAGES)
+
+    def apply_metadata_images_recovery(self, revision: Any) -> InitApplyOutcome:
+        """One explicit restoration through the original native workspace."""
+        original = self._image_restoration()
+        _require(original is not None and revision is original and not self._typed_claimed
+                 and self._scope is not None and self._scope.lease._image_recovery_mode,
+                 "image restoration belongs to its original one-use inspected capability")
+        self._typed_claimed = True
+        return original.apply(self)
+
     def _apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]],
-                     profile: TypedEditProfile) -> InitApplyOutcome:
-        if self._scope is None or self._guard is None or self._typed_claimed:
+                     profile: TypedEditProfile, *, workflow_resource_sha256: str | None = None) -> InitApplyOutcome:
+        if (self._scope is None or self._guard is None or self._typed_claimed
+                or self._image_recovery is not None
+                or self._scope.lease._image_recovery_mode):
             raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         self._typed_claimed = True
         if self._typed_profile is not profile:
             raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         try:
             self._checkpoint()
-            if profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
+            if profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                 from .init_workspace_custody import RootedRevision
                 targets = self._saved_text_targets()
-                original_targets = (self._rooted_revision._metadata_targets if profile is TypedEditProfile.METADATA_TEXT
-                                    else self._rooted_revision._version_targets) if type(self._rooted_revision) is RootedRevision else None
+                original_targets = (getattr(self._rooted_revision, {
+                    TypedEditProfile.METADATA_TEXT: "_metadata_targets", TypedEditProfile.RELEASE_VERSION: "_version_targets",
+                    TypedEditProfile.METADATA_IMAGES: "_image_targets"}[profile])
+                    if type(self._rooted_revision) is RootedRevision else None)
                 _require(type(self._rooted_revision) is RootedRevision
                          and self._scope.lease._revision is self._rooted_revision
                          and original_targets is targets,
                          "metadata Apply requires its original rechecked revision")
-                paths, limits = targets.paths, targets.observation_limits[2:]
+                paths = targets.paths
+                limits = targets.payload_limits if profile is TypedEditProfile.METADATA_IMAGES else targets.observation_limits[2:]
             elif profile in (TypedEditProfile.CONFIGURATION, TypedEditProfile.GITHUB_WORKFLOWS):
                 paths, limits = profile.paths, profile.payload_limits
             else:
@@ -1511,19 +1746,23 @@ class InitWorkspace:
                          "desktop changes do not match the original revision")
                 if profile is TypedEditProfile.GITHUB_WORKFLOWS:
                     _require((item.before is not None and payload is None)
-                             or (item.before is None and item.data is None and type(payload) is bytes and 0 < len(payload)),
-                             "workflow changes cannot replace existing files or omit absent callers")
-                elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
+                             or (type(payload) is bytes and 0 < len(payload)
+                                 and (item.before is not None or item.data is None)),
+                             "workflow changes cannot omit absent callers")
+                elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                     _require((item.before is not None and payload is None)
                              or type(payload) is bytes and 0 < len(payload),
                              "metadata changes cannot omit an absent required field")
             if profile is TypedEditProfile.GITHUB_WORKFLOWS:
                 _require(set(self._captured) == set(paths) and tuple(sorted(self.parents)) == profile.directories,
                          "workflow capture is not the exact fixed domain")
-            elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
+                self._admit_workflow_updates(changes, workflow_resource_sha256)
+            elif profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                 _require(set(self._captured) == set(targets.observation_paths)
                          and set(self.parents) == {"release", *targets.directories},
                          "metadata capture is not the original target/dependency domain")
+                if profile is TypedEditProfile.METADATA_IMAGES:
+                    targets.check_payloads(changes)
             validate_paths(list(paths))
             self.require_clean()
             self._metadata_dependencies_check()

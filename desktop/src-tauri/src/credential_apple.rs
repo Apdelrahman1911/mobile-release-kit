@@ -12,7 +12,7 @@
 //! parameters/attributes. They are unavailable/unsupported, never declared
 //! malformed. Common data-authSafe PFX and issuer-and-serial CMS are unaffected.
 use super::{poll, CmsEncoding, Failure, FileObservation, Limit, Observation, Observed,
-    Pkcs12AuthSafe, UnavailableReason, DEPTH_LIMIT, NODE_LIMIT};
+    Pkcs12AuthSafe, Pkcs8Encoding, Pkcs8Algorithm, Pkcs8Curve, UnavailableReason, DEPTH_LIMIT, NODE_LIMIT};
 use cms::{content_info::ContentInfo, signed_data::SignedData};
 use der_07::{asn1::{AnyRef, ObjectIdentifier, OctetStringRef}, Decode, Reader, SliceReader, Tag, Tagged};
 use pkcs12::pfx::Pfx;
@@ -180,6 +180,98 @@ pub(super) fn profile(bytes: &[u8], stop: &mut dyn FnMut() -> bool) -> Result<Fi
     } }))
 }
 
+
+const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const PRIME256V1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+const RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+
+// No PEM preamble, extra block or trailing data is accepted. The maintained
+// decoder owns complete boundary/base64 syntax; only the original leading
+// boundary is admitted here, so its optional preamble feature is never used.
+// The owned DER allocation below is zeroized. The maintained decoder also uses
+// small internal stack/block temporaries without a zeroize API; this is not a
+// promise of complete stack/register/process erasure.
+fn p8_pem(bytes: &[u8], stop: &mut dyn FnMut() -> bool) -> Result<zeroize::Zeroizing<Vec<u8>>, Failure> {
+    poll(stop)?;
+    if !bytes.starts_with(b"-----BEGIN ") { return Err(Failure::UnsupportedVariant); }
+    let decoder = der_07::pem::Decoder::new(bytes);
+    poll(stop)?;
+    let mut decoder = decoder.map_err(|_| Failure::Malformed)?;
+    if decoder.type_label() != "PRIVATE KEY" { return Err(Failure::UnsupportedVariant); }
+    let size = decoder.remaining_len();
+    if size == 0 { return Err(Failure::Malformed); }
+    if size > super::JSON_LIMIT || size > bytes.len() { return Err(Failure::Limit(Limit::Allocation)); }
+
+    // Allocate the owned DER buffer once before filling it. Zeroizing owns
+    // the whole allocation on success, refusal, allocation error and every STOP.
+    // No growth, cloning or retained normalized copy follows this admission.
+    let mut decoded = zeroize::Zeroizing::new(Vec::<u8>::new());
+    decoded.try_reserve_exact(size).map_err(|_| Failure::Limit(Limit::Allocation))?;
+    if decoded.capacity() > size { return Err(Failure::Limit(Limit::Allocation)); }
+    poll(stop)?;
+    decoded.resize(size, 0);
+    for chunk in decoded.chunks_mut(super::STOP_STRIDE) {
+        poll(stop)?;
+        let result = decoder.decode(chunk);
+        poll(stop)?;
+        result.map_err(|_| Failure::Malformed)?;
+    }
+    if !decoder.is_finished() { return Err(Failure::Malformed); }
+    poll(stop)?;
+    Ok(decoded)
+}
+
+// Borrowed version-0 PrivateKeyInfo only. The private OCTET STRING is nonempty
+// but opaque: this does not parse an EC scalar, derive a public key, decrypt,
+// sign, identify an account or validate Apple's authority.
+fn p8_envelope(bytes: &[u8], stop: &mut dyn FnMut() -> bool) -> Result<(Pkcs8Algorithm, Option<Pkcs8Curve>), Failure> {
+    let (outer, _) = preflight(bytes, stop)?;
+    if outer.tag() != Tag::Sequence { return Err(Failure::Malformed); }
+    let mut reader = SliceReader::new(outer.value()).map_err(|_| Failure::Malformed)?;
+    let version = u8::decode(&mut reader).map_err(|_| Failure::Malformed)?;
+    if version != 0 { return Err(Failure::UnsupportedVariant); }
+    poll(stop)?;
+    let identifier = AnyRef::decode(&mut reader).map_err(|_| Failure::Malformed)?;
+    if identifier.tag() != Tag::Sequence { return Err(Failure::Malformed); }
+    let mut algorithm_reader = SliceReader::new(identifier.value()).map_err(|_| Failure::Malformed)?;
+    let oid = ObjectIdentifier::decode(&mut algorithm_reader).map_err(|_| Failure::Malformed)?;
+    let parameters = if algorithm_reader.is_finished() { None }
+        else { Some(AnyRef::decode(&mut algorithm_reader).map_err(|_| Failure::Malformed)?) };
+    algorithm_reader.finish(()).map_err(|_| Failure::Malformed)?;
+    poll(stop)?;
+    let private = OctetStringRef::decode(&mut reader).map_err(|_| Failure::Malformed)?;
+    if private.as_bytes().is_empty() { return Err(Failure::Malformed); }
+    if !reader.is_finished() { return Err(Failure::UnsupportedVariant); } // No attributes/public-key extension.
+    reader.finish(()).map_err(|_| Failure::Malformed)?;
+    let result = if oid == EC_PUBLIC_KEY {
+        let parameters = parameters.ok_or(Failure::UnsupportedVariant)?;
+        if parameters.tag() != Tag::ObjectIdentifier { return Err(Failure::UnsupportedVariant); } // No explicit EC params.
+        let curve = parameters.decode_as::<ObjectIdentifier>().map_err(|_| Failure::Malformed)?;
+        (Pkcs8Algorithm::Ec, Some(if curve == PRIME256V1 { Pkcs8Curve::P256 } else { Pkcs8Curve::Other }))
+    } else {
+        // No arbitrary OID or parameter value leaves this module. Recognized
+        // non-EC algorithms remain fixed identifiers for the core to reject.
+        (if oid == RSA_ENCRYPTION { Pkcs8Algorithm::Rsa } else { Pkcs8Algorithm::Other }, None)
+    };
+    poll(stop)?;
+    Ok(result)
+}
+
+pub(super) fn p8(bytes: &[u8], stop: &mut dyn FnMut() -> bool) -> Result<FileObservation, Failure> {
+    poll(stop)?;
+    let (encoding, (algorithm, curve)) = if bytes.first() == Some(&0x30) {
+        (Pkcs8Encoding::Der, p8_envelope(bytes, stop)?)
+    } else if bytes.starts_with(b"-----BEGIN ") {
+        let decoded = p8_pem(bytes, stop)?;
+        (Pkcs8Encoding::Pem, p8_envelope(&decoded, stop)?)
+        // The one decoded allocation is zeroized/dropped here, including on ?.
+    } else { return Ok(FileObservation::unavailable(UnavailableReason::UnsupportedFormat)); };
+    poll(stop)?;
+    Ok(FileObservation(Observation::Observed { data: Observed::Pkcs8 {
+        byte_count: bytes.len() as u64, encoding, algorithm, curve,
+    } }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +306,129 @@ mod tests {
     fn signed_pfx() -> Vec<u8> { pfx_fixture(SIGNED_DATA, signed_body(CANARY)) }
     fn profile() -> Vec<u8> { profile_fixture(SIGNED_DATA, signed_body(CANARY)) }
     fn wire(kind: FileKind, bytes: &[u8]) -> Value { serde_json::to_value(inspect(kind, bytes, &mut || false).ok().unwrap()).unwrap() }
+
+
+    fn p8_fixture(algorithm: ObjectIdentifier, parameters: Option<Any>, version: u8, private: &[u8], tail: &[u8]) -> Vec<u8> {
+        let mut identifier = algorithm.to_der().unwrap();
+        if let Some(parameters) = parameters { identifier.extend_from_slice(&parameters.to_der().unwrap()); }
+        let mut fields = version.to_der().unwrap();
+        fields.extend_from_slice(&tlv(Tag::Sequence, &identifier));
+        fields.extend_from_slice(&tlv(Tag::OctetString, private));
+        fields.extend_from_slice(tail);
+        tlv(Tag::Sequence, &fields)
+    }
+    fn p8_curve(oid: ObjectIdentifier) -> Option<Any> { Some(Any::encode_from(&oid).unwrap()) }
+    fn p8_der() -> Vec<u8> { p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 0, CANARY, &[]) }
+    fn p8_text(label: &str, bytes: &[u8]) -> Vec<u8> {
+        der_07::pem::encode_string(label, der_07::pem::LineEnding::LF, bytes).unwrap().into_bytes()
+    }
+
+    #[test]
+    fn p8_der_and_pem_publish_only_envelope_identifiers_not_key_validity() {
+        let der = p8_der(); let pem = p8_text("PRIVATE KEY", &der);
+        for (encoding, bytes) in [("der", der), ("pem", pem)] {
+            let result = wire(FileKind::AscP8, &bytes);
+            assert_eq!(result, json!({"status":"observed","format":"pkcs8","byteCount":bytes.len(),
+                "encoding":encoding,"algorithm":"ec","curve":"p256"}));
+            assert!(!result.to_string().contains(std::str::from_utf8(CANARY).unwrap()));
+        }
+        // Not even an inner EC key: a nonempty opaque payload is deliberately
+        // enough for this narrow observation. No signing/key-validity claim.
+        let bytes = p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 0, &[0xff, 0], &[]);
+        assert_eq!(wire(FileKind::AscP8, &bytes)["status"], "observed");
+        let pem = String::from_utf8(p8_text("PRIVATE KEY", &p8_der())).unwrap();
+        assert_eq!(wire(FileKind::AscP8, pem.replace('\n', "\r\n").as_bytes())["encoding"], "pem");
+    }
+    #[test]
+    fn p8_other_algorithms_and_curves_are_fixed_nonsecret_core_rejection_facts() {
+        for (oid, parameters, algorithm, curve) in [
+            (RSA_ENCRYPTION, Some(Any::null()), "rsa", Value::Null),
+            (ObjectIdentifier::new_unwrap("1.3.101.112"), None, "other", Value::Null),
+            (EC_PUBLIC_KEY, p8_curve(ObjectIdentifier::new_unwrap("1.3.132.0.34")), "ec", json!("other")),
+        ] {
+            let bytes = p8_fixture(oid, parameters, 0, CANARY, &[]);
+            assert_eq!(wire(FileKind::AscP8, &bytes), json!({"status":"observed","format":"pkcs8","byteCount":bytes.len(),
+                "encoding":"der","algorithm":algorithm,"curve":curve}));
+        }
+    }
+    #[test]
+    fn p8_never_accepts_encryption_sec1_extensions_or_explicit_ec_parameters() {
+        for label in ["ENCRYPTED PRIVATE KEY", "EC PRIVATE KEY", "PUBLIC KEY"] {
+            assert_eq!(wire(FileKind::AscP8, &p8_text(label, &p8_der())),
+                json!({"status":"unavailable","reason":"unsupported-variant"}));
+        }
+        let attributes = tlv(Tag::ContextSpecific { constructed: true, number: der_07::TagNumber::N0 }, &[]);
+        for bytes in [
+            p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 1, CANARY, &[]),
+            p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 0, CANARY, &attributes),
+            p8_fixture(EC_PUBLIC_KEY, Some(Any::new(Tag::Sequence, Vec::new()).unwrap()), 0, CANARY, &[]),
+            p8_fixture(EC_PUBLIC_KEY, Some(Any::null()), 0, CANARY, &[]),
+            p8_fixture(EC_PUBLIC_KEY, None, 0, CANARY, &[]),
+        ] {
+            assert_eq!(wire(FileKind::AscP8, &bytes), json!({"status":"unavailable","reason":"unsupported-variant"}));
+        }
+        let mut sec1 = 1u8.to_der().unwrap(); sec1.extend_from_slice(&tlv(Tag::OctetString, CANARY));
+        assert_eq!(wire(FileKind::AscP8, &tlv(Tag::Sequence, &sec1))["status"], "unavailable");
+        let mut encrypted = tlv(Tag::Sequence, &RSA_ENCRYPTION.to_der().unwrap());
+        encrypted.extend_from_slice(&tlv(Tag::OctetString, CANARY));
+        assert_ne!(wire(FileKind::AscP8, &tlv(Tag::Sequence, &encrypted))["status"], "observed");
+    }
+    #[test]
+    fn p8_requires_complete_canonical_framing_and_nonempty_private_octets() {
+        let der = p8_der();
+        for end in 0..der.len() { assert_ne!(wire(FileKind::AscP8, &der[..end])["status"], "observed"); }
+        let mut trailing = der.clone(); trailing.extend_from_slice(&[5, 0]);
+        assert_eq!(wire(FileKind::AscP8, &trailing), json!({"status":"rejected","reason":"malformed-container"}));
+        assert!(der[1] < 128);
+        let mut noncanonical = vec![0x30, 0x81, der[1]]; noncanonical.extend_from_slice(&der[2..]);
+        assert_eq!(wire(FileKind::AscP8, &noncanonical), json!({"status":"rejected","reason":"malformed-container"}));
+        let empty = p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 0, &[], &[]);
+        assert_eq!(wire(FileKind::AscP8, &empty), json!({"status":"rejected","reason":"malformed-container"}));
+        let bad_oid = p8_fixture(EC_PUBLIC_KEY, Some(Any::new(Tag::ObjectIdentifier, vec![0x80]).unwrap()), 0, CANARY, &[]);
+        assert_eq!(wire(FileKind::AscP8, &bad_oid), json!({"status":"rejected","reason":"malformed-container"}));
+        let pem = p8_text("PRIVATE KEY", &der);
+        for bytes in [
+            [b"preamble\n".as_slice(), &pem].concat(), [pem.as_slice(), b"trailing"].concat(),
+            [pem.as_slice(), pem.as_slice()].concat(),
+            b"-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----\n".to_vec(),
+            b"-----BEGIN PRIVATE KEY-----\nMA==\n-----END PUBLIC KEY-----\n".to_vec(),
+        ] {
+            let result = wire(FileKind::AscP8, &bytes);
+            assert_ne!(result["status"], "observed");
+            assert!(!result.to_string().contains(std::str::from_utf8(CANARY).unwrap()));
+        }
+    }
+    #[test]
+    fn p8_preserves_material_and_existing_der_work_limits() {
+        assert_eq!(wire(FileKind::AscP8, &vec![0; super::super::JSON_LIMIT + 1]),
+            json!({"status":"unavailable","reason":"material-limit"}));
+        let mut deep = tlv(Tag::Null, &[]);
+        for _ in 0..DEPTH_LIMIT { deep = tlv(Tag::Sequence, &deep); }
+        let too_many = tlv(Tag::Sequence, &[5u8, 0].repeat(SIBLING_LIMIT + 1));
+        let large_set = tlv(Tag::Set, &tlv(Tag::OctetString, &[0; 4096]).repeat(64));
+        for parameter in [deep, too_many, large_set] {
+            let bytes = p8_fixture(ObjectIdentifier::new_unwrap("1.2.3.4"), Some(Any::from_der(&parameter).unwrap()), 0, CANARY, &[]);
+            assert_eq!(wire(FileKind::AscP8, &bytes), json!({"status":"unavailable","reason":"parser-limit"}));
+        }
+    }
+    #[test]
+    fn p8_stop_at_every_original_checkpoint_prevents_success_and_refusal() {
+        // Multiple PEM chunks make mid-decode STOP meaningful. These are inert
+        // canaries, never an actual key or an allocation/OOM experiment.
+        let large = p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 0, &CANARY.repeat(400), &[]);
+        for bytes in [p8_der(), p8_text("PRIVATE KEY", &large),
+            p8_fixture(EC_PUBLIC_KEY, p8_curve(PRIME256V1), 1, CANARY, &[]),
+            p8_text("ENCRYPTED PRIVATE KEY", &p8_der()), b"preamble\n".to_vec(),
+            b"-----BEGIN PRIVATE KEY-----\n!!!!\n-----END PRIVATE KEY-----\n".to_vec(),
+            vec![0x30, 0x84, 0x7f, 0xff, 0xff, 0xff]] {
+            let mut count = 0;
+            assert!(inspect(FileKind::AscP8, &bytes, &mut || { count += 1; false }).is_ok());
+            for cutoff in 1..=count {
+                let mut calls = 0;
+                assert!(inspect(FileKind::AscP8, &bytes, &mut || { calls += 1; calls >= cutoff }).is_err());
+            }
+        }
+    }
 
     #[test]
     fn both_pfx_forms_and_cms_publish_only_mechanical_envelope_facts() {
@@ -271,7 +486,7 @@ mod tests {
         for bytes in [vec![0x30, 0x84, 0x7f, 0xff, 0xff, 0xff], vec![0x30, 0x80, 0, 0],
             vec![0x30, 6, 4, 0x84, 0x7f, 0xff, 0xff, 0xff], vec![0x30, 3, 4, 0x81, 0xff]] {
             assert!(matches!(preflight(&bytes, &mut || false), Err(Failure::Malformed)));
-            for kind in [FileKind::AppleP12, FileKind::AppleProfile] {
+            for kind in [FileKind::AppleP12, FileKind::AppleProfile, FileKind::AscP8] {
                 assert_eq!(wire(kind, &bytes), json!({"status":"rejected","reason":"malformed-container"}));
             }
         }

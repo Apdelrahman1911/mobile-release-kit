@@ -258,9 +258,12 @@ def _scalar_result(value: str | None, name: str, input_kind: str) -> tuple[str, 
     if "\x00" in value:
         return "invalid", ["value-nul"], [_check("value-admission", "failed")]
     checks = [_check("value-admission", "passed")]
-    # Only these guide text fields have shared identifier rules. Passwords and
-    # the project token receive value admission, never a password/permission test.
-    if input_kind == "text":
+    # Visibility and format policy are independent: the review email and
+    # retained commitment key stay private while using existing core rules.
+    # Format checks prove no password, reachability or historical-key match.
+    if input_kind == "text" or name in {
+        "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL", "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
+    }:
         valid = credential_format_error(name, value) is None
         checks.append(_check("identifier-format", "passed" if valid else "failed"))
         if not valid:

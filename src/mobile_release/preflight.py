@@ -22,6 +22,7 @@ from .credentials import (
     materialize_build_inputs,
     materialized_profile_specifier,
     resolve_credential_values,
+    local_requirements,
     scrub_credential_capabilities,
     store_material_prerequisite_findings,
     _selected_store_material,
@@ -1009,11 +1010,17 @@ def _preflight(
     if not report.ok and mode != "online":
         return _stop_preflight(report, "Application checks, credentials and builds were skipped because initial checks failed.")
     invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
+    input_requirements = local_requirements(config, "candidate",
+        purpose="store" if mode == "online" else "signing", platforms=selected)
+    if mode == "offline":
+        input_requirements = [item for item in input_requirements
+                              if item.name == "MOBILE_RELEASE_PROJECT_READ_TOKEN"]
     credential_values = resolve_credential_values(
         config,
         credentials_file=credentials_file,
         credentials_from_env=credentials_from_env,
         cancellation=cancellation,
+        required=input_requirements,
     )
     build_credential_values = credential_values_for_purpose(
         config,

@@ -30,6 +30,7 @@ READ_CHUNK = 64 * 1024
 MAX_READ_RESULT = 16 * 1024 * 1024
 MAX_AAB_BYTES = 1024**3
 MAX_READ_BYTES = 8 * 1024**3
+MAX_SIGNED_READ_BYTES = 14 * 1024**3  # Separate source/staging proofs; unsigned bound is unchanged.
 MAX_INPUT_BYTES = MAX_CONFIG_BYTES + MAX_VERSION_BYTES + 512 * 1024
 MAX_OUTPUT_ENTRIES = 4096
 MAX_OUTPUT_CANDIDATES = 32
@@ -389,6 +390,70 @@ class OriginalAndroidArtifact:
                     raise
 
 
+class OriginalAndroidSigningInput:
+    """One immutable staging input, separate from the final artifact's borrow."""
+
+    def __init__(self, files, source, snapshot, *, size: int, sha256: str) -> None:
+        files._require(files.operation.signing is not None and files._capture_claimed
+                       and files.signing_input is None and files._staging is snapshot
+                       and any(record is source for record in files.file_records), "artifact-unsafe")
+        self.files, self._source, self._snapshot = files, source, snapshot
+        self.size, self.sha256 = size, sha256
+        self._native = self._borrowed = self._checked_after = False
+
+    @property
+    def path(self) -> Path:
+        self.check()
+        return self.files.work_path / "signing-input.aab"
+
+    def check(self) -> None:
+        files = self.files
+        files._point()
+        files._require(type(self) is OriginalAndroidSigningInput and files.signing_input is self
+                       and self._snapshot is files._staging and self._snapshot.identity is not None
+                       and self._snapshot.identity["size"] == self.size and not files._work_claimed,
+                       "artifact-changed")
+        files._namespace_metadata()
+        files._check_output_scope()
+        files._check_record(self._source)
+        files._check_record(self._snapshot)
+
+    def verify_bytes(self) -> None:
+        self.check()
+        files = self.files
+        files._require(files._digest(self._source, self.size) == self.sha256
+                       and files._digest(self._snapshot, self.size) == self.sha256, "artifact-changed")
+        self.check()
+
+    @contextmanager
+    def native_input(self) -> Iterator[Path]:
+        self.check()
+        files = self.files
+        files._require(not self._borrowed and not self._native and not files.operation.close_claimed,
+                       "artifact-changed")
+        files._check_signing_output(initial=True)
+        self.verify_bytes()
+        self._borrowed = self._native = True
+        primary = None
+        try:
+            yield self.path
+        except BaseException as error:
+            primary = error
+            files._remember(error)
+            raise
+        finally:
+            try:
+                files._require_consumers()
+                self._native = False  # Only original consumer settlement retires the borrow.
+                with files.guard.deferred(check_on_exit=False):
+                    self.verify_bytes()
+                    self._checked_after = True
+            except BaseException as error:
+                files._remember(error)
+                if primary is None:
+                    raise
+
+
 class AndroidBuildFiles:
     """One narrow original file roster; no generic runner or cleanup callback."""
 
@@ -418,6 +483,9 @@ class AndroidBuildFiles:
         self._work: _DirectoryRecord | None = None
         self._artifacts: _DirectoryRecord | None = None
         self._snapshot: _FileRecord | None = None
+        self._staging: _FileRecord | None = None
+        self.signing_input: OriginalAndroidSigningInput | None = None
+        self._signed_output_sealed = False
         self._output_scope: _DirectoryRecord | None = None
         self._output_epoch: tuple[int, int] | None = None
         self._capture_claimed = self._work_claimed = self.close_claimed = False
@@ -498,7 +566,9 @@ class AndroidBuildFiles:
         self._require(invocation is not None and invocation is self.operation.invocation
                       and project is not None and project is invocation._original_project
                       and project is invocation.project_owner and not project.claimed
-                      and invocation.child is None and invocation.signing_lease is None
+                      and (invocation.child is None or self.operation.signing is not None
+                           and invocation.child is self.operation.signing.materialization)
+                      and invocation.signing_lease is None
                       and self._root_number is not None,
                       "project-admission-refused")
         invocation._owner()
@@ -535,6 +605,8 @@ class AndroidBuildFiles:
                 and self.namespace.android_operation is self.operation):
             if any(slot.number == number for slot in self.namespace.slots):
                 return
+        if self.operation.signing is not None and self.operation.signing.known_descriptor(number):
+            return
         self._require(False, "project-admission-refused")
 
     def _new_slot(self, *, cleanup: bool = False) -> _FD:
@@ -713,7 +785,8 @@ class AndroidBuildFiles:
         self._require(type(amount) is int and 0 < amount <= READ_CHUNK, "input-limit")
         self._known_number(number)
         self._charge("file-read-calls", 1, 262_144)
-        self._charge("file-read-bytes", amount, MAX_READ_BYTES)
+        self._charge("file-read-bytes", amount,
+                     MAX_SIGNED_READ_BYTES if self.operation.signing is not None else MAX_READ_BYTES)
         value = os.read(number, amount)
         self._point()
         self._require(type(value) is bytes and len(value) <= amount, "artifact-changed")
@@ -862,11 +935,41 @@ class AndroidBuildFiles:
         assert self.namespace is not None
         return self.namespace.path / "work"
 
-    def capture_aab(self, module: str, variant: str) -> OriginalAndroidArtifact:
+    def _reserve_capture_output(self, *, staging: bool) -> _FileRecord:
+        self._point()
+        parent = self._work if staging else self._artifacts
+        existing = self._staging if staging else self._snapshot
+        self._require(parent is not None and existing is None and parent.slot.number is not None,
+                      "artifact-unsafe")
+        self._check_record(parent)
+        destination = parent.slot.number
+        name = "signing-input.aab" if staging else "app-release.aab"
+        names = self.names(destination)
+        self._require((not names if not staging else all(_name_key(item) != _name_key(name) for item in names)),
+                      "artifact-unsafe")
+        record = _FileRecord(destination, name, self._new_slot(), parent_record=parent)
+        self.file_records.append(record)
+        if staging:
+            self._staging = record
+        else:
+            self._snapshot = record
+        number = self._open(record.slot, name, os.O_RDWR | os.O_CREAT | os.O_EXCL, destination)
+        record.identity = _file(os.fstat(number))  # Root the exclusive output before any fallible handoff.
+        initial = record.identity
+        self._require(initial["uid"] == self.uid and initial["mode"] == 0o600
+                      and initial["links"] == 1 and initial["size"] == 0
+                      and initial["device"] == parent.identity["device"], "artifact-unsafe")
+        self._check_record(record)
+        if self.operation.signing is not None:
+            os.fsync(destination)
+        return record
+
+    def _capture_aab(self, module: str, variant: str, *, signing: bool):
         self._point()
         self._require(not self.close_claimed and not self.operation.close_claimed, "artifact-unsafe")
         self.operation.capture_ready(module, variant)
-        self._require(not self._capture_claimed and self.artifact is None, "artifact-unsafe")
+        self._require(not self._capture_claimed and self.artifact is None
+                      and signing is (self.operation.signing is not None), "artifact-unsafe")
         self._capture_claimed = True
         self._require(type(module) is str and _MODULE.fullmatch(module) is not None
                       and type(variant) is str and _VARIANT.fullmatch(variant) is not None,
@@ -917,19 +1020,9 @@ class AndroidBuildFiles:
         size = original.identity["size"]
         self._require(0 < size <= MAX_AAB_BYTES, "artifact-unsafe")
         self._charge("captured-aab-bytes", size, MAX_AAB_BYTES)
-        destination = self._artifacts.slot.number
-        self._require(destination is not None and not self.names(destination), "artifact-unsafe")
-        snapshot = _FileRecord(destination, "app-release.aab", self._new_slot(),
-                               parent_record=self._artifacts)
-        self._snapshot = snapshot
-        self.file_records.append(snapshot)
-        number = self._open(snapshot.slot, snapshot.name,
-                            os.O_RDWR | os.O_CREAT | os.O_EXCL, destination)
-        initial = _file(os.fstat(number))
-        self._require(initial["uid"] == self.uid and initial["mode"] == 0o600
-                      and initial["links"] == 1 and initial["size"] == 0
-                      and initial["device"] == self._artifacts.identity["device"], "artifact-unsafe")
-        snapshot.identity = initial  # Even an incomplete copy retains its original inode.
+        snapshot = self._reserve_capture_output(staging=signing)
+        number, initial = snapshot.slot.number, snapshot.identity
+        self._require(number is not None and initial is not None, "artifact-unsafe")
         digest, consumed = hashlib.sha256(), 0
         while consumed < size:
             self._check_record(original)
@@ -952,10 +1045,75 @@ class AndroidBuildFiles:
                       and final["size"] == size, "artifact-changed")
         snapshot.identity = final
         self._check_record(snapshot)
-        os.fsync(destination)
-        artifact = OriginalAndroidArtifact(self, original, snapshot, size=size, sha256=digest.hexdigest())
+        os.fsync(snapshot.parent)
+        return original, snapshot, size, digest.hexdigest()
+
+    def capture_aab(self, module: str, variant: str) -> OriginalAndroidArtifact:
+        original, snapshot, size, digest = self._capture_aab(module, variant, signing=False)
+        artifact = OriginalAndroidArtifact(self, original, snapshot, size=size, sha256=digest)
         self.artifact = self._original_artifact = artifact
         artifact.verify_bytes()
+        return artifact
+
+    def capture_signing_input(self, module: str, variant: str) -> OriginalAndroidSigningInput:
+        original, snapshot, size, digest = self._capture_aab(module, variant, signing=True)
+        selected = OriginalAndroidSigningInput(self, original, snapshot, size=size, sha256=digest)
+        self.signing_input = selected
+        self._reserve_capture_output(staging=False)
+        selected.check()
+        self._require(self._digest(snapshot, size) == digest, "artifact-changed")
+        return selected
+
+    def _check_signing_output(self, *, initial: bool = False) -> dict[str, int]:
+        self._point()
+        snapshot, parent, namespace = self._snapshot, self._artifacts, self.namespace
+        self._require(self.operation.signing is not None and snapshot is not None
+                      and parent is not None and namespace is self._namespace_owner
+                      and namespace is not None and snapshot.parent_record is parent
+                      and snapshot.slot.number is not None and snapshot.identity is not None,
+                      "artifact-changed")
+        self._namespace_metadata()
+        self._check_record(parent)
+        self._require(self.names(parent.slot.number) == {"app-release.aab"}
+                      and self.names(namespace.slots[-1].number) == {"artifacts", "work"},
+                      "artifact-changed")
+        final = _file(os.fstat(snapshot.slot.number))
+        self._require(_file(os.stat(snapshot.name, dir_fd=snapshot.parent, follow_symlinks=False)) == final
+                      and all(final[key] == snapshot.identity[key]
+                              for key in ("device", "inode", "uid", "gid", "mode", "links"))
+                      and final["mode"] == 0o600 and final["links"] == 1
+                      and (final == snapshot.identity if initial else 0 < final["size"] <= MAX_AAB_BYTES),
+                      "artifact-changed")
+        return final
+
+    def signing_output(self) -> Path:
+        self._point()
+        self._require(self.signing_input is not None and self.signing_input._native
+                      and not self._signed_output_sealed, "artifact-changed")
+        self._check_signing_output(initial=True)
+        return self.namespace.path / "artifacts" / "app-release.aab"
+
+    def capture_signed(self) -> OriginalAndroidArtifact:
+        self._point()
+        selected = self.signing_input
+        self._require(selected is not None and selected._borrowed and selected._checked_after
+                      and not selected._native and not self._signed_output_sealed and self.artifact is None
+                      and self.operation._returned.get("jarsigner-sign") == 0, "artifact-changed")
+        self._require_consumers()
+        selected.check()  # Full source/staging proof just ran at the original borrow's exit.
+        snapshot = self._snapshot
+        self._check_signing_output()
+        os.fsync(snapshot.slot.number)
+        final = self._check_signing_output()
+        self._signed_output_sealed = True
+        snapshot.identity = final  # Seal the reserved writer once, BEFORE creating an artifact.
+        digest = self._digest(snapshot, final["size"])
+        self._check_signing_output()
+        selected.check()
+        os.fsync(snapshot.parent)
+        artifact = OriginalAndroidArtifact(self, selected._source, snapshot, size=final["size"], sha256=digest)
+        self.artifact = self._original_artifact = artifact
+        artifact.check()
         return artifact
 
     def _check_output_scope(self) -> None:
@@ -981,6 +1139,9 @@ class AndroidBuildFiles:
         if work is None or work.creation["state"] in ("NEW", "NO_EFFECT"):
             return
         self._require_consumers()
+        if (self.signing_input is not None and self.signing_input._native
+                or self.operation.signing is not None and not self.operation.signing.inputs_closed()):
+            self._unknown(AndroidFileError("cleanup-unknown"))
         if self.artifact is not None and (self.artifact._reader is not None or self.artifact._native):
             self._unknown(AndroidFileError("cleanup-unknown"))
         self._namespace_metadata()
@@ -1049,6 +1210,8 @@ class AndroidBuildFiles:
             return
         self.close_claimed = True
         self._require_consumers()
+        if self.signing_input is not None and self.signing_input._native:
+            self._unknown(AndroidFileError("cleanup-unknown"))
         if self.artifact is not None and (self.artifact._reader is not None or self.artifact._native):
             self._unknown(AndroidFileError("cleanup-unknown"))
         primary = None
@@ -1109,6 +1272,7 @@ class AndroidBuildFiles:
                 and all(record.state in ("NEW", "NO_EFFECT", "DELETED") for record in self.deletions)
                 and self.namespace is self._namespace_owner
                 and (self._namespace_owner is None or self._namespace_owner.closed())
+                and (self.signing_input is None or not self.signing_input._native)
                 and (self.artifact is None or self.artifact._reader is None and not self.artifact._native))
 
     def disposition(self) -> dict[str, str]:

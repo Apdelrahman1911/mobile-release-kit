@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { AssetSessionController, assetCancellationReason, assetContextReason, assetIntentPending, assetStorageReason } from '../src/assetSessionController.ts';
-import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
+import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason, assetStorageReason } from '../src/assetSessionController.ts';
+import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, isAssetScalarKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../src/assetSessionHelp.ts';
@@ -52,6 +52,12 @@ function firebaseAssessment(kind = 'android-firebase') {
 }
 function appleAssessment(kind) {
   const value = assessment(), p12 = kind === 'apple-p12';
+  if (kind === 'asc-p8') return { ...value, kind, context: { platform: 'ios', stage: 'candidate', purpose: 'full' }, fields: [
+    { id: 'file', requirement: 'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64', presence: 'supplied', state: 'configured', issues: [],
+      checks: [{ scope: 'pkcs8-envelope', outcome: 'asserted-pass' }, { scope: 'ec-p256-identifiers', outcome: 'asserted-pass' }] },
+    { id: 'keyId', requirement: 'MOBILE_RELEASE_ASC_KEY_ID', presence: 'supplied', state: 'configured', issues: [], checks: [{ scope: 'identifier-format', outcome: 'passed' }] },
+    { id: 'issuerId', requirement: 'MOBILE_RELEASE_ASC_ISSUER_ID', presence: 'supplied', state: 'configured', issues: [], checks: [{ scope: 'identifier-format', outcome: 'passed' }] },
+  ], assurance: { ...value.assurance, scalarValuesProcessed: true, fileObservationsProcessed: true } };
   return { ...value, kind, context: { platform: 'ios', stage: 'candidate', purpose: 'signing' }, state: 'configured', fields: [
     { id: 'file', requirement: p12 ? 'MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64' : 'MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64',
       presence: 'supplied', state: 'configured', issues: [], checks: [{ scope: p12 ? 'pfx-envelope' : 'cms-signed-data-envelope', outcome: 'asserted-pass' }] },
@@ -59,6 +65,21 @@ function appleAssessment(kind) {
       checks: [{ scope: 'value-admission', outcome: 'passed' }] }] : []),
   ], assurance: { ...value.assurance, scalarValuesProcessed: p12, fileObservationsProcessed: true } };
 }
+
+const privateReviewFields = {
+  'apple-review-contact': { firstName: 'PRIVATE_FIRST_CANARY', lastName: 'PRIVATE_LAST_CANARY', email: 'PRIVATE_EMAIL_CANARY@example.test', phone: '+00 PRIVATE_PHONE_CANARY' },
+  'apple-review-demo-account': { username: 'PRIVATE_USERNAME_CANARY', password: 'PRIVATE_PASSWORD_CANARY' },
+  'apple-operation-commitment': { keyBase64: 'A'.repeat(43) + '=', keyVersion: 'retained-v1' },
+};
+const privateReviewScope = { platform: 'ios', stage: 'production', purpose: 'store' };
+function privateReviewAssessment(kind) {
+  const base = assessment();
+  return { ...base, kind, context: { ...privateReviewScope }, fields: guide.kinds.find((entry) => entry.id === kind).fields.map((field) => ({
+    id: field.id, requirement: field.requirement, presence: 'supplied', state: 'configured', issues: [],
+    checks: [{ scope: 'value-admission', outcome: 'passed' }, ...(['email', 'keyBase64', 'keyVersion'].includes(field.id) ? [{ scope: 'identifier-format', outcome: 'passed' }] : [])],
+  })) };
+}
+
 function deferred() {
   let resolve; let reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -157,14 +178,14 @@ test('requests are exact, bounded unions; paths, bytes, observations and extra f
   assert.equal(assetJsonFits(accessor, 32768), false); assert.equal(read, false);
 });
 
-test('iOS Firebase and separately admitted Apple files extend only the exact closed session kinds', () => {
-  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'google-wif', 'project-read-token']);
+test('iOS Firebase and separately admitted Apple and ASC files extend only the exact closed session kinds', () => {
+  assert.deepEqual(ASSET_KINDS, ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo-account', 'apple-operation-commitment']);
   assert.deepEqual(SESSION_FIELDS['ios-firebase'], []);
-  for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile']) {
+  for (const kind of ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8']) {
     assert.equal(isAssetFileKind(kind), true);
     assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), true);
   }
-  for (const kind of ['asc-p8', 'google-wif', 'project-read-token', 'IOS-Firebase', 'Apple-P12']) {
+  for (const kind of ['google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo-account', 'apple-operation-commitment', 'IOS-Firebase', 'Apple-P12', 'ASC-P8']) {
     assert.equal(isAssetFileKind(kind), false);
     assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), false);
   }
@@ -211,6 +232,48 @@ test('Apple selection password and assessment layouts stay exact, bounded and en
   }
 });
 
+test('ASC keeps exactly two nullable original companions and a fixed envelope-only assessment layout', () => {
+  assert.deepEqual(SESSION_FIELDS['asc-p8'], ['keyId', 'issuerId']);
+  const source = { type: 'selection', selectionToken: A };
+  for (const [index, fields] of [
+    { keyId: null, issuerId: null }, { keyId: '', issuerId: null },
+    { keyId: ' INERT_ASC_KEY_CANARY\0é ', issuerId: 'MixedCase-Inert-UUID\t' },
+    { keyId: 'é'.repeat(2048), issuerId: 'x'.repeat(4096) },
+    // Transport admits bounded original bytes; the core reports value-nul.
+    { keyId: '\0'.repeat(4096), issuerId: '\0'.repeat(4096) },
+  ].entries()) assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source, fields }), true, `valid ASC wire fields case ${index}`);
+  for (const [index, fields] of [
+    { keyId: null }, { issuerId: null }, { keyId: null, issuerId: null, password: null },
+    { keyId: 1, issuerId: null }, { keyId: null, issuerId: [] },
+    { keyId: 'x'.repeat(4097), issuerId: null }, { keyId: null, issuerId: 'é'.repeat(2049) },
+    { keyId: '\ud800', issuerId: null },
+  ].entries()) assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source, fields }), false, `invalid ASC wire fields case ${index}`);
+  const fields = { keyId: null, issuerId: null };
+  assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source: { type: 'scalar', kind: 'asc-p8', replacement: null }, fields }), false);
+  for (const extra of ['path', 'filename', 'bytes', 'privateKey', 'observation', 'algorithm', 'encoding']) {
+    assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind: 'asc-p8', replacement: null, [extra]: 'INERT_ASC_KEY_CANARY' }), false);
+    assert.equal(assetRequestFits('credential_prepare', { contextRevision: 1, source: { ...source, [extra]: 'INERT_ASC_KEY_CANARY' }, fields }), false);
+  }
+  for (const stage of ['candidate', 'external-testing', 'production']) for (const purpose of ['full', 'store']) {
+    const scope = { platform: 'ios', stage, purpose };
+    const value = status(2, { context: { ...context, ...scope }, operation: operation({ source: 'captured',
+      assessment: { ...appleAssessment('asc-p8'), context: scope },
+      preview: { token: A, action: 'save', expiresInMs: 10000, subject: { type: 'record', kind: 'asc-p8', change: 'new', recordId: null, recordRevision: null } } }) });
+    assert.deepEqual(parseAssetStatus(value), value); // DTO shape, not native profile qualification.
+    for (const mutate of [
+      (s) => { s.operation.assessment.fields.reverse(); },
+      (s) => { s.operation.assessment.fields[1].requirement = 'MOBILE_RELEASE_ASC_ISSUER_ID'; },
+      (s) => { s.operation.assessment.fields[1].value = 'INERT_ASC_KEY_CANARY'; },
+      (s) => { s.operation.assessment.fields.push({ ...s.operation.assessment.fields[1], id: 'password' }); },
+      (s) => { s.operation.assessment.privateKey = 'INERT_ASC_KEY_CANARY'; },
+      (s) => { s.operation.assessment.assurance.nativeValidation = 'verified'; },
+      (s) => { s.operation.assessment.assurance.serviceValidation = 'verified'; },
+      (s) => { s.operation.preview.subject.kind = 'apple-p12'; },
+    ]) { const changed = structuredClone(value); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+    assert.doesNotMatch(JSON.stringify(parseAssetStatus(value)), /INERT_ASC_KEY_CANARY|privateKey/);
+  }
+});
+
 test('bridge invokes only closed routes, copies admitted input, and removes raw error text', async () => {
   const work = deferred(); const calls = [];
   const api = createNativeApi('native', (command, args) => { calls.push({ command, args }); return work.promise; });
@@ -238,6 +301,7 @@ test('unqualified native and browser modes never collect input or fabricate a se
     assert.equal(h.controller.choose('ios-firebase'), false);
     assert.equal(h.controller.choose('apple-p12'), false);
     assert.equal(h.controller.choose('apple-profile'), false);
+    assert.equal(h.controller.choose('asc-p8'), false);
     assert.match(assetContextReason(h.controller.getSnapshot()), /qualification/u);
     await assert.rejects(previewApi.openAssetSession(), (error) => error.code === 'AssetSessionUnavailable');
     await assert.rejects(previewApi.prepareCredential({}), (error) => error.code === 'AssetSessionUnavailable');
@@ -270,7 +334,8 @@ test('preparation refuses active or uncertain work and local replacement/private
       assert.notEqual(preparationSessionReason(target, current, local), null);
       assert.deepEqual(local, { ...emptyPreparationLocal, ...patch });
     }
-    assert.match(preparationSessionReason(preparationView('asc-p8'), current, emptyPreparationLocal), /reference guide only/);
+    assert.equal(preparationSessionReason(preparationView('asc-p8', { platform: 'ios', stage: 'candidate', purpose: 'full' }), current, emptyPreparationLocal), null);
+    assert.match(preparationSessionReason(preparationView('unknown-credential'), current, emptyPreparationLocal), /reference guide only/);
     assert.equal(preparationSessionReason(target, current, emptyPreparationLocal, 'Other original work is pending.'), 'Other original work is pending.');
     const same = preparationView('google-wif', current.scope), form = { ...emptyPreparationLocal, kindId: 'google-wif', writeOnlyFormMounted: true };
     assert.equal(preparationScopeChanged(same, current.scope), false);
@@ -608,33 +673,47 @@ for (const finalAction of ['assign explicitly', 'change context']) test(`iOS XML
   } finally { h.controller.dispose(); }
 });
 
-for (const kind of ['apple-p12', 'apple-profile']) for (const finalAction of ['assign', 'context-change'])
+for (const kind of ['apple-p12', 'apple-profile', 'asc-p8']) for (const finalAction of ['assign', 'context-change'])
 test(`${kind} original selection keeps write-only companions separate and requires explicit current ${finalAction}`, async () => {
-  const iosContext = { ...context, platform: 'ios', purpose: 'signing' };
+  const purpose = kind === 'asc-p8' ? 'full' : 'signing';
+  const iosContext = { ...context, platform: 'ios', purpose };
   const ios = (revision, patch = {}) => status(revision, { context: iosContext, ...patch });
   const h = harness();
   try {
-    h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'signing' }); await ready(h, { context: iosContext });
+    h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose }); await ready(h, { context: iosContext });
     assert.equal(h.controller.choose(kind), true);
     assert.deepEqual(h.latest('choose').args, { contextRevision: 1, kind, replacement: null });
     h.latest('choose').resolve(ios(2, { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) })); await settle();
-    const fields = kind === 'apple-p12' ? { password: ' PRIVATE_P12_PASSWORD_CANARY\t' } : {};
-    for (const wrong of kind === 'apple-p12' ? [{}, { token: null }, { password: 'x'.repeat(4097) }] : [{ password: null }, { storePassword: null, keyAlias: null, keyPassword: null }])
+    const fields = kind === 'apple-p12' ? { password: ' PRIVATE_P12_PASSWORD_CANARY\t' } :
+      kind === 'asc-p8' ? { keyId: 'P8CANARY01', issuerId: '00112233-4455-6677-8899-AABBCCDDEEFF' } : {};
+    const selected = h.controller.getSnapshot();
+    for (const wrong of kind === 'apple-p12' ? [{}, { token: null }, { password: 'x'.repeat(4097) }] :
+      kind === 'asc-p8' ? [{}, { keyId: null }, { keyId: null, issuerId: null, password: null }, { keyId: 'é'.repeat(2049), issuerId: null }] :
+      [{ password: null }, { storePassword: null, keyAlias: null, keyPassword: null }]) {
       assert.equal(h.controller.prepareSelection(wrong), false);
+      assert.equal(h.controller.getSnapshot().entryGeneration, selected.entryGeneration);
+      assert.equal(h.controller.getSnapshot().previewDeadline, selected.previewDeadline);
+      assert.deepEqual(h.controller.getSnapshot().intent, selected.intent);
+      assert.equal(h.controller.getSnapshot().status.operation.selectionToken, A);
+    }
     assert.equal(h.calls.filter((call) => call.command === 'prepare').length, 0);
     const before = h.controller.getSnapshot().entryGeneration;
     assert.equal(h.controller.prepareSelection(fields), true); assert.equal(h.controller.prepareSelection(fields), false);
     assert.ok(h.controller.getSnapshot().entryGeneration > before);
     assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'selection', selectionToken: A }, fields });
-    assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /PRIVATE_P12_PASSWORD_CANARY/);
+    assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /PRIVATE_P12_PASSWORD_CANARY|INERT_ASC_KEY_CANARY|P8CANARY01|00112233-4455-6677-8899-AABBCCDDEEFF/);
     const subject = { type: 'record', kind, change: 'new', recordId: null, recordRevision: null };
     h.latest('prepare').resolve(ios(3, { operation: operation({ operationId: 4, source: 'captured', assessment: appleAssessment(kind),
       preview: { token: B, action: 'save', expiresInMs: 9000, subject } }) })); await settle();
-    assert.equal(h.controller.getSnapshot().reviewReady, true); assert.equal(h.controller.confirmPreview(B, 'save'), true);
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    const deadline = h.controller.getSnapshot().previewDeadline;
+    assert.equal(h.controller.confirmPreview(B, 'bind'), false);
+    assert.equal(h.controller.confirmPreview(B, 'save'), true); assert.equal(h.controller.confirmPreview(B, 'save'), false);
     const records = [{ recordId: D, revision: 1, kind, availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' }];
     h.latest('commit').resolve(ios(4, { records, operation: operation({ operationId: 5, operation: 'commit', source: 'captured', assessment: appleAssessment(kind),
       preview: { token: C, action: 'bind', expiresInMs: 8000, subject: { type: 'record', kind, change: 'assign', recordId: D, recordRevision: 1 } } }) })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true); assert.deepEqual(h.controller.getSnapshot().status.assignments, []);
+    assert.ok(h.controller.getSnapshot().previewDeadline <= deadline);
     assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
     if (finalAction === 'assign') {
       assert.equal(h.controller.confirmPreview(C, 'bind'), true);
@@ -642,12 +721,73 @@ test(`${kind} original selection keeps write-only companions separate and requir
         assignments: [{ kind, recordId: D, recordRevision: 1, contextRevision: 1, availability: 'available' }],
         operation: operation({ operationId: 6, operation: 'bind', phase: 'idle', source: 'captured', assessment: null, preview: null }) })); await settle();
       assert.equal(h.controller.getSnapshot().status.assignments[0].kind, kind);
-      assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /PRIVATE_P12_PASSWORD_CANARY/);
+      assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /PRIVATE_P12_PASSWORD_CANARY|INERT_ASC_KEY_CANARY|P8CANARY01|00112233-4455-6677-8899-AABBCCDDEEFF/);
     } else {
       h.setProject({ ...h.selected(), revision: 2, draft: { schemaVersion: 1, ios: { teamId: 'Z9Y8X7W6V5' } } });
       assert.equal(h.controller.getSnapshot().contextCurrent, false); assert.equal(h.controller.getSnapshot().reviewReady, false);
       assert.equal(h.controller.confirmPreview(C, 'bind'), false); assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
     }
+  } finally { h.controller.dispose(); }
+});
+
+test('ASC replacement Cancel spends the selected original without restoring old assignments or private entry', async () => {
+  const kind = 'asc-p8', iosContext = { ...context, platform: 'ios' };
+  const ios = (revision, patch = {}) => status(revision, { context: iosContext, ...patch });
+  const record = { recordId: D, revision: 7, kind, availability: 'assigned', storage: 'session', label: null, payloadState: 'assessed' };
+  const assignment = { kind, recordId: D, recordRevision: 7, contextRevision: 1, availability: 'available' };
+  const h = harness();
+  try {
+    h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'full' });
+    await ready(h, { context: iosContext, records: [record], assignments: [assignment] });
+    assert.equal(h.controller.choose(kind, { recordId: D, expectedRevision: 7 }), true);
+    const revoked = { ...assignment, availability: 'unavailable' };
+    const selected = ios(2, { records: [{ ...record, availability: 'mutation-pending' }], assignments: [revoked],
+      operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) });
+    h.latest('choose').resolve(selected); await settle();
+    assert.deepEqual(h.controller.getSnapshot().intent, { type: 'record', kind, change: 'replace', record: { recordId: D, expectedRevision: 7 } });
+    assertPreparationPreservesOriginal(h);
+    const generation = h.controller.getSnapshot().entryGeneration;
+    assert.equal(h.controller.discard(), true);
+    assert.ok(h.controller.getSnapshot().entryGeneration > generation);
+    assert.equal(h.latest('discard').args, 3);
+    h.latest('discard').resolve(ios(3, { records: [{ ...record, availability: 'unassigned', payloadState: 'not-checked' }], assignments: [revoked],
+      operation: operation({ operation: 'discard', phase: 'idle', reason: 'user-cancelled', source: 'refused', assessment: null, preview: null }) })); await settle();
+    h.emit(selected); // A late original selection cannot revive the form/token.
+    assert.equal(h.controller.getSnapshot().status.statusRevision, 3);
+    assert.equal(h.controller.getSnapshot().status.operation.selectionToken, null);
+    assert.equal(h.controller.prepareSelection({ keyId: null, issuerId: null }), false);
+    assert.equal(h.controller.getSnapshot().status.records[0].revision, 7);
+    assert.equal(h.controller.getSnapshot().status.assignments[0].availability, 'unavailable');
+    assert.equal(h.calls.some((call) => ['prepare', 'commit', 'bind'].includes(call.command)), false);
+  } finally { h.controller.dispose(); }
+});
+
+for (const refusal of ['expired', 'different-subject']) test(`ASC original review refuses ${refusal} confirmation without renewing authority`, async () => {
+  const kind = 'asc-p8', iosContext = { ...context, platform: 'ios' };
+  const ios = (revision, patch = {}) => status(revision, { context: iosContext, ...patch });
+  const record = { recordId: D, revision: 1, kind, availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' };
+  const h = harness();
+  try {
+    h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'full' }); await ready(h, { context: iosContext });
+    assert.equal(h.controller.choose(kind), true);
+    h.latest('choose').resolve(ios(2, { operation: operation({ operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: A, assessment: null, preview: null }) })); await settle();
+    assert.equal(h.controller.prepareSelection({ keyId: 'P8CANARY01', issuerId: '00112233-4455-6677-8899-AABBCCDDEEFF' }), true);
+    const reviewed = ios(3, { operation: operation({ operationId: 4, source: 'captured', assessment: appleAssessment(kind),
+      preview: { token: B, action: 'save', expiresInMs: 9000, subject: { type: 'record', kind, change: 'new', recordId: null, recordRevision: null } } }) });
+    h.latest('prepare').resolve(reviewed); await settle();
+    const deadline = h.controller.getSnapshot().previewDeadline;
+    assert.equal(h.controller.getSnapshot().reviewReady, true);
+    if (refusal === 'expired') {
+      h.time(deadline); h.emit(reviewed);
+      assert.equal(h.controller.getSnapshot().previewDeadline, deadline);
+    } else {
+      const changed = structuredClone(reviewed); changed.statusRevision = 4; changed.records = [record];
+      changed.operation.preview.subject = { type: 'record', kind, change: 'replace', recordId: D, recordRevision: 1 };
+      assert.ok(parseAssetStatus(changed)); h.emit(changed);
+      assert.equal(h.controller.getSnapshot().reviewReady, false);
+    }
+    assert.equal(h.controller.confirmPreview(B, 'save'), false);
+    assert.equal(h.calls.some((call) => call.command === 'commit'), false);
   } finally { h.controller.dispose(); }
 });
 
@@ -692,7 +832,12 @@ test('live session help explains actual collection and does not promise restored
   assert.equal(keystore.fields.find((field) => field.id === 'storePassword').requiredWhen, guide.kinds[0].fields.find((field) => field.id === 'storePassword').requiredWhen);
   assert.match(keystore.fields.find((field) => field.id === 'storePassword').failure, /accepts the write-only value/u);
   assert.doesNotMatch(keystore.fields.find((field) => field.id === 'storePassword').failure, /No password is entered/u);
-  assert.deepEqual(keystore.fields.find((field) => field.id === 'file').suffixes, ['.jks', '.keystore']);
+  assert.deepEqual(keystore.fields.find((field) => field.id === 'file').suffixes, ['.jks', '.keystore', '.p12', '.pfx']);
+  assert.match(keystore.fields.find((field) => field.id === 'file').format, /recognized from bytes, not filenames.*Recognition is not key or password validation/u);
+  assert.match(keystore.fields.find((field) => field.id === 'file').where, /admitted Linux or Apple-silicon Mac session.*private original outside registered project/);
+  const android = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'android-firebase'));
+  assert.match(android.fields[0].where, /intended Android app.*google-services\.json.*admitted Linux or Apple-silicon Mac session/);
+  assert.match(android.fields[0].failure, /application-ID mismatch.*No Firebase service is contacted/);
   assert.match(sessionControlHelp(guide, 'save').failure, /never restores assignment automatically/u);
   assert.doesNotMatch(sessionControlHelp(guide, 'save').failure, /preserves prior authority|No save is available/u);
   assert.match(sessionControlHelp(guide, 'project').format, /Submission is not validation/u);
@@ -710,17 +855,45 @@ test('live session help explains actual collection and does not promise restored
   const profile = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'apple-profile'));
   assert.match(profile.fields[0].format, /4 MiB.*DER CMS SignedData.*No password/);
   assert.match(profile.fields[0].failure, /not proof of Apple authenticity/);
+  const asc = sessionKindHelp(guide.kinds.find((kind) => kind.id === 'asc-p8'));
+  assert.deepEqual(asc.fields.map((field) => field.id), ['file', 'keyId', 'issuerId']);
+  assert.deepEqual(asc.fields[0].suffixes, ['.p8']);
+  assert.match(asc.fields[0].format, /4 MiB.*unencrypted PRIVATE KEY PEM.*DER PKCS#8 version 0.*identifiers only/);
+  assert.match(asc.fields[0].failure, /do not prove mathematical private-key validity.*ownership.*revocation.*permissions/);
+  assert.match(asc.fields[1].format, /10 uppercase ASCII.*4,096 UTF-8 bytes.*Do not trim or normalize.*write-only/);
+  assert.match(asc.fields[2].format, /UUID spelling: 8-4-4-4-12/);
+  assert.match(asc.fields[2].format, /4,096 UTF-8 bytes.*Do not trim or normalize.*write-only/);
+  assert.deepEqual(asc.fields.map((field) => field.requiredWhen), guide.kinds.find((kind) => kind.id === 'asc-p8').fields.map((field) => field.requiredWhen));
   assert.deepEqual(guide, original);
 });
 
-test('Apple UI reuses original password-only write-only lifetime without file-path or browser-storage collection', () => {
+test('Android, Apple and ASC UI reuse the original write-only lifetime without file-path or browser-storage collection', () => {
   const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
-  assert.match(component, /type="password".*autoComplete="new-password"/);
+  assert.ok(component.includes("type={kind.id === 'apple-operation-commitment' && name === 'keyVersion' ? 'text' : 'password'} autoComplete=\"new-password\""));
+  // Only that exact public version identifier is visible while editing. Other
+  // kinds (including existing text identifiers) and the private key stay masked.
   assert.ok(component.includes("state.selectionKind === 'apple-p12' ? { password: fields.password ?? null }"));
+  assert.ok(component.includes("state.selectionKind === 'asc-p8' ? { keyId: fields.keyId ?? null, issuerId: fields.issuerId ?? null }"));
   assert.ok(component.includes("if (onPrepare(fields, encrypted ? proposedLabel : null)) { setValues({}); setLabel(''); }"));
   assert.ok(component.includes('state.entryGeneration'));
+  assert.ok(component.includes('idle && !intentPending && isAssetScalarKind(kindId)'));
+  assert.ok(component.includes("controller.prepareScalar('apple-review-contact'"));
+  assert.ok(component.includes("controller.prepareScalar('apple-review-demo-account'"));
+  assert.match(component, /private Apple review contact\/demo inputs/u);
+  assert.doesNotMatch(component, /Those Mac contexts admit only ASC P8/u);
   assert.match(component, /P12 envelope only: the password has not been tested/);
   assert.match(component, /CMS envelope only: this does not establish an Apple issuer/);
+  assert.match(component, /P8 envelope and EC\/P-256 identifiers only: no mathematical private-key validity.*Store access has been verified/);
+  assert.match(component, /state\.selectionKind === 'android-keystore' \?\s*\{ storePassword: fields\.storePassword \?\? null, keyAlias: fields\.keyAlias \?\? null, keyPassword: fields\.keyPassword \?\? null \}/u);
+  const dependencyHelp = component.match(/<p>For a project dependency token,[\s\S]*?<\/p>/u)?.[0];
+  assert.ok(dependencyHelp);
+  assert.match(dependencyHelp, /Project dependency access/u);
+  assert.match(dependencyHelp, /Candidate \/ internal testing · Build \/ signing only/u);
+  assert.match(dependencyHelp, /Android or iOS context when core requires it for that build/u);
+  assert.match(dependencyHelp, /does not fetch source or verify token permissions/u);
+  assert.match(component, /Admitted Linux or Apple-silicon Mac sessions can collect supported Android inputs and ASC P8/);
+  assert.match(component, /Windows import and binary plist are unavailable/);
+  assert.doesNotMatch(component, /Windows import, ASC P8 and binary plist are unavailable/);
   assert.doesNotMatch(component, /type="file"|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b/);
 });
 
@@ -853,17 +1026,30 @@ test('native v2 routes are exact, browser-unavailable, and never acquire fields 
     await assert.rejects(action(), (error) => error.code === 'AssetSessionUnavailable');
 });
 
-test('encrypted Save ends unassigned; only explicit preparation of the actual saved revision can lead to Bind', async () => {
-  const h = harness(vaultStatus());
+for (const kind of ['google-wif', 'asc-p8']) test(`${kind} encrypted Save ends unassigned; only explicit preparation of the actual saved revision can lead to Bind`, async () => {
+  const scope = { platform: kind === 'asc-p8' ? 'ios' : 'android', stage: 'candidate', purpose: 'full' };
+  const native = (revision, patch = {}) => vaultStatus(revision, { context: { ...context, ...scope }, ...patch });
+  const checkedInput = kind === 'asc-p8' ? appleAssessment(kind) : assessment();
+  const h = harness(native(0)); let revision = 1;
   try {
-    await ready(h, { mode: 'encrypted', persistence: vaultStatus().persistence });
-    assert.equal(h.controller.prepareScalar('google-wif', fields, null, 'Upload identity'), true);
-    assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'scalar', kind: 'google-wif', replacement: null }, fields, label: 'Upload identity' });
-    assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /inert-provider-canary|Upload identity/, 'private entry is not retained in display state');
-    h.latest('prepare').resolve(vaultStatus(2, { operation: operation() })); await settle();
+    h.controller.setScope(scope);
+    await ready(h, { context: { ...context, ...scope }, mode: 'encrypted', persistence: vaultStatus().persistence });
+    if (kind === 'asc-p8') {
+      assert.equal(h.controller.choose(kind), true);
+      h.latest('choose').resolve(native(++revision, { operation: operation({ operationId: 2, operation: 'choose-file', phase: 'selected', source: 'captured', selectionToken: D, assessment: null, preview: null }) })); await settle();
+      const fields = { keyId: 'P8CANARY01', issuerId: '00112233-4455-6677-8899-AABBCCDDEEFF' };
+      assert.equal(h.controller.prepareSelection(fields, 'Upload identity'), true);
+      assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'selection', selectionToken: D }, fields, label: 'Upload identity' });
+    } else {
+      assert.equal(h.controller.prepareScalar(kind, fields, null, 'Upload identity'), true);
+      assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'scalar', kind, replacement: null }, fields, label: 'Upload identity' });
+    }
+    assert.doesNotMatch(JSON.stringify(h.controller.getSnapshot()), /inert-provider-canary|P8CANARY01|Upload identity/, 'private entry is not retained in display state');
+    h.latest('prepare').resolve(native(++revision, { operation: operation({ assessment: checkedInput,
+      preview: { token: A, action: 'save', expiresInMs: 10000, subject: { type: 'record', kind, change: 'new', recordId: null, recordRevision: null } } }) })); await settle();
     assert.equal(h.controller.confirmPreview(A, 'save'), true);
-    const record = vaultRecord({ label: 'Upload identity' });
-    h.latest('commit').resolve(vaultStatus(3, { records: [record], operation: operation({ operationId: 4, operation: 'commit', phase: 'idle', assessment: null, preview: null,
+    const record = vaultRecord({ kind, label: 'Upload identity' });
+    h.latest('commit').resolve(native(++revision, { records: [record], operation: operation({ operationId: 4, operation: 'commit', phase: 'idle', assessment: null, preview: null,
       storageOutcome: { effect: 'known-applied', durability: 'confirmed', cleanup: 'known' } }) })); await settle();
     const saved = h.controller.getSnapshot();
     assert.equal(saved.reviewReady, false); assert.equal(saved.status.operation.preview, null);
@@ -873,13 +1059,13 @@ test('encrypted Save ends unassigned; only explicit preparation of the actual sa
     assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), true);
     assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'record', recordId: C, expectedRevision: 1 } });
     const checked = { ...record, payloadState: 'assessed' };
-    h.latest('prepare').resolve(vaultStatus(4, { records: [checked], operation: operation({ operationId: 5,
-      preview: { token: B, action: 'bind', expiresInMs: 10000, subject: { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 } } }) })); await settle();
+    h.latest('prepare').resolve(native(++revision, { records: [checked], operation: operation({ operationId: 5, assessment: checkedInput,
+      preview: { token: B, action: 'bind', expiresInMs: 10000, subject: { type: 'record', kind, change: 'assign', recordId: C, recordRevision: 1 } } }) })); await settle();
     assert.equal(h.controller.getSnapshot().reviewReady, true);
     assert.equal(h.controller.confirmPreview(B, 'bind'), true);
     assert.equal(h.latest('bind').args, B);
-    h.latest('bind').resolve(vaultStatus(5, { records: [{ ...checked, availability: 'assigned' }],
-      assignments: [{ kind: 'google-wif', recordId: C, recordRevision: 1, contextRevision: 1, availability: 'available' }],
+    h.latest('bind').resolve(native(++revision, { records: [{ ...checked, availability: 'assigned' }],
+      assignments: [{ kind, recordId: C, recordRevision: 1, contextRevision: 1, availability: 'available' }],
       operation: operation({ operationId: 6, operation: 'bind', phase: 'idle', assessment: null, preview: null }) })); await settle();
     assert.equal(h.controller.getSnapshot().contextCurrent, true);
     assert.equal(h.controller.getSnapshot().status.assignments.length, 1);
@@ -1006,7 +1192,8 @@ test('encrypted live help keeps user labels nonsecret and saving distinct from a
     for (const field of ['label', 'requiredWhen', 'what', 'why', 'where', 'format', 'failure']) assert.ok(help[field].length, `${id}/${field}`);
   }
   assert.equal(sessionControlHelp(guide, 'label', 'encrypted').requiredness, 'optional');
-  assert.match(sessionControlHelp(guide, 'mode', 'encrypted').failure, /trusted operating system.*desktop account.*Secret Service.*not atomic process protection/);
+  assert.match(sessionControlHelp(guide, 'mode', 'encrypted').failure, /trusted operating system.*original desktop account and session.*not atomic process protection.*compromised account/);
+  assert.match(sessionControlHelp(guide, 'mode', 'encrypted').failure, /fails closed.*without replacing a key or weakening OS permissions.*erasure is not promised/);
   assert.match(sessionControlHelp(guide, 'label', 'encrypted').format, /128 UTF-8 bytes/);
   assert.match(sessionControlHelp(guide, 'save', 'encrypted').format, /Saved means not assigned.*stored payload has not yet been checked/);
   assert.match(sessionControlHelp(guide, 'assign', 'encrypted').format, /actual stored revision/);
@@ -1016,4 +1203,228 @@ test('encrypted live help keeps user labels nonsecret and saving distinct from a
   assert.match(sessionTargetLabel(guide, subject, [vaultRecord({ label: '<nonsecret text>' })], 'encrypted'), /<nonsecret text> · item 1 · revision 1/);
   assert.equal(sessionTargetLabel(guide, { ...subject, recordRevision: 2 }, [vaultRecord()], 'encrypted'), null);
   assert.deepEqual(guide, before, 'the static catalogue and requiredness are unchanged');
+});
+
+
+function imageOperation(patch = {}) {
+  return operation({ operation: 'choose-images', phase: 'capturing', source: 'pending', settlement: 'pending',
+    assessment: null, preview: null, selectionToken: null, ...patch });
+}
+
+test('generic choose-images status is passive closed DATA, never a credential kind or authority', () => {
+  for (const mode of ['closed', 'session', 'encrypted']) {
+    for (const phase of ['admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown', 'idle']) {
+      const op = imageOperation({ phase, source: phase === 'selected' ? 'captured' : phase === 'unknown' ? 'unknown' : 'pending',
+        settlement: phase === 'selected' || phase === 'idle' ? 'known' : phase === 'unknown' ? 'unknown' : 'pending' });
+      const frame = status(1, { mode, context: null, operation: op,
+        persistence: mode === 'encrypted' ? { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' } : null });
+      assert.deepEqual(parseAssetStatus(frame), frame);
+      for (const change of [
+        (v) => { v.operation.selectionToken = A; }, (v) => { v.operation.assessment = assessment(); },
+        (v) => { v.operation.preview = operation().preview; }, (v) => { v.operation.items = []; },
+        (v) => { v.operation.root = '/inert-not-a-source'; }, (v) => { v.operation.bytes = [1]; },
+        (v) => { v.operation.operationId = A; },
+        (v) => { v.operation.phase = 'assessing'; }, (v) => { v.operation.phase = 'preview'; },
+        (v) => { v.operation.phase = 'mutating'; },
+        (v) => { v.operation.storageOutcome = { effect: 'known-none', durability: 'not-run', cleanup: 'known' }; },
+      ]) {
+        const invalid = structuredClone(frame); change(invalid); assert.equal(parseAssetStatus(invalid), null);
+      }
+    }
+  }
+  assert.equal(ASSET_KINDS.includes('choose-images'), false);
+  assert.equal(isAssetFileKind('choose-images'), false);
+  assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind: 'choose-images', replacement: null }), false);
+});
+
+test('every active image phase blocks credential context, mutations, discard and lock without another cancellation route', async () => {
+  for (const phase of ['admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown']) {
+    const h = harness();
+    try {
+      await ready(h); const before = h.calls.length, scope = h.controller.getSnapshot().scope;
+      h.emit(status(2, { operation: imageOperation({ phase, source: phase === 'selected' ? 'captured' : phase === 'unknown' ? 'unknown' : 'pending',
+        settlement: phase === 'selected' ? 'known' : phase === 'unknown' ? 'unknown' : 'pending' }) }));
+      const observed = h.controller.getSnapshot();
+      assert.equal(assetImageOperationPending(observed.status), true);
+      assert.notEqual(assetSessionReason(observed), null);
+      assert.match(assetCancellationReason(observed), /original image operation in Metadata/);
+      assert.equal(observed.contextCurrent, false);
+      h.controller.setScope({ platform: 'ios', stage: 'production', purpose: 'store' });
+      assert.deepEqual(h.controller.getSnapshot().scope, scope);
+      h.controller.submitContext();
+      assert.equal(h.controller.choose('android-keystore'), false);
+      assert.equal(h.controller.prepareScalar('google-wif', fields), false);
+      assert.equal(h.controller.prepareSelection({}), false);
+      assert.equal(h.controller.prepareRecord({ recordId: C, expectedRevision: 1 }), false);
+      assert.equal(h.controller.prepareDelete({ recordId: C, expectedRevision: 1 }), false);
+      assert.equal(h.controller.confirmPreview(A, 'save'), false);
+      assert.equal(h.controller.discard(), false); assert.equal(h.controller.lock(), false);
+      h.setProject({ ...h.selected(), revision: 2 });
+      await settle(); assert.equal(h.calls.length, before, phase);
+      assert.equal(h.controller.getSnapshot().selectionKind, null);
+      assert.equal(h.controller.getSnapshot().reviewReady, false);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('an image slot suppresses an already queued credential context but does not auto-submit it on retirement', async () => {
+  const h = harness();
+  try {
+    await ready(h); const before = h.calls.length;
+    h.controller.setScope({ platform: 'android', stage: 'production', purpose: 'full' });
+    h.emit(status(2, { operation: imageOperation() })); await settle();
+    assert.equal(h.calls.length, before);
+    assert.equal(h.controller.getSnapshot().updatingContext, false);
+    h.emit(status(3, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) })); await settle();
+    assert.equal(h.calls.length, before, 'retirement is passive, not permission to mutate credential context');
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    h.controller.submitContext(); await settle();
+    assert.equal(h.calls.length, before + 1);
+    assert.equal(h.latest('context').args.stage, 'production');
+    h.latest('context').resolve(status(4, { context: { ...context, revision: 2, stage: 'production' },
+      operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) })); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, true);
+  } finally { h.controller.dispose(); }
+});
+
+test('image retirement is monotone, unknown stays blocked and idle never supplies credential origin authority', async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    const selected = status(2, { operation: imageOperation({ phase: 'selected', source: 'captured', settlement: 'known' }) });
+    h.emit(selected); h.emit(status(1));
+    assert.equal(h.controller.getSnapshot().status.operation.operation, 'choose-images');
+    assert.equal(h.controller.getSnapshot().originPending, false);
+    assert.equal(h.controller.getSnapshot().intent, null);
+    assert.equal(h.controller.getSnapshot().previewDeadline, null);
+    h.emit(status(3, { operation: imageOperation({ phase: 'unknown', source: 'unknown', settlement: 'unknown', reason: 'cleanup-unknown' }) }));
+    h.emit(status(4, { operation: imageOperation({ phase: 'unknown', source: 'unknown', settlement: 'late-known', reason: 'cleanup-unknown' }) }));
+    h.emit(status(5, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
+    assert.equal(h.controller.getSnapshot().blocked, true);
+    assert.equal(h.controller.choose('android-keystore'), false);
+    assert.equal(h.controller.discard(), false); assert.equal(h.controller.lock(), false);
+    assert.equal(h.calls.some((row) => row.command === 'discard' || row.command === 'lock'), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('CredentialSession renders choose-images only as passive status without a second Stop or private form', () => {
+  const component = readFileSync(new URL('../src/components/CredentialSession.tsx', import.meta.url), 'utf8');
+  const start = component.indexOf('imageOperation ? <div'), end = component.indexOf(': projectPathOperation ?', start);
+  assert.ok(start >= 0 && end > start);
+  const passive = component.slice(start, end);
+  assert.ok(passive.includes('Original image selection status'));
+  assert.ok(passive.includes('passive busy and retirement display'));
+  assert.ok(passive.includes('original image operation in Metadata'));
+  assert.doesNotMatch(passive, /onClick=|controller\.(discard|lock|choose)|selectionToken|assessment|preview\.token/);
+  assert.ok(component.includes('nativeAvailable && writable && guide && !projectPathActive && !imageActive'));
+  assert.equal((component.match(/disabled=\{!!state\.busy \|\| projectPathActive \|\| imageActive\}/g) ?? []).length, 2);
+  assert.ok(component.includes('nativeBusyReason !== null || imageActive'));
+});
+
+test('image retirement never auto-submits a deferred credential context even with a writable storage observation', async () => {
+  const h = harness(vaultStatus(0, { context: null, persistence: { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' } }));
+  try {
+    await h.controller.connect(h.api); const before = h.calls.length;
+    h.emit(vaultStatus(1, { context: null, persistence: { state: 'locked', reason: 'vault-keyring-locked', keyAccess: 'locked' },
+      operation: imageOperation() }));
+    h.emit(vaultStatus(2, { context: null, operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
+    await settle(); assert.equal(h.calls.length, before);
+    assert.equal(h.controller.getSnapshot().contextCurrent, false);
+    h.controller.submitContext(); await settle(); assert.equal(h.calls.length, before + 1);
+    h.latest('context').resolve(vaultStatus(3, { operation: imageOperation({ phase: 'idle', source: 'captured', settlement: 'known' }) }));
+    await settle(); assert.equal(h.controller.getSnapshot().contextCurrent, true);
+  } finally { h.controller.dispose(); }
+});
+
+
+test('private Apple contact/demo/recovery-key requests remain exact write-only scalar kinds and results never carry their values', () => {
+  for (const [kind, fields] of Object.entries(privateReviewFields)) {
+    assert.equal(isAssetScalarKind(kind), true); assert.equal(isAssetFileKind(kind), false);
+    assert.deepEqual(SESSION_FIELDS[kind], Object.keys(fields));
+    const request = { contextRevision: 1, source: { type: 'scalar', kind, replacement: null }, fields };
+    assert.equal(assetRequestFits('credential_prepare', request), true);
+    assert.equal(assetRequestFits('asset_choose', { contextRevision: 1, kind, replacement: null }), false);
+    for (const key of Object.keys(fields)) {
+      const missing = structuredClone(request); delete missing.fields[key];
+      assert.equal(assetRequestFits('credential_prepare', missing), false);
+      const large = structuredClone(request); large.fields[key] = 'é'.repeat(2049);
+      assert.equal(assetRequestFits('credential_prepare', large), false);
+      const maximum = structuredClone(request); maximum.fields[key] = 'é'.repeat(2048);
+      assert.equal(assetRequestFits('credential_prepare', maximum), true, 'native/core, not renderer, judge scalar format policy');
+    }
+    for (const extra of ['token', 'file', 'observation', 'path']) {
+      const wrong = structuredClone(request); wrong.fields[extra] = 'PRIVATE_CANARY';
+      assert.equal(assetRequestFits('credential_prepare', wrong), false);
+    }
+    const value = status(2, { context: { ...context, ...privateReviewScope }, operation: operation({
+      assessment: privateReviewAssessment(kind), preview: { token: A, action: 'save', expiresInMs: 10000,
+        subject: { type: 'record', kind, change: 'new', recordId: null, recordRevision: null } },
+    }) });
+    assert.deepEqual(parseAssetStatus(value), value);
+    for (const mutate of [
+      (v) => { v.operation.assessment.fields[0].value = 'PRIVATE_CANARY'; },
+      (v) => { v.operation.assessment.fields[0].requirement = 'MOBILE_RELEASE_PROJECT_READ_TOKEN'; },
+      (v) => { v.operation.assessment.assurance.serviceValidation = 'verified'; },
+      (v) => { v.operation.assessment.fields.push({ ...v.operation.assessment.fields[0], id: 'file' }); },
+    ]) { const changed = structuredClone(value); mutate(changed); assert.equal(parseAssetStatus(changed), null); }
+    const safe = JSON.stringify(parseAssetStatus(value));
+    for (const secret of Object.values(fields)) assert.equal(safe.includes(secret), false);
+    const help = sessionKindHelp(guide.kinds.find((entry) => entry.id === kind));
+    for (const field of help.fields) {
+      assert.equal(field.input, field.id === 'keyVersion' ? 'text' : 'secret');
+      assert.match(field.format, /write-only/); assert.doesNotMatch(field.format, /future/i);
+    }
+  }
+  assert.equal(isAssetScalarKind('asc-p8'), false); assert.equal(isAssetScalarKind('unknown'), false);
+});
+
+test('private Apple scalar kinds retain one-use Keep then Assign and suppress original late outcomes after context changes', async () => {
+  for (const [kind, fields] of Object.entries(privateReviewFields)) {
+    const ctx = { ...context, ...privateReviewScope };
+    const reply = (revision, patch = {}) => status(revision, { context: ctx, ...patch });
+    const reviewed = operation({ assessment: privateReviewAssessment(kind), preview: {
+      token: A, action: 'save', expiresInMs: 10000, subject: { type: 'record', kind, change: 'new', recordId: null, recordRevision: null },
+    } });
+    const h = harness();
+    try {
+      h.controller.setScope({ ...privateReviewScope }); await ready(h, { context: ctx });
+      assert.equal(h.controller.prepareScalar(kind, { ...fields }), true);
+      assert.equal(h.controller.prepareScalar(kind, { ...fields }), false);
+      assert.deepEqual(h.latest('prepare').args, { contextRevision: 1, source: { type: 'scalar', kind, replacement: null }, fields });
+      for (const secret of Object.values(fields)) assert.equal(JSON.stringify(h.controller.getSnapshot()).includes(secret), false);
+      h.latest('prepare').resolve(reply(2, { operation: reviewed })); await settle();
+      assert.equal(h.controller.confirmPreview(A, 'bind'), false);
+      assert.equal(h.controller.confirmPreview(A, 'save'), true); assert.equal(h.controller.confirmPreview(A, 'save'), false);
+      const kept = { recordId: C, revision: 1, kind, availability: 'unassigned', storage: 'session', label: null, payloadState: 'assessed' };
+      h.latest('commit').resolve(reply(3, { records: [kept], operation: operation({
+        operationId: 4, operation: 'commit', assessment: privateReviewAssessment(kind),
+        preview: { token: B, action: 'bind', expiresInMs: 10000, subject: { type: 'record', kind, change: 'assign', recordId: C, recordRevision: 1 } },
+      }) })); await settle();
+      assert.deepEqual(h.controller.getSnapshot().status.assignments, []);
+      assert.equal(h.calls.filter((call) => call.command === 'bind').length, 0);
+      assert.equal(h.controller.confirmPreview(B, 'bind'), true); assert.equal(h.controller.confirmPreview(B, 'bind'), false);
+      h.latest('bind').resolve(reply(4, { records: [{ ...kept, availability: 'assigned' }],
+        assignments: [{ kind, recordId: C, recordRevision: 1, contextRevision: 1, availability: 'available' }],
+        operation: operation({ operationId: 5, operation: 'bind', phase: 'idle', assessment: null, preview: null }),
+      })); await settle();
+      assert.equal(h.controller.getSnapshot().status.assignments[0].kind, kind);
+      assert.equal(h.calls.filter((call) => call.command === 'commit').length, 1);
+    } finally { h.controller.dispose(); }
+    for (const rejected of [false, true]) {
+      const late = harness();
+      try {
+        late.controller.setScope({ ...privateReviewScope }); await ready(late, { context: ctx });
+        assert.equal(late.controller.prepareScalar(kind, { ...fields }), true);
+        const original = late.latest('prepare');
+        late.setProject({ ...late.selected(), revision: 2, draft: { schemaVersion: 1, marker: 'changed-context' } });
+        if (rejected) original.reject(new Error('PRIVATE_REJECTION_CANARY'));
+        else original.resolve(reply(2, { operation: reviewed }));
+        await settle();
+        assert.equal(late.controller.confirmPreview(A, 'save'), false);
+        assert.equal(late.controller.getSnapshot().contextCurrent, false);
+        assert.equal(late.calls.filter((call) => call.command === 'commit' || call.command === 'bind').length, 0);
+        assert.doesNotMatch(JSON.stringify(late.controller.getSnapshot()), /PRIVATE_.*CANARY/);
+      } finally { late.controller.dispose(); }
+    }
+  }
 });

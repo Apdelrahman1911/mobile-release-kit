@@ -112,7 +112,7 @@ class LifecycleSourcePinTests(unittest.TestCase):
             "verify/desktop-ubuntu-publication": {"publisher-helpers": 1},
             ("verify/desktop-project-recovery, verify/desktop-installed-shell, verify/desktop-installed-github-readonly, "
              "verify/desktop-installed-github-normal-boundaries, verify/desktop-installed-github-preflight, "
-             "verify/desktop-shell-host-metadata"): {"compile": 3, "recovery-negative": 2},
+             "verify/desktop-installed-github-release, verify/desktop-shell-host-metadata"): {"compile": 3, "recovery-negative": 2},
         }
         self.assertIn(branches[0], profiles, "Unknown or mixed publication route")
         expected_jobs = profiles[branches[0]]

@@ -563,12 +563,14 @@ fn native_event(call: &Arc<GuiCall>, event: native::DialogEvent, quit: bool) {
     }
     call.changed();
 }
+#[derive(PartialEq)]
+enum ChosenPath { Single(PathBuf), PublicImages(Vec<PathBuf>) }
 fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::DialogKind,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"),
         not(feature = "macos-installed-installer")))]
     observation: Option<(Arc<super::installed_observation::Observation>, tauri::AppHandle)>,
-) -> Result<Option<PathBuf>, Reason> {
+) -> Result<Option<ChosenPath>, Reason> {
     let Some(owner) = call.owner() else { call.not_created(Reason::DocumentLost); return Err(Reason::DocumentLost); };
     if owner.interrupted() { call.not_created(Reason::UserCancelled); return Err(Reason::UserCancelled); }
     let parent = match SESSION.with(|slot| slot.try_borrow().map_err(|_| native::UiError::State)?
@@ -609,12 +611,24 @@ fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::D
     if !original.created() { call.not_created(if owner.interrupted() { Reason::UserCancelled } else { Reason::SourceRefused }); }
     let result = match returned {
         Ok(result) => {
-            if let Some(path) = result.selected { call.selected_path(Ok(path)); }
+            if kind == native::DialogKind::PublicImages {
+                if result.selected.is_some() { call.failed(Reason::CleanupUnknown); return Err(Reason::CleanupUnknown); }
+                if result.response == Some(native::DialogResponse::Accept) && !owner.interrupted() {
+                    let paths = original.take_public_images().map_err(|error|
+                        if error == native::UiError::CleanupUnknown { Reason::CleanupUnknown } else { Reason::SourceRefused })
+                        .and_then(|paths| paths.ok_or(Reason::SourceRefused));
+                    call.selected_public_images(paths);
+                }
+            } else if let Some(path) = result.selected { call.selected_path(Ok(path)); }
             let mut facts = call.facts().ok_or(Reason::CleanupUnknown)?;
             if let Some(reason) = facts.refusal { Err(reason) }
             else if owner.interrupted() && kind != native::DialogKind::Quit { Err(Reason::UserCancelled) }
             else if kind == native::DialogKind::Quit || !facts.accepted { Ok(None) }
-            else { facts.selected.take().map(Some).ok_or(Reason::SourceRefused) }
+            else if kind == native::DialogKind::PublicImages {
+                if facts.selected.is_some() { Err(Reason::CleanupUnknown) }
+                else { drop(facts); call.take_public_images()?.map(|paths| Some(ChosenPath::PublicImages(paths))).ok_or(Reason::SourceRefused) }
+            }
+            else { facts.selected.take().map(|path| Some(ChosenPath::Single(path))).ok_or(Reason::SourceRefused) }
         }
         Err(error) => { let reason = if error == native::UiError::CleanupUnknown { Reason::CleanupUnknown } else { Reason::SourceRefused };
             call.failed(reason); Err(reason) }
@@ -628,8 +642,33 @@ fn show(call: Arc<GuiCall>, control: Arc<native::DialogControl>, kind: native::D
 }
 pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
     initial_folder: Option<PathBuf>) -> Result<Option<PathBuf>, Reason> {
+    if matches!(choice, DialogChoice::PublicImages) {
+        owner.gui.not_created(Reason::UnsupportedPlatform); return Err(Reason::UnsupportedPlatform);
+    }
+    match run_owned_choice(app, owner, choice, initial_folder).await? {
+        Some(ChosenPath::Single(path)) => Ok(Some(path)), None => Ok(None),
+        Some(ChosenPath::PublicImages(_)) => { owner.gui.failed(Reason::CleanupUnknown); Err(Reason::CleanupUnknown) },
+    }
+}
+pub(crate) async fn run_owned_images_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<PathBuf>>, Reason> {
+    match run_owned_choice(app, owner, DialogChoice::PublicImages, None).await? {
+        Some(ChosenPath::PublicImages(paths)) => Ok(Some(paths)), None => Ok(None),
+        Some(ChosenPath::Single(_)) => { owner.gui.failed(Reason::CleanupUnknown); Err(Reason::CleanupUnknown) },
+    }
+}
+// The same DIALOG/GuiCall original, modal callback route and join/cancel loop.
+// Public results never enter the credential facts.selected cell.
+async fn run_owned_choice(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice,
+    initial_folder: Option<PathBuf>) -> Result<Option<ChosenPath>, Reason> {
     let kind = match (choice, initial_folder) {
         (DialogChoice::Project, None) => native::DialogKind::Project,
+        (DialogChoice::PublicImages, None) => native::DialogKind::PublicImages,
+        (DialogChoice::File(crate::credential_format::FileKind::AndroidKeystore), None) =>
+            native::DialogKind::Credential(native::CredentialKind::AndroidKeystore),
+        (DialogChoice::File(crate::credential_format::FileKind::AndroidFirebase), None) =>
+            native::DialogKind::Credential(native::CredentialKind::AndroidFirebase),
+        (DialogChoice::File(crate::credential_format::FileKind::IosFirebase), None) =>
+            native::DialogKind::Credential(native::CredentialKind::IosFirebase),
         (DialogChoice::Quit, None) => native::DialogKind::Quit,
         _ => { owner.gui.not_created(Reason::UnsupportedPlatform); return Err(Reason::UnsupportedPlatform); }
     };

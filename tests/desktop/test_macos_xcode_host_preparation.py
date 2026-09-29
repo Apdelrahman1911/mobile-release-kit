@@ -1,4 +1,4 @@
-"""Twelve focused regressions; NONE is a Mac/native preparation qualification.
+"""Focused regressions; NONE is a Mac/native preparation qualification.
 
 Running this file needs an explicit later COMMAND grant. It imports the helper,
 creates owned local temporary-directory/pipe fixtures and performs a real
@@ -14,6 +14,7 @@ import errno
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import stat
@@ -32,17 +33,17 @@ SPEC.loader.exec_module(M)
 
 NATIVE_PINS = {
     "desktop/src-tauri/src/installed_runtime_macos.rs":
-        "ff925a45fb68fcd0c8758d1ac9866f08dded93f5401f0c44b28c2a637ec932bf",
+        "8f0082bc3909203b1bf67cbd3a42365e670853a46bae16a71fd9407d0659eaab",
     "desktop/native/macos-installed-native/src/native.m":
-        "f53c9b32ba7eb9b42550a6c481d7b3965fe0f1a9896aeb561e9d3318fdc005ef",
+        "d65309035ac1ab231fee503ce9dcda570ded45735490ba80c80ef343bf5c7c5f",
     "desktop/src-tauri/src/ios_toolchain.rs":
-        "39a618d6c886e986b6ac414d5ebcd2ba02d9e70b0f44f258f3d793338044cbb1",
+        "acd508df197ab6369ba29e9f0e3eca781224ba74741af8f757b8d7c93d053b5f",
     "src/mobile_release/ios_archive_operation.py":
         "ca724e7943c9862608f4f23db3ffa4202a3904703600c9c338acb8667ee0a49a",
     "desktop/src-tauri/src/saved_command_owner.rs":
-        "d89f2f730c07ae7b3f7a66f9292df621356974668c11f80a74da970532c6a0eb",
+        "6046335845d909d6f3acc028831c017079029540ff6a9987ef907a978aedea4b",
     "desktop/src-tauri/src/installed_shell_observation_macos_ios.rs":
-        "df48d8a5ef0670b1070ddd1490e4f8d242035f134314b0c3e3c2ed51fe49e5ce",
+        "fc59e98648ca8c05919271c8f23149263741ab4d488bdba14285593e0fc07216",
 }
 
 
@@ -331,11 +332,11 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertIn("s.st_mode & 0o7022 != 0", runtime)
         self.assertIn("self.original.chain(Path::new(APPLICATIONS)", runtime)
         workflow = (ROOT / M.WORKFLOW).read_text()
-        diagnostic = block(workflow, "PY_XCODE")
-        self.assertEqual(len(diagnostic), 4423)
-        self.assertEqual(hashlib.sha256(diagnostic).hexdigest(),
-                         "fa5289e5fd550a286bdf00b97404754caf632abf4a816f590dbaa186a0511a22")
-        self.assertIn(b"s.st_mode & 0o022", diagnostic)
+        # The original preparer and native consumer own this boundary. A second
+        # pathname-based diagnostic previously rejected a valid job-owned alias.
+        self.assertNotIn("PY_XCODE", workflow)
+        self.assertNotIn("xcode-layout.json", workflow)
+        self.assertNotIn("Diagnose the real full-Xcode layout", workflow)
         self.assertEqual((stat.S_IFDIR | 0o775) & 0o7022, 0o020)
         self.assertEqual((stat.S_IFDIR | 0o775) & 0o022, 0o020)
         self.assertEqual((stat.S_IFDIR | 0o755) & 0o7022, 0)
@@ -478,7 +479,7 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         replaced = types.SimpleNamespace(**{**fields, "st_ino": 12})
         book.work = types.SimpleNamespace(fd=78)
         book.result_fd, book.result_bytes = 79, b"{}"
-        book.result_pin = {"full9": M.full9(current)}
+        book.result_pin = {"name": M.RESULT, "full9": M.full9(current)}
         with mock.patch.object(M.os, "fstat", return_value=current), \
                 mock.patch.object(M.os, "stat", side_effect=[current, replaced]) as named, \
                 mock.patch.object(M.os, "lseek"), mock.patch.object(M.os, "read", side_effect=[b"{}", b""]):
@@ -524,6 +525,22 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertGreater(book.roles.index("os-provisioner-chmod"), book.roles.index("iphoneos-sdk:4"))
 
     def test_only_one_fixed_xcode_sibling_alias_is_accepted(self):
+        for owner, account, accepted in ((0, 501, True), (501, 501, True),
+                                          (502, 501, False), (0, 0, False), (501, 0, False)):
+            with self.subTest(aliasOwner=owner, account=account):
+                self.assertEqual(M._selection_alias_owner(owner, account), accepted)
+        # Only the selection alias allows the actual account. The concrete
+        # sibling directory/tools still require root; no mode repair occurs.
+        for kind, policy, owner, accepted in (("alias", "alias", 0, True),
+                ("alias", "alias", 501, True), ("alias", "alias", 502, False),
+                ("directory", "native", 0, True), ("directory", "native", 501, False)):
+            mode = (stat.S_IFLNK if kind == "alias" else stat.S_IFDIR) | 0o755
+            current = types.SimpleNamespace(st_mode=mode, st_uid=owner, st_gid=80, st_nlink=1, st_size=20)
+            book = M.Originals(None, {"uid": 501, "gid": 20}, M.Deadline())
+            node = M.Node("/Applications/Xcode.app", "unit-selection", None, "Xcode.app", kind, policy)
+            with self.subTest(kind=kind, owner=owner):
+                self.assertTrue(book.metadata(node, current, "unit"))
+                self.assertEqual(not book.errors, accepted)
         for target, expected in (("Xcode_26.0.app", "Xcode_26.0.app"),
                                  ("/Applications/Xcode-beta.app", "Xcode-beta.app"),
                                  ("Xcode+26.app", "Xcode+26.app")):
@@ -569,6 +586,109 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                 self.assertEqual(book.errors, [])
                 self.assertEqual(book.close_all(), [])
                 closed.assert_called_once_with(71)
+
+    def test_sudo_snapshot_basis_requires_exact_role_protected_original_and_root_mount(self):
+        # Entirely synthetic policy DATA, never a hosted filesystem observation.
+        node = M.Node("/usr/bin/sudo", "os-provisioner-sudo", None, "sudo", "file", "sudo")
+        fs = {"typeName": "apfs", "fsid": [1, 2], "owner": 0, "type": 26,
+              "flags": M.MNT_RDONLY | M.MNT_LOCAL | M.MNT_ROOTFS | M.MNT_SNAPSHOT,
+              "subtype": 0, "flagsExt": 0, "mountOn": "/", "mountFrom": "/dev/unit-snapshot"}
+        snapshot = {"full9": [7, 111, stat.S_IFREG | 0o4511, 0, 0, 1, 120, 100, 101],
+                    "flags": M.SF_RESTRICTED | M.UF_COMPRESSED, "filesystem": fs}
+        basis = M._sudo_xattr_basis(node, snapshot, copy.deepcopy(fs))
+        self.assertFalse(basis["observed"])
+        self.assertEqual(basis["basis"], "same-held-readonly-root-apfs-snapshot")
+        self.assertEqual(basis["filesystem"], fs)
+        for field, value in (("path", "/tmp/sudo"), ("role", "another-tool"),
+                              ("kind", "directory"), ("policy", "native")):
+            changed = copy.copy(node)
+            setattr(changed, field, value)
+            with self.subTest(roleField=field), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(changed, snapshot, fs)
+        for index, value in ((2, stat.S_IFREG | 0o511), (2, stat.S_IFREG | 0o4531),
+                             (2, stat.S_IFREG | 0o4400), (2, stat.S_IFDIR | 0o4511),
+                             (3, 501), (4, 80), (5, 2)):
+            changed = copy.deepcopy(snapshot)
+            changed["full9"][index] = value
+            with self.subTest(originalField=index, value=value), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(node, changed, fs)
+        for flags in (0, M.UF_COMPRESSED, M.SF_RESTRICTED | 0x40000000):
+            with self.subTest(fileFlags=flags), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(node, {**snapshot, "flags": flags}, fs)
+        for bit in (M.MNT_RDONLY, M.MNT_LOCAL, M.MNT_ROOTFS, M.MNT_SNAPSHOT):
+            changed = {**fs, "flags": fs["flags"] & ~bit}
+            with self.subTest(requiredMountBit=bit), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(node, {**snapshot, "filesystem": changed}, changed)
+        for bit in (M.MNT_NOEXEC, M.MNT_NOSUID, M.MNT_UNION, M.MNT_IGNORE_OWNERSHIP, M.MNT_AUTOMOUNTED):
+            changed = {**fs, "flags": fs["flags"] | bit}
+            with self.subTest(forbiddenMountBit=bit), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(node, {**snapshot, "filesystem": changed}, changed)
+        for key, value in (("typeName", "hfs"), ("owner", 501), ("mountOn", "/System/Volumes/Data")):
+            changed = {**fs, key: value}
+            with self.subTest(mountPolicy=key), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(node, {**snapshot, "filesystem": changed}, changed)
+        for key, value in (("fsid", [1, 3]), ("type", 27), ("subtype", 1), ("flagsExt", 1),
+                           ("mountFrom", "/dev/another-snapshot")):
+            with self.subTest(rootMismatch=key), self.assertRaises(M.Refused):
+                M._sudo_xattr_basis(node, snapshot, {**fs, key: value})
+        changed = copy.deepcopy(snapshot)
+        changed["xattrs"] = None
+        changed["xattrStability"] = basis
+        later = copy.deepcopy(changed)
+        later["xattrStability"]["filesystem"]["fsid"][1] += 1
+        self.assertFalse(M._same_snapshot(changed, later))
+
+    def test_snapshot_uses_same_held_root_not_an_xattr_error_fallback(self):
+        fs = {"typeName": "apfs", "fsid": [1, 2], "owner": 0, "type": 26,
+              "flags": M.MNT_RDONLY | M.MNT_LOCAL | M.MNT_ROOTFS | M.MNT_SNAPSHOT,
+              "subtype": 0, "flagsExt": 0, "mountOn": "/", "mountFrom": "/dev/unit-snapshot"}
+
+        def observed(policy="sudo", changed_root=False, missing_root=False):
+            api = types.SimpleNamespace(library=None,
+                filesystem=mock.Mock(side_effect=lambda fd: ({**fs, "fsid": [1, 3]}
+                    if fd == 72 and changed_root else copy.deepcopy(fs))),
+                xattrs=mock.Mock(side_effect=OSError(errno.EACCES, "unit-only-unreadable")))
+            book = M.Originals(api, {"uid": 501, "gid": 20}, M.Deadline())
+            root = M.Node("/", "root", None, "/", "directory", "native")
+            root.fd = 72  # Unit DATA only; every syscall below is intercepted.
+            root.expected = {"filesystem": copy.deepcopy(fs)}
+            if not missing_root:
+                book.nodes["/"] = root
+            node = M.Node("/usr/bin/sudo" if policy == "sudo" else "/usr/bin/codesign",
+                          "os-provisioner-sudo" if policy == "sudo" else "signing-recovery:codesign",
+                          root, "sudo" if policy == "sudo" else "codesign", "file", policy)
+            node.fd = 71
+            fields = dict(st_dev=7, st_ino=111,
+                          st_mode=stat.S_IFREG | (0o4511 if policy == "sudo" else 0o755),
+                          st_uid=0, st_gid=0, st_nlink=1, st_size=120,
+                          st_mtime_ns=100, st_ctime_ns=101, st_flags=M.SF_RESTRICTED)
+            current = types.SimpleNamespace(**fields)
+            acl = {"empty": True, "kind": "absent", "present": 0, "errno": 0,
+                   "snapshotFlags": current.st_flags, "snapshotBirthtimeNs": 99}
+            with mock.patch.object(M.os, "fstat", return_value=current), \
+                    mock.patch.object(book, "named_stat", return_value=current), \
+                    mock.patch.object(M, "_acl_snapshot", return_value=acl):
+                value = book.snapshot(node, "unit")
+            return value, book, api
+
+        value, book, api = observed()
+        self.assertEqual(book.errors, [])
+        self.assertIsNone(value["xattrs"])
+        self.assertFalse(value["xattrStability"]["observed"])
+        self.assertEqual(api.filesystem.call_args_list, [mock.call(71), mock.call(72)])
+        api.xattrs.assert_not_called()
+        for options in ({"changed_root": True}, {"missing_root": True}):
+            value, book, api = observed(**options)
+            self.assertTrue(book.errors)
+            self.assertNotIn("xattrStability", value)
+            book.applications = types.SimpleNamespace(pre={"full9": application(0o755)})
+            self.assertIsNone(M._eligible_action(book))
+        value, book, api = observed(policy="native")
+        api.xattrs.assert_called_once_with(71)
+        # OSError(EACCES, ...) is the standard PermissionError subclass.
+        self.assertEqual(book.errors, [{"stage": "unit", "role": "signing-recovery:codesign",
+                                        "code": "xattr-PermissionError", "errno": errno.EACCES}])
+        self.assertNotIn("xattrStability", value)
 
     def test_acl_absence_needs_successful_populated_same_fd_snapshot(self):
         library = ACLLibraryData()
@@ -1004,8 +1124,7 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                  "Bind the complete reviewed first-party checkout before compilation",
                  "Prepare only the fixed disposable Xcode ancestor before any worker",
                  "Select fixed frontend compiler",
-                 "Record exact source and actual tool bindings only after host preparation",
-                 "Diagnose the real full-Xcode layout before compilation, separately from CLT",
+                 "Record exact source and actual tool bindings only after route admission",
                  "Check current owner pins before native preparation"]
         offsets = [workflow.index("      - name: " + name + "\n") for name in names]
         self.assertEqual(offsets, sorted(offsets))
@@ -1014,6 +1133,13 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertNotIn("--version", reserve)
         self.assertNotIn("xcrun", reserve)
         preparation = workflow[offsets[3]:offsets[4]]
+        self.assertEqual(workflow.count("      MRK_MACOS_AQUA_SCOPE: project-fields-android-inputs\n"), 1)
+        admission = workflow.split("      - name: Admit only this exact disposable-hosted source route\n", 1)[1].split("\n      - name:", 1)[0]
+        guard = '[[ "$MRK_MACOS_AQUA_SCOPE" == project-fields || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == xcode-installed-classification || "$MRK_MACOS_AQUA_SCOPE" == android-inputs || "$MRK_MACOS_AQUA_SCOPE" == project-fields-android-inputs ]]'
+        self.assertIn(guard, admission)
+        self.assertLess(admission.index(guard), admission.index("/usr/bin/uname"))
+        self.assertEqual([line.strip() for line in preparation.splitlines() if line.strip().startswith("if:")],
+                         ["if: success() && env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic'"])
         self.assertIn("timeout-minutes: 2", preparation)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", preparation)
         self.assertIn("exec /usr/bin/env -i", preparation)
@@ -1038,9 +1164,21 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertNotIn("Standard Installer only is privileged", workflow)
         self.assertIn("${{ steps.work.outputs.root }}/" + M.INTENT, workflow)
         self.assertIn("${{ steps.work.outputs.root }}/" + M.RESULT, workflow)
-        self.assertIn("Nine serial current-iOS Aqua cases through the reviewed original invocation owner", workflow)
-        self.assertIn("6b6376420b79bc9a60f6b549700e0e539f1e204d97e1bd07aea8032e3616e7ee", workflow)
-        self.assertIn("81fb5b6babb560b27a7a42c69883de2bd65763d1faec4d215df057396dc76169", workflow)
+        native_step = "Nine serial current-iOS Aqua cases through the reviewed original invocation owner"
+        self.assertIn(native_step, workflow)
+        self.assertLess(offsets[-1], workflow.index("      - name: " + native_step + "\n"))
+        self.assertIn('"scopes": selected_scopes, "caseNames": case_names', workflow)
+        self.assertIn('if aqua_scope not in scope_cases: raise ValueError("Aqua scope refused")', workflow)
+        self.assertIn('"unselectedScopes": [scope for scope in native_scopes if scope not in selected_scopes]', workflow)
+        self.assertIn("bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37", workflow)
+        self.assertIn("f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371", workflow)
+        diagnostics = block(workflow, "PY_DIAGNOSTICS").decode()
+        self.assertIn('admitted_scopes = ("project-fields", "ios-current-synthetic", "android-inputs", "project-fields-android-inputs")', diagnostics)
+        self.assertIn('if aqua_scope not in admitted_scopes: raise ValueError("Aqua scope refused")', diagnostics)
+        self.assertIn('"requestedScope": aqua_scope', diagnostics)
+        self.assertIn('"unselectedScopes": [scope for scope in native_scopes if scope not in selected_scopes]', diagnostics)
+        self.assertIn('"scope": "bounded-diagnostic-snapshots-only-not-original-process-family-finality"', diagnostics)
+        self.assertIn('name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}', workflow)
         helper = PATH.read_text()
         self.assertEqual(helper.count("subprocess.Popen("), 1)
         self.assertNotIn("shell=True", helper)
@@ -1063,6 +1201,333 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
         self.assertIn('"prepared": False', helper)
         self.assertIn("owner.park_until_disposal()", helper)
         self.assertIn("final_errors.extend(book.close_all())", helper)
+
+
+class InstalledXcodesData:
+    """Inert native/filesystem DATA. Every OS boundary below is intercepted.
+
+    Runs the real ledger, metadata, snapshot, POST, report and close logic; the
+    synthetic FD integers are never passed to an actual syscall or process.
+    """
+    def __init__(self, names=("Xcode_26.app",), common_extra=0):
+        self.entries, self.contents, self.aliases = {}, {}, {}
+        self.descriptors, self.positions, self.events = {}, {}, []
+        self.next_fd = 701
+        self.common_extra = common_extra
+        self.close_unknown = None
+        self.scan_close_unknown = None
+        self.open_failure = None
+        self.acl_unavailable = None
+        self.drift = None
+        self.late_close = None
+        self.clock = [0.0]
+        self.report = None
+        self.stderr = io.StringIO()
+        self.book = None
+        self.add("/", stat.S_IFDIR | 0o755)
+        self.add("/Applications", stat.S_IFDIR | 0o775, gid=80)
+        self.add("/unit-work", stat.S_IFDIR | 0o700, uid=501, gid=20)
+        self.add("/unit-work/" + M.INVENTORY, stat.S_IFREG | 0o600, uid=501, gid=20)
+        for number in range(common_extra):
+            self.add("/unit-common-" + str(number), stat.S_IFDIR | 0o755)
+        for name in names:
+            root = "/Applications/" + name
+            for suffix in ("", "/Contents", "/Contents/Developer", "/Contents/Developer/usr",
+                           "/Contents/Developer/usr/bin", "/Contents/Developer/Platforms",
+                           "/Contents/Developer/Platforms/iPhoneOS.platform",
+                           "/Contents/Developer/Platforms/iPhoneOS.platform/Developer",
+                           "/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs",
+                           "/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"):
+                self.add(root + suffix, stat.S_IFDIR | 0o755)
+            self.add(root + "/Contents/Developer/usr/bin/xcodebuild", stat.S_IFREG | 0o755)
+        self.api = types.SimpleNamespace(version="26.unit-DATA", library=object(),
+            filesystem=lambda fd: {"typeName": "apfs", "flags": M.MNT_LOCAL, "owner": 0, "fsid": [7, 8]},
+            xattrs=lambda fd: [])
+
+    def add(self, path, mode, uid=0, gid=0):
+        self.entries[path] = types.SimpleNamespace(st_dev=7, st_ino=2**54 + len(self.entries),
+            st_mode=mode, st_uid=uid, st_gid=gid, st_nlink=1 if not stat.S_ISDIR(mode) else 2,
+            st_size=0, st_mtime_ns=1790486400000000001, st_ctime_ns=1790486400000000002, st_flags=0)
+        self.contents[path] = bytearray()
+        parent = path.rsplit("/", 1)[0] or "/"
+        if path != "/" and parent in self.entries:
+            self.entries[parent].st_nlink += 1
+
+    def alias(self, target="Xcode_26.app"):
+        self.add("/Applications/Xcode.app", stat.S_IFLNK | 0o777, uid=501, gid=20)
+        self.entries["/Applications/Xcode.app"].st_size = len(target)
+        self.aliases["/Applications/Xcode.app"] = target
+
+    def path(self, name, dir_fd=None):
+        if dir_fd is None:
+            return name
+        return self.descriptors[dir_fd].rstrip("/") + "/" + name
+
+    def named(self, name, *, dir_fd=None, follow_symlinks=False):
+        if follow_symlinks:
+            raise AssertionError("classification must never follow a DATA alias")
+        return copy.copy(self.entries[self.path(name, dir_fd)])
+
+    def opened(self, name, flags, mode=0o600, *, dir_fd=None):
+        path = self.path(name, dir_fd)
+        self.events.append(("open", path))
+        if path == self.open_failure:
+            raise OSError(errno.EIO, "unit-original-open-failed")
+        if flags & os.O_CREAT:
+            if path in self.entries:
+                raise FileExistsError(errno.EEXIST, "unit-exclusive-collision")
+            self.add(path, stat.S_IFREG | mode, uid=501, gid=20)
+            parent = self.entries[self.descriptors[dir_fd]]
+            parent.st_size += 32
+            parent.st_mtime_ns += 1
+            parent.st_ctime_ns += 1
+        fd, self.next_fd = self.next_fd, self.next_fd + 1
+        self.descriptors[fd], self.positions[fd] = path, 0
+        return fd
+
+    def closed(self, fd):
+        path = self.descriptors.pop(fd)
+        self.positions.pop(fd)
+        self.events.append(("close", path))
+        if path == self.late_close:
+            self.clock[0] = M.PREPARATION_SECONDS
+        if path == self.close_unknown:
+            raise OSError(errno.EIO, "unit-once-consuming-close-unknown")
+
+    def scan(self, fd):
+        path = self.descriptors[fd]
+        names = [p.rsplit("/", 1)[-1] for p in self.entries if p != "/" and (p.rsplit("/", 1)[0] or "/") == path]
+        fixture = self
+        class IteratorData:
+            def __init__(self):
+                self.iterator = iter([types.SimpleNamespace(name=name) for name in sorted(names)])
+            def __iter__(self): return self
+            def __next__(self): return next(self.iterator)
+            def close(self):
+                fixture.events.append(("scan-close", path))
+                if path == fixture.scan_close_unknown:
+                    raise OSError(errno.EIO, "unit-scan-original-close-unknown")
+        return IteratorData()
+
+    def acl(self, library, fd, expected):
+        path = self.descriptors[fd]
+        value = {"empty": True, "kind": "absent", "present": 0, "phase": 0, "errno": 0,
+                 "snapshotFull9": list(expected), "snapshotFlags": self.entries[path].st_flags,
+                 "snapshotBirthtimeNs": 100, "filesecFreeReturned": True, "aclFreeResult": None}
+        if path == self.acl_unavailable:
+            value.update(empty=False, kind="unavailable", phase=2, errno=errno.EIO)
+        if path == self.drift:
+            self.entries[path].st_ctime_ns += 1
+        return value
+
+    def write(self, fd, data):
+        path = self.descriptors[fd]
+        self.contents[path].extend(data)
+        self.positions[fd] += len(data)
+        self.entries[path].st_size = len(self.contents[path])
+        return len(data)
+
+    def read(self, fd, size):
+        offset = self.positions[fd]
+        data = bytes(self.contents[self.descriptors[fd]][offset:offset + size])
+        self.positions[fd] += len(data)
+        return data
+
+    def seek(self, fd, offset, whence):
+        if whence != os.SEEK_SET:
+            raise AssertionError("unit-fixed-seek-only")
+        self.positions[fd] = offset
+        return offset
+
+    def bind(self, book):
+        self.book = book
+        root = book.nodes["/"]
+        book.work = book.open(root, "unit-work", "directory", "work", "unit-work")
+        book.work_admitted = True
+        book.source_binding = {"unitDataOnly": True}
+        for number in range(self.common_extra):
+            book.open(root, "unit-common-" + str(number), "directory", "source-directory", "unit-common-" + str(number))
+
+    @contextlib.contextmanager
+    def patched(self):
+        with contextlib.ExitStack() as stack:
+            for name, function in (("stat", self.named), ("open", self.opened), ("close", self.closed),
+                    ("fstat", lambda fd: copy.copy(self.entries[self.descriptors[fd]])),
+                    ("scandir", self.scan), ("write", self.write), ("read", self.read), ("lseek", self.seek),
+                    ("fsync", lambda fd: None),
+                    ("fchmod", lambda fd, mode: setattr(self.entries[self.descriptors[fd]], "st_mode", stat.S_IFREG | mode)),
+                    ("readlink", lambda name, dir_fd: self.aliases[self.path(name, dir_fd)])):
+                stack.enter_context(mock.patch.object(M.os, name, side_effect=function))
+            stack.enter_context(mock.patch.object(M, "_acl_snapshot", side_effect=self.acl))
+            stack.enter_context(mock.patch.object(M, "_bind_source", side_effect=self.bind))
+            stack.enter_context(mock.patch.object(M, "_validate_context", return_value=valid_context()))
+            stack.enter_context(mock.patch.object(M, "DarwinAPI", return_value=self.api))
+            stack.enter_context(mock.patch.object(M.time, "monotonic", side_effect=lambda: self.clock[0]))
+            stack.enter_context(mock.patch.object(M.sys, "argv", [M.WORKSPACE + "/" + M.HELPER, M.CLASSIFICATION_ARG]))
+            for name in ("FixedCommandOwner", "_collect_prerequisites"):
+                stack.enter_context(mock.patch.object(M, name, side_effect=AssertionError("classification forbids preparation")))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            yield
+
+    def run(self):
+        with self.patched():
+            status = M.main()
+        raw = self.contents.get("/unit-work/" + M.CLASSIFICATION_RESULT)
+        self.report = json.loads(raw) if raw else None
+        return status
+
+
+class MacOSXcodeClassificationTests(unittest.TestCase):
+    def test_complete_chain_and_alias_are_observation_not_preparation(self):
+        fixture = InstalledXcodesData()
+        fixture.alias()
+        self.assertEqual(fixture.run(), 0)
+        report = fixture.report
+        self.assertFalse(any(report[key] for key in ("prepared", "consumerQualified", "nativeQualified")))
+        self.assertEqual(report["command"], {"claimed": False, "retirement": "not-started"})
+        self.assertIsNone(report["intent"])
+        self.assertEqual(report["applicationsActionStillRequired"], "chmod")
+        self.assertTrue(report["classification"]["complete"])
+        selection, concrete = report["classification"]["observations"]
+        self.assertEqual((selection["outcome"], selection["selectionDataOnly"], selection["selectionTarget"]),
+                         ("ineligible", True, "Xcode_26.app"))
+        self.assertEqual((concrete["outcome"], concrete["completeChain"], len(concrete["objects"])), ("eligible", True, 11))
+        self.assertTrue(all(item["strictPostMatched"] and item["finalClose"] == "closed" for item in concrete["objects"]))
+        self.assertGreater(concrete["objects"][0]["preFull9"][1], 2**53)
+        self.assertEqual(fixture.descriptors, {})
+        self.assertEqual(fixture.book.budget["live"], 0)
+        self.assertNotIn("/unit-work/" + M.INTENT, fixture.contents)
+        self.assertNotIn("/unit-work/" + M.RESULT, fixture.contents)
+        for forbidden in ("/usr/bin/sudo", "/bin/chmod", "/usr/bin/security", "/usr/bin/codesign"):
+            self.assertNotIn(("open", forbidden), fixture.events)
+        direct = InstalledXcodesData(names=("Xcode.app",))
+        self.assertEqual(direct.run(), 0)
+        self.assertEqual(direct.report["classification"]["observations"][0]["outcome"], "eligible")
+
+    def test_stable_owner_mode_lower_tool_sdk_and_alias_type_negatives(self):
+        for suffix, field, value in (("", "st_uid", 501), ("", "st_mode", stat.S_IFDIR | 0o777),
+                ("/Contents/Developer/usr/bin/xcodebuild", "st_uid", 501),
+                ("/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk", "st_uid", 501),
+                ("/Contents/Developer/usr/bin/xcodebuild", "st_mode", stat.S_IFLNK | 0o777)):
+            with self.subTest(suffix=suffix, field=field):
+                fixture = InstalledXcodesData()
+                fixture.alias()
+                path = "/Applications/Xcode_26.app" + suffix
+                setattr(fixture.entries[path], field, value)
+                self.assertEqual(fixture.run(), 0)  # Complete negative is diagnostic success only.
+                result = fixture.report["classification"]["observations"][-1]
+                self.assertEqual(result["outcome"], "ineligible")
+                self.assertFalse(result["completeChain"])
+                self.assertTrue(result["reasons"])
+                self.assertEqual(fixture.descriptors, {})
+                if stat.S_ISLNK(fixture.entries[path].st_mode):
+                    self.assertNotIn(("open", path), fixture.events)
+
+    def test_sequential_aggregate40_custody_includes_scans_and_receipt(self):
+        fixture = InstalledXcodesData(names=("Xcode_A.app", "Xcode_B.app"), common_extra=25)
+        self.assertEqual(fixture.run(), 0)
+        self.assertEqual(fixture.book.budget, {"live": 0, "peak": 40, "uncertain": False})
+        last_a = max(index for index, event in enumerate(fixture.events) if event[0] == "close" and event[1].startswith("/Applications/Xcode_A.app"))
+        first_b = min(index for index, event in enumerate(fixture.events) if event[0] == "open" and event[1].startswith("/Applications/Xcode_B.app"))
+        self.assertLess(last_a, first_b)
+        common_close = fixture.events.index(("close", "/Applications"))
+        result_close = fixture.events.index(("close", "/unit-work/" + M.CLASSIFICATION_RESULT))
+        self.assertLess(first_b, result_close)
+        self.assertLess(result_close, common_close)
+        book = M.Originals(None, valid_context(), M.Deadline(), budget={"live": 40, "peak": 40, "uncertain": False}, classification=True)
+        book.work = types.SimpleNamespace(fd=1)
+        book.work_admitted = True
+        with mock.patch.object(M.os, "open", side_effect=AssertionError("over-budget open forbidden")) as opened:
+            with self.assertRaisesRegex(M.Refused, "receipt-descriptor-bound"):
+                book.receipt(M.CLASSIFICATION_RESULT, {})
+            opened.assert_not_called()
+        for classification, forbidden in ((True, M.INTENT), (True, M.RESULT), (False, M.CLASSIFICATION_RESULT)):
+            ledger = M.Originals(None, valid_context(), M.Deadline(), classification=classification)
+            ledger.work, ledger.work_admitted = types.SimpleNamespace(fd=1), True
+            with self.assertRaisesRegex(M.Refused, "receipt-private-work-unavailable"):
+                ledger.receipt(forbidden, {})
+
+    def test_uncertain_reads_topology_partial_open_and_close_stop_next_candidate(self):
+        for failure in ("acl_unavailable", "drift", "open_failure", "close_unknown"):
+            with self.subTest(failure=failure):
+                fixture = InstalledXcodesData(names=("Xcode_A.app", "Xcode_B.app"))
+                path = "/Applications/Xcode_A.app/Contents/Developer/usr/bin/xcodebuild"
+                setattr(fixture, failure, path)
+                self.assertEqual(fixture.run(), 1)
+                self.assertFalse(any(event[0] == "open" and event[1].startswith("/Applications/Xcode_B.app") for event in fixture.events))
+                self.assertEqual(fixture.descriptors, {})
+                closes = [event for event in fixture.events if event == ("close", path)]
+                self.assertEqual(len(closes), 0 if failure == "open_failure" else 1)
+                if failure == "close_unknown":
+                    self.assertTrue(fixture.book.budget["uncertain"])
+                    self.assertEqual(fixture.book.budget["live"], 1)
+                    # Keep this ledger in its original fixture clock; do not renew its deadline.
+                    with mock.patch.object(M.time, "monotonic", side_effect=lambda: fixture.clock[0]), \
+                            self.assertRaisesRegex(M.Refused, "original-close-uncertain"):
+                        fixture.book.reserve("unit")
+                    self.assertIn("xcodebuild:original-close-unknown", fixture.stderr.getvalue())
+                    close_index = fixture.events.index(("close", path))
+                    self.assertFalse(any(event[0] == "open" for event in fixture.events[close_index + 1:]))
+                else:
+                    self.assertIsNotNone(fixture.report)
+                    self.assertFalse(fixture.report["classification"]["complete"])
+                    self.assertEqual(fixture.report["classification"]["observations"][0]["outcome"], "unresolved")
+
+    def test_same_absolute_deadline_report_bound_and_final_close_are_not_success(self):
+        for path in ("/Applications/Xcode_A.app", "/unit-work/" + M.CLASSIFICATION_RESULT, "/"):
+            with self.subTest(lateClose=path):
+                fixture = InstalledXcodesData(names=("Xcode_A.app", "Xcode_B.app"))
+                fixture.late_close = path
+                self.assertEqual(fixture.run(), 1)
+                self.assertEqual(fixture.descriptors, {})
+                if path.startswith("/Applications/"):
+                    self.assertNotIn(("open", "/Applications/Xcode_B.app"), fixture.events)
+        fixture = InstalledXcodesData(names=("Xcode_A.app", "Xcode_B.app"))
+        with mock.patch.object(M, "MAX_RECORD", 12288):
+            self.assertEqual(fixture.run(), 1)
+        self.assertNotIn(("open", "/Applications/Xcode_B.app"), fixture.events)
+        self.assertFalse(fixture.report["classification"]["complete"])
+        self.assertEqual(fixture.report["classification"]["omittedObservations"], 1)
+        self.assertLessEqual(len(fixture.contents["/unit-work/" + M.CLASSIFICATION_RESULT]), 12288)
+        fixture = InstalledXcodesData()
+        fixture.close_unknown = "/unit-work/" + M.CLASSIFICATION_RESULT
+        self.assertEqual(fixture.run(), 1)
+        self.assertTrue(fixture.book.budget["uncertain"])
+        self.assertEqual(fixture.descriptors, {})
+        for argv in (["--classify"], [M.CLASSIFICATION_ARG, "extra"], [M.CLASSIFICATION_ARG, M.CLASSIFICATION_ARG]):
+            with mock.patch.object(M.sys, "argv", [M.WORKSPACE + "/" + M.HELPER, *argv]), \
+                    mock.patch.object(M, "DarwinAPI", side_effect=AssertionError("invalid argv before native load")) as api, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(M.main(), 1)
+                api.assert_not_called()
+
+    def test_roster_bound_and_transient_scan_close_uncertainty_stop_observation(self):
+        fixture = InstalledXcodesData()
+        for number in range(M.MAX_ENTRIES):
+            fixture.add("/Applications/unselected-" + str(number), stat.S_IFDIR | 0o755)
+        self.assertEqual(fixture.run(), 1)
+        self.assertNotIn(("open", "/Applications/Xcode_26.app"), fixture.events)
+        self.assertEqual(fixture.descriptors, {})
+        fixture = InstalledXcodesData()
+        fixture.scan_close_unknown = "/Applications"
+        self.assertEqual(fixture.run(), 1)
+        self.assertIn('"role":"applications"', fixture.stderr.getvalue())
+        self.assertIn('"code":"roster-original-close-unknown"', fixture.stderr.getvalue())
+        closed = fixture.events.index(("scan-close", "/Applications"))
+        self.assertFalse(any(event[0] == "open" for event in fixture.events[closed + 1:]))
+        self.assertEqual(fixture.descriptors, {})
+        ledger = M.Originals(None, valid_context(), M.Deadline(), classification=True)
+        iterator = types.SimpleNamespace(close=mock.Mock(side_effect=OSError(errno.EIO, "unit-scan-close-unknown")))
+        class ScanData:
+            def __iter__(self): return iter(())
+            def close(self): iterator.close()
+        with mock.patch.object(M.os, "scandir", return_value=ScanData()):
+            with self.assertRaises(OSError):
+                ledger.roster(types.SimpleNamespace(fd=77, role="unit-scan"))
+        iterator.close.assert_called_once_with()
+        self.assertEqual(ledger.budget, {"live": 1, "peak": 1, "uncertain": True})
+        with self.assertRaisesRegex(M.Refused, "original-close-uncertain"):
+            ledger.reserve("unit")
 
 
 if __name__ == "__main__":

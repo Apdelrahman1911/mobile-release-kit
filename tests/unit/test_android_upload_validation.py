@@ -41,6 +41,37 @@ def jarsigner_output(*, warning: str = "") -> str:
     )
 
 
+class AndroidAliasOperandTests(unittest.TestCase):
+    """Pure operand refusals, no temporary directory or native tool acquisition."""
+
+    def test_option_like_alias_refuses_material_validation_before_any_file_or_command(self):
+        from mobile_release import credentials
+        values = {"MOBILE_RELEASE_ANDROID_KEY_ALIAS": "-providerClass"}
+        with patch.object(credentials, "finite_scratch") as scratch, \
+                patch.object(credentials, "_materialize") as materialize, \
+                patch.object(credentials, "_run_private") as private, \
+                patch.object(credentials, "run_owned") as owned:
+            finding = credentials._validate_android_material(object(), values, Path("/inert/scratch"))
+        self.assertEqual(finding.status, Status.INVALID)
+        self.assertIn("cannot start with a hyphen", finding.message)
+        scratch.assert_not_called(); materialize.assert_not_called()
+        private.assert_not_called(); owned.assert_not_called()
+        self.assertTrue(credentials._android_alias_operand("upload-key_1.0"))
+
+    def test_option_like_alias_refuses_shared_final_signer_before_scratch_or_native_work(self):
+        from mobile_release import android
+        environment = {"MOBILE_RELEASE_ANDROID_KEYSTORE_PATH": "/inert/not-opened.jks",
+                       "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "PRIVATE store",
+                       "MOBILE_RELEASE_ANDROID_KEY_ALIAS": "-tsa",
+                       "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": "PRIVATE key"}
+        with patch.dict(os.environ, environment, clear=True), \
+                patch.object(android, "finite_scratch") as scratch, \
+                patch.object(android, "run_owned") as owned:
+            with self.assertRaises(ValidationError):
+                android._canonicalize_aab_signature(Path("/inert/not-opened.aab"), project_root=Path("/inert"))
+        scratch.assert_not_called(); owned.assert_not_called()
+
+
 class AndroidCurrentUploadTests(unittest.TestCase):
     """Real input/ZIP/JDK-output policy with explicit native-command seams."""
 

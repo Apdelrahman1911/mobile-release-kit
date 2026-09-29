@@ -1,9 +1,11 @@
-# GitHub connection: session-only read profile
+# GitHub connection: session-only authentication and observations
 
-**Status: implemented source under review, unavailable in production.** The
-native document gate, runtime/TLS gate and renderer credential-entry gate remain
-closed. A registered command or a passing supplied-data test is not native
-qualification. Preferred GitHub App/device login is separately unavailable.
+**Device flow status: authored source, not native-qualified or delivered.**
+The advanced-token and device paths have separate exact-source native selectors.
+Device login stays unavailable until both the device and final-read profiles are
+qualified and the publisher supplies its real registered public App configuration.
+A registered command or a supplied-data test cannot activate either selector.
+Historical read-only evidence below is not evidence for the changed device source.
 
 The guided screen distinguishes local workflow-file planning from GitHub
 observations. Enter the **application** repository as `OWNER/REPO`; it is not the
@@ -18,8 +20,17 @@ policy, correct workflow contents, installed secrets or release readiness.
   explicit advanced-token read under the original document's mutex. It never
   replaces another session. The native project ID comes from the picker registry,
   not a renderer path or a Git remote.
+- `github_connection_start_device {projectId,repository}` admits one deliberate
+  publisher-bound device flow. It accepts no renderer client ID, endpoint or scope.
+- `github_connection_open_device_page {sessionId,expectedRevision}` returns null
+  or a closed error after one fixed OS handoff. The actual main-thread callback
+  rechecks current document/project/session/revision/expiry before opening only
+  `https://github.com/login/device`, outside all document/registry locks.
 - `github_connection_refresh {sessionId,expectedRevision}` is one new explicit
   observation, not a replay. Original account/repository IDs stay pinned.
+- `github_connection_inspect {sessionId,expectedRevision,stage,name}` explicitly
+  observes one canonical environment input's metadata using the same original
+  session, identity pins and read ticket. It accepts no path, URL, type or value.
 - `github_connection_disconnect {sessionId}` immediately retires credential use
   and stops only that session's original ticket. It remains available when new
   reads are refused. It neither revokes a GitHub grant nor affects Store state.
@@ -27,7 +38,7 @@ policy, correct workflow contents, installed secrets or release readiness.
   100ms relay. Status repairs missed events; neither event nor UI arrival order
   is authority.
 
-Only the nine `github_connection_refused_*` codes documented in the native
+Only the closed `github_connection_refused_*` codes documented in the native
 session module establish definite **pre-admission** refusal. Later startup,
 transport and cleanup failures are retained session outcomes. Generic IPC errors,
 an overtaking idle Status, an event subscription failure or a timeout must not
@@ -40,16 +51,16 @@ usable only for retirement, not restoring an abandoned connection.
 The password input is uncontrolled and cleared synchronously after its one
 handoff and on context/gate loss. No token belongs in React/controller/draft
 state, public DTOs, event/error text, files, logs, Git, environment or arguments.
-Native state retains at most one credential and one original read ticket. The
+Native state retains at most one credential and one active original native step. The
 private request uses one bounded buffer, a fixed helper and private stdin; this
 does not claim complete allocator, framework or operating-system erasure.
 
-Only fixed GitHub.com HTTPS GETs are implemented: account, explicit repository,
+The final read profile uses only fixed GitHub.com HTTPS GETs: account, explicit repository,
 up to two workflow-metadata pages and the closing repository-identity bracket.
 At most five calls, no arbitrary URL, redirects, automatic retries, CLI helpers,
-ambient proxy/CA/credential lookup, remote HTML or Store/mutation/dispatch path.
-The bundled CA is a separate required, bounded packaging input. No CA has been
-shipped or native TLS profile qualified merely by adding its inventory contract.
+ambient proxy/CA/credential lookup, remote HTML or Store/mutation/dispatch path in authentication.
+The bundled CA is a separate required, bounded packaging input. Its actual
+source/runtime/loader custody must remain bound to the native qualification.
 
 The read shares the existing Supervisor's two slots, original startup-inclusive
 10-second endpoint and first immutable 2-second cleanup allowance. No session
@@ -57,6 +68,122 @@ driver, watchdog, extra periodic task, guessed PID/group or replacement joiner i
 introduced. Pending and RetainedUnknown are not final receipts. Only original
 resource/IO/management settlement can produce Settled; late settlement may free
 material, never erase prior cleanup uncertainty.
+
+## Device flow and public status v2
+
+Public status is schema2; help and safe read facts remain schema1. Required
+nullable `authorization` is present only for a checking session with a running
+`authorize` operation. All account/repository/automation facts stay not-observed
+until the original final identity bracket settles. Capability includes
+`deviceLogin` (publisher-unconfigured, not-qualified or available) and a nullable
+control-safe publisher name of at most 96 UTF-8 bytes. Available describes a
+qualified profile, not transient permission to start another operation.
+
+| Phase | userCode | expiresAt |
+| --- | --- | --- |
+| requesting-code | null | null |
+| waiting / slow-down | `[A-Z0-9]{4}-[A-Z0-9]{4}` | original UTC expiry |
+| checking-access | null | same original UTC expiry |
+| terminal, Disconnect or Unknown | authorization itself is null | |
+
+One public `github-authorize-{sequence}` spans one private Start, sequential
+Poll originals and the final read; receipt IDs never replace that public ID.
+The native authorization endpoint is at most 15 minutes from admission and may
+only shorten. Start calls `github.com/login/device/code`; Poll calls
+`github.com/login/oauth/access_token` with the original private device code and
+fixed device grant type. Bodies use form encoding; JSON responses are capped at
+64 KiB. No client secret, returned URL or repository authorization override is used.
+
+The existing relay separately drives due work; Status and receipt reconciliation
+never admit a poll. Waiting retains no child. Each step reuses the Supervisor's
+original custody/finality and has an endpoint no later than its own start+10s,
+the authorization end or the credential end, plus the existing 2s cleanup bound.
+A next poll is permitted only after the previous original settles with explicit
+pending/slow-down, and no sooner than settlement+interval (minimum5s). Slow-down
+uses max(previous interval+5s, returned interval). There are at most180 polls.
+No timeout, lost reply, Unknown or ambiguous transport result authorizes replay.
+
+The device result mailbox is consuming, not Clone/Debug. Secret-bearing outcome
+containers are also non-Clone/non-Debug; unsuccessful Rust disposal zeroizes
+owned secret strings and request/output buffers. Python refresh material is
+excluded from the private native response and discarded; no allocator-wide or
+OS memory-erasure guarantee is claimed. Late/cancelled/expired/Unknown positive
+results cannot connect or restore admission. Failed Authorize requires settled
+Disconnect followed by new deliberate Sign in, never Refresh.
+
+`desktop/github-device-publisher.json` contains only public publisher data and
+is compiled into Rust; it is not a new runtime resource. This source supplies
+`publisher:null`, not a fictitious registration. The fixed build script binds its
+digest; only validated public clientId enters the private helper request. A
+separate device manifest/protocol/publisher-digest tuple stays unactivated until
+new exact-source native evidence exists. No preparer/stager/resource-roster
+migration is needed for this public static file.
+
+## Read-only environment/input metadata (P1)
+
+**Authored source only; no new native qualification, live service result or
+delivery is claimed.** This is not remote provisioning. Before first inspection
+the public schema2 shape is unchanged. After an attempt, optional
+**inputMetadata** contains exactly:
+
+- **selection: {stage,name}** for the actual original request, not the UI's latest
+  dropdown selection;
+- **environment: Fact<{id,name}>**;
+- **field: Fact<{name,kind,createdAt,updatedAt}>**.
+
+The three environment/secret/variable fact flags are derived from actual retained
+values as **metadata-only** or **not-run**; they do not assert current credential
+validity or a fully configured environment. Refresh and retirement stale these
+facts, preserving their original selection and observation time. Public metadata
+cannot appear on Connect/Authorize, revive on the same settled operation, or
+survive a removed session. Successful Inspect requires its original metadata.
+
+The private **mrk-github-input-metadata/1** request extends only the read params
+with **stage** and **name**, and requires both original account/repository IDs.
+The fixed environment and secret/variable classification come from the core's
+shared **ENVIRONMENT_NAMES / ENVIRONMENT_INPUT_TYPES** authority, also used by
+credential requirements. Local PATH alternatives, arbitrary names and
+renderer-supplied field types/routes are not admitted.
+
+One original helper makes at most five GETs:
+account → repository-before → named environment → selected field →
+repository-after. An ordinary environment refusal may omit only the field and
+still bracket repository identity. Authentication/identity/malformed/rate-limit/
+transport failures stop further reads. P1 uses documented REST version
+2026-03-10 with owner/repository environment routes; the ordinary workflow
+listing remains on its existing version. Environment metadata requires Actions
+read; field metadata requires Environments read. Reported repository roles
+are not effective grants; the app never requests a broader grant automatically.
+
+The shared transport's 10s operation budget, body/header/TLS limits, 1MiB total
+body bound and 64KiB final response bound remain. P1 allows at most4,000 JSON
+nodes per reply (five replies remain within the original20,000 aggregate).
+Variable responses include a value upstream; it is counted against bounds and
+discarded before native/public output. Secret values are not returned by this
+GET. Only bounded projected metadata reaches the original read receipt.
+No result is a log, journal, credential asset or persisted readiness receipt.
+
+Inspect requires a current observed account/repository under the existing
+document/registry-generation check. It retains the exact selected field until
+original settlement, reuses the same Supervisor profile and clamps admission to
+the existing credential endpoint. A different returned selection is
+response-invalid and retires credential use without erasing cooldown. Unknown,
+expiry, cancellation, revocation, quit and lost IPC acknowledgements retain the
+ordinary owner/finality rules. Status does not admit or retry Inspect.
+
+Saved-local requirements come from existing core validation only when it
+matches the observed saved configuration snapshot and no invalidating save/read/
+validation remains. The UI labels that snapshot separately from remote
+metadata. The network helper receives no project root or configuration and
+retains its no-filesystem network profile. These sequential observations are
+not an atomic remote snapshot and prove neither local/remote source equivalence,
+input applicability, effective permissions, environment protections nor readiness.
+HTTP404 means missing **or inaccessible**, not confirmed absence.
+
+Multi-field provisioning is not implemented: independent writes could expose
+mixed credential or operation-commitment groups to workflows. Any later write
+design needs its own reviewed atomic group-consumption contract, explicit
+consent, reconciliation and native evidence; P1 does not grant that authority.
 
 ## Lifetime, errors and recovery
 

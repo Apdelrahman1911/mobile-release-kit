@@ -157,6 +157,12 @@ fn github_release_tooling() {
 }
 
 fn main() {
+    // Public publisher DATA is fixed source, never an environment/runtime URL
+    // or registration override. The device profile binds this exact digest too.
+    println!("cargo:rerun-if-changed=../github-device-publisher.json");
+    let publisher = include_bytes!("../github-device-publisher.json");
+    if publisher.len() > 8192 { panic!("Bundled GitHub publisher configuration exceeds its fixed limit"); }
+    println!("cargo:rustc-env=MRK_GITHUB_DEVICE_PUBLISHER_SHA256={:x}", Sha256::digest(publisher));
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DEVELOPMENT_RUNTIME");
     println!("cargo:rerun-if-env-changed=PROFILE");
     if env::var_os("CARGO_FEATURE_DEVELOPMENT_RUNTIME").is_some()
@@ -210,15 +216,21 @@ fn main() {
             "close_config_edit", "config_edit_status",
             "github_workflow_edit_open", "github_workflow_edit_prepare", "github_workflow_edit_apply",
             "github_workflow_edit_close", "github_workflow_edit_status",
-            "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
+            "metadata_validate", "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
             "metadata_text_edit_apply", "metadata_text_edit_close", "metadata_text_edit_status",
+            "metadata_images_catalog", "metadata_images_choose", "metadata_images_selection_status", "metadata_images_selection_cancel",
+            "metadata_images_edit_open", "metadata_images_recovery_open", "metadata_images_edit_prepare",
+            "metadata_images_edit_apply", "metadata_images_edit_close", "metadata_images_edit_status",
             "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
             "release_version_edit_close", "release_version_edit_status",
-            "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+            "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_inspect", "github_connection_disconnect",
+            "github_connection_start_device", "github_connection_open_device_page",
             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
             "github_release_reconcile", "github_release_pending", "github_release_cancel",
+            "github_input_group_status", "github_input_runner_check", "github_input_group_prepare", "github_input_group_apply",
+            "github_input_group_reconcile", "github_input_group_pending", "github_input_group_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

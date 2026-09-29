@@ -321,8 +321,9 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
 class _NamedTextReads:
     """Small named-reader seam retaining original parents until final recheck.
 
-    It does not enumerate a metadata tree, supply new native write authority or
-    reopen a replacement root. Only the fixed caller-derived names are read.
+    It never walks a metadata tree, supplies native write authority or reopens a
+    replacement root. The metadata-only seam lists immediate caller-derived
+    directories under the same budget; only selected caller-derived files are read.
     Immediate names are inspected under the shared entry/deadline budget solely
     to reject portable aliases; no sibling contents are opened.
     """
@@ -332,6 +333,8 @@ class _NamedTextReads:
         self.handles: list[int] = []
         self.links: list[tuple[int, str, int, tuple[int, ...]]] = []
         self.leaves: list[tuple[int, str, tuple[int, ...] | None]] = []
+        self.metadata_directories: dict[str, int] = {}
+        self.metadata_rosters: dict[int, tuple[str, ...]] = {}
         original = os.fstat(root)
         self.root_identity = _named_identity(original)
         self.device, self.owner = original.st_dev, original.st_uid
@@ -403,6 +406,70 @@ class _NamedTextReads:
             parent = child
         raise _ReadProblem("snapshot.unsafe-file", "Named path is empty.")
 
+
+    def _metadata_entries(self, descriptor: int) -> tuple[str, ...]:
+        """Names only, under the unchanged passive entry/deadline limits."""
+        names: list[str] = []
+        entries = os.scandir(descriptor)
+        try:
+            for entry in entries:
+                if not self.inventory.tick() or self.inventory.counts["entries"] >= MAX_ENTRIES:
+                    raise _ReadProblem("snapshot.entry-limit", "Metadata name observation exhausted its entry budget.")
+                self.inventory.counts["entries"] += 1
+                names.append(entry.name)
+        finally:
+            try:
+                entries.close()
+            except BaseException as error:
+                raise _DescriptorCleanupError("Metadata directory iterator cleanup did not settle") from error
+        return tuple(sorted(names))
+
+    def metadata_names(self, relative: str) -> tuple[str, ...] | None:
+        """Private metadata caller-derived directory, not a generic API.
+
+        Only immediate names are returned. Unrelated siblings are not stat'ed or
+        traversed. Requested aliases, original parents and these exact rosters
+        must still settle through check(); ordinary absence is retained as data.
+        """
+        if self.inventory.budget is not None:
+            raise _ReadProblem("snapshot.unsafe-file", "Metadata names are not a preflight directory-borrow route.")
+        parts = relative.split("/")
+        if not relative or len(relative.encode("utf-8")) > MAX_RELATIVE_BYTES or len(parts) > MAX_DEPTH or any(
+                part in {"", ".", ".."} or not _safe_component(part) for part in parts):
+            raise _ReadProblem("snapshot.unsafe-file", "Metadata directory path was not admitted.")
+        parent = self.root
+        prefix: list[str] = []
+        for name in parts:
+            if not self.inventory.tick():
+                raise _ReadProblem("snapshot.deadline", "Metadata names exhausted their deadline.")
+            self._alias(parent, name)
+            try:
+                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                self.leaves.append((parent, name, None))
+                return None
+            self._admit(before, directory=True)
+            prefix.append(name)
+            key = "/".join(prefix)
+            child = self.metadata_directories.get(key)
+            if child is None:
+                try:
+                    child = os.open(name, _directory_flags(), dir_fd=parent)
+                except FileNotFoundError as error:
+                    raise _ReadProblem("snapshot.changed", "Metadata parent disappeared.") from error
+                self.handles.append(child)
+                self.metadata_directories[key] = child
+                self.links.append((parent, name, child, _named_identity(before)))
+            if _named_identity(before) != _named_identity(os.fstat(child)):
+                raise _ReadProblem("snapshot.changed", "Metadata parent changed during admission.")
+            parent = child
+        names = self._metadata_entries(parent)
+        previous = self.metadata_rosters.get(parent)
+        if previous is not None and previous != names:
+            raise _ReadProblem("snapshot.changed", "Metadata directory names changed.")
+        self.metadata_rosters[parent] = names
+        return names
+
     def directory(self, relative: str) -> int:
         """Borrowed preflight traversal only; same named-parent admission rules."""
         if self.inventory.budget is None:
@@ -447,6 +514,9 @@ class _NamedTextReads:
                 current = None
             if current != expected:
                 raise _ReadProblem("snapshot.changed", "Original named file or absence changed.")
+        for descriptor, names in self.metadata_rosters.items():
+            if self._metadata_entries(descriptor) != names:
+                raise _ReadProblem("snapshot.changed", "Original metadata directory roster changed.")
 
 
 @contextmanager

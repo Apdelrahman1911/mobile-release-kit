@@ -2641,6 +2641,13 @@ def positive_capture(receipt=None, lifecycle=None):
 
 def fixture_namespace_data(value):
     suffix = value["runId"] + "-" + value["attempt"]
+    if L.shell_apple_review(value):
+        return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
+                "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 3, 4096, 11, 11],
+                "children": ["session-apple-review"],
+                "control": {"path": "/var/lib/mrk-ubuntu-native-" + suffix, "identity": [1, 4, stat.S_IFDIR | 0o711, 0, 0]},
+                "ancestors": [{"path": path, "identity": [1, i + 1, stat.S_IFDIR | 0o755, 0, 0]}
+                              for i, path in enumerate(("/", "/var", "/var/lib"))]}
     return {"root": "/var/lib/mrk-ubuntu-shell-fixtures-" + suffix,
             "identity": [1, 5, stat.S_IFDIR | 0o755, 0, 0, 26, 4096, 11, 11],
             "children": ["android-build", "android-build-cancel", "android-build-failure", "android-build-refusals",
@@ -2667,7 +2674,7 @@ def session_fixture_data(value, case, *, changed=False):
     namespace = fixture_namespace_data(value)
     roster = L._shell_session_roster(value, case, changed)
     original_names = [name for name, _, _, _ in L._shell_session_roster(value, case)]
-    offset = 600 + 100 * L.SHELL_SESSION_CASES.index(case)
+    offset = 1100 if case == "session-apple-review" else 600 + 100 * L.SHELL_SESSION_CASES.index(case)
     rows = []
     for name, mode, owners, expected in roster:
         original_name = "sources/changed-next.jks" if changed and name == "sources/changed.jks" else name
@@ -2680,7 +2687,7 @@ def session_fixture_data(value, case, *, changed=False):
         row.update({"children": expected} if kind == "directory" else {"target": expected} if kind == "symlink"
                    else {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest()})
         rows.append(row)
-    return {"schemaVersion": 1, "fixture": "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1", "case": case,
+    return {"schemaVersion": 1, "fixture": "apple-review-session-v1" if case == "session-apple-review" else "ios-firebase-session-v1" if case == "session-ios-firebase" else "four-kind-session-v1", "case": case,
             "root": namespace["root"] + "/" + case, "changed": changed, "entries": rows,
             "absent": L._shell_session_absent(case, changed), "namespace": namespace}
 
@@ -2770,7 +2777,8 @@ def path_fixture_data(value, *, changed=False):
     absent = ["path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
               "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
               "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup",
-            "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup"]
+              "path-project/.mobile-release-version-prepare", "path-project/.mobile-release-version", "path-project/.mobile-release-version-cleanup",
+              "path-project/.mobile-release-metadata-images-prepare", "path-project/.mobile-release-metadata-images", "path-project/.mobile-release-metadata-images-cleanup"]
     absent += ["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else [
         "path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"]
     namespace = fixture_namespace_data(value)
@@ -2825,7 +2833,8 @@ def workflow_fixture_data(value, *, installed=False):
                      "identity": [1, 404 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
     absent = ["release", ".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
               ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
-            ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "android-workflow-apply-v1", "root": namespace["root"] + "/workflow-project",
             "installed": installed, "entries": rows, "absent": absent + ([] if installed else list(callers[1:])), "namespace": namespace}
@@ -2892,7 +2901,8 @@ def metadata_fixture_data(value, *, saved=False):
                      "identity": [1, 514 if replaced else 506 + index, stat.S_IFREG | mode, *owners, 1, len(raw), stamp, stamp]})
     absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
               ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
-            ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "android-metadata-save-v1", "root": namespace["root"] + "/metadata-project",
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else [locale + "/full_description.txt"]), "namespace": namespace}
@@ -2980,7 +2990,8 @@ def version_fixture_data(value, *, saved=False):
                      "identity": [1, 602 + index, stat.S_IFREG | 0o600, *owner, 1, len(raw), stamp, stamp]})
     absent = [".mobile-release", ".mobile-release-init-prepare", ".mobile-release-init", ".mobile-release-init-cleanup",
               ".mobile-release-metadata-text-prepare", ".mobile-release-metadata-text", ".mobile-release-metadata-text-cleanup",
-              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup"]
+              ".mobile-release-version-prepare", ".mobile-release-version", ".mobile-release-version-cleanup",
+              ".mobile-release-metadata-images-prepare", ".mobile-release-metadata-images", ".mobile-release-metadata-images-cleanup"]
     namespace = fixture_namespace_data(value)
     return {"schemaVersion": 1, "fixture": "release-version-save-v1", "root": namespace["root"] + "/version-project",
             "saved": saved, "entries": rows, "absent": absent + ([] if saved else ["version.properties"]), "namespace": namespace}
@@ -3171,6 +3182,39 @@ def settled_failure_capture():
             + b"MRK_INSTALLED_SHELL_BOOTSTRAP_PROGRESS=advanced\n"
             + b"MRK_INSTALLED_SHELL_FAILURE_HANDOFF=original-quit-relay-loop-returned\n"
             + b"MRK_INSTALLED_SHELL_OBSERVATION=failed\n", b"")
+
+
+def apple_review_handoff_data():
+    """Inert paired metadata, not a native/owner/compiled-source attestation."""
+    value = installed_handoff(); value.pop("installed")
+    binaries = {role: {"path": "/task/admitted-shell/" + role, "size": 12, "sha256": "c" * 64}
+                for role in ("normal", "observer")}
+    compiler = {"sourceSha": value["sourceSha"], "runId": value["runId"], "attempt": "1",
+        "features": L.SHELL_FEATURES, "manifestSha256": L.M, "protocolSha256": L.Q,
+        "exportedArtifacts": deepcopy(binaries), "appleReview": L.shell_apple_review_selection(),
+        "androidBuildMaterials": None, "androidBuildBindings": {}, "androidBuildPublication": None}
+    value["shell"] = {"binaries": binaries, "compiler": compiler, "rosterSha256": "e" * 64,
+        "producerAttempt": "1", "artifactId": "17", "loaderPolicy": {}, "appleReview": L.shell_apple_review_selection(),
+        "acceptedU": {"sourceSha": value["compilerRecords"]["sourceSha"], "runId": "5", "attempt": "1", "artifactId": "11"}}
+    return value
+
+
+def closed_apple_review_data():
+    """One-case decoder DATA only; never prepare unrelated old25 families."""
+    value, expected = apple_review_handoff_data(), map_data()
+    case = "session-apple-review"; stdout, stderr = session_capture(case, expected=expected)
+    cases = {case: L.shell_result(stdout, stderr, case, 0, expected)}
+    files = {name: b"" for name in L.public_files(value)}
+    files.update({"shell-" + case + ".stdout": stdout, "shell-" + case + ".stderr": stderr,
+        "shell-cases.json": L.canonical(cases), "observe-p0.stdout": L.canonical({"published": {"P0": {"DATA": True}}}),
+        "published-before-upgrade.txt": L.canonical({"P0": {"DATA": True}})})
+    for phase in ("before", "after"):
+        files["shell-" + case + "-" + phase + ".json"] = L.canonical(session_fixture_data(value, case))
+    outcome = {"shellRosterSha256": value["shell"]["rosterSha256"], "shellProducerAttempt": "1", "shellArtifactId": "17",
+        "acceptedU": value["shell"]["acceptedU"], "consumerAttempt": value["attempt"], "appleReview": L.shell_apple_review_selection(),
+        "ordinaryActivation": False, "packageLifecycleQualified": False, "shellPackageBuilt": False,
+        "commands": [{"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0}]}
+    return value, outcome, files, expected
 
 
 def closed_shell_data(*, ordinary=False):
@@ -3578,8 +3622,21 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(hashlib.sha256(L.SHELL_PROJECT_CONFIG).hexdigest(), L.SHELL_PROJECT_RECEIPT["readback"]["sha256"])
         ignored, additions = prepare_edit_ignore(b"")
         self.assertEqual(ignored, L.SHELL_PROJECT_IGNORE)
-        self.assertEqual(len(additions), 10)
+        self.assertEqual(len(additions), 13)
         self.assertEqual(prepare_edit_ignore(ignored), (ignored, ()))
+        # The installed observers compare against these literal bytes; stale
+        # count/size copies must fail here rather than in an expensive GUI run.
+        for name in ("installed_shell_observation.rs", "installed_shell_observation_macos.rs"):
+            native = (SOURCE / "desktop/src-tauri/src" / name).read_text()
+            declared, lines = native.split("const IGNORE_LINES: [&str; ", 1)[1].split("] = [", 1)
+            self.assertEqual((int(declared), tuple(json.loads("[" + lines.split("];", 1)[0] + "]"))),
+                             (len(additions), additions))
+            if name == "installed_shell_observation.rs":
+                self.assertIn(f"const IGNORE_BYTES: u32 = {len(ignored)};", native)
+        aqua = ast.parse((SOURCE / "desktop/tools/macos_aqua_qualification.py").read_bytes())
+        rules = next(node for node in aqua.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "IGNORE_RULES" for target in node.targets))
+        self.assertEqual(ast.literal_eval(rules.value), ignored)
 
     def test_shell_fixture_roster_fits_shell_only_cap_without_changing_aggregate_or_other_profiles(self):
         value, _, _, _ = closed_shell_data()
@@ -3597,7 +3654,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(namespace["children"], list(names))
         self.assertEqual(namespace["identity"][5], len(names) + 2)
         session_capture = native.split("impl SessionFixture {", 1)[1].split("    fn namespace_unchanged", 1)[0]
-        self.assertEqual(session_capture.count("id[5] > (SESSION_FIXTURE_NAMESPACE.len() as u64 + 2)"), 1)
+        self.assertEqual(session_capture.count("id[5] > (session_fixture_namespace(case).len() as u64 + 2)"), 1)
+        self.assertIn('if case==SessionCase::AppleReview { &["session-apple-review"] } else { &SESSION_FIXTURE_NAMESPACE }', native)
         self.assertEqual(tools_native.count("id[5] > (super::SESSION_FIXTURE_NAMESPACE.len() as u64 + 2)"), 1)
         self.assertNotIn("id[5] > 20", session_capture)
         self.assertNotIn("id[5] > 20", tools_native)
@@ -4334,7 +4392,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     and ast.unparse(node.iter) == "shell_cases(value)")
         transaction = next(node for node in loop.body if isinstance(node, ast.Try))
         branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
-        self.assertEqual(len(branch.orelse), 14)
+        self.assertEqual(len(branch.orelse), 15)
         self.assertEqual(ast.unparse(branch.orelse[0]),
                          "result = command('shell-' + case, shell_argv(value, case), maximum=SHELL_RECOVERY_NEGATIVE_SECONDS if case == SHELL_RECOVERY_PARTIAL else 60, env=environment, shell_log=(value, case, log_binding))")
         self.assertEqual(ast.unparse(branch.orelse[1]),
@@ -4348,6 +4406,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          "    shell_recovery_fixture(value, case, *(read(_ROOT / 'public' / ('shell-' + case + '-' + stage + '.json'), SHELL_RECOVERY_INVENTORY_LIMIT) for stage in ('initial', 'generated', 'before')), after)\n"
                          "    need(cases[case]['projectRecovery']['sourceCommit'] == value['sourceSha'], 'Recovery native source differs')")
         self.assertEqual(ast.unparse(branch.orelse[4]),
+                         "if shell_github_release(value):\n    _shell_github_release_after(value, case, cases[case])")
+        self.assertEqual(ast.unparse(branch.orelse[5]),
                          "if shell_github_preflight(value):\n    _shell_github_preflight_after(value, case, cases[case])")
         metadata = next(node for node in branch.orelse[5:] if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'metadata-save'")
         self.assertEqual(len(metadata.body), 3)
@@ -4356,6 +4416,14 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             "_retain('shell-metadata-save-after.json', metadata_after)",
             "shell_metadata_fixture(value, read(_ROOT / 'public/shell-metadata-save-before.json', 8192), metadata_after)"])
         final = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_shell_fixtures_final")
+        self.assertEqual(len(final.body), 9)  # Separate Apple return; historical finality body remains exact below.
+        apple = final.body.pop(1)
+        self.assertEqual(ast.unparse(apple.test), "shell_apple_review(value)")
+        self.assertEqual(ast.unparse(apple.body[0].iter), "SHELL_APPLE_REVIEW_CASES")
+        self.assertEqual(ast.unparse(apple.body[0].body[0].value.args[0]),
+                         "canonical(_shell_session_inventory(value, namespace, case)) == read(_ROOT / 'public' / ('shell-' + case + '-after.json'), SHELL_SESSION_INVENTORY_LIMIT)")
+        self.assertIsInstance(apple.body[-1], ast.Return)
+        self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(apple)))
         self.assertEqual(len(final.body), 8)  # Recovery return, GitHub return, common21 families, selected Android and inert placeholders.
         self.assertIsInstance(final.body[1], ast.If)
         self.assertEqual(ast.unparse(final.body[1].test), "shell_recovery(value)")
@@ -4369,6 +4437,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertIsInstance(final.body[2], ast.If)
         self.assertEqual(ast.unparse(final.body[2].test), "shell_github(value)")
         self.assertEqual(ast.unparse(final.body[2].body[0]),
+                         "if shell_github_release(value):\n    _shell_github_release_journals_final(value)")
+        self.assertEqual(ast.unparse(final.body[2].body[1]),
                          "if shell_github_preflight(value):\n    _shell_github_preflight_journals_final(value)")
         self.assertIsInstance(final.body[2].body[-1], ast.Return)
         recheck = final.body[3].value
@@ -5311,11 +5381,12 @@ class AndroidSameJobLifecycleContracts(unittest.TestCase):
     def test_root_copies_and_imports_only_exact_pinned_protected_helper_and_data(self):
         value = self.value(); root = L.root_path(value)
         names = {"desktop/tools/android_material_preparation.py", "desktop/tools/ci_ubuntu_publication.py",
+                 "desktop/tools/android_hosted_data.py",
                  "desktop/tools/stock_trust_correspondence.py", "desktop/tools/ubuntu_stock_ca_policy.json",
                  "desktop/tools/ci_foundation.py", *("desktop/tools/android_material_data/" + name
                  for name in ("policy.json", "suppliers.json", "layout.json.gz", "archives.json.gz", "fonts.json", "providers.json"))}
         pins = {name: (1, "c" * 64) for name in names}
-        for missing in ("fonts.json", "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json"):
+        for missing in ("fonts.json", "stock_trust_correspondence.py", "ubuntu_stock_ca_policy.json", "android_hosted_data.py"):
             missing_input = {name: pin for name, pin in pins.items() if not name.endswith("/" + missing)}
             with self.subTest(missing=missing), patch.object(L, "ANDROID_PREPARATION_PINS", missing_input), self.assertRaises(L.Refused):
                 L._android_source_pins()
@@ -5341,7 +5412,7 @@ class AndroidSameJobLifecycleContracts(unittest.TestCase):
             self.assertIn(((root / "source/desktop/tools/android_material_data", 0o555), {}),
                           [(call.args, call.kwargs) for call in chmod.call_args_list])
             self.assertTrue(mkdir.called)
-            modules.assert_called_once_with(root, owner=True)
+            modules.assert_called_once_with(root, owner=True, saved=False)
         for writable in (False, True):
             with self.subTest(writable=writable), patch.object(L, "ANDROID_PREPARATION_PINS", pins), \
                  patch.object(L, "directory"), patch.object(L.os, "listxattr", return_value=[]), \
@@ -6145,6 +6216,10 @@ class SessionFixtureContracts(unittest.TestCase):
         self._assert_private_fixture_actual_snapshot(L.SHELL_SESSION_IOS_FIREBASE_CONFIG, 684,
             "fa6e91784d45703c39ab22db99abea8957f5dc33efbdb8aa02cae3f493dabc02")
 
+    def test_apple_private_fixture_actual_snapshot_matches_separate_scalar_case(self):
+        self._assert_private_fixture_actual_snapshot(L.SHELL_SESSION_APPLE_REVIEW_CONFIG, 759,
+            "9625b63082a0608688fddf9ee979c04ae982600eeeb42513b0cce1a4fae4debd")
+
     def _assert_private_fixture_actual_snapshot(self, fixture, count, digest):
         from mobile_release.api._snapshot import project_snapshot
 
@@ -6531,16 +6606,224 @@ class SessionFixtureContracts(unittest.TestCase):
         branch = next(node for node in transaction.body if isinstance(node, ast.If) and ast.unparse(node.test) == "case == 'normal'")
         gate = next(node for node in branch.orelse if isinstance(node, ast.Assign)
                     and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
-        session = next(node for node in branch.orelse if isinstance(node, ast.If) and ast.unparse(node.test) == "case in SHELL_SESSION_CASES")
+        session = next(node for node in branch.orelse if isinstance(node, ast.If) and ast.unparse(node.test) == "case in shell_session_cases(value)")
         self.assertLess(gate.end_lineno, session.lineno)
         calls = [node for node in ast.walk(session) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
         self.assertEqual([node.func.id for node in calls].count("_shell_session_inventory"), 1)
         self.assertEqual([node.func.id for node in calls].count("shell_session_fixture"), 1)
         command = next(node for node in ast.walk(branch) if isinstance(node, ast.Call)
                        and isinstance(node.func, ast.Name) and node.func.id == "command")
-        self.assertIn(("maximum", 60), [(arg.arg, ast.literal_eval(arg.value)) for arg in command.keywords if arg.arg == "maximum"])
+        self.assertEqual([ast.unparse(arg.value) for arg in command.keywords if arg.arg == "maximum"],
+                         ["SHELL_RECOVERY_NEGATIVE_SECONDS if case == SHELL_RECOVERY_PARTIAL else 60"])
         self.assertFalse(any(isinstance(node, (ast.Try, ast.While)) for node in ast.walk(session)))
 
+
+
+class AppleReviewSessionContracts(unittest.TestCase):
+    """Pure/mocked singleton contracts; these are not installed-native proof."""
+
+    def setUp(self):
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.guards = [self.stack.enter_context(patch.object(L, name,
+            side_effect=AssertionError("No owner, command or unrelated fixture preparation in Apple DATA contracts")))
+            for name in ("command", "service_argv", "shell_android_materials", "shell_android_compile_environment",
+                         "shell_android_publication_data", "_shell_tools_offline_fixtures_prepare", "_shell_android_fixtures_prepare",
+                         "_shell_github_fixtures_prepare", "_shell_recovery_fixtures_prepare")]
+        self.guards.append(self.stack.enter_context(patch.object(L.subprocess, "Popen", side_effect=AssertionError("No subprocess"))))
+
+    def tearDown(self):
+        for guard in self.guards: guard.assert_not_called()
+
+    def test_explicit_singleton_preserves_old5_21_25_rosters_and_caps(self):
+        value = apple_review_handoff_data()
+        self.assertEqual(L.shell_apple_review_selection(), {"profile": "session-apple-review1-v1",
+            "cases": ["session-apple-review"], "androidPreparation": False, "androidExecution": False})
+        self.assertEqual(L.shell_cases(value), ("session-apple-review",))
+        self.assertEqual(L.shell_session_cases(value), ("session-apple-review",))
+        self.assertEqual(L.shell_observers(value), ("session-apple-review",))
+        self.assertEqual(L.shell_fixture_children(value), ("session-apple-review",))
+        self.assertFalse(L.shell_android(value)); self.assertEqual(L.shell_android_cases(value), ())
+        self.assertEqual(L.result_state(value), "installed-apple-review-session-observed")
+        self.assertEqual(L.SHELL_SESSION_CASES, ("session-inputs", "session-refusals", "session-loss", "session-deadline", "session-ios-firebase"))
+        self.assertEqual((len(L.SHELL_ORDINARY_CASES), len(L.SHELL_CASES), len(L.SHELL_FIXTURE_CHILDREN)), (21, 25, 24))
+        historical, ordinary = {"shell": {}}, {"shell": {"ordinary21": L.shell_ordinary_selection()}}
+        self.assertEqual(L.shell_cases(historical), L.SHELL_CASES)
+        self.assertEqual(L.shell_session_cases(historical), L.SHELL_SESSION_CASES)
+        self.assertEqual(sum(len(L._shell_session_roster(installed_handoff(), name)) for name in L.SHELL_SESSION_CASES), 50)
+        self.assertEqual((len(L.public_files(historical)), len(L.public_files(ordinary))), (188, 170))
+        self.assertEqual((L.SHELL_PUBLIC_FILE_LIMIT, L.TOTAL_LIMIT, L.SHELL_FIXTURE_NAMESPACE_LIMIT), (190, 32 << 20, 2048))
+        self.assertEqual({name for name in L.public_files(value) if name.startswith("shell-") and not name.startswith("shell-root-data-")},
+            {"shell-cases.json", "shell-session-apple-review.stdout", "shell-session-apple-review.stderr",
+             "shell-session-apple-review-xvfb.stderr", "shell-session-apple-review-before.json", "shell-session-apple-review-after.json"})
+        for wrong in (None, {}, "session-apple-review1-v1", {**L.shell_apple_review_selection(), "cases": []},
+                      {**L.shell_apple_review_selection(), "cases": ["session-inputs"]},
+                      {**L.shell_apple_review_selection(), "cases": ["session-apple-review", "session-inputs"]},
+                      {**L.shell_apple_review_selection(), "profile": "ordinary21-v1"},
+                      {**L.shell_apple_review_selection(), "androidPreparation": 0},
+                      {**L.shell_apple_review_selection(), "androidExecution": True},
+                      {**L.shell_apple_review_selection(), "extra": False}):
+            for reader in (L.shell_cases, L.public_files, L.result_state):
+                with self.subTest(wrong=wrong, reader=reader.__name__), self.assertRaises(L.Refused):
+                    reader({"shell": {"appleReview": wrong}})
+        for key in ("ordinary21", "githubReadOnly", "githubPreflight", "githubRelease", "projectRecovery", "androidPublication", "localTransport"):
+            with self.subTest(mixed=key), self.assertRaises(L.Refused):
+                L.shell_cases({"shell": {"appleReview": L.shell_apple_review_selection(), key: {}}})
+
+    def test_pair_handoff_requires_original_source_scope_and_no_android_inputs(self):
+        original = apple_review_handoff_data(); L.shell_handoff(original, [])
+        for target, key, item in (
+            ("shell", "appleReview", None), ("compiler", "appleReview", None),
+            *(("compiler", key, "missing") for key in ("appleReview", "androidBuildMaterials", "androidBuildBindings", "androidBuildPublication")),
+            ("compiler", "appleReview", L.shell_ordinary_selection()), ("compiler", "androidBuildBindings", {"unexpected": "value"}),
+            *((target, key, {}) for target in ("shell", "compiler") for key in ("ordinary21", "projectRecovery", "androidPublication", "githubPreflight", "localTransport")),
+            ("compiler", "sourceSha", "f" * 40), ("compiler", "androidBuildMaterials", {}), ("compiler", "androidBuildPublication", {}),
+        ):
+            value = deepcopy(original); row = value["shell"] if target == "shell" else value["shell"]["compiler"]
+            if item == "missing": row.pop(key)
+            else: row[key] = item
+            with self.subTest(target=target, key=key), self.assertRaises(L.Refused): L.shell_handoff(value, [])
+
+    def test_fixture_is_six_private_nodes_and_actual_scalar_results_match_recipe(self):
+        from mobile_release.api._credential_assessment import assess_credentials
+        value = apple_review_handoff_data(); case = "session-apple-review"
+        config = json.loads(L.SHELL_SESSION_APPLE_REVIEW_CONFIG)
+        expected = json.loads(L.SHELL_SESSION_CONFIG)
+        expected["ios"] = {"enabled": True, "bundleId": "org.assessment.fixture", "identityStatus": "unverified", "review": {"usesNonExemptEncryption": False, "demoAccountRequired": True}}
+        expected["metadata"]["iosLocales"] = ["en-US"]
+        self.assertEqual(config, expected)
+        nodes = L._shell_session_roster(value, case)
+        self.assertEqual([name for name, _, _, _ in nodes],
+            [".", "project", "project/release", "sources", "project/release/mobile-release.json", "project/version.properties"])
+        self.assertEqual(next(row[3] for row in nodes if row[0] == "sources"), [])
+        self.assertTrue(all(stat.S_IMODE(mode) == (0o700 if stat.S_ISDIR(mode) else 0o600) for _, mode, _, _ in nodes))
+        for kind, fields in (("apple-review-contact", {"firstName": "Fictional", "lastName": "Review Contact",
+                "email": "fictional-review@example.invalid", "phone": "+1 555 010 0100"}),
+                ("apple-review-demo-account", {"username": "fictional-app-review-demo", "password": "fictional-demo-password"})):
+            result = assess_credentials({"schemaVersion": 1, "policyVersion": "credential-policy-v1",
+                "context": {"draft": config, "platform": "ios", "stage": "external-testing", "purpose": "full"},
+                "input": {"kind": kind, "fields": fields, "observation": None}})
+            self.assertEqual((result["state"], result["identity"], result["applicability"]),
+                             ("configured", "not-applicable", {"state": "required", "reason": "selected"}))
+            self.assertEqual([row["id"] for row in result["fields"]], list(fields))
+            for row in result["fields"]:
+                self.assertEqual((row["presence"], row["state"], row["issues"]), ("supplied", "configured", []))
+                checks = [{"scope": "value-admission", "outcome": "passed"}]
+                if row["id"] == "email": checks.append({"scope": "identifier-format", "outcome": "passed"})
+                self.assertEqual(row["checks"], checks)
+            self.assertIs(result["assurance"]["fileObservationsProcessed"], False)
+            self.assertEqual(result["assurance"]["serviceValidation"], "not-run")
+            for secret in fields.values(): self.assertNotIn(secret, json.dumps(result))
+        before = session_fixture_data(value, case); raw = L.canonical(before)
+        fixture = L.shell_session_fixture(value, case, raw, raw)
+        self.assertEqual((fixture["fixture"], fixture["beforeCount"], fixture["afterCount"]), ("apple-review-session-v1", 6, 6))
+        for mutate in (lambda d: d.update(fixture="four-kind-session-v1"), lambda d: d["namespace"]["children"].append("session-inputs"),
+                       lambda d: d["entries"][3]["children"].append("private-input.json"), lambda d: d["entries"].pop(),
+                       lambda d: d["entries"][4].update(sha256="0" * 64), lambda d: d["entries"][0]["identity"].__setitem__(1, 9999)):
+            changed = deepcopy(before); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(L.Refused): L.shell_session_fixture(value, case, raw, L.canonical(changed))
+        with self.assertRaises(L.Refused): L._shell_session_roster({"shell": {}}, case)
+
+    def test_native_recipe_uses_real_controls_private_scalar_checks_and_stage_revocation(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        recipe = source.split("const SESSION_APPLE_REVIEW: &[SA] = &[", 1)[1].split("];", 1)[0]
+        expected = '''SA::Open, SA::Platform("ios"), SA::Stage("external-testing"),
+            SA::Kind("apple-review-contact"), SA::Fields("apple-review-contact"), SA::Prepare("apple-review-contact","save"), SA::Keep, SA::Assign,
+            SA::Kind("apple-review-demo-account"), SA::Fields("apple-review-demo-account"), SA::Prepare("apple-review-demo-account","save"), SA::Keep, SA::Assign,
+            SA::Stage("candidate"), SA::Discard, SA::ConfirmDiscard, SA::Open,'''
+        self.assertEqual("".join(recipe.split()), "".join(expected.split()))
+        self.assertIn('session_apple_assessment_expected(kind).as_ref()==Some(assessment)', source)
+        self.assertIn('assert_session_apple_assessment_contract();', source)
+        self.assertIn('old["revision"].as_u64().and_then(|n| n.checked_add(1)).is_some_and', source)
+        self.assertIn('!unchanged || !session_context_transition(&old["context"],ctx,platform,stage)', source)
+        self.assertIn('!unassigned(status) || !op["preview"].is_null() || !op["selectionToken"].is_null()', source)
+        self.assertIn('!before.sources.is_empty() || !snapshot.sources.is_empty() || op["source"]!="not-run"', source)
+        renderer = (SOURCE / "desktop/src/components/CredentialSession.tsx").read_text()
+        for label, old, count in (("Explicit private-input review", "Explicit session review", 5),
+                                  ("Confirm private-input lock", "Confirm session discard", 2),
+                                  ("Replace item", "Replace session item", 2)):
+            self.assertIn(label, renderer); self.assertEqual(source.count(label), count); self.assertNotIn(old, source)
+
+    def test_singleton_preparation_retains_existing_exclusive_namespace_and_capacity(self):
+        value = apple_review_handoff_data(); root = L.shell_fixture_root(value); case_root = root / "session-apple-review"
+        namespace = fixture_namespace_data(value); ancestry = {key: namespace[key] for key in ("control", "ancestors")}
+        nodes, writes = {}, {}
+        def mkdir(path, *, mode):
+            if path in nodes: raise FileExistsError("inert exclusive creation conflict")
+            nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFDIR | mode, size=4096, stamp=11)
+            if path.parent in nodes: nodes[path.parent].st_nlink += 1
+        def write(path, raw, mode):
+            self.assertNotIn(path, nodes); writes[path] = raw
+            nodes[path] = inert_stat(2000 + len(nodes), stat.S_IFREG | mode, size=len(raw), stamp=11)
+        def chmod(path, mode): nodes[path].st_mode = stat.S_IFMT(nodes[path].st_mode) | mode
+        def chown(path, uid, gid, **kwargs): nodes[path].st_uid, nodes[path].st_gid = uid, gid
+        def scan(path):
+            context = Mock(); context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=p.name) for p in nodes if p.parent == path))
+            context.__exit__ = Mock(return_value=False); return context
+        with patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "_shell_fixture_ancestry", return_value=ancestry), \
+             patch.object(Path, "mkdir", autospec=True, side_effect=mkdir), patch.object(Path, "lstat", autospec=True, side_effect=lambda p: deepcopy(nodes[p])), \
+             patch.object(L, "_D", SimpleNamespace(write=write)), patch.object(L, "_xattrs"), patch.object(L, "_retain") as retained, \
+             patch.object(L.os, "chown", side_effect=chown), patch.object(L.os, "chmod", side_effect=chmod), patch.object(L.os, "scandir", side_effect=scan), \
+             patch.object(L.os, "symlink", side_effect=AssertionError("Scalar fixture needs no asset")):
+            binding = L._shell_fixtures_prepare(value)
+            self.assertEqual(L.decode(binding)["children"], ["session-apple-review"])
+            self.assertEqual(set(nodes), {root, *(case_root if name == "." else case_root / name for name, _, _, _ in L._shell_session_roster(value, "session-apple-review"))})
+            self.assertEqual(writes, {case_root / "project/release/mobile-release.json": L.SHELL_SESSION_APPLE_REVIEW_CONFIG,
+                                     case_root / "project/version.properties": L.SHELL_PROJECT_VERSION})
+            retained.assert_not_called()
+            with self.assertRaises(FileExistsError): L._shell_fixtures_prepare(value)
+        value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024, "installedBytes": {key: 2048 for key in L.VERSIONS},
+                                                "installedEntries": {key: 16 for key in L.VERSIONS}}
+        with patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=1 << 30, f_frsize=4096, f_favail=1 << 30)), \
+             patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)):
+            self.assertIsNone(L._capacity(value))
+
+    def test_receipt_requires_two_original_assessments_and_unweakened_finality(self):
+        case = "session-apple-review"; receipt = deepcopy(L.SHELL_SESSION_RECEIPTS[case])
+        self.assertEqual(receipt["behavior"], {"kinds": ["apple-review-contact", "apple-review-demo-account"],
+            "assessments": 2, "fileChoosers": 0, "capturedFiles": 0, "capturesClosed": 0, "kept": 2, "assigned": 2,
+            "contactAndDemoConfigured": True, "privateEmailFormatChecked": True, "contextRevoked": True, "discardReopenEmpty": True})
+        stdout, stderr = session_capture(case)
+        self.assertEqual(L.shell_result(stdout, stderr, case, 0, map_data())["sessionInputs"], receipt)
+        for family in ("behavior", "originals", "safety"):
+            for key, item in receipt[family].items():
+                wrong = deepcopy(receipt)
+                wrong[family][key] = not item if type(item) is bool else item + 1 if type(item) is int else ["ios-firebase"]
+                raw, err = session_capture(case, wrong)
+                with self.subTest(family=family, key=key), self.assertRaises(L.Refused): L.shell_result(raw, err, case, 0, map_data())
+        for raw, err, code in ((stdout, stderr, 1), (stdout + L.SHELL_SESSION_MARKER + L.canonical(receipt), stderr, 0),
+                               (*session_capture(case, maps=[]), 0), (stdout, b"MRK_UNEXPECTED=1\n", 0)):
+            with self.subTest(code=code, size=len(raw)), self.assertRaises(L.Refused): L.shell_result(raw, err, case, code, map_data())
+
+    def test_closed_consumer_binds_exact_export_commands_post_fixture_and_unchanged_publication(self):
+        value, outcome, files, expected = closed_apple_review_data(); case = "session-apple-review"
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+            self.assertEqual(set(result["cases"]), {case}); self.assertIs(result["ordinaryActivation"], False)
+            self.assertFalse({"projectDraft", "ordinary21", "androidBuild", "androidPublication"} & set(result))
+            for fault in ("scope", "activation", "ordinary", "source", "file-missing", "file-extra", "case-extra", "command", "exit", "post", "publication"):
+                altered, raw = deepcopy(outcome), dict(files)
+                if fault == "scope": altered.pop("appleReview")
+                elif fault == "activation": altered["ordinaryActivation"] = True
+                elif fault == "ordinary": altered["ordinary21"] = L.shell_ordinary_selection()
+                elif fault == "source": altered["shellRosterSha256"] = "0" * 64
+                elif fault == "file-missing": raw.pop("shell-" + case + ".stdout")
+                elif fault == "file-extra": raw["shell-session-inputs.stdout"] = b""
+                elif fault == "case-extra":
+                    cases = L.decode(raw["shell-cases.json"]); cases["session-inputs"] = {}; raw["shell-cases.json"] = L.canonical(cases)
+                elif fault == "command": altered["commands"][0]["argv"][-1] = "session-inputs"
+                elif fault == "exit": altered["commands"][0]["exitCode"] = 1
+                elif fault == "post":
+                    doc = L.decode(raw["shell-" + case + "-after.json"]); doc["entries"][4]["sha256"] = "0" * 64
+                    raw["shell-" + case + "-after.json"] = L.canonical(doc)
+                else: raw["published-before-upgrade.txt"] = L.canonical({"P1": {"DATA": True}})
+                with self.subTest(fault=fault), self.assertRaises((L.Refused, KeyError)): L.shell_closed_result(value, altered, raw)
+        document = session_fixture_data(value, case); namespace = L.canonical(document["namespace"])
+        with patch.object(L, "_ROOT", L.root_path(value)), patch.object(L, "read", return_value=L.canonical(document)), \
+             patch.object(L, "_shell_session_inventory", return_value=document) as inventory, \
+             patch.object(L, "_shell_project_inventory", side_effect=AssertionError("No unrelated fixture reads")):
+            L._shell_fixtures_final(value, namespace); inventory.assert_called_once_with(value, namespace, case)
+            changed = deepcopy(document); changed["entries"][4]["sha256"] = "0" * 64; inventory.return_value = changed
+            with self.assertRaisesRegex(L.Refused, "Apple scalar fixture changed"): L._shell_fixtures_final(value, namespace)
 
 
 class GitHubEntryFailureLabelContracts(unittest.TestCase):

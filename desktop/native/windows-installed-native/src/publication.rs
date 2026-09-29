@@ -861,7 +861,7 @@ impl Publication {
         self.book.slots.try_reserve(1).map_err(|_| Error::Bounds)?;
         let index = self.book.slots.len();
         self.book.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
-            state: SlotState::Reserved, kind: kind.into(), parent: Some(parent_slot), name: wide(name), canonical,
+            state: SlotState::Reserved, kind: kind.into(), file_purpose: FileReadPurpose::Content, parent: Some(parent_slot), name: wide(name), canonical,
             read_bytes: 0, read_ended: false, directory_ended: false, directory_mode: DirectoryMode::Unstarted,
             system_image: None, _pin: PhantomPinned })));
         Ok(index)

@@ -134,7 +134,7 @@ int mrk_decode_directory_entries(const uint8_t *block, size_t bytes, int count,
         if (name.attr_dataoffset < (int32_t)(fixed - name_field)
             || (uint32_t)name.attr_dataoffset > length - name_field
             || name.attr_length < 2 || name.attr_length > 256 || !inode
-            || (kind != VREG && kind != VDIR)) return EIO;
+            || (kind != VREG && kind != VDIR && kind != VLNK)) return EIO;
         // attr_dataoffset is relative to the name reference itself.
         size_t name_at = name_field + (uint32_t)name.attr_dataoffset;
         if (name.attr_length > length - name_at) return EIO;
@@ -143,7 +143,9 @@ int mrk_decode_directory_entries(const uint8_t *block, size_t bytes, int count,
         if (text[name_length] || memchr(text, 0, name_length) || memchr(text, '/', name_length)) return EIO;
         if (capacity - written < 11 || name_length > capacity - written - 11) return EOVERFLOW;
         memcpy(out + written, &inode, sizeof(inode));
-        out[written + 8] = kind == VDIR ? DT_DIR : DT_REG;
+        // Report link metadata only; consumers still decide which kinds they
+        // admit. This decoder never opens or follows a reported entry.
+        out[written + 8] = kind == VDIR ? DT_DIR : (kind == VLNK ? DT_LNK : DT_REG);
         memcpy(out + written + 9, &name_length, sizeof(name_length));
         memcpy(out + written + 11, text, name_length);
         written += 11 + name_length;
@@ -203,9 +205,11 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
+static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
+static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || mrk_panel_project_field(kind); }
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
-    if (kind == 1 || kind == 3) {
+    if (mrk_panel_open_kind(kind)) {
         if (code == NSModalResponseOK) return 1;
         if (code == NSModalResponseCancel) return 2;
     } else if (kind == 2) {
@@ -217,6 +221,10 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
 
 #ifdef MRK_INSTALLED_OBSERVATION
 // Saved scalar DATA only. Zero means unobserved, not a nil getter result.
+enum { MRK_OPEN_NONE, MRK_OPEN_THREAD, MRK_OPEN_INPUT, MRK_OPEN_INELIGIBLE, MRK_OPEN_UNSUPPORTED,
+    MRK_OPEN_AMBIGUOUS, MRK_OPEN_MALFORMED, MRK_OPEN_LIMIT, MRK_OPEN_DEADLINE, MRK_OPEN_CUSTODY,
+    MRK_OPEN_INVALID_ELEMENT, MRK_OPEN_CANNOT_COMPLETE, MRK_OPEN_OTHER,
+    MRK_OPEN_CHANGED, MRK_OPEN_EXCEPTION, MRK_OPEN_CLEANUP_UNKNOWN };
 typedef struct {
     uint32_t flags, checked, matched, parent, panel, children, originals, site, error;
 } MRKIdentityProof;
@@ -231,7 +239,8 @@ enum { MRK_ID_ARMED = 1u, MRK_ID_CONFIG_ATTEMPTED = 2u, MRK_ID_PARENT_ENTERED = 
     MRK_ID_DIRECTORY_ENTERED = 128u, MRK_ID_DIRECTORY_RETURNED = 256u,
     MRK_ID_FILE_PANEL = 512u, MRK_ID_NAME_ENTERED = 1024u, MRK_ID_NAME_RETURNED = 2048u };
 enum { MRK_ID_OBJECTS = 1u, MRK_ID_TAGS, MRK_ID_PARENT_SET, MRK_ID_PARENT_GET, MRK_ID_COMPLETE,
-    MRK_ID_PROMPT_SET, MRK_ID_PROMPT_GET, MRK_ID_DIRECTORY_URL, MRK_ID_DIRECTORY_SET, MRK_ID_NAME_SET, MRK_ID_NAME_GET };
+    MRK_ID_PROMPT_SET, MRK_ID_PROMPT_GET, MRK_ID_DIRECTORY_URL, MRK_ID_DIRECTORY_SET, MRK_ID_NAME_SET, MRK_ID_NAME_GET,
+    MRK_ID_INITIAL_CLOSE };
 enum { MRK_ID_UNOBSERVED, MRK_ID_NIL, MRK_ID_MATCH, MRK_ID_DIFFERENT, MRK_ID_TYPE_INVALID };
 enum { MRK_PANEL_ID_UNOBSERVED, MRK_PANEL_ID_NIL, MRK_PANEL_ID_TYPE_INVALID, MRK_PANEL_ID_EMPTY,
     MRK_PANEL_ID_LIMIT, MRK_PANEL_ID_NUL, MRK_PANEL_ID_ENCODING, MRK_PANEL_ID_VALID,
@@ -257,6 +266,10 @@ enum { MRK_SELECTION_UNOBSERVED, MRK_SELECTION_EMPTY, MRK_SELECTION_MALFORMED,
     NSWindow *parent;
     NSWindow *window;
     NSAlert *alert;
+    // P2-only synchronous start temporaries stay on the SAME native original
+    // until their consuming releases return. Uncertain release is never retried.
+    NSString *initialPath;
+    NSURL *initialDirectory;
     void (^completion)(NSModalResponse);
     BOOL attempted, started, responded, reported, callbackActive, closeAttempted, closed, unknown;
     int kind, response;
@@ -265,6 +278,11 @@ enum { MRK_SELECTION_UNOBSERVED, MRK_SELECTION_EMPTY, MRK_SELECTION_MALFORMED,
     // Instrumentation only; never callback/cleanup/selection authority.
     BOOL observationDirectoryReturned, observationActionAttempted, observationActionReturned;
     char observationTarget[4097];
+    // Copied only from the production start's original ProjectPathBinding.
+    // It is distinct from the later synthetic navigation target.
+    char observationInitialRoot[4097];
+    uint32_t observationProjectField;
+    NSString *observationFieldName;
     char observationParentTag[64], observationPanelTag[64];
     char observationPrompt[8];
     MRKIdentityWire observationIdentity;
@@ -284,8 +302,63 @@ void *mrk_panel_reserve(void) {
     if (!pthread_main_np()) return NULL;
     @try { return [[MRKInstalledPanel alloc] init]; } @catch (NSException *e) { (void)e; return NULL; }
 }
-int mrk_panel_start(void *opaque, int kind) {
-    if (!pthread_main_np() || !opaque || (kind != 1 && kind != 2 && kind != 3)) return EINVAL;
+static int mrk_panel_initial_directory(MRKInstalledPanel *s, const uint8_t *bytes, size_t length) {
+    int result = EIO;
+#ifdef MRK_INSTALLED_OBSERVATION
+    BOOL observed = (s->observationIdentity.flags & MRK_ID_ARMED) != 0;
+    if (observed) { s->observationIdentity.site = MRK_ID_DIRECTORY_URL; s->observationIdentity.error = MRK_OPEN_INPUT; }
+#endif
+    @try {
+        s->initialPath = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
+        if (!s->initialPath) result = EINVAL;
+        else {
+            s->initialDirectory = [[NSURL alloc] initFileURLWithPath:s->initialPath isDirectory:YES];
+            if (s->initialDirectory && [s->initialDirectory isFileURL]) {
+#ifdef MRK_INSTALLED_OBSERVATION
+                memcpy(s->observationInitialRoot, bytes, length);
+                s->observationInitialRoot[length] = 0;
+                if (observed) {
+                    s->observationIdentity.site = MRK_ID_DIRECTORY_SET;
+                    s->observationIdentity.flags |= MRK_ID_DIRECTORY_ENTERED;
+                }
+#endif
+                [(NSOpenPanel *)s->window setDirectoryURL:s->initialDirectory];
+#ifdef MRK_INSTALLED_OBSERVATION
+                s->observationDirectoryReturned = YES;
+                if (observed) s->observationIdentity.flags |= MRK_ID_DIRECTORY_RETURNED;
+#endif
+                result = 0;
+            }
+        }
+    } @catch (NSException *e) {
+        (void)e; s->unknown = YES; result = EIO;
+#ifdef MRK_INSTALLED_OBSERVATION
+        if (observed) s->observationIdentity.error = MRK_OPEN_EXCEPTION;
+#endif
+    }
+    // Independent one-use releases; an uncertain first close cannot suppress
+    // the other safe close or erase either original pointer.
+    @try { if (s->initialDirectory) { [s->initialDirectory release]; s->initialDirectory = nil; } }
+    @catch (NSException *e) {
+        (void)e; s->unknown = YES; result = EIO;
+#ifdef MRK_INSTALLED_OBSERVATION
+        if (observed) { s->observationIdentity.site = MRK_ID_INITIAL_CLOSE; s->observationIdentity.error = MRK_OPEN_CLEANUP_UNKNOWN; }
+#endif
+    }
+    @try { if (s->initialPath) { [s->initialPath release]; s->initialPath = nil; } }
+    @catch (NSException *e) {
+        (void)e; s->unknown = YES; result = EIO;
+#ifdef MRK_INSTALLED_OBSERVATION
+        if (observed) { s->observationIdentity.site = MRK_ID_INITIAL_CLOSE; s->observationIdentity.error = MRK_OPEN_CLEANUP_UNKNOWN; }
+#endif
+    }
+    return result;
+}
+static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial, size_t length) {
+    if (!pthread_main_np() || !opaque || (!mrk_panel_open_kind(kind) && kind != 2)) return EINVAL;
+    if (mrk_panel_project_field(kind)) {
+        if (!initial || !length || length > 4096 || initial[0] != '/' || memchr(initial, 0, length)) return EINVAL;
+    } else if (initial || length) return EINVAL;
     MRKInstalledPanel *s = opaque;
     if (s->attempted || s->unknown) return EALREADY;
     s->attempted = YES; s->kind = kind;
@@ -296,12 +369,16 @@ int mrk_panel_start(void *opaque, int kind) {
         if (!main || [main isKindOfClass:[NSPanel class]] || [main attachedSheet]) return EPERM;
         s->started = YES;
         s->parent = [main retain];
-        if (kind == 1 || kind == 3) {
+        if (mrk_panel_open_kind(kind)) {
             NSOpenPanel *panel = [NSOpenPanel openPanel]; s->window = [panel retain];
-            [panel setTitle:kind == 1 ? @"Choose a mobile project folder" : @"Choose a signing or iOS build-input file"];
-            [panel setCanChooseFiles:kind == 3]; [panel setCanChooseDirectories:kind == 1];
+            NSString *title = kind == 1 ? @"Choose a mobile project folder" : kind == 3 ? @"Choose a signing or iOS build-input file"
+                : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
+                : kind == 6 ? @"Choose an existing Xcode workspace directory" : @"Choose an existing metadata directory inside the project";
+            [panel setTitle:title];
+            [panel setCanChooseFiles:kind == 3 || kind == 4];
+            [panel setCanChooseDirectories:kind == 1 || (kind >= 5 && kind <= 7)];
             [panel setAllowsMultipleSelection:NO]; [panel setCanCreateDirectories:NO];
-            [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:NO];
+            [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:kind >= 5 && kind <= 7];
         } else {
             s->alert = [[NSAlert alloc] init];
             [s->alert setMessageText:@"Quit and discard unsaved drafts?"];
@@ -318,6 +395,21 @@ int mrk_panel_start(void *opaque, int kind) {
             s->unknown = YES; return EIO;
         }
 #endif
+        // This production setter is shared by observed and ordinary P2. Its
+        // sole source is the original binding. In the instrumented path the
+        // existing parent/prompt tags precede it, preserving the same ordered
+        // partial-return decoder as Project/File. No observation setter is used.
+        if (mrk_panel_project_field(kind)) {
+            int configured = mrk_panel_initial_directory(s, initial, length);
+            if (configured != 0 || s->unknown) { s->unknown = YES; return EIO; }
+#ifdef MRK_INSTALLED_OBSERVATION
+            if (s->observationIdentity.flags & MRK_ID_ARMED) {
+                s->observationIdentity.flags |= MRK_ID_CONFIG_COMPLETE;
+                s->observationIdentity.site = MRK_ID_COMPLETE;
+                s->observationIdentity.error = MRK_OPEN_NONE;
+            }
+#endif
+        }
         // The original state is retained by the copied native completion. No
         // raw Rust callback or path publication can outlive the real document.
         s->completion = Block_copy(^(NSModalResponse code) {
@@ -344,7 +436,7 @@ int mrk_panel_start(void *opaque, int kind) {
                     if (observed) s->observationCompletion.response = s->response == 1 ? MRK_COMPLETION_ACCEPT
                         : s->response == 2 ? MRK_COMPLETION_DECLINE : MRK_COMPLETION_OTHER;
 #endif
-                    if (s->response == 1 && (kind == 1 || kind == 3)) {
+                    if (s->response == 1 && mrk_panel_open_kind(kind)) {
                         NSURL *url = [(NSOpenPanel *)s->window URL];
                         const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
                         if (!path || path[0] != '/' || strnlen(path, sizeof(s->selected)) >= sizeof(s->selected)) s->unknown = YES;
@@ -364,10 +456,18 @@ int mrk_panel_start(void *opaque, int kind) {
             // No native call/run-loop pumping after this final completion fact.
             s->callbackActive = NO;
         });
-        if (kind == 1 || kind == 3) [(NSOpenPanel *)s->window beginSheetModalForWindow:s->parent completionHandler:s->completion];
+        if (mrk_panel_open_kind(kind)) [(NSOpenPanel *)s->window beginSheetModalForWindow:s->parent completionHandler:s->completion];
         else [s->alert beginSheetModalForWindow:s->parent completionHandler:s->completion];
         return 0;
     } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }
+}
+int mrk_panel_start(void *opaque, int kind) {
+    if (mrk_panel_project_field(kind)) return EINVAL;
+    return mrk_panel_start_inner(opaque, kind, NULL, 0);
+}
+int mrk_panel_start_project_field(void *opaque, int kind, const uint8_t *initial, size_t length) {
+    if (!mrk_panel_project_field(kind)) return EINVAL;
+    return mrk_panel_start_inner(opaque, kind, initial, length);
 }
 int mrk_panel_poll(void *opaque, int *result, uint8_t *path, size_t capacity) {
     if (!pthread_main_np() || !opaque || !result || !path || capacity != 4097) return -1;
@@ -396,7 +496,8 @@ int mrk_panel_close(void *opaque) {
     if (s->closeAttempted) return EALREADY;
     s->closeAttempted = YES;
     @try {
-        if (!s->started && !s->window && !s->parent && !s->alert && !s->completion) { s->closed = YES; return 0; }
+        if (!s->started && !s->window && !s->parent && !s->alert && !s->completion
+            && !s->initialPath && !s->initialDirectory) { s->closed = YES; return 0; }
         if (!s->responded && s->window && [s->window sheetParent]) [s->parent endSheet:s->window returnCode:NSModalResponseCancel];
         if (s->window) { [s->window orderOut:nil]; [s->window close]; }
         return s->unknown ? EIO : 0;
@@ -405,7 +506,10 @@ int mrk_panel_close(void *opaque) {
 int mrk_panel_release(void *opaque) {
     if (!pthread_main_np() || !opaque) return EINVAL;
     MRKInstalledPanel *s = opaque;
-    if (s->unknown || s->callbackActive || !s->closed) return EBUSY;
+    if (s->unknown || s->callbackActive || !s->closed || s->initialPath || s->initialDirectory) return EBUSY;
+#ifdef MRK_INSTALLED_OBSERVATION
+    if (s->observationFieldName) return EBUSY;
+#endif
     @try {
         // Only original references, after original close/completion returned.
         // Unknown retains the object; there is no replacement or Drop fallback.
@@ -476,20 +580,24 @@ static void mrk_panel_completion_selection(MRKInstalledPanel *s) {
 }
 static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s) {
     // Actual pre-presentation setter return + current ROOT browsing, not selection.
-    if ((s->kind != 1 && s->kind != 3) || !s->window || !s->observationDirectoryReturned
+    if (!mrk_panel_open_kind(s->kind) || !s->window || !s->observationDirectoryReturned
         || !mrk_target_path(s->observationTarget)) return NO;
+    // P2's actual displayed initial root is observed before the separate,
+    // one-use synthetic navigation. Neither substitutes for the other.
+    if (mrk_panel_project_field(s->kind) && !(s->observationProjectField & 1024u)) return NO;
     NSURL *url = [(NSOpenPanel *)s->window directoryURL];
     const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
     // Preserve the original Project proof. Only File panels need the parent/
     // filename transformation and its additional Objective-C getters.
-    if (s->kind == 1) return path && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
+    if (s->kind != 3 && s->kind != 4) return path && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
         && strcmp(path, s->observationTarget) == 0;
     NSString *target = [NSString stringWithUTF8String:s->observationTarget];
     NSString *directory = [target stringByDeletingLastPathComponent];
     const char *expected = [directory fileSystemRepresentation];
     return path && expected && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
         && strcmp(path, expected) == 0
-        && (s->observationIdentity.flags & (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)) == (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)
+        && (s->kind == 4 ? (s->observationProjectField & 2048u) != 0
+            : (s->observationIdentity.flags & (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)) == (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED))
         && [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];
 }
 int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity) {
@@ -502,7 +610,7 @@ int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, u
         uint32_t attachment = mrk_observation_attachment(s);
         *kind = s->kind; *response = s->response;
         *flags = attachment | (s->started ? 1u : 0u) | (attachment == MRK_ATTACHMENT_ALL ? 2u : 0u)
-            | (s->observationTarget[0] ? 4u : 0u) | (s->observationDirectoryReturned ? 8u : 0u)
+            | (s->observationTarget[0] || s->observationInitialRoot[0] ? 4u : 0u) | (s->observationDirectoryReturned ? 8u : 0u)
             | (mrk_observation_directory_ready(s) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
             | (s->observationActionReturned ? 64u : 0u) | (s->responded ? 128u : 0u)
             | (s->responded && !s->callbackActive ? 256u : 0u) | (s->closeAttempted ? 512u : 0u)
@@ -551,7 +659,8 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
     site = MRK_ACTION_CLOSED; if (s->closed) MRK_ACTION_RETURN(EPERM);
     site = MRK_ACTION_ATTEMPTED; if (s->observationActionAttempted) MRK_ACTION_RETURN(EPERM);
     site = MRK_ACTION_KIND;
-    if ((action <= 3 && s->kind != 1) || ((action == 4 || action == 5) && s->kind != 2) || (action == 6 && s->kind != 3)) MRK_ACTION_RETURN(EPERM);
+    if ((action <= 3 && s->kind != 1 && !(s->kind >= 5 && s->kind <= 7))
+        || ((action == 4 || action == 5) && s->kind != 2) || (action == 6 && s->kind != 3 && s->kind != 4)) MRK_ACTION_RETURN(EPERM);
     @try {
         // EAGAIN is only pre-action readiness, never permission to repeat an
         // attempted action. The caller's original endpoint is not renewed.
@@ -582,12 +691,71 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
 #undef MRK_ACTION_RETURN
 }
 
+// Observation-only preparation of one real P2 panel. The production initial
+// directory/options are sampled while visible/attached BEFORE any navigation.
+// This never creates a panel, publishes selection, or invokes its completion.
+// Bits0..8 are the latched initial proof;9/10 navigation entry/return;11 name
+// return;12 all same-call temporary closes returned. The native original owns
+// the latch and conversion pointers; an uncertain entered call is not retried.
+int mrk_panel_observe_project_field(void *opaque, int navigate, uint32_t *facts) {
+    if (!pthread_main_np() || !opaque || !facts || (navigate != 0 && navigate != 1)) return EINVAL;
+    MRKInstalledPanel *s = opaque; *facts = s->observationProjectField;
+    if (s->unknown) return EIO;
+    if (!mrk_panel_project_field(s->kind) || !s->started || !s->parent || !s->window || !s->completion
+        || s->responded || s->callbackActive || s->closeAttempted || s->closed || s->observationActionAttempted
+        || s->observationActionReturned || s->initialPath || s->initialDirectory || s->observationFieldName
+        || !s->observationDirectoryReturned || !mrk_target_path(s->observationInitialRoot)) return EPERM;
+    if (s->observationProjectField) return EALREADY;
+    if (navigate && (!mrk_target_path(s->observationTarget)
+        || (s->observationIdentity.flags & (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE)) != (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE))) return EPERM;
+    int result = EIO;
+    @try {
+        if (!mrk_observation_attached(s)) return EAGAIN; // No attempted proof or setter yet.
+        s->observationProjectField = 1u | 256u;
+        NSOpenPanel *panel = (NSOpenPanel *)s->window;
+        NSURL *url = [panel directoryURL];
+        const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
+        if (path && strnlen(path, 4097) < 4097 && strcmp(path, s->observationInitialRoot) == 0) s->observationProjectField |= 2u;
+        if ([panel canChooseFiles] == (s->kind == 4)) s->observationProjectField |= 4u;
+        if ([panel canChooseDirectories] == (s->kind >= 5)) s->observationProjectField |= 8u;
+        if ([panel treatsFilePackagesAsDirectories] == (s->kind >= 5)) s->observationProjectField |= 16u;
+        if (![panel allowsMultipleSelection]) s->observationProjectField |= 32u;
+        if (![panel canCreateDirectories]) s->observationProjectField |= 64u;
+        if (![panel resolvesAliases]) s->observationProjectField |= 128u;
+        if (s->observationProjectField != 511u) result = EPERM;
+        else if (!navigate) result = 0;
+        else {
+            size_t length = strlen(s->observationTarget);
+            const char *leaf = s->kind == 4 ? strrchr(s->observationTarget, '/') + 1 : NULL;
+            size_t directoryLength = leaf ? (size_t)(leaf - s->observationTarget - 1) : length;
+            if (!directoryLength) directoryLength = 1;
+            s->initialPath = [[NSString alloc] initWithBytes:s->observationTarget length:directoryLength encoding:NSUTF8StringEncoding];
+            if (s->initialPath) s->initialDirectory = [[NSURL alloc] initFileURLWithPath:s->initialPath isDirectory:YES];
+            if (leaf) s->observationFieldName = [[NSString alloc] initWithBytes:leaf length:strlen(leaf) encoding:NSUTF8StringEncoding];
+            if (s->initialDirectory && [s->initialDirectory isFileURL] && (!leaf || s->observationFieldName)) {
+                s->observationProjectField |= 512u;
+                [panel setDirectoryURL:s->initialDirectory];
+                s->observationProjectField |= 1024u;
+                if (leaf) {
+                    [panel setNameFieldStringValue:s->observationFieldName];
+                    s->observationProjectField |= 2048u;
+                }
+                result = 0;
+            }
+        }
+    } @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
+    @try { if (s->initialDirectory) { [s->initialDirectory release]; s->initialDirectory = nil; } }
+    @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
+    @try { if (s->initialPath) { [s->initialPath release]; s->initialPath = nil; } }
+    @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
+    @try { if (s->observationFieldName) { [s->observationFieldName release]; s->observationFieldName = nil; } }
+    @catch (NSException *e) { (void)e; s->unknown = YES; result = EIO; }
+    if (!s->unknown && !s->initialDirectory && !s->initialPath && !s->observationFieldName) s->observationProjectField |= 4096u;
+    *facts = s->observationProjectField; return result;
+}
+
 // Main-only original proof and off-main public AX input have separate ABIs.
 // Only copied bounded identity/control DATA crosses threads; never an AppKit object.
-enum { MRK_OPEN_NONE, MRK_OPEN_THREAD, MRK_OPEN_INPUT, MRK_OPEN_INELIGIBLE, MRK_OPEN_UNSUPPORTED,
-    MRK_OPEN_AMBIGUOUS, MRK_OPEN_MALFORMED, MRK_OPEN_LIMIT, MRK_OPEN_DEADLINE, MRK_OPEN_CUSTODY,
-    MRK_OPEN_INVALID_ELEMENT, MRK_OPEN_CANNOT_COMPLETE, MRK_OPEN_OTHER,
-    MRK_OPEN_CHANGED, MRK_OPEN_EXCEPTION, MRK_OPEN_CLEANUP_UNKNOWN };
 enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PARENT_ID,
     MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_CONTROL_PROJECTION, MRK_OPEN_BUTTON, MRK_OPEN_CONTROL_RECHECK,
     MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP,
@@ -704,7 +872,7 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
     d->flags |= MRK_ID_CONFIG_ATTEMPTED; d->site = MRK_ID_OBJECTS;
     if (s->kind == 3) d->flags |= MRK_ID_FILE_PANEL;
     d->error = MRK_OPEN_INELIGIBLE;
-    if (!s->parent || !s->window || (s->kind != 1 && s->kind != 3) || s->unknown || s->responded
+    if (!s->parent || !s->window || !mrk_panel_open_kind(s->kind) || s->unknown || s->responded
         || s->callbackActive || s->closeAttempted || s->closed) return NO;
     @try {
         d->site = MRK_ID_TAGS; d->error = MRK_OPEN_INPUT;
@@ -729,6 +897,14 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
         d->site = MRK_ID_PROMPT_GET;
         d->prompt = mrk_identity_class([(NSOpenPanel *)s->window prompt], prompt);
         if (d->prompt != MRK_ID_MATCH) { d->error = MRK_OPEN_CHANGED; return NO; }
+        if (mrk_panel_project_field(s->kind)) {
+            // Do not navigate to the observation target. The SAME production
+            // start now configures its original bound root exactly once, then
+            // marks this ordered configuration complete before presentation.
+            if (s->observationDirectoryReturned || s->observationInitialRoot[0]
+                || (d->flags & (MRK_ID_DIRECTORY_ENTERED | MRK_ID_DIRECTORY_RETURNED))) return NO;
+            return YES;
+        }
         d->site = MRK_ID_DIRECTORY_URL; d->error = MRK_OPEN_INPUT;
         if (!mrk_target_path(s->observationTarget) || s->observationDirectoryReturned) return NO;
         NSString *target = [NSString stringWithUTF8String:s->observationTarget];
@@ -760,7 +936,7 @@ static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {
     }
 }
 static BOOL mrk_original_eligible(MRKInstalledPanel *s) {
-    return !s->unknown && s->started && (s->kind == 1 || s->kind == 3) && s->parent && s->window && s->completion
+    return !s->unknown && s->started && mrk_panel_open_kind(s->kind) && s->parent && s->window && s->completion
         && !s->responded && !s->callbackActive && !s->closeAttempted && !s->closed
         && !s->observationActionAttempted && !s->observationActionReturned
         && (s->observationIdentity.flags & (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE)) == (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE);
@@ -923,7 +1099,10 @@ typedef struct {
 // At most eight different genuine panels, one registered worker at a time.
 // Every original ledger remains retained for process lifetime, never reused.
 // Unknown CF/control custody permanently forbids any successor, not just reuse.
-static MRKPrompt mrk_prompt_originals[8];
+// Project selection plus the eight accepted P2 choices. Slots are never
+// recycled; Cancel does not consume a Press original.
+enum { MRK_PROMPT_ORIGINALS = 9 };
+static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];
 static atomic_uint mrk_prompt_next = 0;
 static atomic_flag mrk_prompt_active = ATOMIC_FLAG_INIT;
 static atomic_bool mrk_prompt_unknown = false;
@@ -1245,7 +1424,7 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
         refused.error = MRK_OPEN_CUSTODY; *out = refused; return;
     }
     unsigned index = atomic_load(&mrk_prompt_next);
-    if (index >= 8 || !atomic_compare_exchange_strong(&mrk_prompt_next, &index, index + 1)) {
+    if (index >= MRK_PROMPT_ORIGINALS || !atomic_compare_exchange_strong(&mrk_prompt_next, &index, index + 1)) {
         atomic_store(&mrk_prompt_unknown, true); refused.error = MRK_OPEN_CUSTODY; *out = refused; return;
     }
     MRKPrompt *s = &mrk_prompt_originals[index]; s->admit = admission; s->recheck = recheck; s->context = context;
@@ -1279,3 +1458,25 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
     atomic_flag_clear(&mrk_prompt_active);
 }
 #endif
+
+// Public-URL handoff only, not a Keychain/provider or application operation.
+// The original shell admission belongs outside its document/registry locks.
+// This function creates no worker, completion block or task-owned browser.
+int mrk_github_device_page_open(void) {
+    uint32_t uid = 0;
+    if (mrk_user(&uid) != 0 || !pthread_main_np()) return 0;
+    @try {
+        @autoreleasepool {
+            NSURL *url = [NSURL URLWithString:@"https://github.com/login/device"];
+            if (!url) return 0;
+            NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
+            if (!workspace) return 0;
+            // A positive native return is handoff acceptance, not authenticated
+            // navigation. The user/browser remains owned by the desktop.
+            return [workspace openURL:url] ? 1 : 0;
+        }
+    } @catch (NSException *exception) {
+        (void)exception; // Never expose native exception/private diagnostic text.
+        return 0; // Ambiguous handoff is not retried or called "not launched".
+    }
+}

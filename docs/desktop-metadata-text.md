@@ -96,6 +96,60 @@ may normalize line endings; the exact proposed bytes and newline-style-set
 change are therefore included in Review. Android's separate raw CR/LF
 500-character build release-note policy is unchanged and outside this editor.
 
+## Check all saved required public text
+
+The separate **Check all saved public text** action reads and validates the
+required public fields across every enabled locale in the saved configuration.
+It reuses the two existing bounded Observe and core Validate APIs, serially;
+there is no recursive filesystem scan, offline-preflight invocation, project
+command, tool probe, network/Store request or writer. Its result is **saved
+required public text only**, not complete metadata validation.
+
+Refresh the saved project configuration first when its exact byte count and
+digest are unavailable. Every locale observation must match that same saved
+configuration assertion, platform, locale and metadata root. The UI checks the
+complete enabled locale-list shape and order instead of silently accepting a
+subset after malformed lists or duplicates are omitted. The existing 250 locales
+per platform bounds give at most 500 bundles. One monotonic two-minute scheduling
+endpoint prevents further calls at expiry; it does not replace native per-call
+endpoints or prove that an outstanding request has settled.
+
+Known missing files stay distinct from present-but-empty text. The core validates
+a complete canonical field bundle, using empty supplied strings only for
+explicitly observed missing fields, while the UI retains their missing state.
+Core policy corrections do not prevent checking other locales. An unsafe,
+withheld, unreadable, changed, invalid or unaccepted observation stops the batch,
+keeps completed scoped rows, and reports remaining locales as unchecked. There
+is no blank/valid fallback, automatic retry or partial-success readiness claim.
+
+**Stop checking** stops scheduling, not the original native request. The batch
+retains its original pending slot until that promise actually settles, including
+after project/configuration/service retirement or renderer disposal. Known
+native metadata status is required: pending, unknown, shutdown, foreign-edit and
+cleanup-unknown states refuse. An unsupported writer-only capability cannot
+grant or deny the separate passive-reader capability. Existing other-operation
+and file-edit gates remain in effect.
+
+No saved text is placed in the editor cache, no in-memory draft or comparison
+baseline is replaced, and no Save receipt is generated. Result storage contains
+bounded field digests/absence and core counts/issues, not another raw-text cache.
+Unsaved text drafts are explicitly excluded. **Edit this locale** only selects a
+still-current settled saved context and focuses its editor; Load, reconciliation,
+Review and Save stay separate. Retired results cannot regain eligibility merely
+by returning to equal configuration values.
+
+These are historical, non-atomic observations, not a live filesystem monitor.
+Check again after changing files. Required public text format validity does not
+cover screenshots, optional text, private App Review/TestFlight data,
+build-selected Android changelogs, hidden/unconfigured files, archive constraints
+or Store acceptance. The whole-metadata engine seam remains unfinished; this
+small action must not be described as complete metadata or release readiness.
+
+The additional controller tests are inert lifecycle/DTO tests. They do not
+establish native observation, installed UI or platform qualification. The native
+readers, core text policy, runtime/profile gates and existing editor/save
+observation selectors are unchanged; the new action occupies a sibling card.
+
 ## Drafts, help and reconciliation
 
 The UI distinguishes configured, observed/missing, unsaved, format-valid,

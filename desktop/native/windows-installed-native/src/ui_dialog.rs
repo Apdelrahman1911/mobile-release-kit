@@ -1,4 +1,4 @@
-//! Original-STA Project/Quit dialogs. The cross-thread control transports only
+//! Original-STA project/credential/quit dialogs. Cross-thread control transports only
 //! one fixed close message; COM interfaces never cross the apartment boundary.
 use super::*;
 use std::{cell::{OnceCell, RefCell}, sync::{OnceLock, Mutex, atomic::{AtomicBool, Ordering}}};
@@ -9,6 +9,28 @@ const CLOSE_MESSAGE: u32 = W::WM_APP + 0x4a1;
 const TIMER: usize = 1;
 const CANCEL: HRESULT = HRESULT(0x800704c7u32 as i32); // HRESULT_FROM_WIN32(ERROR_CANCELLED)
 const CLASS: &[u16] = &[77,82,75,46,79,114,105,103,105,110,97,108,68,105,97,108,111,103,46,118,49,0];
+
+fn file_options(kind: DialogKind) -> UiResult<FILEOPENDIALOGOPTIONS> {
+    let choice = match kind {
+        DialogKind::Project => FOS_PICKFOLDERS,
+        DialogKind::Credential(_) => FOS_FILEMUSTEXIST,
+        DialogKind::PublicImages => FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT,
+        DialogKind::Quit => return Err(UiError::State),
+    };
+    Ok(choice | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
+        | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS)
+}
+fn credential_filter(kind: CredentialKind) -> Common::COMDLG_FILTERSPEC {
+    // These UTF16 literals have static lifetime. The array containing their
+    // pointers lives in the original Dialog throughout native entry/settlement.
+    use windows::core::w;
+    let (name, pattern) = match kind {
+        CredentialKind::AndroidKeystore => (w!("Android signing keystore"), w!("*.jks;*.keystore;*.p12;*.pfx")),
+        CredentialKind::AndroidFirebase => (w!("Android Firebase configuration"), w!("*.json")),
+        CredentialKind::IosFirebase => (w!("iOS Firebase configuration"), w!("*.plist")),
+    };
+    Common::COMDLG_FILTERSPEC { pszName: name, pszSpec: pattern }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogResponse { Accept, Decline }
@@ -77,6 +99,91 @@ impl DialogControl {
     }
 }
 
+
+const PUBLIC_RESULTS: usize = 10;
+fn public_count(count: u32) -> UiResult<usize> {
+    usize::try_from(count).ok().filter(|count| (1..=PUBLIC_RESULTS).contains(count)).ok_or(UiError::NativeFailure)
+}
+struct PublicImageItem {
+    output: ComOutput, item: OnceCell<ComOriginal<IShellItem>>, text: RefCell<NativeText>,
+    name_entered: Cell<bool>, name_returned: Cell<bool>,
+    release_entered: Cell<bool>, release_returned: Cell<bool>,
+    text_release_entered: Cell<bool>, text_release_returned: Cell<bool>,
+}
+impl PublicImageItem {
+    fn new() -> Self {
+        Self { output: ComOutput::new(), item: OnceCell::new(), text: RefCell::new(NativeText::new()),
+            name_entered: Cell::new(false), name_returned: Cell::new(false),
+            release_entered: Cell::new(false), release_returned: Cell::new(false),
+            text_release_entered: Cell::new(false), text_release_returned: Cell::new(false) }
+    }
+    fn pending(&self) -> bool {
+        self.output.state.entered.get() && !self.output.state.returned.get()
+            || self.name_entered.get() && !self.name_returned.get()
+            || self.release_entered.get() && !self.release_returned.get()
+            || self.text_release_entered.get() && !self.text_release_returned.get()
+    }
+    fn release_known(&self) -> bool {
+        let mut known = self.output.settled();
+        // A partial/pending text does not prevent retirement of OTHER items.
+        // The actual item's own pending getter still retains that original.
+        if self.name_entered.get() && !self.name_returned.get() { known = false; }
+        else { match self.text.try_borrow_mut() {
+            Ok(mut text) => {
+                if text.unknown || text.entered && !text.returned { known = false; }
+                else if self.text_release_entered.get() && !self.text_release_returned.get() { known = false; }
+                else if !self.text_release_entered.replace(true) {
+                    if text.release().is_ok() { self.text_release_returned.set(true); } else { known = false; }
+                }
+            },
+            Err(_) => known = false,
+        } }
+        if let Some(original) = self.item.get() {
+            if self.name_entered.get() && !self.name_returned.get()
+                || self.release_entered.get() && !self.release_returned.get() { known = false; }
+            else if !self.release_entered.replace(true) {
+                original.release(); self.release_returned.set(true);
+            }
+        }
+        known && !self.pending()
+    }
+}
+struct PublicImageResults {
+    array_output: ComOutput, array: OnceCell<ComOriginal<IShellItemArray>>, count: ComValue<u32>,
+    items: [PublicImageItem; PUBLIC_RESULTS], entered: Cell<bool>, taken: Cell<bool>,
+    release_entered: Cell<bool>, release_returned: Cell<bool>,
+    selected: RefCell<Option<Vec<PathBuf>>>,
+}
+impl PublicImageResults {
+    fn new() -> Self {
+        Self { array_output: ComOutput::new(), array: OnceCell::new(), count: ComValue::new(),
+            items: std::array::from_fn(|_| PublicImageItem::new()), entered: Cell::new(false), taken: Cell::new(false),
+            release_entered: Cell::new(false), release_returned: Cell::new(false), selected: RefCell::new(None) }
+    }
+    fn pending(&self) -> bool {
+        self.array_output.state.entered.get() && !self.array_output.state.returned.get()
+            || self.count.state.entered.get() && !self.count.state.returned.get()
+            || self.items.iter().any(PublicImageItem::pending)
+            || self.release_entered.get() && !self.release_returned.get()
+    }
+    fn release_known(&self) -> bool {
+        let mut known = self.array_output.settled() && self.count.settled();
+        // Every independent original gets its own consuming attempt, even after
+        // another item/text is ambiguous. Pending array/item borrowers retain
+        // their dependent originals; no Drop or fabricated empty array settles it.
+        for item in &self.items { if !item.release_known() { known = false; } }
+        let array_borrowed = self.count.state.entered.get() && !self.count.state.returned.get()
+            || self.items.iter().any(|item| item.output.state.entered.get() && !item.output.state.returned.get());
+        if let Some(original) = self.array.get() {
+            if array_borrowed || self.release_entered.get() && !self.release_returned.get() { known = false; }
+            else if !self.release_entered.replace(true) {
+                original.release(); self.release_returned.set(true);
+            }
+        }
+        known && !self.pending()
+    }
+}
+
 pub struct Dialog {
     kind: DialogKind, control: Arc<DialogControl>, on_event: Box<dyn Fn(DialogEvent)>,
     thread: Cell<u32>, begun: Cell<bool>, created: Cell<bool>, presented: Cell<bool>,
@@ -88,8 +195,12 @@ pub struct Dialog {
     window_output: UnsafeCell<HWND>, window_query_entered: Cell<bool>, project_window: Cell<F::HWND>,
     events: OnceCell<ComOriginal<IFileDialogEvents>>, cookie: Cell<Option<u32>>, cookie_output: UnsafeCell<u32>, unadvise_entered: Cell<bool>,
     item: OnceCell<ComOriginal<IShellItem>>, path_text: RefCell<NativeText>,
+    public_images: Option<PublicImageResults>,
     task_config: UnsafeCell<C::TASKDIALOGCONFIG>, task_button: UnsafeCell<i32>,
     title: Vec<u16>, instruction: Vec<u16>, content: Vec<u16>,
+    // Array storage is owned by this registered Dialog, not a temporary argument
+    // to SetFileTypes. Its pointed-to literal strings have static lifetime.
+    file_types: Option<[Common::COMDLG_FILTERSPEC; 1]>,
     #[cfg(feature = "windows-installed-observation")]
     folder: FolderAction,
     #[cfg(feature = "windows-installed-observation")]
@@ -107,8 +218,23 @@ impl Dialog {
             file_output: ComOutput::new(), ole_output: ComOutput::new(), item_output: ComOutput::new(),
             window_output: UnsafeCell::new(HWND::default()), window_query_entered: Cell::new(false), project_window: Cell::new(null_mut()),
             item: OnceCell::new(), path_text: RefCell::new(NativeText::new()),
+            public_images: (kind == DialogKind::PublicImages).then(PublicImageResults::new),
             task_config: UnsafeCell::new(C::TASKDIALOGCONFIG::default()), task_button: UnsafeCell::new(0),
-            title: wide(if kind == DialogKind::Project { "Choose a mobile project folder" } else { "Quit Mobile Release Kit?" }),
+            title: wide(match kind {
+                DialogKind::Project => "Choose a mobile project folder",
+                DialogKind::PublicImages => "Choose public PNG or JPEG listing images",
+                DialogKind::Credential(CredentialKind::AndroidKeystore) => "Choose an Android signing keystore",
+                DialogKind::Credential(CredentialKind::AndroidFirebase) => "Choose an Android Firebase configuration",
+                DialogKind::Credential(CredentialKind::IosFirebase) => "Choose an iOS Firebase configuration",
+                DialogKind::Quit => "Quit Mobile Release Kit?",
+            }),
+            file_types: match kind {
+                DialogKind::Credential(kind) => Some([credential_filter(kind)]),
+                DialogKind::PublicImages => Some([Common::COMDLG_FILTERSPEC {
+                    pszName: windows::core::w!("Public PNG or JPEG images"), pszSpec: windows::core::w!("*.png;*.jpg;*.jpeg"),
+                }]),
+                _ => None,
+            },
             instruction: wide("Quit and discard unsaved drafts?"),
             content: wide("Unsaved in-memory changes will be lost. Choose Cancel to keep working, or OK to stop this application's operations and wait for cleanup before quitting. Quitting does not undo completed file changes."),
             #[cfg(feature = "windows-installed-observation")]
@@ -139,7 +265,7 @@ impl Dialog {
         self.check()?;
         if !self.showing.get() || self.show_returned.get() { return Ok(None); }
         let window = match self.kind {
-            DialogKind::Project => {
+            DialogKind::Project | DialogKind::Credential(_) | DialogKind::PublicImages => {
                 let Some(ole) = self.ole.get() else { return Ok(None); };
                 let ole = ole.get()?;
                 if self.window_query_entered.replace(true) { return self.uncertain(); }
@@ -178,7 +304,7 @@ impl Dialog {
     fn close_on_sta(&self) {
         if self.check().is_err() || !self.showing.get() { return; }
         match self.kind {
-            DialogKind::Project => {
+            DialogKind::Project | DialogKind::Credential(_) | DialogKind::PublicImages => {
                 if self.close_entered.replace(true) { return; }
                 let result = self.file.get().and_then(|file| file.get().ok()).map(|file| unsafe { file.Close(CANCEL) });
                 if result.is_none_or(|result| result.is_err()) { self.unknown.set(true); self.event(DialogEvent::Unknown); }
@@ -223,8 +349,12 @@ impl Dialog {
             if self.window.get().is_null() && !self.timer.get() && !self.unknown.get() { return self.no_native_object(error); }
             return self.uncertain();
         }
-        let result = match self.kind { DialogKind::Project => self.project(parent), DialogKind::Quit => self.quit(parent) };
-        if self.unknown.get() || result == Err(UiError::CleanupUnknown) { return self.uncertain(); }
+        let result = match self.kind { DialogKind::Project | DialogKind::Credential(_) | DialogKind::PublicImages => self.choose_path(parent), DialogKind::Quit => self.quit(parent) };
+        if self.unknown.get() || result == Err(UiError::CleanupUnknown) {
+            if self.kind != DialogKind::PublicImages { return self.uncertain(); }
+            // Notify unknown before independently retiring known public results.
+            self.unknown.set(true); self.event(DialogEvent::Unknown);
+        }
         self.release_once()?;
         result.map(|selected| DialogResult { created: self.created.get(), response: self.response.get(), selected })
     }
@@ -232,10 +362,14 @@ impl Dialog {
         let mut route = self.control.route.lock().map_err(|_| UiError::CleanupUnknown)?;
         if route.bound || route.unknown || !self.window.get().is_null() || self.created.get() { return self.uncertain(); }
         route.retired = true; drop(route);
+        if let Some(results) = &self.public_images {
+            if !results.release_known() { return self.uncertain(); }
+        }
         self.path_text.try_borrow_mut().map_err(|_| UiError::CleanupUnknown)?.release()?;
         self.settled.set(true); self.event(DialogEvent::Settled); Err(error)
     }
-    fn project(self: &Rc<Self>, parent: HWND) -> UiResult<Option<PathBuf>> {
+    fn choose_path(self: &Rc<Self>, parent: HWND) -> UiResult<Option<PathBuf>> {
+        let options = file_options(self.kind)?;
         let file_output = self.file_output.begin()?;
         let created = unsafe { windows_sys::Win32::System::Com::CoCreateInstance(
             (&FileOpenDialog as *const windows::core::GUID).cast(), null_mut(),
@@ -248,8 +382,10 @@ impl Dialog {
         let ole_output = self.ole_output.begin()?;
         let queried = unsafe { (file.vtable().base__.base__.base__.QueryInterface)(file.as_raw(), &IOleWindow::IID, ole_output) };
         self.ole.set(ComOriginal::new(self.ole_output.complete(queried)?)).map_err(|_| UiError::State)?;
-        hresult(unsafe { file.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
-            | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS) })?;
+        hresult(unsafe { file.SetOptions(options) })?;
+        if let Some(filters) = &self.file_types {
+            hresult(unsafe { file.SetFileTypes(filters) })?;
+        }
         hresult(unsafe { file.SetTitle(PCWSTR(self.title.as_ptr())) })?;
         let events: IFileDialogEvents = FileEvents { dialog: self.clone() }.into();
         self.events.set(ComOriginal::new(events)).map_err(|_| UiError::State)?;
@@ -269,6 +405,7 @@ impl Dialog {
         match returned {
             Ok(()) => {
                 if self.response.get() != Some(DialogResponse::Accept) { return self.uncertain(); }
+                if self.kind == DialogKind::PublicImages { return self.read_public_images(file).map(|()| None); }
                 let item_output = self.item_output.begin()?;
                 let selected = unsafe { (file.vtable().base__.GetResult)(file.as_raw(), item_output) };
                 self.item.set(ComOriginal::new(self.item_output.complete(selected)?)).map_err(|_| UiError::State)?;
@@ -278,8 +415,8 @@ impl Dialog {
                 let path = unsafe { (item.vtable().GetDisplayName)(item.as_raw(), SIGDN_FILESYSPATH, &mut text.value) };
                 text.complete(path.ok())?;
                 let path = text.read(NAME_UNITS)?;
-                // Native-selected data only. The shared project SourceBook still
-                // independently probes/registers full identity before publication.
+                // Native-selected data only. The shared SourceBook independently
+                // captures/probes full identity and source policy before publication.
                 mapped(project_path_hint(&path), UiError::NativeFailure)?;
                 Ok(Some(PathBuf::from(path)))
             }
@@ -291,6 +428,62 @@ impl Dialog {
             Err(_) => Err(UiError::NativeFailure),
         }
     }
+
+    fn read_public_images(&self, file: &IFileOpenDialog) -> UiResult<()> {
+        let results = self.public_images.as_ref().ok_or(UiError::State)?;
+        if self.kind != DialogKind::PublicImages || results.entered.replace(true) { return self.uncertain(); }
+        let output = results.array_output.begin()?;
+        let returned = unsafe { (file.vtable().GetResults)(file.as_raw(), output) };
+        results.array.set(ComOriginal::new(results.array_output.complete(returned)?)).map_err(|_| UiError::State)?;
+        // Adopt each original out value before the next STOP/read/branch.
+        if self.control.stopped.load(Ordering::SeqCst) { return Ok(()); }
+        let array = results.array.get().ok_or(UiError::State)?.get()?;
+        let output = results.count.begin()?;
+        let returned = unsafe { (array.vtable().GetCount)(array.as_raw(), output) };
+        let count = results.count.complete(returned.ok())?;
+        if returned.0 != 0 { results.count.state.unknown.set(true); return self.uncertain(); }
+        let count = public_count(count)?;
+        if self.control.stopped.load(Ordering::SeqCst) { return Ok(()); }
+        let mut paths = Vec::new(); paths.try_reserve_exact(count).map_err(|_| UiError::NativeFailure)?;
+        if paths.capacity() > PUBLIC_RESULTS { return Err(UiError::NativeFailure); }
+        for index in 0..count {
+            if self.control.stopped.load(Ordering::SeqCst) { return Ok(()); }
+            let original = &results.items[index];
+            let output = original.output.begin()?;
+            let returned = unsafe { (array.vtable().GetItemAt)(array.as_raw(), index as u32, output) };
+            original.item.set(ComOriginal::new(original.output.complete(returned)?)).map_err(|_| UiError::State)?;
+            if self.control.stopped.load(Ordering::SeqCst) { return Ok(()); }
+            let item = original.item.get().ok_or(UiError::State)?.get()?;
+            let mut text = original.text.try_borrow_mut().map_err(|_| UiError::CleanupUnknown)?;
+            if original.name_entered.replace(true) { return self.uncertain(); }
+            text.entered = true;
+            let returned = unsafe { (item.vtable().GetDisplayName)(item.as_raw(), SIGDN_FILESYSPATH, &mut text.value) };
+            if returned.0 != HRESULT_PENDING { original.name_returned.set(true); }
+            text.complete(returned.ok())?;
+            if returned.0 != 0 { text.unknown = true; return self.uncertain(); }
+            if text.value.is_null() { return self.uncertain(); } // Null-success is poison, not cancellation.
+            if self.control.stopped.load(Ordering::SeqCst) { return Ok(()); }
+            let path = text.read(NAME_UNITS)?;
+            mapped(project_path_hint(&path), UiError::NativeFailure)?;
+            let path = PathBuf::from(path);
+            if path.capacity() > 4096 || paths.iter().any(|prior| prior == &path) { return Err(UiError::NativeFailure); }
+            paths.push(path);
+        }
+        if self.control.stopped.load(Ordering::SeqCst) { return Ok(()); }
+        let mut selected = results.selected.try_borrow_mut().map_err(|_| UiError::CleanupUnknown)?;
+        if selected.is_some() { return self.uncertain(); }
+        *selected = Some(paths); Ok(())
+    }
+    /// One-way DATA handoff only AFTER this same Dialog's actual settlement.
+    /// Never consumes the credential single-path output or grants write authority.
+    pub fn take_public_images(&self) -> UiResult<Option<Vec<PathBuf>>> {
+        if self.kind != DialogKind::PublicImages || !self.settled() { return Err(UiError::State); }
+        self.check()?;
+        let results = self.public_images.as_ref().ok_or(UiError::State)?;
+        if results.taken.replace(true) { return self.uncertain(); }
+        results.selected.try_borrow_mut().map(|mut paths| paths.take()).map_err(|_| UiError::CleanupUnknown)
+    }
+
     fn quit(self: &Rc<Self>, parent: HWND) -> UiResult<Option<PathBuf>> {
         if self.control.stopped.load(Ordering::SeqCst) { return Ok(None); }
         let config = self.task_config.get();
@@ -317,12 +510,21 @@ impl Dialog {
         Ok(None)
     }
     fn release_once(&self) -> UiResult<()> {
-        self.check()?;
+        let public = self.kind == DialogKind::PublicImages;
+        if public {
+            // Never sweep from a different STA or while a callback/modal caller
+            // still borrows the original. Each result then settles independently.
+            if self.thread.get() != unsafe { T::GetCurrentThreadId() }
+                || self.depth.get() != 0 || self.showing.get() { return self.uncertain(); }
+            let results = self.public_images.as_ref().ok_or(UiError::State)?;
+            if !results.release_known() { self.unknown.set(true); }
+            if results.pending() { return self.uncertain(); }
+        } else { self.check()?; }
         if self.depth.get() != 0 || self.showing.get() || self.settled.get() || self.window_query_entered.get()
             || !self.file_output.settled() || !self.ole_output.settled() || !self.item_output.settled() { return self.uncertain(); }
         if self.kind == DialogKind::Quit && self.created.get() && !self.task_destroyed.get() { return self.uncertain(); }
         self.event(DialogEvent::Releasing);
-        if self.unknown.get() { return self.uncertain(); }
+        if self.unknown.get() && !public { return self.uncertain(); }
         if let Some(cookie) = self.cookie.get() {
             if self.unadvise_entered.replace(true) { return self.uncertain(); }
             if unsafe { self.file.get().ok_or(UiError::State)?.get()?.Unadvise(cookie) }.is_err() { return self.uncertain(); }
@@ -347,7 +549,9 @@ impl Dialog {
         unsafe { W::PeekMessageW(&mut message, window, CLOSE_MESSAGE, CLOSE_MESSAGE, W::PM_REMOVE); }
         unsafe { W::PeekMessageW(&mut message, window, W::WM_TIMER, W::WM_TIMER, W::PM_REMOVE); }
         if unsafe { W::DestroyWindow(window) } == 0 || !self.window.get().is_null() || self.depth.get() != 0 { return self.uncertain(); }
-        drop(route); self.settled.set(true); self.event(DialogEvent::Settled); Ok(())
+        drop(route);
+        if self.unknown.get() { return self.uncertain(); }
+        self.settled.set(true); self.event(DialogEvent::Settled); Ok(())
     }
     pub fn settled(&self) -> bool { self.settled.get() && !self.unknown.get() }
     pub fn created(&self) -> bool { self.created.get() }
@@ -619,6 +823,39 @@ impl IFileDialogEvents_Impl for FileEvents_Impl {
 mod tests {
     use super::*;
     #[test]
+    fn credential_choosers_require_the_live_document_and_private_single_file_policy() -> UiResult<()> {
+        for kind in [DialogKind::Project,
+            DialogKind::Credential(CredentialKind::AndroidKeystore),
+            DialogKind::Credential(CredentialKind::AndroidFirebase),
+            DialogKind::Credential(CredentialKind::IosFirebase)] {
+            assert!(kind.requires_live_document());
+            let options = file_options(kind)?;
+            let privacy = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS;
+            assert_eq!(options & privacy, privacy);
+            assert_eq!((options & FOS_ALLOWMULTISELECT).0, 0);
+            let dialog = Dialog::new(kind, Arc::new(DialogControl::new()), Box::new(|_| {}));
+            if kind == DialogKind::Project {
+                assert_ne!((options & FOS_PICKFOLDERS).0, 0);
+                assert!(dialog.file_types.is_none());
+            } else {
+                assert_eq!((options & FOS_PICKFOLDERS).0, 0);
+                assert_ne!((options & FOS_FILEMUSTEXIST).0, 0);
+                let filters = dialog.file_types.as_ref().ok_or(UiError::State)?;
+                assert_eq!(filters.len(), 1);
+                assert!(!filters[0].pszName.is_null() && !filters[0].pszSpec.is_null());
+            }
+            // Pre-creation STOP is retained in the same original control and
+            // cannot post to any native window for these newly admitted kinds.
+            dialog.control.request_stop()?;
+            assert!(dialog.control.stopped.load(Ordering::SeqCst));
+            let route = dialog.control.route.lock().map_err(|_| UiError::State)?;
+            assert!(!route.bound && !route.posted && route.window == 0);
+        }
+        assert!(!DialogKind::Quit.requires_live_document());
+        assert_eq!(file_options(DialogKind::Quit), Err(UiError::State));
+        Ok(())
+    }
+    #[test]
     fn stop_before_native_construction_is_latched_without_a_foreign_window() -> UiResult<()> {
         let control = DialogControl::new();
         assert!(control.request_stop().is_ok());
@@ -659,6 +896,47 @@ mod tests {
             dialog.showing.set(true); dialog.depth.set(0); assert!(dialog.enter_observation_turn().is_none());
             dialog.depth.set(1); assert!(dialog.enter_observation_turn().is_some());
             assert!(!dialog.observation_entered.get());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod public_image_dialog_data_tests {
+    use super::*;
+    #[test]
+    fn public_images_share_privacy_flags_but_have_their_own_bounded_output_roster() -> UiResult<()> {
+        let kind = DialogKind::PublicImages;
+        assert!(kind.requires_live_document());
+        let options = file_options(kind)?;
+        let privacy = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_NODEREFERENCELINKS;
+        assert_eq!(options & privacy, privacy);
+        assert_ne!((options & FOS_FILEMUSTEXIST).0, 0);
+        assert_ne!((options & FOS_ALLOWMULTISELECT).0, 0);
+        assert_eq!((options & FOS_PICKFOLDERS).0, 0);
+        let dialog = Dialog::new(kind, Arc::new(DialogControl::new()), Box::new(|_| {}));
+        let results = dialog.public_images.as_ref().ok_or(UiError::State)?;
+        assert_eq!(results.items.len(), 10);
+        assert!(results.array_output.settled() && results.count.settled());
+        assert!(results.items.iter().all(|item| item.output.settled() && item.item.get().is_none()));
+        assert!(dialog.file_types.is_some()); assert!(!dialog.settled());
+        assert_eq!(dialog.take_public_images(), Err(UiError::State)); // No fabricated native settlement.
+        for count in [0, 11, u32::MAX] { assert!(public_count(count).is_err()); }
+        assert_eq!(public_count(1), Ok(1)); assert_eq!(public_count(10), Ok(10));
+        Ok(())
+    }
+    #[test]
+    fn an_unreturned_public_item_keeps_its_original_out_cell_and_poisons_the_batch() -> UiResult<()> {
+        // Inert state refusal only: no COM pointer, native call or positive
+        // qualification receipt is constructed. Every slot is an original cell.
+        for index in 0..PUBLIC_RESULTS {
+            let results = PublicImageResults::new();
+            results.items[index].output.begin()?;
+            assert!(results.pending());
+            assert_eq!(results.items[index].output.begin(), Err(UiError::CleanupUnknown));
+            assert!(!results.release_known());
+            assert!(results.pending());
+            assert!(results.selected.borrow().is_none());
         }
         Ok(())
     }

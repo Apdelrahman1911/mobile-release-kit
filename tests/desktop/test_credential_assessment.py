@@ -42,6 +42,10 @@ SCALARS = {
     "google-wif": {"provider": "projects/123/locations/global/workloadIdentityPools/fixture/providers/fixture",
                    "serviceAccount": "fixture@fixture-project.iam.gserviceaccount.com"},
     "project-read-token": {"token": "fictional-read-token"},
+    "apple-review-contact": {"firstName": "fictional-first", "lastName": "fictional-last",
+                             "email": "reviewer@example.test", "phone": "+00 fictional phone"},
+    "apple-review-demo-account": {"username": "fictional-demo-user", "password": "fictional-demo-password"},
+    "apple-operation-commitment": {"keyBase64": "A" * 43 + "=", "keyVersion": "retained-v1"},
 }
 
 
@@ -96,10 +100,13 @@ class CredentialAssessmentTests(unittest.TestCase):
         self.assertEqual(raised.exception.message, ERRORS[code])
         return raised.exception
 
-    def test_all_eight_unions_have_ordered_constant_fields_and_honest_assurance(self):
+    def test_all_closed_unions_have_ordered_constant_fields_and_honest_assurance(self):
         for kind, (_, layout) in guide._KIND_LAYOUT.items():
             with self.subTest(kind=kind):
                 body = request(kind)
+                if kind.startswith("apple-review-") or kind == "apple-operation-commitment":
+                    body["context"]["stage"] = "external-testing"
+                    body["context"]["draft"]["ios"]["review"] = {"usesNonExemptEncryption": False, "demoAccountRequired": True}
                 result = execute("credentials.assess", body)
                 self.assertEqual(set(result), {"schemaVersion", "policyVersion", "kind", "context", "applicability", "state", "fields", "identity", "assurance"})
                 self.assertEqual(result["context"], {key: body["context"][key] for key in ("platform", "stage", "purpose")})
@@ -217,6 +224,125 @@ class CredentialAssessmentTests(unittest.TestCase):
                     self.assertEqual(field["state"], "configured" if valid else "invalid")
                     self.assertEqual(field["issues"], [] if valid else ["scalar-format"])
                     self.assertEqual(checks(field), [("value-admission", "passed"), ("identifier-format", "passed" if valid else "failed")])
+
+
+    def test_private_review_groups_follow_core_requiredness_without_signing_or_demo_coupling(self):
+        for demo in (False, True):
+            for kind in ("apple-review-contact", "apple-review-demo-account", "apple-operation-commitment"):
+                for stage, purpose in (("candidate", "full"), ("external-testing", "full"),
+                                       ("production", "store"), ("production", "signing")):
+                    with self.subTest(kind=kind, demo=demo, stage=stage, purpose=purpose):
+                        body = request(kind, stage=stage, purpose=purpose)
+                        body["context"]["draft"]["ios"]["review"] = {"usesNonExemptEncryption": False, "demoAccountRequired": demo}
+                        result = execute("credentials.assess", body)
+                        selected = stage != "candidate" and purpose != "signing" and (kind != "apple-review-demo-account" or demo)
+                        self.assertEqual(result["applicability"], {
+                            "state": "required" if selected else "not-applicable",
+                            "reason": "selected" if selected else "not-required",
+                        })
+                        self.assertEqual(result["state"], "configured" if selected else "not-applicable")
+                        self.assertFalse(result["assurance"]["fileObservationsProcessed"])
+                        self.assertEqual(result["assurance"]["serviceValidation"], "not-run")
+                        self.assertEqual(result["identity"], "not-applicable")
+                        for value in SCALARS[kind].values():
+                            self.assertNotIn(value, json.dumps(result))
+        body = request("apple-review-contact", platform="android", stage="production", purpose="store")
+        self.assertEqual(execute("credentials.assess", body)["applicability"]["reason"], "wrong-platform")
+        body["context"]["platform"] = "ios"
+        body["context"]["draft"]["ios"] = {"enabled": False}
+        self.assertEqual(execute("credentials.assess", body)["applicability"]["reason"], "platform-disabled")
+
+    def test_private_review_fields_preserve_bounds_missing_nul_and_the_single_private_email_rule(self):
+        for kind in ("apple-review-contact", "apple-review-demo-account"):
+            for key in SCALARS[kind]:
+                for value, state, issues, expected_checks in (
+                    (None, "missing", ["required-missing"], []),
+                    ("", "missing", ["required-missing"], []),
+                    ("private\0canary", "invalid", ["value-nul"], [("value-admission", "failed")]),
+                ):
+                    body = request(kind, stage="production", purpose="store")
+                    body["context"]["draft"]["ios"]["review"] = {"usesNonExemptEncryption": False, "demoAccountRequired": True}
+                    body["input"]["fields"][key] = value
+                    result = execute("credentials.assess", body)
+                    field = next(item for item in result["fields"] if item["id"] == key)
+                    self.assertEqual((field["state"], field["issues"], checks(field)), (state, issues, expected_checks))
+                    self.assertNotIn("private\\u0000canary", json.dumps(result))
+                body = request(kind, stage="production", purpose="store")
+                body["context"]["draft"]["ios"]["review"] = {"usesNonExemptEncryption": False, "demoAccountRequired": True}
+                maximum = "x" * (4096 - len("@example.test")) + "@example.test" if key == "email" else "é" * 2048
+                body["input"]["fields"][key] = maximum
+                self.assertEqual(execute("credentials.assess", body)["state"], "configured")
+                body["input"]["fields"][key] += "x"
+                self.refusal(body, "assessment_limit")
+                body["input"]["fields"][key] = "  private value  "
+                result = execute("credentials.assess", body)
+                field = next(item for item in result["fields"] if item["id"] == key)
+                if key != "email":
+                    self.assertEqual(checks(field), [("value-admission", "passed")])
+                    self.assertEqual(field["state"], "configured")
+                else:
+                    self.assertEqual(checks(field), [("value-admission", "passed"), ("identifier-format", "failed")])
+                    self.assertEqual(field["issues"], ["scalar-format"])
+        email = request("apple-review-contact", stage="production", purpose="store")
+        original = copy.deepcopy(email)
+        with patch.object(assessment, "credential_format_error", wraps=policy.credential_format_error) as shared:
+            result = execute("credentials.assess", email)
+        shared.assert_called_once_with("MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL", "reviewer@example.test")
+        self.assertEqual(email, original)
+        self.assertTrue(all(field[2] == "secret" for field in guide._KIND_LAYOUT["apple-review-contact"][1]))
+        self.assertEqual(checks(result["fields"][2]), [("value-admission", "passed"), ("identifier-format", "passed")])
+
+
+    def test_retained_commitment_pair_uses_existing_policy_without_canonicality_or_recovery_claims(self):
+        body = request("apple-operation-commitment", stage="production", purpose="store")
+        original = copy.deepcopy(body)
+        with patch.object(assessment, "credential_format_error", wraps=policy.credential_format_error) as shared:
+            result = execute("credentials.assess", body)
+        self.assertEqual(body, original)
+        self.assertEqual([entry.args for entry in shared.call_args_list], [
+            ("MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64", "A" * 43 + "="),
+            ("MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION", "retained-v1"),
+        ])
+        self.assertEqual([field[2] for field in guide._KIND_LAYOUT["apple-operation-commitment"][1]], ["secret", "text"])
+        for field in result["fields"]:
+            self.assertEqual(checks(field), [("value-admission", "passed"), ("identifier-format", "passed")])
+        self.assertEqual(result["state"], "configured")
+        self.assertEqual(result["assurance"]["releaseReadiness"], "unknown")
+        for value in SCALARS["apple-operation-commitment"].values():
+            self.assertNotIn(value, json.dumps(result))
+        cases = {
+            "keyBase64": (
+                ("A" * 42 + "B=", "configured"),  # Existing core accepts these legacy pad bits.
+                ("not!base64", "invalid"), ("AA==", "invalid"), ("A" * 44, "invalid"),
+                (" " + "A" * 43 + "=", "invalid"),
+            ),
+            "keyVersion": (("v" * 64, "configured"), ("v" * 65, "invalid"),
+                           ("version with spaces", "invalid"), ("é", "invalid")),
+        }
+        for field_id, values in cases.items():
+            for value, expected in values:
+                candidate = copy.deepcopy(body)
+                candidate["input"]["fields"][field_id] = value
+                value_result = execute("credentials.assess", candidate)
+                field = next(item for item in value_result["fields"] if item["id"] == field_id)
+                self.assertEqual(value_result["state"], expected, field_id)
+                self.assertEqual(field["state"], expected)
+                self.assertEqual(field["issues"], [] if expected == "configured" else ["scalar-format"])
+                self.assertEqual(checks(field)[1], ("identifier-format", "passed" if expected == "configured" else "failed"))
+            for value, state, issues in ((None, "missing", ["required-missing"]), ("", "missing", ["required-missing"]),
+                                         ("PRIVATE\0CANARY", "invalid", ["value-nul"])):
+                candidate = copy.deepcopy(body)
+                candidate["input"]["fields"][field_id] = value
+                output = execute("credentials.assess", candidate)
+                field = next(item for item in output["fields"] if item["id"] == field_id)
+                self.assertEqual((field["state"], field["issues"]), (state, issues))
+                self.assertEqual(checks(field), [] if state == "missing" else [("value-admission", "failed")])
+                self.assertNotIn("PRIVATE", json.dumps(output))
+            candidate = copy.deepcopy(body)
+            candidate["input"]["fields"][field_id] = "x" * 4096
+            self.assertEqual(execute("credentials.assess", candidate)["state"], "invalid")
+            candidate["input"]["fields"][field_id] += "x"
+            self.refusal(candidate, "assessment_limit")
 
     def test_file_recognition_stays_independent_of_missing_or_invalid_companions(self):
         for kind, key, bad in (("android-keystore", "storePassword", "bad\0password"),
@@ -407,7 +533,7 @@ class CredentialAssessmentTests(unittest.TestCase):
             body = request()
             body["context"][key] = bad
             self.refusal(body)
-        for kind in ("google-wif", "project-read-token"):
+        for kind in ("google-wif", "project-read-token", "apple-review-contact", "apple-review-demo-account", "apple-operation-commitment"):
             body = request(kind)
             body["input"]["observation"] = {"status": "unavailable", "reason": "not-run"}
             self.refusal(body)
@@ -465,7 +591,7 @@ class CredentialAssessmentTests(unittest.TestCase):
             self.refusal(body, "assessment_limit")
         body = request()
         body["input"]["fields"] = {key: "x" * 4096 for key in SCALARS["android-keystore"]}
-        # The closed union has at most three scalars, so its aggregate cannot
+        # This AndroidKeystore case has three scalars, so its aggregate cannot
         # reach 64 KiB. The alias policy can fail without an interface refusal.
         self.assertEqual(execute("credentials.assess", body)["state"], "invalid")
         self.assertEqual(assessment.MAX_SCALARS_BYTES, 65536)

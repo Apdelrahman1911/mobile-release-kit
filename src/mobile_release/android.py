@@ -13,7 +13,7 @@ from .config import ReleaseConfig, ReleaseVersion
 from .cancellation import DefaultCancellation
 from .build_inputs import BuildInputs, finite_scratch
 from .checked_files import BUNDLETOOL_MAX_BYTES, copy_bundletool, read_external_bytes
-from .credentials import artifact_validation_environment
+from .credentials import _android_alias_operand, artifact_validation_environment
 from .discovery import discover_project, selected_android_module
 from .owned_process import ProcessError, fatal_lifetime_error, run_owned
 from .errors import ValidationError
@@ -339,8 +339,38 @@ def _jar_signature_policy(returncode: int, stdout: str, stderr: str) -> bool:
 
 def _canonicalize_aab_signature(path: Path, *, project_root: Path, execution_source=None,
                                 cancellation: DefaultCancellation | None = None,
-                                build_inputs: BuildInputs | None = None) -> None:
+                                build_inputs: BuildInputs | None = None,
+                                operation: AndroidBuildOperation | None = None) -> None:
     """Re-sign the final copy so JAR stream and central-directory views agree."""
+
+    if operation is not None:
+        from .android_build_operation import AndroidBuildOperation
+        from ._desktop_android_build_files import OriginalAndroidSigningInput
+        from ._desktop_android_build_protocol import require
+        require(type(operation) is AndroidBuildOperation and operation.signing is not None
+                and project_root == operation.root and execution_source is None)
+        operation.require(operation.inputs.config, cancellation)
+        operation.signing.require_materialized(build_inputs)
+        selected = operation.files.signing_input
+        require(type(selected) is OriginalAndroidSigningInput and selected.files is operation.files
+                and selected.path == path and operation.stage == "signing")
+        with selected.native_input() as original_path:
+            try:
+                argv = operation.signing.signing_command(
+                    original_path, operation.files.signing_output(), build_inputs)
+                result = run_owned(argv, cwd=project_root, environ=operation.command_environment(),
+                                   capture=True, timeout=120, output_limit=2 * 1024 * 1024,
+                                   cancellation=cancellation)
+                operation.returned("jarsigner-sign", result.returncode)
+            except BaseException as error:
+                operation.command_error("jarsigner-sign", error)
+                raise
+            if result.returncode:
+                operation.fail("signing-failed")
+            operation.tools.check()
+            scratch = build_inputs.scratch
+            scratch.require(scratch.require_input("android-keystore"))
+        return
 
     required = (
         "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH",
@@ -353,6 +383,8 @@ def _canonicalize_aab_signature(path: Path, *, project_root: Path, execution_sou
         raise ValidationError(
             "Android final signing inputs are incomplete: " + ", ".join(missing)
         )
+    if not _android_alias_operand(os.environ["MOBILE_RELEASE_ANDROID_KEY_ALIAS"]):
+        raise ValidationError("Android signing alias is invalid or starts with a hyphen")
     signing_environment = _validation_environment()
     for name in (
         "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
@@ -645,9 +677,13 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
     if operation is not None:
         from .android_build_operation import AndroidBuildOperation
         from ._desktop_android_build_protocol import require
-        require(type(operation) is AndroidBuildOperation and signed is False
-                and execution_source is None and build_inputs is None)
+        require(type(operation) is AndroidBuildOperation and type(signed) is bool
+                and signed is (operation.signing is not None) and execution_source is None)
         operation.require(config, cancellation)
+        if signed:
+            operation.signing.require_materialized(build_inputs)
+        else:
+            require(build_inputs is None)
         argv = operation.gradle_command()
         try:
             result = run_owned(argv, cwd=config.root, environ=operation.command_environment(),
@@ -661,7 +697,14 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
         operation.tools.check()
         operation.check_inputs()
         operation.advance("capturing")
-        captured = operation.capture_after()
+        if signed:
+            selected = operation.capture_for_signing()
+            operation.advance("signing")
+            _canonicalize_aab_signature(selected.path, project_root=config.root,
+                                        cancellation=cancellation, build_inputs=build_inputs, operation=operation)
+            captured = operation.capture_signed()
+        else:
+            captured = operation.capture_after()
         # Compatibility/diagnostic map only; Desktop consumes the original
         # operation.artifact(), never reopens this returned path as authority.
         return {"android-aab": captured.path}

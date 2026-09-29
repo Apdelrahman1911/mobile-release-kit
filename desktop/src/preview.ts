@@ -1,3 +1,4 @@
+import { savedMetadataError } from './metadataValidation.ts';
 import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import { androidBuildError } from './androidBuildProtocol.ts';
@@ -17,6 +18,7 @@ import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
 import { githubPreflightError } from './githubPreflightProtocol.ts';
 import { githubReleaseError } from './githubReleaseProtocol.ts';
+import { githubInputGroupError } from './githubInputGroupProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
@@ -80,6 +82,7 @@ const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const githubPreflightUnavailable = (): Promise<never> => Promise.reject(githubPreflightError({ code: 'github_preflight_refused_unqualified' }));
+const githubInputGroupUnavailable = (): Promise<never> => Promise.reject(githubInputGroupError({ code: 'github_input_group_refused_unqualified' }));
 const githubReleaseUnavailable = (): Promise<never> => Promise.reject(githubReleaseError({ code: 'github_release_refused_unqualified' }));
 const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
@@ -212,6 +215,7 @@ export const previewApi: DesktopApi = {
   closeReleaseVersionEdit: versionEditUnavailable,
   releaseVersionEditStatus: versionEditUnavailable,
   subscribeReleaseVersionEdit: versionEditUnavailable,
+  validateMetadata: () => Promise.reject(savedMetadataError({ code: 'metadata_validation_unavailable' })),
   observeMetadataText: metadataUnavailable,
   validateMetadataText: metadataUnavailable,
   openMetadataTextEdit: metadataUnavailable,
@@ -221,10 +225,21 @@ export const previewApi: DesktopApi = {
   metadataTextEditStatus: metadataUnavailable,
   subscribeMetadataTextEdit: metadataUnavailable,
   githubConnectionStatus: connectionUnavailable,
+  startGitHubDevice: connectionUnavailable,
+  openGitHubDevicePage: connectionUnavailable,
   connectGitHubToken: connectionUnavailable,
   refreshGitHubConnection: connectionUnavailable,
+  inspectGitHubEnvironmentInput: connectionUnavailable,
   disconnectGitHubConnection: connectionUnavailable,
   subscribeGitHubConnection: connectionUnavailable,
+  githubInputGroupStatus: githubInputGroupUnavailable,
+  checkGitHubInputRunners: githubInputGroupUnavailable,
+  prepareGitHubInputGroup: githubInputGroupUnavailable,
+  applyGitHubInputGroup: githubInputGroupUnavailable,
+  reconcileGitHubInputGroup: githubInputGroupUnavailable,
+  loadGitHubInputGroupPending: githubInputGroupUnavailable,
+  cancelGitHubInputGroup: githubInputGroupUnavailable,
+  subscribeGitHubInputGroup: githubInputGroupUnavailable,
   githubPreflightStatus: githubPreflightUnavailable,
   githubReleaseStatus: githubReleaseUnavailable,
   prepareGitHubPreflight: githubPreflightUnavailable,

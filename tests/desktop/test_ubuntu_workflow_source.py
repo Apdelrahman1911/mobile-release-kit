@@ -78,21 +78,6 @@ class HostedWorkflowSource(unittest.TestCase):
         self.assertEqual(re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow),
                          [hashlib.sha256(lifecycle).hexdigest()] * 5)
 
-    def test_workflow_fits_its_actual_original_source_record_bound(self):
-        module = ast.parse(DRIVER.read_text())
-        for name, kib in (("verify_installed_shell_compile", 128), ("verify", 64)):
-            with self.subTest(consumer=name):
-                original = next(node for node in module.body
-                                if isinstance(node, ast.FunctionDef) and node.name == name)
-                calls = [node for node in ast.walk(original)
-                         if isinstance(node, ast.Call)
-                         and ast.unparse(node.func) == "D.file_record"
-                         and len(node.args) == 2
-                         and ast.unparse(node.args[0]) == "source / WORKFLOW"]
-                self.assertEqual(len(calls), 1)
-                self.assertEqual(ast.unparse(calls[0].args[1]), f"{kib} << 10")
-                # Check each actual consumer, not a larger test-only cap.
-                self.assertLessEqual(len(WORKFLOW.read_bytes()), kib << 10)
 
     def test_same_job_compiler_and_native_share_the_fixed_source_bound_data_script(self):
         workflow = WORKFLOW.read_text()
@@ -128,7 +113,8 @@ class HostedWorkflowSource(unittest.TestCase):
 
         selector = step("Require one exact disposable preparation route")
         native_refs = ("desktop-project-recovery", "desktop-installed-shell", "desktop-installed-github-readonly",
-                       "desktop-installed-github-normal-boundaries", "desktop-installed-github-preflight")
+                       "desktop-installed-github-normal-boundaries", "desktop-installed-github-preflight",
+                       "desktop-installed-github-release")
         closed_cases = "|".join("refs/heads/verify/" + name + ":compile" for name in native_refs)
         route_cases = selector.split('case "$GITHUB_REF:$MRK_INSTALLED_SHELL_CASE" in\n', 1)[1].split("          esac\n", 1)[0]
         self.assertEqual(route_cases, "            " + closed_cases + ") ;;\n"
@@ -422,17 +408,17 @@ class JvmNamespaceWorkflowSource(unittest.TestCase):
                     self.assertNotIn(ast.unparse(node.func),
                                      {"os.mkdir", "os.rename", "os.replace", "os.chmod", "os.fchmod", "os.unlink", "os.rmdir", "subprocess.Popen"})
 
-    def test_namespace_reads_and_source_records_keep_the_original_fixed_bounds(self):
+    def test_namespace_and_source_records_share_the_fixed_workflow_bound(self):
         _, _, program, _ = self._program(); tree = ast.parse(program)
         sources = next(node for node in tree.body if isinstance(node, ast.Assign)
                        and any(isinstance(target, ast.Name) and target.id == "SOURCES" for target in node.targets))
         self.assertEqual(ast.literal_eval(sources.value),
-                         ((".github/workflows/desktop-ubuntu-publication.yml", 65536), ("desktop/tools/ci_ubuntu_publication.py", 1048576)))
+                         ((".github/workflows/desktop-ubuntu-publication.yml", 98304), ("desktop/tools/ci_ubuntu_publication.py", 1048576)))
         driver = ast.parse(DRIVER.read_text())
         values = {target.id: node.value for node in driver.body if isinstance(node, ast.Assign)
                   for target in node.targets if isinstance(target, ast.Name)}
         for name, expected in (
-            ("SHELL_TOOLS_NAMESPACE_SOURCES", {".github/workflows/desktop-ubuntu-publication.yml": "64 << 10",
+            ("SHELL_TOOLS_NAMESPACE_SOURCES", {".github/workflows/desktop-ubuntu-publication.yml": "WORKFLOW_SOURCE_LIMIT",
                                               "desktop/tools/ci_ubuntu_publication.py": "1 << 20"}),
             ("SHELL_TOOLS_NAMESPACE_FILES", {"namespace-before.json": "64 << 10", "namespace.stdout": "16 << 10",
                                             "namespace.stderr": "4096", "namespace.exit": "4"}),
@@ -440,7 +426,18 @@ class JvmNamespaceWorkflowSource(unittest.TestCase):
             value = values[name]
             self.assertIsInstance(value, ast.Dict)
             self.assertEqual({ast.literal_eval(key): ast.unparse(item) for key, item in zip(value.keys, value.values)}, expected)
-        self.assertLessEqual(len(WORKFLOW.read_bytes()), 64 << 10)
+        self.assertEqual(ast.unparse(values["WORKFLOW_SOURCE_LIMIT"]), "96 << 10")
+        for name in ("installed_shell_source_admission", "verify_installed_shell_compile", "verify"):
+            function = next(node for node in driver.body if isinstance(node, ast.FunctionDef) and node.name == name)
+            reads = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+                     and ast.unparse(node.func) == "D.file_record" and node.args
+                     and any(isinstance(value, ast.Name) and value.id == "WORKFLOW" for value in ast.walk(node.args[0]))]
+            self.assertEqual(len(reads), 1, name)
+            self.assertEqual(len(reads[0].args), 2, name)
+            self.assertEqual(ast.unparse(reads[0].args[0]),
+                             "SOURCE / WORKFLOW" if name == "installed_shell_source_admission" else "source / WORKFLOW", name)
+            self.assertEqual(ast.unparse(reads[0].args[1]), "WORKFLOW_SOURCE_LIMIT", name)
+        self.assertLessEqual(len(WORKFLOW.read_bytes()), 96 << 10)
         self.assertLessEqual(len(DRIVER.read_bytes()), 1 << 20)
         for token in ('read_file(root_fd, "namespace-before.json", 65536)', "stat.S_ISREG(before.st_mode) and before.st_nlink == 1",
                       "before.st_size <= limit", "os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC",

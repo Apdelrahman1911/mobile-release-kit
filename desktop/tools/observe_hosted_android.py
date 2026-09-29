@@ -311,7 +311,7 @@ class Reader:
             return {"status": "observed", "file": row}, count
         return self.charged(64 << 10, observe)
 
-    def directory(self, name, *, custom=False):
+    def directory(self, name, *, custom=False, bind_path=None):
         self.point()
         if not custom and name in (CA_ROOT, CA_ROOT + "/mozilla"):
             with self.ca_namespace(name) as (fd, binding, _):
@@ -324,7 +324,8 @@ class Reader:
                         names.append(entry.name)
             return {"status": "observed", "directory": binding, "names": sorted(names)}
         need(custom and name == CUSTOM_CA_ROOT, "custom-directory-role")
-        before = self.s.shell_host_binding(Path(name), directory_only=True, absent=True)
+        bind = self.s.shell_host_binding if bind_path is None else bind_path
+        before = bind(Path(name), directory_only=True, absent=True)
         if before.get("absent"):
             return {"status": "absent"}
         selected = Path(before["path"])
@@ -342,7 +343,7 @@ class Reader:
                     break
             need(self.s.D.state(os.fstat(fd)) == self.s.D.state(original)
                  and self.s.D.state(selected.lstat()) == self.s.D.state(original)
-                 and self.s.D.same(self.s.shell_host_binding(Path(name), directory_only=True), before),
+                 and self.s.D.same(bind(Path(name), directory_only=True), before),
                  "directory-read-changed")
         finally:
             os.close(fd)
@@ -413,8 +414,13 @@ def image_identity(raw):
     return {"identity": result, "producerExecutionProven": False}
 
 
-def package_status(raw):
-    result = {name: {"status": "absent"} for name in PACKAGES}
+def package_status(raw, *, packages=PACKAGES):
+    # Explicit finite callers may reuse the DATA parser without global mutation.
+    need(type(packages) in (tuple, list) and 0 < len(packages) <= 128
+         and all(type(name) is str and re.fullmatch(r"[a-z0-9][a-z0-9+.-]{0,127}", name) for name in packages)
+         and len(set(packages)) == len(packages),
+         "package-selection")
+    result = {name: {"status": "absent"} for name in packages}
     seen = set()
     for paragraph in raw.decode("utf-8").split("\n\n"):
         lines = paragraph.splitlines()

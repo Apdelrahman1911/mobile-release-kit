@@ -3,9 +3,10 @@
 //! mailbox receipt releases an active read; a reply or Unknown never does.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::{error::BridgeError, github_connection_protocol::{self as wire, Account, Automation,
-    Capability, ConnectTokenArgs, DeviceLogin, Fact, FactState, GitHubReadControl, GitHubReadFacts,
+    Authorization, AuthorizationPhase, Capability, ConnectTokenArgs, StartDeviceArgs, DeviceLogin, Fact, FactState, GitHubReadControl, GitHubReadFacts,
     GitHubReadOutcome, Operation, OperationKind, Phase, Reason, Repository, Session, SessionState,
-    Status, UnobservedFacts}, supervisor::{GitHubReadReceipt, GitHubReadTicket, Supervisor}};
+    Status, UnobservedFacts}, github_device_protocol::{self as device, Secret},
+    supervisor::{GitHubReadReceipt, GitHubReadTicket, GitHubDeviceState, GitHubDeviceTicket, Supervisor}};
 
 // Historical development entry stays closed. The separate normal installed
 // selector below supplies capability DATA, not a substitute for original
@@ -50,6 +51,7 @@ pub(crate) fn offline_fixture_private(permit: &crate::offline_preflight_owner::O
 pub(crate) fn refused(reason: Reason) -> BridgeError {
     let (code, message) = match reason {
         Reason::Unqualified => ("unqualified", "Read-only GitHub connection is not qualified in this build."),
+        Reason::PublisherUnconfigured => ("publisher_unconfigured", "The publisher has not configured GitHub device sign-in for this application."),
         Reason::Busy => ("busy", "Finish or disconnect the original GitHub operation first."),
         Reason::RuntimeUnavailable => ("runtime_unavailable", "The fixed GitHub runtime is unavailable."),
         Reason::CleanupUnknown => ("cleanup_unknown", "Original cleanup is unconfirmed; keep the original session for retirement."),
@@ -102,10 +104,11 @@ fn merge<T>(old: Fact<T>, new: Fact<T>) -> Fact<T> {
     else { let mut old = old; stale(&mut old, new.reason); old }
 }
 fn empty_status(revision: u32, reason: Reason) -> Status {
-    Status { schema_version: 1, revision,
+    Status { schema_version: 2, revision,
         capability: Capability { read_only_session_available: reason == Reason::None, reason,
-            device_login: DeviceLogin::PublisherUnconfigured, storage: "session-only".into() },
-        session: None, operation: None, account: unobserved(), repository: unobserved(), automation: unobserved(),
+            device_login: if device::publisher().is_some() { DeviceLogin::NotQualified } else { DeviceLogin::PublisherUnconfigured },
+            publisher_name: device::publisher().map(|p| p.display_name.clone()), storage: "session-only".into() },
+        session: None, operation: None, authorization: None, account: unobserved(), repository: unobserved(), automation: unobserved(), input_metadata: None,
         facts: UnobservedFacts { remote_mutation_available: false, dispatch_available: false,
             repository_actions_settings_observation: "not-run".into(), environment_observation: "not-run".into(),
             secret_observation: "not-run".into(), variable_observation: "not-run".into(),
@@ -120,6 +123,17 @@ impl CredentialClock {
     fn new(admitted: Instant, wall: SystemTime) -> Option<Self> {
         Some(Self { admitted, wall, end: admitted.checked_add(LIFETIME)?,
             display: display_utc(wall.checked_add(LIFETIME)?)? })
+    }
+    fn display_end(&self, end: Instant) -> Option<String> {
+        display_utc(self.wall.checked_add(end.checked_duration_since(self.admitted)?)?)
+    }
+    fn shorten_from(&mut self, original_start: Instant, seconds: u32) -> bool {
+        let Some(end) = original_start.checked_add(Duration::from_secs(u64::from(seconds))) else { return false; };
+        if end < self.end {
+            let Some(display) = self.display_end(end) else { return false; };
+            self.end = end; self.display = display;
+        }
+        true
     }
     fn shorten(&mut self, timestamp: &str) -> bool {
         let Some(server) = parse_utc(timestamp) else { return false; };
@@ -165,8 +179,8 @@ mod tests {
         let clock = CredentialClock::new(at, parse_utc("2026-09-17T12:00:00Z").unwrap()).unwrap();
         state.private = Some(PrivateSession { id: "github-session-1".into(), project_id: "project-1".into(), repository: "owner/app".into(),
             generation: 2, stop_id: "github-disconnect-1".into(), unknown_id: "github-unknown-1".into(),
-            clock, token: Some("INERT_NOT_A_CREDENTIAL".into()),
-            account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false });
+            clock, token: Some(Secret::new("INERT_NOT_A_CREDENTIAL".into())),
+            account_pin: None, repository_pin: None, ticket: None, device: None, retirement: None, remove_after_settlement: false, inspection: None });
         state.status.session = Some(Session { id: "github-session-1".into(), project_id: "project-1".into(), target_repository: "owner/app".into(),
             state: SessionState::Checking, expires_at: Some("2026-09-17T13:00:00Z".into()) });
         state.status.operation = Some(Operation { id: "original-data-1".into(), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None });
@@ -174,7 +188,7 @@ mod tests {
     }
     fn observed<T>(value: T) -> Fact<T> { Fact { state: FactState::Observed, value: Some(value), observed_at: Some("2026-09-17T12:00:01Z".into()), reason: Reason::None } }
     fn result() -> GitHubReadOutcome {
-        GitHubReadOutcome { facts: GitHubReadFacts { schema_version: 1,
+        GitHubReadOutcome { metadata: None, facts: GitHubReadFacts { schema_version: 1,
             account: observed(Account { id: "11".into(), login: "owner".into() }),
             repository: observed(Repository { id: "22".into(), full_name: "owner/app".into(), default_branch: "main".into(), visibility: Visibility::Private,
                 archived: false, permissions: Permissions { pull: Permission::ReportedAllowed, push: Permission::Unknown, admin: Permission::Unknown } }),
@@ -194,6 +208,209 @@ mod tests {
     fn refresh_data(state: &mut ConnectionState) {
         state.status.operation = Some(Operation { id: "original-data-2".into(), kind: OperationKind::Refresh, phase: Phase::Running, reason: Reason::None });
         state.status.session.as_mut().unwrap().state = SessionState::Checking; state.fact_retirement(Reason::Stale);
+    }
+
+    fn inspection_selection() -> crate::github_environment_metadata::Selection {
+        crate::github_environment_metadata::Selection { stage:"production".into(),
+            name:"MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION".into() }
+    }
+    fn inspection_data(state: &mut ConnectionState) {
+        refresh_data(state);
+        state.status.operation.as_mut().unwrap().kind = OperationKind::Inspect;
+        state.private.as_mut().unwrap().inspection = Some(inspection_selection());
+    }
+    fn inspection_result() -> GitHubReadOutcome {
+        use crate::github_environment_metadata::{Observation, Environment, Field, FieldKind};
+        let mut value = result();
+        value.facts.automation = unavailable(Reason::Cancelled);
+        value.metadata = Some(Observation { selection: inspection_selection(),
+            environment: observed(Environment { id:"33".into(), name:"mobile-production".into() }),
+            field: observed(Field { name:inspection_selection().name, kind:FieldKind::Variable,
+                created_at:"2026-09-17T12:00:00Z".into(), updated_at:"2026-09-17T12:00:00Z".into() }) });
+        value
+    }
+    #[test]
+    fn environment_input_metadata_settlement_is_original_selected_and_refresh_stales_it() {
+        let at = Instant::now(); let mut state = fixture(at);
+        settle(&mut state, result(), at, at, false);
+        let endpoint = state.private.as_ref().unwrap().clock.end;
+        inspection_data(&mut state);
+        assert!(state.status.input_metadata.is_none());
+        settle(&mut state, inspection_result(), at + Duration::from_secs(1), at + Duration::from_secs(1), false);
+        assert!(state.private.as_ref().unwrap().inspection.is_none());
+        assert_eq!(state.private.as_ref().unwrap().clock.end, endpoint);
+        assert_eq!(state.status.operation.as_ref().unwrap().kind, OperationKind::Inspect);
+        assert_eq!(state.status.input_metadata.as_ref().unwrap().field.state, FactState::Observed);
+        assert_eq!(state.status.facts.variable_observation, "metadata-only");
+        assert_eq!(state.status.facts.secret_observation, "not-run");
+        assert!(!state.status.facts.remote_mutation_available);
+        assert_eq!(state.status.facts.release_readiness, "unknown");
+        let before = state.snapshot(); refresh_data(&mut state);
+        state.status.operation.as_mut().unwrap().id = "original-data-3".into();
+        state.finish(before); valid(&state);
+        assert_eq!(state.status.input_metadata.as_ref().unwrap().field.state, FactState::Stale);
+        assert_eq!(state.status.input_metadata.as_ref().unwrap().selection, inspection_selection());
+    }
+    #[test]
+    fn environment_input_selection_mismatch_retires_without_erasing_original_cooldown() {
+        let at = Instant::now(); let mut state = fixture(at);
+        settle(&mut state, result(), at, at, false); inspection_data(&mut state);
+        let mut wrong = inspection_result();
+        let observation = wrong.metadata.as_mut().unwrap();
+        observation.selection.name = "MOBILE_RELEASE_ANDROID_KEY_ALIAS".into();
+        observation.field.value.as_mut().unwrap().name = observation.selection.name.clone();
+        wrong.control.reason = Reason::RateLimited; wrong.control.cooldown_seconds = Some(7);
+        settle(&mut state, wrong, at + Duration::from_secs(1), at + Duration::from_secs(1), false);
+        assert_eq!(state.status.operation.as_ref().unwrap().reason, Reason::ResponseInvalid);
+        assert_eq!(state.cooldown, Some(at + Duration::from_secs(8)));
+        assert!(state.private.as_ref().unwrap().token.is_none());
+        assert!(state.status.input_metadata.is_none());
+        assert_eq!(state.status.session.as_ref().unwrap().state, SessionState::Failed);
+    }
+    #[test]
+    fn environment_input_late_metadata_never_revives_expired_cancelled_or_unknown_session() {
+        // Supplied phase DATA, not proof of an OS stop, a ticket or native finality.
+        let at = Instant::now();
+        for mode in ["expired", "cancelled", "unknown"] {
+            let mut state = fixture(at); settle(&mut state, result(), at, at, false); inspection_data(&mut state);
+            let now = if mode == "expired" { at + LIFETIME } else { at + Duration::from_secs(2) };
+            if mode == "cancelled" { state.retire(Reason::Cancelled); }
+            if mode == "unknown" { state.unknown(); }
+            settle(&mut state, inspection_result(), at + Duration::from_secs(1), now, mode == "unknown");
+            assert!(state.status.input_metadata.is_none());
+            assert!(state.private.as_ref().unwrap().token.is_none());
+            assert_ne!(state.status.session.as_ref().unwrap().state, SessionState::Connected);
+            assert_eq!(state.status.facts.variable_observation, "not-run");
+        }
+    }
+
+    // Public/private phase DATA only. Setting a supplied public capability here
+    // cannot activate publisher registration, qualification or Supervisor admission.
+    fn device_fixture(at: Instant) -> ConnectionState {
+        let mut state = fixture(at);
+        let private = state.private.as_mut().unwrap(); private.token = None;
+        private.device = Some(DeviceAuthorization { end: at + Duration::from_secs(900), code: None,
+            interval: 5, next_poll: None, polls: 0, ticket: None, checking_access: false });
+        state.status.capability.device_login = DeviceLogin::Available;
+        state.status.capability.publisher_name = Some("Synthetic publisher DATA".into());
+        state.status.capability.reason = Reason::Busy; state.status.capability.read_only_session_available = false;
+        state.status.operation.as_mut().unwrap().kind = OperationKind::Authorize;
+        state.status.authorization = Some(Authorization { phase: AuthorizationPhase::RequestingCode, user_code: None, expires_at: None });
+        valid(&state); state
+    }
+    fn device_code_data(state: &mut ConnectionState, start: Instant, settled: Instant, now: Instant, expiry: u32, interval: u32) {
+        let before = state.snapshot();
+        state.accept_device_result(Ok(device::Outcome::Code { device_code: Secret::new("0123456789012345678901234567890123456789".into()),
+            user_code: "AB12-CD34".into(), expires_in: expiry, interval }), device::Step::Start, start, settled, false, now);
+        state.finish(before); valid(state);
+    }
+    fn poll_data(state: &mut ConnectionState, result: device::Outcome, started: Instant, settled: Instant, now: Instant) {
+        // Supply the phase after a separately admitted original poll. No native
+        // ticket, socket or original-settlement fact is forged by this fixture.
+        let auth = state.private.as_mut().unwrap().device.as_mut().unwrap();
+        auth.next_poll = None; auth.polls += 1;
+        let before = state.snapshot();
+        state.accept_device_result(Ok(result), device::Step::Poll, started, settled, false, now);
+        state.finish(before); valid(state);
+    }
+    #[test]
+    fn device_original_expiry_and_settled_poll_schedule_do_not_renew() {
+        let at = Instant::now(); let mut state = device_fixture(at);
+        let operation = state.status.operation.as_ref().unwrap().id.clone();
+        device_code_data(&mut state, at, at + Duration::from_secs(2), at + Duration::from_secs(2), 40, 1);
+        let auth = state.private.as_ref().unwrap().device.as_ref().unwrap();
+        assert_eq!(auth.end, at + Duration::from_secs(40));
+        assert_eq!(auth.interval, 5); assert_eq!(auth.next_poll, Some(at + Duration::from_secs(7)));
+        assert_eq!(auth.poll_due(at + Duration::from_secs(6)), Ok(false));
+        assert_eq!(auth.poll_due(at + Duration::from_secs(7)), Ok(true));
+        poll_data(&mut state, device::Outcome::SlowDown { interval: 7 }, at + Duration::from_secs(7), at + Duration::from_secs(9), at + Duration::from_secs(9));
+        let auth = state.private.as_ref().unwrap().device.as_ref().unwrap();
+        assert_eq!(auth.interval, 10); assert_eq!(auth.next_poll, Some(at + Duration::from_secs(19)));
+        assert_eq!(state.status.authorization.as_ref().unwrap().phase, AuthorizationPhase::SlowDown);
+        poll_data(&mut state, device::Outcome::Pending { interval: Some(2) }, at + Duration::from_secs(19), at + Duration::from_secs(21), at + Duration::from_secs(21));
+        let auth = state.private.as_mut().unwrap().device.as_mut().unwrap();
+        assert_eq!(auth.interval, 10); assert_eq!(auth.next_poll, Some(at + Duration::from_secs(31)));
+        assert_eq!(auth.end, at + Duration::from_secs(40));
+        auth.polls = device::POLL_LIMIT; assert_eq!(auth.poll_due(at + Duration::from_secs(31)), Err(Reason::ResponseLimit));
+        assert_eq!(state.status.operation.as_ref().unwrap().id, operation);
+        assert_eq!(state.private.as_ref().unwrap().clock.end, at + LIFETIME);
+        assert!(state.native_work_pending() && !state.private.as_ref().unwrap().original_pending());
+        state.reconcile(at + Duration::from_secs(40), Reason::None); valid(&state);
+        assert!(state.material_settled() && !state.native_work_pending());
+        assert_eq!(state.status.session.as_ref().unwrap().state, SessionState::Expired);
+    }
+    #[test]
+    fn device_token_is_private_until_final_identity_bracket_and_keeps_original_ceiling() {
+        let at = Instant::now(); let mut state = device_fixture(at);
+        device_code_data(&mut state, at, at, at, 900, 5);
+        poll_data(&mut state, device::Outcome::Token { token: Secret::new("ghu_SYNTHETIC_NOT_A_CREDENTIAL".into()), expires_in: Some(28_800) },
+            at + Duration::from_secs(5), at + Duration::from_secs(6), at + Duration::from_secs(6));
+        assert_eq!(state.status.session.as_ref().unwrap().state, SessionState::Checking);
+        let auth = state.status.authorization.as_ref().unwrap();
+        assert_eq!(auth.phase, AuthorizationPhase::CheckingAccess); assert!(auth.user_code.is_none());
+        assert!(state.private.as_ref().unwrap().device.as_ref().unwrap().code.is_none());
+        assert!(state.private.as_ref().unwrap().token.is_some());
+        assert_eq!(state.private.as_ref().unwrap().clock.end, at + LIFETIME);
+        assert!(!serde_json::to_string(&state.snapshot()).unwrap().contains("ghu_"));
+        assert_eq!(state.status.account.state, FactState::NotObserved);
+        let original = state.status.operation.as_ref().unwrap().id.clone();
+        settle(&mut state, result(), at + Duration::from_secs(8), at + Duration::from_secs(8), false);
+        assert_eq!(state.status.operation.as_ref().unwrap().id, original);
+        assert_eq!(state.status.operation.as_ref().unwrap().kind, OperationKind::Authorize);
+        assert_eq!(state.status.session.as_ref().unwrap().state, SessionState::Connected);
+        assert!(state.status.authorization.is_none() && state.private.as_ref().unwrap().device.is_none());
+        assert_eq!(state.private.as_ref().unwrap().account_pin.as_deref(), Some("11"));
+        assert_eq!(state.private.as_ref().unwrap().repository_pin.as_deref(), Some("22"));
+    }
+    #[test]
+    fn device_shortened_expiry_and_late_cancelled_or_unknown_token_never_adopt() {
+        let at = Instant::now(); let mut late_code = device_fixture(at);
+        device_code_data(&mut late_code, at, at + Duration::from_secs(2), at + Duration::from_secs(3), 1, 5);
+        assert_eq!(late_code.status.session.as_ref().unwrap().state, SessionState::Expired);
+        assert!(late_code.material_settled() && late_code.status.authorization.is_none());
+        for reason in [Reason::Cancelled, Reason::Expired, Reason::TargetChanged, Reason::CleanupUnknown] {
+            let mut state = device_fixture(at); device_code_data(&mut state, at, at, at, 900, 5);
+            if reason == Reason::CleanupUnknown { state.unknown(); } else { state.retire(reason); }
+            let snapshot = state.snapshot();
+            state.accept_device_result(Ok(device::Outcome::Token { token: Secret::new("ghu_LATE_SYNTHETIC".into()), expires_in: None }),
+                device::Step::Poll, at, at, reason == Reason::CleanupUnknown, at);
+            valid(&state);
+            assert_eq!(state.snapshot(), snapshot);
+            assert!(state.material_settled() && state.status.authorization.is_none());
+            assert!(state.private.as_ref().unwrap().token.is_none());
+        }
+    }
+    #[test]
+    fn device_ambiguous_failure_is_terminal_and_cooldown_survives_disconnect() {
+        let at = Instant::now(); let mut state = device_fixture(at); device_code_data(&mut state, at, at, at, 900, 5);
+        poll_data(&mut state, device::Outcome::Failed { reason: Reason::RateLimited, cooldown_seconds: Some(60), cooldown_blocked: false },
+            at + Duration::from_secs(5), at + Duration::from_secs(6), at + Duration::from_secs(8));
+        assert_eq!(state.cooldown, Some(at + Duration::from_secs(66)));
+        assert_eq!(state.status.operation.as_ref().unwrap().kind, OperationKind::Authorize);
+        assert_eq!(state.status.operation.as_ref().unwrap().phase, Phase::Settled);
+        assert_eq!(state.private.as_ref().unwrap().retirement, Some(Reason::RateLimited));
+        assert!(state.material_settled());
+        state.disconnect("github-session-1", at + Duration::from_secs(9), Reason::None).unwrap(); valid(&state);
+        assert_eq!(state.status.capability.reason, Reason::RateLimited);
+        let mut state = device_fixture(at);
+        state.accept_device_result(Err(BridgeError::protocol()), device::Step::Start, at, at, false, at);
+        valid(&state); assert_eq!(state.private.as_ref().unwrap().retirement, Some(Reason::ResponseInvalid));
+        assert!(state.material_settled() && state.status.authorization.is_none());
+    }
+    #[test]
+    fn browser_gate_is_exact_current_read_only_and_closes_at_original_deadline() {
+        let at = Instant::now(); let mut state = device_fixture(at); device_code_data(&mut state, at, at, at, 900, 5);
+        let snapshot = state.snapshot(); let revision = snapshot.revision;
+        assert!(state.allow_device_page("github-session-1", revision, at, Reason::None).is_ok());
+        for (id, revision, when, external) in [
+            ("replacement", revision, at, Reason::None), ("github-session-1", revision - 1, at, Reason::None),
+            ("github-session-1", revision, at + Duration::from_secs(900), Reason::None),
+            ("github-session-1", revision, at, Reason::Busy), ("github-session-1", revision, at, Reason::Cancelled)] {
+            assert!(state.allow_device_page(id, revision, when, external).is_err());
+        }
+        assert_eq!(state.snapshot(), snapshot); // No observation/revision/poll at handoff.
+        state.private.as_mut().unwrap().device.as_mut().unwrap().checking_access = true;
+        assert!(state.allow_device_page("github-session-1", revision, at, Reason::None).is_err());
     }
 
     #[test]
@@ -460,33 +677,60 @@ fn display_utc(time: SystemTime) -> Option<String> {
 // its owner; we retain it until its actual Settled variant has been consumed.
 struct PrivateSession {
     id: String, project_id: String, repository: String, generation: u32, stop_id: String, unknown_id: String,
-    clock: CredentialClock, token: Option<String>, account_pin: Option<String>, repository_pin: Option<String>,
-    ticket: Option<GitHubReadTicket>, retirement: Option<Reason>, remove_after_settlement: bool,
+    clock: CredentialClock, token: Option<Secret>, account_pin: Option<String>, repository_pin: Option<String>,
+    ticket: Option<GitHubReadTicket>, device: Option<DeviceAuthorization>, retirement: Option<Reason>, remove_after_settlement: bool,
+    inspection: Option<crate::github_environment_metadata::Selection>,
+}
+impl PrivateSession {
+    fn original_pending(&self) -> bool { self.ticket.is_some() || self.device.as_ref().is_some_and(|v| v.ticket.is_some()) }
+    fn authorization_expired(&self, now: Instant) -> bool { self.device.as_ref().is_some_and(|v| now >= v.end) }
+}
+// One retained phase in the existing private session, not a second owner. Waiting
+// has no native worker but still conflicts with other document actions.
+struct DeviceAuthorization {
+    end: Instant, code: Option<Secret>, interval: u32, next_poll: Option<Instant>, polls: u32,
+    ticket: Option<GitHubDeviceTicket>, checking_access: bool,
+}
+impl DeviceAuthorization {
+    fn poll_due(&self, now: Instant) -> Result<bool, Reason> {
+        if self.next_poll.is_none_or(|next| now < next) { return Ok(false); }
+        if self.polls >= device::POLL_LIMIT { return Err(Reason::ResponseLimit); }
+        Ok(true)
+    }
 }
 pub(crate) struct ConnectionState {
     status: Status, private: Option<PrivateSession>, next_session: u32,
-    cooldown: Option<Instant>, cooldown_blocked: bool, unknown: bool, exhausted: bool,
+    cooldown: Option<Instant>, cooldown_blocked: bool, unknown: bool, exhausted: bool, device_profile_available: bool,
     preflight: crate::github_preflight_session::State,
     release: crate::github_release_session::State,
+    input: crate::github_input_group_session::State,
 }
 impl ConnectionState {
     pub(crate) fn new() -> Self {
         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
-            cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new() }
+            cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false, device_profile_available: false,
+            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(),
+            input: crate::github_input_group_session::State::new() }
     }
     pub(crate) fn snapshot(&self) -> Status { self.status.clone() }
     pub(crate) fn registration(&self) -> Option<(&str, u32)> {
         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
     }
     pub(crate) fn material_settled(&self) -> bool {
-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending()
+        if !self.input.material_settled() { return false; }
+        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.device.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.input.native_work_pending()
     }
-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() }
+    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.device.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.input.native_work_pending() }
     fn fact_retirement(&mut self, reason: Reason) {
         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
+        if let Some(metadata) = &mut self.status.input_metadata { metadata.stale(reason); }
+        self.revoke_input_runner(crate::github_input_group_session::connection_reason(reason));
     }
     fn finish(&mut self, before: Status) {
+        let flags = self.status.input_metadata.as_ref().map_or(("not-run", "not-run", "not-run"), |v| v.flags());
+        self.status.facts.environment_observation = flags.0.into();
+        self.status.facts.secret_observation = flags.1.into();
+        self.status.facts.variable_observation = flags.2.into();
         if self.exhausted { self.status = empty_status(u32::MAX, Reason::Unqualified); return; }
         if self.status != before {
             if let Some(next) = before.revision.checked_add(1).filter(|v| *v < u32::MAX) { self.status.revision = next; }
@@ -494,7 +738,8 @@ impl ConnectionState {
         }
     }
     fn room(&mut self) -> Result<(), BridgeError> {
-        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
+        if self.input.retirement_pending() { return Err(refused(Reason::Busy)); }
+        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.input.exhausted || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
         if self.unknown { return Err(refused(Reason::CleanupUnknown)); } Ok(())
     }
     pub(crate) fn exhaust(&mut self) {
@@ -507,7 +752,7 @@ impl ConnectionState {
     }
     fn unknown_inner(&mut self) {
         self.unknown = true;
-        self.preflight.unknown(); self.release.unknown();
+        self.preflight.unknown(); self.release.unknown(); self.input.unknown();
         self.unknown_operation();
         self.retire_inner(Reason::CleanupUnknown, false);
         if let Some(session) = &mut self.status.session {
@@ -532,12 +777,17 @@ impl ConnectionState {
         let before = self.status.clone(); self.retire_inner(reason, false); self.finish(before);
     }
     fn retire_inner(&mut self, reason: Reason, remove: bool) {
-        self.preflight.stop(); self.release.stop();
+        self.preflight.stop(); self.release.stop(); self.input.stop();
+        self.status.authorization = None;
         let Some(private) = &mut self.private else { return; };
         private.remove_after_settlement |= remove;
         let first = private.retirement.is_none();
         if first { private.retirement = Some(reason); }
         if let Some(ticket) = &private.ticket { ticket.stop(); }
+        if let Some(auth) = &mut private.device {
+            auth.code = None; auth.next_poll = None;
+            if let Some(ticket) = &auth.ticket { ticket.stop(); }
+        }
         if !self.unknown && (first || remove && self.status.operation.as_ref().is_none_or(|op| op.kind != OperationKind::Disconnect)) {
             self.status.operation = Some(Operation { id: private.stop_id.clone(), kind: OperationKind::Disconnect,
                 phase: Phase::Running, reason: Reason::None });
@@ -545,12 +795,12 @@ impl ConnectionState {
         let reason = private.retirement.unwrap_or(reason);
         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() { self.complete_retirement(); }
+        if self.private.as_ref().is_some_and(|s| !s.original_pending()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.input.native_work_pending() { self.complete_retirement(); }
     }
     fn complete_retirement(&mut self) {
         let Some(private) = &mut self.private else { return; };
-        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() { return; }
-        private.token = None;
+        if private.original_pending() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.input.native_work_pending() { return; }
+        private.token = None; private.device = None; self.status.authorization = None;
         if self.unknown {
             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
             self.unknown_operation();
@@ -565,20 +815,33 @@ impl ConnectionState {
             if op.phase == Phase::Running { op.phase = Phase::Settled; op.reason = reason; }
         }
     }
-    fn apply_control(&mut self, control: &GitHubReadControl, settled_at: Instant) -> bool {
+    fn apply_control(&mut self, control: &GitHubReadControl, original_at: Instant) -> bool {
         // Independent read limits survive disconnect, token replacement and a
-        // response-invalid expiry policy. Never base them on observation time.
+        // response-invalid expiry policy. The caller supplies the original read
+        // control Instant; a later status poll must never move that endpoint.
         self.cooldown_blocked |= control.cooldown_blocked;
         if let Some(seconds) = control.cooldown_seconds {
-            match settled_at.checked_add(Duration::from_secs(u64::from(seconds))) {
+            match original_at.checked_add(Duration::from_secs(u64::from(seconds))) {
                 Some(end) => self.cooldown = Some(self.cooldown.map_or(end, |old| old.max(end))),
                 None => self.cooldown_blocked = true,
             }
         }
+        let mut shortened=false;
         if let Some(timestamp) = &control.credential_expires_at {
             let Some(private) = &mut self.private else { return false; };
+            let end=private.clock.end;
             if !private.clock.shorten(timestamp) { return false; }
+            shortened=private.clock.end<end;
             if let Some(session) = &mut self.status.session { session.expires_at = Some(private.clock.display.clone()); }
+        }
+        // A changed credential/control retires old runner authority. The
+        // current runner read has already cleared its predecessor; do not
+        // cancel it merely because its own refusal/control arrived early.
+        if self.input.runner.observation.is_some() && (shortened || control.reason!=Reason::None
+            || control.cooldown_blocked || control.cooldown_seconds.is_some()) {
+            self.revoke_input_runner(if shortened {crate::github_input_group_protocol::Reason::Expired}
+                else if control.reason!=Reason::None {crate::github_input_group_session::connection_reason(control.reason)}
+                else {crate::github_input_group_protocol::Reason::RateLimited});
         }
         true
     }
@@ -591,12 +854,16 @@ impl ConnectionState {
         else if let Some(reason) = self.private.as_ref().and_then(|s| s.retirement) { reason }
         else { Reason::None };
         self.status.capability.reason = reason; self.status.capability.read_only_session_available = reason == Reason::None;
+        self.status.capability.publisher_name = device::publisher().map(|p| p.display_name.clone());
+        self.status.capability.device_login = if device::publisher().is_none() { DeviceLogin::PublisherUnconfigured }
+            else if self.device_profile_available { DeviceLogin::Available } else { DeviceLogin::NotQualified };
     }
     /// Observe only the ORIGINAL mailbox and fixed clocks. No inspection,
     /// network, spawn, timer, join replacement or callback into the document.
     pub(crate) fn reconcile(&mut self, now: Instant, external: Reason) {
         let before = self.status.clone();
-        if self.private.as_ref().is_some_and(|s| s.retirement.is_none() && now >= s.clock.end) { self.retire_inner(Reason::Expired, false); }
+        if self.private.as_ref().is_some_and(|s| s.retirement.is_none() && (now >= s.clock.end || s.authorization_expired(now))) { self.retire_inner(Reason::Expired, false); }
+        self.consume_device_original(now, external);
         let receipt = self.private.as_ref().and_then(|s| s.ticket.as_ref()).map(GitHubReadTicket::receipt);
         match receipt {
             Some(GitHubReadReceipt::RetainedUnknown) => self.unknown_inner(),
@@ -610,25 +877,38 @@ impl ConnectionState {
             },
             Some(GitHubReadReceipt::Pending) | None => {},
         }
-        self.reconcile_preflight(now, external); self.reconcile_release(now, external);
+        self.reconcile_preflight(now, external); self.reconcile_release(now, external); self.reconcile_runner(now,external); self.reconcile_input(now,external);
         self.capability(now, external); self.finish(before);
     }
     fn accept_final(&mut self, mut result: Result<GitHubReadOutcome, BridgeError>, settled_at: Instant, was_unknown: bool, now: Instant) {
         // This function is reached only via the actual Settled mailbox above.
         // It is also tested with explicitly supplied DATA, not a mock OS proof.
         let Some(private) = &mut self.private else { return; }; private.ticket = None;
+        let expected_inspection = private.inspection.take();
         let mut reason = result.as_ref().map_or_else(outcome_error, |v| v.control.reason);
         if let Ok(outcome) = &result { if !self.apply_control(&outcome.control, settled_at) { reason = Reason::ResponseInvalid; } }
         if was_unknown || reason == Reason::CleanupUnknown || self.unknown { self.unknown_inner(); return; }
         if self.private.as_ref().is_some_and(|s| s.retirement.is_some()) { self.complete_retirement(); return; }
-        if self.private.as_ref().is_some_and(|s| now >= s.clock.end) { self.retire_inner(Reason::Expired, false); return; }
+        if self.private.as_ref().is_some_and(|s| now >= s.clock.end || s.authorization_expired(now)) { self.retire_inner(Reason::Expired, false); return; }
+        // The final identity bracket settles the SAME public Authorize. Its
+        // local original deadline has already been checked above, before release.
+        if let Some(private) = &mut self.private { private.device = None; }
+        self.status.authorization = None;
         if reason == Reason::Expired {
             reason = Reason::NetworkUnavailable;
             if let Ok(outcome) = &mut result {
                 for fact_reason in [&mut outcome.facts.account.reason, &mut outcome.facts.repository.reason, &mut outcome.facts.automation.reason] {
                     if *fact_reason == Reason::Expired { *fact_reason = Reason::NetworkUnavailable; }
                 }
+                if let Some(metadata) = &mut outcome.metadata {
+                    for reason in [&mut metadata.environment.reason, &mut metadata.field.reason] {
+                        if *reason == Reason::Expired { *reason = Reason::NetworkUnavailable; }
+                    }
+                }
             }
+        }
+        if result.as_ref().is_ok_and(|v| v.metadata.as_ref().map(|v| &v.selection) != expected_inspection.as_ref()) {
+            reason = Reason::ResponseInvalid;
         }
         let mismatch = result.as_ref().is_ok_and(|v| {
             self.private.as_ref().is_some_and(|s|
@@ -643,11 +923,18 @@ impl ConnectionState {
             self.fact_retirement(reason); self.complete_retirement(); return;
         }
         match result {
-            Ok(outcome) => self.accept_facts(outcome.facts),
+            Ok(outcome) => {
+                self.accept_facts(outcome.facts);
+                if let Some(metadata) = outcome.metadata { self.status.input_metadata = Some(metadata); }
+            },
             Err(_) => self.fact_retirement(reason),
         }
         if let Some(session) = &mut self.status.session {
             session.state = if self.status.account.state == FactState::Observed { SessionState::Connected } else { SessionState::Failed };
+            if session.state == SessionState::Failed && self.status.operation.as_ref().is_some_and(|op| op.kind == OperationKind::Authorize) {
+                if let Some(private) = &mut self.private { private.retirement = Some(reason); }
+                self.complete_retirement();
+            }
         }
     }
     fn accept_facts(&mut self, facts: GitHubReadFacts) {
@@ -680,8 +967,8 @@ impl ConnectionState {
             state: SessionState::Checking, expires_at: Some(clock.display.clone()) };
         let mut private = PrivateSession { id, project_id: args.project_id, repository: args.repository,
             generation, stop_id: format!("github-disconnect-{sequence}"), unknown_id: format!("github-unknown-{sequence}"),
-            clock, token: Some(args.token),
-            account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
+            clock, token: Some(Secret::new(args.token)),
+            account_pin: None, repository_pin: None, ticket: None, device: None, retirement: None, remove_after_settlement: false, inspection: None };
         let mut operation = Operation { id: String::with_capacity(64), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None };
         let ticket = supervisor.start_github_readonly(&private.repository, None, None,
             private.token.as_deref().ok_or_else(|| refused(Reason::InvalidInput))?).map_err(admission_error)?;
@@ -695,32 +982,55 @@ impl ConnectionState {
         let release_before = self.release.snapshot();
         self.release.revoke_consent(); self.release.view.pending.clear(); self.release.view.run = None;
         self.release.view.operation = None; self.release.view.session_id = None;
+        self.input.reset_session_view();
         self.release.finish(release_before);
+        self.revoke_input_material();
         let before = self.status.clone();
-        self.status.session = Some(session); self.status.operation = Some(operation);
-        self.status.account = unobserved(); self.status.repository = unobserved(); self.status.automation = unobserved();
+        self.status.session = Some(session); self.status.operation = Some(operation); self.status.authorization = None;
+        self.status.account = unobserved(); self.status.repository = unobserved(); self.status.automation = unobserved(); self.status.input_metadata = None;
         self.capability(now, Reason::None); self.finish(before); Ok(self.snapshot())
     }
     pub(crate) fn refresh(&mut self, id: &str, revision: u32, supervisor: &Supervisor, now: Instant) -> Result<Status, BridgeError> {
+        self.refresh_selected(id, revision, supervisor, now, None)
+    }
+    pub(crate) fn inspect(&mut self, args: wire::InspectArgs, supervisor: &Supervisor, now: Instant) -> Result<Status, BridgeError> {
+        let selection = crate::github_environment_metadata::Selection { stage: args.stage, name: args.name };
+        if !selection.valid() { return Err(refused(Reason::InvalidInput)); }
+        self.refresh_selected(&args.session_id, args.expected_revision, supervisor, now, Some(selection))
+    }
+    fn refresh_selected(&mut self, id: &str, revision: u32, supervisor: &Supervisor, now: Instant,
+        selection: Option<crate::github_environment_metadata::Selection>) -> Result<Status, BridgeError> {
         self.room()?;
         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
-        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() { return Err(refused(Reason::Busy)); }
+        if private.ticket.is_some() || private.device.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.input.native_work_pending() { return Err(refused(Reason::Busy)); }
         if let Some(reason) = private.retirement { return Err(refused(reason)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
         let allowed = self.status.session.as_ref().is_some_and(|s| s.state == SessionState::Connected
-            || s.state == SessionState::Failed && self.status.operation.as_ref().is_some_and(|op| op.phase == Phase::Settled && retryable(op.reason)));
+            || s.state == SessionState::Failed && self.status.operation.as_ref().is_some_and(|op| op.kind != OperationKind::Authorize && op.phase == Phase::Settled && retryable(op.reason)));
         if !allowed { return Err(refused(Reason::InvalidInput)); }
-        let mut operation = Operation { id: String::with_capacity(64), kind: OperationKind::Refresh, phase: Phase::Running, reason: Reason::None };
-        let ticket = supervisor.start_github_readonly(&private.repository, private.account_pin.as_deref(), private.repository_pin.as_deref(),
-            private.token.as_deref().ok_or_else(|| refused(Reason::Expired))?).map_err(admission_error)?;
+        if selection.is_some() && (private.account_pin.is_none() || private.repository_pin.is_none()
+            || self.status.account.state != FactState::Observed || self.status.repository.state != FactState::Observed) {
+            return Err(refused(Reason::InvalidInput));
+        }
+        let mut operation = Operation { id: String::with_capacity(64),
+            kind: if selection.is_some() { OperationKind::Inspect } else { OperationKind::Refresh },
+            phase: Phase::Running, reason: Reason::None };
+        let token = private.token.as_deref().ok_or_else(|| refused(Reason::Expired))?;
+        let ticket = if let Some(selection) = &selection {
+            supervisor.start_github_metadata(&private.repository, private.account_pin.as_deref(), private.repository_pin.as_deref(),
+                token, selection, private.clock.end)
+        } else {
+            supervisor.start_github_readonly(&private.repository, private.account_pin.as_deref(), private.repository_pin.as_deref(), token)
+        }.map_err(admission_error)?;
         let preflight_before = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(preflight_before);
         let release_before = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(release_before);
+        self.revoke_input_material();
         operation.id.push_str(ticket.operation_id());
         // There is no await or callback between the recheck and storing the
         // exact original ticket in this same document-owned state.
-        if let Some(private) = &mut self.private { private.ticket = Some(ticket); }
+        if let Some(private) = &mut self.private { private.ticket = Some(ticket); private.inspection = selection; }
         let before = self.status.clone();
         self.status.operation = Some(operation);
         if let Some(session) = &mut self.status.session { session.state = SessionState::Checking; }
@@ -734,13 +1044,210 @@ impl ConnectionState {
     }
 }
 
+// The shell's existing relay observes first, then separately drives one due
+// device step. None of these methods creates a second timer/task/credential owner.
+impl ConnectionState {
+    pub(crate) fn observe_device_capability(&mut self, supervisor: &Supervisor) {
+        let before = self.status.clone();
+        self.device_profile_available = qualified_for(supervisor) && supervisor.github_device_profile_available();
+        self.status.capability.publisher_name = device::publisher().map(|p| p.display_name.clone());
+        self.status.capability.device_login = if device::publisher().is_none() { DeviceLogin::PublisherUnconfigured }
+            else if self.device_profile_available { DeviceLogin::Available } else { DeviceLogin::NotQualified };
+        self.finish(before);
+    }
+    pub(crate) fn begin_device(&mut self, args: StartDeviceArgs, generation: u32, supervisor: &Supervisor,
+        now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        self.room()?;
+        if self.private.is_some() { return Err(refused(Reason::Busy)); }
+        let publisher = device::publisher().ok_or_else(|| refused(Reason::PublisherUnconfigured))?;
+        if self.status.capability.device_login != DeviceLogin::Available || !self.device_profile_available {
+            return Err(refused(Reason::Unqualified));
+        }
+        if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
+        let Some(sequence) = self.next_session.checked_add(1) else { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); };
+        let clock = CredentialClock::new(now, wall).ok_or_else(|| refused(Reason::RuntimeUnavailable))?;
+        let end = now.checked_add(Duration::from_secs(device::AUTHORIZATION_SECONDS)).ok_or_else(|| refused(Reason::RuntimeUnavailable))?.min(clock.end);
+        let id = format!("github-session-{sequence}");
+        let session = Session { id: id.clone(), project_id: args.project_id.clone(), target_repository: args.repository.clone(),
+            state: SessionState::Checking, expires_at: Some(clock.display.clone()) };
+        let mut private = PrivateSession { id, project_id: args.project_id, repository: args.repository, generation,
+            stop_id: format!("github-disconnect-{sequence}"), unknown_id: format!("github-unknown-{sequence}"),
+            clock, token: None, account_pin: None, repository_pin: None, ticket: None, inspection: None,
+            device: Some(DeviceAuthorization { end, code: None, interval: 5, next_poll: None, polls: 0, ticket: None, checking_access: false }),
+            retirement: None, remove_after_settlement: false };
+        let operation = Operation { id: format!("github-authorize-{sequence}"), kind: OperationKind::Authorize, phase: Phase::Running, reason: Reason::None };
+        let original = private.device.as_mut().ok_or_else(|| refused(Reason::InvalidInput))?;
+        let ticket = supervisor.start_github_device(device::Step::Start, &publisher.client_id, None, end).map_err(admission_error)?;
+        // Infallible integration after the SAME original Supervisor registered.
+        original.ticket = Some(ticket);
+        self.private = Some(private); self.next_session = sequence;
+        let preflight_before = self.preflight.snapshot();
+        self.preflight.revoke_consent(); self.preflight.view.pending.clear(); self.preflight.view.run = None;
+        self.preflight.view.operation = None; self.preflight.view.session_id = None; self.preflight.finish(preflight_before);
+        let release_before = self.release.snapshot();
+        self.release.revoke_consent(); self.release.view.pending.clear(); self.release.view.run = None;
+        self.release.view.operation = None; self.release.view.session_id = None;
+        self.input.reset_session_view(); self.release.finish(release_before);
+        self.revoke_input_material();
+        let before = self.status.clone();
+        self.status.session = Some(session); self.status.operation = Some(operation);
+        self.status.authorization = Some(Authorization { phase: AuthorizationPhase::RequestingCode, user_code: None, expires_at: None });
+        self.status.account = unobserved(); self.status.repository = unobserved(); self.status.automation = unobserved(); self.status.input_metadata = None;
+        self.capability(now, Reason::None); self.finish(before); Ok(self.snapshot())
+    }
+    fn consume_device_original(&mut self, now: Instant, external: Reason) {
+        let Some(ticket) = self.private.as_ref().and_then(|p| p.device.as_ref()).and_then(|a| a.ticket.as_ref()) else { return; };
+        match ticket.state() {
+            GitHubDeviceState::Pending => return,
+            GitHubDeviceState::RetainedUnknown => { self.unknown_inner(); return; },
+            GitHubDeviceState::Settled { was_unknown } => {
+                if external != Reason::None && !self.unknown && !was_unknown
+                    && self.private.as_ref().is_some_and(|p| p.retirement.is_none()) { return; }
+            },
+        }
+        let step = ticket.step(); let started_at = ticket.started_at();
+        let result = ticket.take_settled(); // One consuming mailbox read, never Clone or Debug.
+        if let Some(auth) = self.private.as_mut().and_then(|p| p.device.as_mut()) { auth.ticket = None; }
+        let Some(result) = result else { self.unknown_inner(); return; };
+        self.accept_device_result(result.outcome, step, started_at, result.settled_at, result.was_unknown, now);
+    }
+    fn accept_device_result(&mut self, result: Result<device::Outcome, BridgeError>, step: device::Step,
+        started_at: Instant, settled_at: Instant, was_unknown: bool, now: Instant) {
+        // Production reaches this only after actual original retirement. Tests
+        // supply DATA here; they do not manufacture a ticket or native receipt.
+        if let Ok(device::Outcome::Failed { reason, cooldown_seconds, cooldown_blocked }) = &result {
+            let control = GitHubReadControl { reason: *reason, credential_expires_at: None,
+                cooldown_seconds: *cooldown_seconds, cooldown_blocked: *cooldown_blocked };
+            self.apply_control(&control, settled_at);
+        }
+        if was_unknown || self.unknown || result.as_ref().is_err_and(|e| e.code == "cleanup_unknown") {
+            self.unknown_inner(); return;
+        }
+        let Some(private) = self.private.as_ref() else { return; };
+        if private.retirement.is_some() { self.complete_retirement(); return; }
+        if now >= private.clock.end || private.authorization_expired(now) {
+            self.retire_inner(Reason::Expired, false); return;
+        }
+        let outcome = match result { Ok(value) => value, Err(error) => { self.fail_device(outcome_error(&error)); return; } };
+        if let Err(reason) = self.apply_device_result(outcome, step, started_at, settled_at) { self.fail_device(reason); }
+        else if self.private.as_ref().is_some_and(|p| now >= p.clock.end || p.authorization_expired(now)) {
+            self.retire_inner(Reason::Expired, false); // A shortened start/credential expiry is effective NOW.
+        }
+    }
+    fn apply_device_result(&mut self, result: device::Outcome, step: device::Step,
+        started_at: Instant, settled_at: Instant) -> Result<(), Reason> {
+        let private = self.private.as_mut().ok_or(Reason::ResponseInvalid)?;
+        let auth = private.device.as_mut().ok_or(Reason::ResponseInvalid)?;
+        if auth.ticket.is_some() || private.ticket.is_some() || auth.checking_access { return Err(Reason::ResponseInvalid); }
+        match result {
+            device::Outcome::Code { device_code, user_code, expires_in, interval } if step == device::Step::Start
+                && auth.code.is_none() && auth.next_poll.is_none() && auth.polls == 0 => {
+                let end = started_at.checked_add(Duration::from_secs(u64::from(expires_in))).ok_or(Reason::ResponseInvalid)?.min(auth.end);
+                let display = private.clock.display_end(end).ok_or(Reason::ResponseInvalid)?;
+                let interval = interval.max(5);
+                let next_poll = settled_at.checked_add(Duration::from_secs(u64::from(interval))).ok_or(Reason::ResponseInvalid)?;
+                auth.end = end; auth.code = Some(device_code); auth.interval = interval; auth.next_poll = Some(next_poll);
+                self.status.authorization = Some(Authorization { phase: AuthorizationPhase::Waiting,
+                    user_code: Some(user_code), expires_at: Some(display) });
+            },
+            device::Outcome::Pending { interval } if step == device::Step::Poll && auth.code.is_some() && auth.next_poll.is_none() => {
+                let interval = auth.interval.max(interval.unwrap_or(5)).max(5);
+                let next_poll = settled_at.checked_add(Duration::from_secs(u64::from(interval))).ok_or(Reason::ResponseInvalid)?;
+                auth.interval = interval; auth.next_poll = Some(next_poll);
+                self.status.authorization.as_mut().ok_or(Reason::ResponseInvalid)?.phase = AuthorizationPhase::Waiting;
+            },
+            device::Outcome::SlowDown { interval } if step == device::Step::Poll && auth.code.is_some() && auth.next_poll.is_none() => {
+                let interval = auth.interval.checked_add(5).ok_or(Reason::ResponseLimit)?.max(interval);
+                let next_poll = settled_at.checked_add(Duration::from_secs(u64::from(interval))).ok_or(Reason::ResponseInvalid)?;
+                auth.interval = interval; auth.next_poll = Some(next_poll);
+                self.status.authorization.as_mut().ok_or(Reason::ResponseInvalid)?.phase = AuthorizationPhase::SlowDown;
+            },
+            device::Outcome::Token { token, expires_in } if step == device::Step::Poll && auth.code.is_some()
+                && auth.next_poll.is_none() && private.token.is_none() => {
+                if let Some(seconds) = expires_in {
+                    if !private.clock.shorten_from(started_at, seconds) { return Err(Reason::ResponseInvalid); }
+                }
+                let public = self.status.authorization.as_mut().ok_or(Reason::ResponseInvalid)?;
+                if public.expires_at.is_none() { return Err(Reason::ResponseInvalid); }
+                // Move the original once into the EXISTING session credential slot.
+                // Never publish a token or refresh credential to a renderer/event.
+                private.token = Some(token); auth.code = None; auth.checking_access = true;
+                public.phase = AuthorizationPhase::CheckingAccess; public.user_code = None;
+                if let Some(session) = &mut self.status.session { session.expires_at = Some(private.clock.display.clone()); }
+            },
+            device::Outcome::Failed { reason, .. } => return Err(reason),
+            _ => return Err(Reason::ResponseInvalid),
+        }
+        Ok(())
+    }
+    fn fail_device(&mut self, reason: Reason) {
+        if reason == Reason::CleanupUnknown { self.unknown_inner(); return; }
+        self.status.authorization = None;
+        if let Some(operation) = &mut self.status.operation { operation.phase = Phase::Settled; operation.reason = reason; }
+        if let Some(private) = &mut self.private { private.retirement = Some(reason); }
+        self.fact_retirement(reason); self.complete_retirement();
+    }
+    pub(crate) fn advance_device_if_due(&mut self, supervisor: &Supervisor, now: Instant, external: Reason) {
+        if external != Reason::None || self.private.as_ref().is_none_or(|p| p.device.is_none() || p.retirement.is_some()) { return; }
+        let before = self.status.clone();
+        if self.room().is_err() { return; }
+        let Some(private) = &mut self.private else { return; };
+        if now >= private.clock.end || private.authorization_expired(now) {
+            self.retire_inner(Reason::Expired, false); self.capability(now, external); self.finish(before); return;
+        }
+        let Some(auth) = private.device.as_mut() else { return; };
+        if auth.ticket.is_some() || private.ticket.is_some() { return; }
+        let end = auth.end.min(private.clock.end);
+        let error = if auth.checking_access {
+            match private.token.as_deref() {
+                Some(token) => match supervisor.start_github_readonly_until(&private.repository, token, end) {
+                    Ok(ticket) => { private.ticket = Some(ticket); None }, Err(error) => Some(error),
+                },
+                None => Some(BridgeError::protocol()),
+            }
+        } else {
+            match auth.poll_due(now) {
+                Ok(false) => return, Ok(true) => {},
+                Err(reason) => { self.fail_device(reason); self.capability(now, external); self.finish(before); return; },
+            }
+            match (device::publisher(), auth.code.as_deref()) {
+                (Some(publisher), Some(code)) => match supervisor.start_github_device(device::Step::Poll, &publisher.client_id, Some(code), end) {
+                    Ok(ticket) => { auth.ticket = Some(ticket); auth.polls += 1; auth.next_poll = None; None },
+                    Err(error) => Some(error),
+                },
+                _ => Some(BridgeError::protocol()),
+            }
+        };
+        if let Some(error) = error {
+            // A pre-registration capacity refusal spends no send. All errors
+            // AFTER an actual admission instead arrive via that original ticket;
+            // a transport ambiguity never reaches this resumable capacity case.
+            if error.code != "busy" { self.fail_device(outcome_error(&error)); }
+        }
+        self.capability(now, external); self.finish(before);
+    }
+    pub(crate) fn allow_device_page(&self, id: &str, revision: u32, now: Instant, external: Reason) -> Result<(), BridgeError> {
+        if external != Reason::None { return Err(refused(external)); }
+        if self.unknown || self.exhausted { return Err(refused(Reason::CleanupUnknown)); }
+        if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
+        let private = self.private.as_ref().filter(|p| p.id == id && p.retirement.is_none()).ok_or_else(|| refused(Reason::TargetChanged))?;
+        let auth = private.device.as_ref().filter(|a| !a.checking_access && a.code.is_some()).ok_or_else(|| refused(Reason::InvalidInput))?;
+        if now >= auth.end || now >= private.clock.end { return Err(refused(Reason::Expired)); }
+        if self.status.capability.device_login != DeviceLogin::Available || !self.status.authorization.as_ref().is_some_and(|a|
+            matches!(a.phase, AuthorizationPhase::Waiting | AuthorizationPhase::SlowDown)) {
+            return Err(refused(Reason::InvalidInput));
+        }
+        Ok(()) // Original synchronous claim; the caller hands off one fixed URL.
+    }
+}
+
 // The action family shares THIS original session's token, monotonic endpoint,
 // cooldown, registration and retirement. Its metadata module owns no credential.
 impl ConnectionState {
     pub(crate) fn preflight_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_preflight_protocol::Status {
         use crate::{github_preflight_protocol::Reason as R, github_preflight_session::connection_reason};
         let before = self.preflight.snapshot(); self.preflight.expire_consent(now);
-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.input.exhausted { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !crate::github_preflight_protocol::publisher_bound() { R::PublisherUnconfigured }
             else if !qualified { R::Unqualified }
@@ -795,6 +1302,7 @@ impl ConnectionState {
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
                 "shutting_down" | "cancelled" => p::Reason::Cancelled, _ => p::Reason::RuntimeUnavailable }))?;
         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
+        self.revoke_input_material();
         self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root });
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
         Ok(self.preflight.snapshot())
@@ -858,10 +1366,10 @@ impl ConnectionState {
         let active = self.preflight.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request)
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
-            && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+            && v.generation == active.generation && v.ticket.is_none() && v.device.is_none() && v.retirement.is_none() && v.token.is_some())
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.release.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.input.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.release.native_work_pending() || self.input.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         let (account, repository, coordinate) = request.action.as_ref().map(|a|
@@ -975,7 +1483,7 @@ impl ConnectionState {
     pub(crate) fn release_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_release_protocol::Status {
         use crate::{github_release_protocol::Reason as R, github_release_session::connection_reason};
         let before = self.release.snapshot(); self.release.expire_consent(now);
-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.input.exhausted { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !crate::github_release_protocol::publisher_bound() { R::PublisherUnconfigured }
             else if !qualified { R::Unqualified }
@@ -1036,6 +1544,7 @@ impl ConnectionState {
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
                 "shutting_down" | "cancelled" => p::Reason::Cancelled, _ => p::Reason::RuntimeUnavailable }))?;
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+        self.revoke_input_material();
         self.release.start(s::Active { ticket, request, session_id, project_id, generation, root });
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
         Ok(self.release.snapshot())
@@ -1099,10 +1608,10 @@ impl ConnectionState {
         let active = self.release.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request)
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
-            && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+            && v.generation == active.generation && v.ticket.is_none() && v.device.is_none() && v.retirement.is_none() && v.token.is_some())
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.preflight.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.input.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.preflight.native_work_pending() || self.input.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         let (account, repository, coordinate) = request.action.as_ref().map(|a|
@@ -1209,3 +1718,6 @@ impl ConnectionState {
         if retirement.is_some() { self.complete_retirement(); }
     }
 }
+
+#[path = "github_connection_input_group.rs"]
+mod input_group;

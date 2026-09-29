@@ -153,6 +153,8 @@ def policy():
 
 
 def _control(value, name):
+    if "_retained" in value and name in {"fonts.json", "providers.json"}:
+        return deepcopy(value["_retained"]["runtime"]["controls"][name])
     pin = value["documents"][name]
     raw = D.read(DATA / name, pin["size"])
     D.need(len(raw) == pin["size"] and _sha(raw) == pin["sha256"], "Android fixed control differs")
@@ -216,7 +218,51 @@ def _protected_ancestry(binding):
                "Android protected host alias changed")
 
 
+def _hosted_selected(value):
+    host = value.get("hostPolicy") if type(value) is dict else None
+    generated = host.get("generated") if type(host) is dict else None
+    rule = generated.get("sdkLicense") if type(generated) is dict else None
+    return type(rule) is dict and rule.get("classification") == "hosted-provider-sdk-data-snapshot-v1"
+
+
+_HOSTED_MODULE = None
+
+
+def _hosted_module():
+    global _HOSTED_MODULE
+    if _HOSTED_MODULE is None:
+        spec = importlib.util.spec_from_file_location("_android_hosted_data",
+            Path(__file__).with_name("android_hosted_data.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _HOSTED_MODULE = module
+    return _HOSTED_MODULE
+
+
+def _hosted_api():
+    from types import SimpleNamespace
+    return SimpleNamespace(**globals())
+
+
+def hosted_policy_admission(*, deadline):
+    """Cheap source/profile/filesystem DATA only, before compiler acquisition."""
+    value = policy()
+    helper = _hosted_module()
+    helper.rule(_hosted_api(), value)  # Missing independently reviewed SDK pins refuse.
+    helper.filesystem(deadline, initial=False)  # Root prepare still requires the initial namespace.
+
+
 def _host_input_limit(name):
+    if name.startswith("/opt/mobile-release-kit/qualification-inputs/android-saved3-v1/"):
+        limit = _hosted_module().input_limit(name)
+        D.need(limit is not None, "Android fixed hosted snapshot role differs")
+        return limit
+    if name == "/opt/android-sdk/licenses/android-sdk-license":
+        return 4096
+    if name in {"/opt/android-sdk/" + package.replace(";", "/") + "/package.xml" for package in SDK_PACKAGE_PATHS}:
+        return 32 << 10
+    if name in {"/opt/android-sdk/" + package.replace(";", "/") + "/source.properties" for package in SDK_PACKAGE_PATHS}:
+        return 16 << 10
     if name == SDK_RECEIPT:
         return 4096
     if name == SDK_IMAGE_DATA:
@@ -294,8 +340,14 @@ def _protected_namespace(binding, expected_path, *, children=None, deadline=None
     _protected_ancestry(binding)
 
 
+def _runtime_policy(value):
+    # Only the explicit retained API constructs this separate source-pinned
+    # selection. Hosted preparation never catches refusal to try a local route.
+    return value["_retained"]["runtime"]["host"] if "_retained" in value else value["hostPolicy"]
+
+
 def _input_rules(value):
-    rules = value["hostPolicy"]
+    rules = _runtime_policy(value)
     D.need(type(rules) is dict, "Android target supplier/configuration/licence policy is not yet admitted")
     inputs = _keys(rules["inputs"], {"files", "directories", "absences"}, "Android fixed host input roster differs")
     D.need(type(inputs["files"]) is list and 0 < len(inputs["files"]) <= 512
@@ -459,7 +511,7 @@ def _stock_custom(host, deadline):
 
 
 def _stock_trust_state(value, host, deadline):
-    rule = value["hostPolicy"]["generated"]["javaTrustStore"]
+    rule = _runtime_policy(value)["generated"]["javaTrustStore"]
     D.need(rule == {"path": STOCK_JKS, "classification": STOCK_CLASSIFICATION,
         "policySha256": STOCK_POLICY_SHA256, "pemPath": STOCK_PEM, "customCaDirectory": STOCK_CUSTOM},
         "Android stock consumer source rule differs")
@@ -498,7 +550,9 @@ def _stock_staged_jks(root, owner, row, identity, jks, deadline):
 
 
 def _sdk_receipt_rule(value):
-    rule = value["hostPolicy"]["generated"]["sdkLicense"]
+    if _hosted_selected(value):
+        return _hosted_module().rule(_hosted_api(), value)
+    rule = _runtime_policy(value)["generated"]["sdkLicense"]
     expected = {"path": SDK_RECEIPT, "classification": SDK_RECEIPT_CLASSIFICATION,
         "imagePath": SDK_IMAGE_DATA, "sourceRecipe": SDK_SOURCE_RECIPE,
         "licenseDefinition": {"id": "android-sdk-license", "normalizedSha1": LICENSE_HASH,
@@ -673,6 +727,10 @@ def _sdk_receipt_state(value, host, deadline):
     explicitly distinct, and neither establishes the image installer ran.
     """
     _point(deadline)
+    if "_retained" in value:
+        return _retained_module().sdk_state(_retained_api(), value, host, deadline)
+    if _hosted_selected(value):
+        return _hosted_module().receipt_state(_hosted_api(), value, host, deadline)
     rule = _sdk_receipt_rule(value)
     files = host["bindings"]["files"]
     selected_paths = {SDK_RECEIPT, SDK_IMAGE_DATA,
@@ -702,8 +760,20 @@ def _sdk_receipt_state(value, host, deadline):
     return proof
 
 
+def _sdk_receipt_path(proof):
+    classification = proof.get("classification")
+    D.need(classification in {SDK_RECEIPT_CLASSIFICATION, "local-retained-sdk-current-use-v1",
+                             "hosted-provider-sdk-data-snapshot-v1"}, "Android SDK current-use classification differs")
+    if classification == "local-retained-sdk-current-use-v1":
+        return "/opt/android-sdk/licenses/android-sdk-license"
+    if classification == "hosted-provider-sdk-data-snapshot-v1":
+        return str(_hosted_module().SDK_ROOT / "licenses/android-sdk-license")
+    return SDK_RECEIPT
+
+
 def _sdk_receipt_bytes(host, proof, deadline):
-    with _stock_host_original(host["bindings"]["files"][SDK_RECEIPT], SDK_RECEIPT, 4096, deadline) as (raw, original):
+    selected = _sdk_receipt_path(proof)
+    with _stock_host_original(host["bindings"]["files"][selected], selected, 4096, deadline) as (raw, original):
         D.need(D.same({**original, "correspondence": _sdk_receipt_ids(raw)}, proof["receipt"]),
                "Android SDK receipt differs from its checked original")
     return raw  # The original read, close and named POST all completed.
@@ -724,8 +794,9 @@ def _sdk_receipt_authority(value, host, deadline):
            and D.same(supplied["sdkLicense"], proof), "Android original SDK correspondence changed")
     # The selected image/source, receipt and both package/property originals
     # correspond now. No installer history or legal entitlement is inferred.
-    # An unprotected source is still rejected by the same original reader;
-    # copying it or supplying a caller-made positive flag cannot admit it.
+    # Old preinstalled and local-retained origins still use the same reader.
+    # Explicit hosted snapshots have their own reviewed provisioning origin;
+    # no caller-made positive flag or relabelling can authorize either route.
     return proof
 
 
@@ -877,7 +948,7 @@ def _network_configuration(value, host, rule, row, deadline):
     files = host["bindings"]["files"]
     D.need({name, role} <= set(inputs["files"]) and {name, role} <= set(files),
            "Android network selected/canonical original is missing")
-    aliases = [alias for alias in value["hostPolicy"]["aliases"] if alias["path"] == role]
+    aliases = [alias for alias in _runtime_policy(value)["aliases"] if alias["path"] == role]
     if name == role:
         D.need(not aliases, "Android regular network input has an alias")
     else:
@@ -905,7 +976,7 @@ def _host_state(value, host, deadline):
     bindings; network configuration uses a separate fixed correspondence rule.
     The caller independently recreates shell_data_snapshot before this check.
     """
-    rules = value["hostPolicy"]
+    rules = _runtime_policy(value)
     D.need(type(rules) is dict, "Android target supplier/configuration/licence policy is not yet admitted")
     _keys(rules, {"id", "files", "aliases", "generated", "preparationFiles", "suppliersSha256",
                   "inputs"},
@@ -916,7 +987,9 @@ def _host_state(value, host, deadline):
            "Android target portable supplier provenance differs")
     provider_state = _provider_state(value, host, deadline)
     bindings, files, used = host["bindings"]["files"], [], set()
-    preparation_paths = {"/usr/bin/curl", "/usr/bin/bash", "/usr/bin/dpkg-deb", "/usr/bin/python3.12", "/usr/bin/fc-cat", "/usr/bin/fc-list"}
+    preparation_paths = {"/usr/bin/bash", "/usr/bin/dpkg-deb", "/usr/bin/python3.12", "/usr/bin/fc-cat", "/usr/bin/fc-list"}
+    if "_retained" not in value:
+        preparation_paths.add("/usr/bin/curl")
     D.need(type(rules["preparationFiles"]) is list and len(rules["preparationFiles"]) == len(preparation_paths)
            and {r["path"] for r in rules["preparationFiles"]} == preparation_paths,
            "Android fixed preparation tools/TLS source roster differs")
@@ -975,8 +1048,9 @@ def _host_state(value, host, deadline):
     _keys(rules["generated"], {"javaTrustStore", "sdkLicense"}, "Android generated origins differ")
     stock = _stock_trust_state(value, host, deadline)
     generated = {"javaTrustStore": stock["jks"]["file"]}
-    _sdk_receipt_authority(value, host, deadline)
-    generated["sdkLicense"] = _protected_binding(bindings[SDK_RECEIPT], SDK_RECEIPT)
+    proof = _sdk_receipt_authority(value, host, deadline)
+    receipt_path = _sdk_receipt_path(proof)
+    generated["sdkLicense"] = _protected_binding(bindings[receipt_path], receipt_path)
     return {"schemaVersion": 1, "id": rules["id"], "closure": "python-jdk-sdk-gradle-shell-loader-v1",
             "files": files, "aliases": aliases}, generated
 
@@ -1010,9 +1084,22 @@ def _provider_control(value):
         "osLibraries", "programs", "packages", "loader", "ldconfig", "launches", "postJliModules", "jvm", "java",
         "expectedGlobalAbsences", "sourceCommitments", "nativeSelectorObligations", "nativeSelectionProven", "symbolBindingProven"},
         "Android fixed provider control differs")
+    local = "_retained" in value
+    if local:
+        baseline = _control({key: item for key, item in value.items() if key != "_retained"}, "providers.json")
+        D.need(set(baseline["toolObjects"]) <= set(control["toolObjects"])
+               and all(control["toolObjects"][name] == row for name, row in baseline["toolObjects"].items())
+               and control["nestedObjects"] == baseline["nestedObjects"]
+               and set(control["programs"]) == set(baseline["programs"])
+               and set(baseline["osLibraries"]) <= set(control["osLibraries"])
+               and control["launches"] == baseline["launches"]
+               and set(baseline["postJliModules"]) <= set(control["postJliModules"]),
+               "Local Android provider selection drops or alters a retained tool route")
     D.need(control["schemaVersion"] == 1 and control["classification"] == PROVIDER_CLASSIFICATION
-           and len(control["toolObjects"]) == 87 and len(control["nestedObjects"]) == 6
-           and len(control["osLibraries"]) == 40 and len(control["programs"]) == 8
+           and (87 <= len(control["toolObjects"]) <= 128 if local else len(control["toolObjects"]) == 87)
+           and len(control["nestedObjects"]) == 6
+           and (40 <= len(control["osLibraries"]) <= 128 if local else len(control["osLibraries"]) == 40)
+           and len(control["programs"]) == 8
            and control["expectedGlobalAbsences"] == ["libtinfo.so.5"]
            and control["java"] == "jdk/bin/java" and control["jvm"] == "jdk/lib/server/libjvm.so"
            and control["nativeSelectionProven"] is False and control["symbolBindingProven"] is False,
@@ -1111,7 +1198,7 @@ def _provider_state(value, host, deadline):
     for name, binding in alternatives.items():
         _point(deadline)
         _provider_boundary(binding, name)
-    return {"policySha256": value["documents"]["providers.json"]["decodedSha256"],
+    return {"policySha256": _sha(D.canonical(control)) if "_retained" in value else value["documents"]["providers.json"]["decodedSha256"],
             "bindings": bindings, "alternatives": alternatives, "osFiles": sorted(required)}
 
 
@@ -1284,7 +1371,7 @@ def _provider_loader_proof(control, state, diagnostics, cache):
             "candidates": [list(row) for row in candidates], "hwcapsTiers": tiers}
 
 
-def _provider_material_graph(value, root, owner, inventory, deadline):
+def _provider_material_graph(value, root, owner, inventory, deadline, *, source_reader=None):
     """Check bound actual ELF/JAR DATA before recomputing the finite structure."""
     control = _provider_control(value)
     parse, _ = _provider_readers()
@@ -1293,13 +1380,19 @@ def _provider_material_graph(value, root, owner, inventory, deadline):
     def body(row):
         _point(deadline)
         name = _tool_path(row["path"])
-        path = root / "tools" / name
-        D.need(name in originals and _private(path, owner, mode=0o500 if row["mode"] & 0o111 else 0o400) == originals[name],
-               "Android native material lost its original staging writer")
-        raw = D.read(path, row["size"])
-        D.need(len(raw) == row["size"] and _sha(raw) == row["sha256"]
-               and _private(path, owner, mode=0o500 if row["mode"] & 0o111 else 0o400) == originals[name],
-               "Android native material changed during bounded inspection")
+        if source_reader is None:
+            path = root / "tools" / name
+            D.need(name in originals and _private(path, owner, mode=0o500 if row["mode"] & 0o111 else 0o400) == originals[name],
+                   "Android native material lost its original staging writer")
+            raw = D.read(path, row["size"])
+            D.need(len(raw) == row["size"] and _sha(raw) == row["sha256"]
+                   and _private(path, owner, mode=0o500 if row["mode"] & 0o111 else 0o400) == originals[name],
+                   "Android native material changed during bounded inspection")
+        else:
+            D.need("_retained" in value and name in originals, "Android retained reader needs an explicit local route")
+            raw, observed = source_reader(name, row)
+            D.need(observed == originals[name] and len(raw) == row["size"] and _sha(raw) == row["sha256"],
+                   "Android original retained native material changed")
         materials[name] = {"size": row["size"], "sha256": row["sha256"], "identity": originals[name]}
         _point(deadline)
         return raw
@@ -1597,12 +1690,14 @@ def _font_state(value, host, deadline):
            and all(host["graph"]["runtimeData"]["suppliers"]["roots"][name] == expected
                    for name, expected in fonts["supplierRoots"].items()),
            "Android font supplier roots differ from the reviewed source")
-    D.need(type(fonts["directories"]) is dict and len(fonts["directories"]) == 13
+    local = value.get("_retained", {}).get("runtime")
+    D.need(type(fonts["directories"]) is dict
+           and (0 < len(fonts["directories"]) <= 128 if local else len(fonts["directories"]) == 13)
            and all(inputs["directories"].get(name) == children for name, children in fonts["directories"].items())
            and fonts["absences"] == ["/etc/fonts/local.conf"] and set(fonts["absences"]) <= set(inputs["absences"]),
            "Android font namespace differs from the reviewed source")
     paths = fonts["fontFiles"]
-    D.need(type(paths) is list and len(paths) == 53 and paths == sorted(set(paths))
+    D.need(type(paths) is list and (0 < len(paths) <= 512 if local else len(paths) == 53) and paths == sorted(set(paths))
            and set(paths) <= set(inputs["files"]), "Android complete fixed font file roster differs")
     directories = host["bindings"]["androidDirectories"]
     absences = host["bindings"]["androidAbsences"]
@@ -1615,9 +1710,13 @@ def _font_state(value, host, deadline):
         _point(deadline)
         _protected_namespace(binding, name)
     roster, file_state = {}, {}
-    for name in FONT_DIRECTORIES:
+    font_directories = local["fontDirectories"] if local else FONT_DIRECTORIES
+    D.need(type(font_directories) in (tuple, list) and 0 < len(font_directories) <= 16
+           and len(set(font_directories)) == len(font_directories)
+           and all(name in FONT_DIRECTORIES for name in font_directories), "Android fixed font directory selection differs")
+    for name in font_directories:
         D.need(name in inputs["directories"], "Android font directory is not bound")
-        subdirectories = sorted(child for child in FONT_DIRECTORIES if str(Path(child).parent) == name)
+        subdirectories = sorted(child for child in font_directories if str(Path(child).parent) == name)
         files = [path for path in paths if str(Path(path).parent) == name]
         D.need(inputs["directories"][name] == sorted(Path(path).name for path in [*subdirectories, *files]),
                "Android font directory contains an unaccounted member")
@@ -1627,8 +1726,13 @@ def _font_state(value, host, deadline):
     D.need(set(paths) == {path for row in roster.values() for path in row["fonts"]},
            "Android font supplier path is outside the admitted directories")
     tag = "/var/cache/fontconfig/CACHEDIR.TAG"
+    extras = local["fontCacheExtraInputs"] if local else []
+    D.need(type(extras) is list and len(extras) <= 64 and extras == sorted(set(extras))
+           and not set(extras).intersection({*roster, tag})
+           and all(re.fullmatch(r"/var/cache/fontconfig/[0-9a-f]{32}-le64\.cache-(?:[1-8]|1[0-9])", name)
+                   and name in inputs["files"] for name in extras), "Android separately versioned cache inputs differ")
     D.need(tag in inputs["files"] and inputs["directories"].get("/var/cache/fontconfig")
-           == sorted(Path(name).name for name in [*roster, tag]), "Android font cache directory is not complete")
+           == sorted(Path(name).name for name in [*roster, *extras, tag]), "Android font cache directory is not complete")
     expected_files = dict(fonts["files"])
     D.need(set(expected_files) == set(paths) | set(fonts["configurationFiles"])
            and set(fonts["consumers"]) == {"/usr/bin/fc-cat", "/usr/bin/fc-list"}
@@ -1645,14 +1749,14 @@ def _font_state(value, host, deadline):
                        for name, required in row["elf"]["versionNeeds"].items()),
                "Android font consumer provider/version edge is incomplete")
     D.need(set(expected_files) <= set(inputs["files"]), "Android font supplier/tool/provider input is not bound")
-    for name in sorted({*expected_files, *roster, tag}):
+    for name in sorted({*expected_files, *roster, *extras, tag}):
         _point(deadline)
         file_state[name] = _protected_binding(host["bindings"]["files"][name], name)
         if name in expected_files:
             D.need(file_state[name] == expected_files[name], "Android current font/configuration/tool/provider supplier bytes differ")
         else:
             D.need(file_state[name]["path"] == name, "Android canonical font cache input is an alias")
-    D.need(sum(file_state[name]["size"] for name in paths) == 37255936,
+    D.need(sum(file_state[name]["size"] for name in paths) == (local["fontFileBytes"] if local else 37255936),
            "Android fixed font supplier byte extent differs")
     marker = D.read(Path(tag), 4096)
     D.need(len(marker) == file_state[tag]["size"] and _sha(marker) == file_state[tag]["sha256"]
@@ -1662,11 +1766,11 @@ def _font_state(value, host, deadline):
     configuration = _font_configuration(host, inputs, fonts, deadline)
     cache_rows = [{"path": ".", "kind": "directory", "present": True, "canonical": "/var/cache/fontconfig",
                    "mode": stat.S_IMODE(directories["/var/cache/fontconfig"]["directory"][2]), "children": []}]
-    for name in sorted([*roster, tag]):
+    for name in sorted([*roster, *extras, tag]):
         row = file_state[name]
         cache_rows.append({"path": Path(name).name, "kind": "file", "present": True,
                            "canonical": name, **{k: row[k] for k in ("size", "sha256", "mode")}, "links": []})
-    summary = {"kind": "directory", "present": True, "entryCount": len(cache_rows), "fileCount": len(roster) + 1,
+    summary = {"kind": "directory", "present": True, "entryCount": len(cache_rows), "fileCount": len(roster) + len(extras) + 1,
                "byteCount": sum(row.get("size", 0) for row in cache_rows), "sha256": _sha(D.canonical(cache_rows))}
     D.need(summary == host["graph"]["runtimeData"]["caches"]["roots"]["/var/cache/fontconfig"],
            "Android font caches changed from the original shell DATA snapshot")
@@ -1781,7 +1885,9 @@ def _font_readback(value, host, root, owner, directories, compiler_root, proof, 
         _font_owner_records(compiler_root, label, owner, expected=original)
         counts.update(_font_cache_report(raw, state["roster"]) if name == "font-cache.stdout"
                       else _font_list_report(raw, state["paths"]))
-    D.need(D.same(proof["counts"], counts) and counts == {"cacheFiles": 7, "fontFaces": 53, "fontFiles": 53},
+    expected_counts = ({"cacheFiles": len(state["roster"]), "fontFaces": len(state["paths"]), "fontFiles": len(state["paths"])}
+                       if "_retained" in value else {"cacheFiles": 7, "fontFaces": 53, "fontFiles": 53})
+    D.need(D.same(proof["counts"], counts) and counts == expected_counts,
            "Android font consumer complete correspondence differs")
     _font_private_empty(root, owner, directories)
     D.need(_font_state(value, host, deadline) == state, "Android font inputs changed during parser readback")
@@ -2512,7 +2618,7 @@ def _archive_routes(files, suppliers, indexes):
     return routes
 
 
-def _documents(value, context, files, os_contract):
+def _documents(value, context, files, os_contract, *, instance=None, source_rows=None):
     files = [{k: row[k] for k in ("path", "size", "sha256", "mode")} for row in files]
     files.sort(key=lambda row: row["path"])
     paths = [_tool_path(row["path"]) for row in files]
@@ -2532,13 +2638,18 @@ def _documents(value, context, files, os_contract):
                                            for row in [*files, *os_contract["files"]]),
            "Android complete tool+OS byte bound")
     contract = D.canonical(os_contract)
-    instance = "ci-" + context["runId"] + "-" + context["runAttempt"] + "-" + context["sourceCommit"][:12]
+    if instance is None:
+        D.need("_retained" not in value and source_rows is None, "Local Android documents require an explicit local instance")
+        instance = "ci-" + context["runId"] + "-" + context["runAttempt"] + "-" + context["sourceCommit"][:12]
+    else:
+        D.need("_retained" in value and instance == _retained_module().local_instance(_retained_api(), context)
+               and source_rows is not None, "Local Android document source/task route differs")
     manifest = {"schemaVersion": 1, "profile": value["profile"], "target": value["target"], "instance": instance,
         "launchContract": "gradle-posix-private-jvm-v1", "versions": value["versions"],
         "gradleDistribution": value["gradleDistribution"], "bundletool": value["bundletool"], "roles": value["roles"],
         "files": files, "osProfile": {"id": os_contract["id"], "inventorySha256": _sha(contract),
             "shell": "/usr/bin/dash", "executableDirectory": "/usr/bin", "helpers": value["helpers"], "files": os_contract["files"]}}
-    sources = {"schemaVersion": 1, "files": [{"path": row["path"], "source": row["path"]} for row in files]}
+    sources = source_rows if source_rows is not None else {"schemaVersion": 1, "files": [{"path": row["path"], "source": row["path"]} for row in files]}
     raw = {"manifest": D.canonical(manifest), "osContract": contract, "sources": D.canonical(sources)}
     D.need(all(0 < len(raw[key]) <= limit for key, (_, limit) in DOCS.items()), "Android publication document bound")
     publication = {"documents": {key: {"size": len(body), "sha256": _sha(body)} for key, body in raw.items()},
@@ -2567,6 +2678,8 @@ def prepare(check, source: Path, material_root: Path, *, context: dict, host: di
 def _prepare(check, source: Path, material_root: Path, *, context: dict, host: dict):
     _point(check.end)
     value, original = policy(), _context(context)
+    if _hosted_selected(value):
+        _hosted_module().context_correspondence(value, host, context)
     owner = (original["runnerUid"], original["runnerGid"])
     D.need((os.getuid(), os.getgid()) == owner and source == _absolute(original["source"])
            and material_root == _absolute(str(material_root)) and material_root.parent == Path(original["root"]).parent
@@ -2673,6 +2786,8 @@ def validate(record, *, context: dict, host: dict, deadline: float):
           "Android compact preparation record differs")
     D.need(record["schemaVersion"] == 1 and record["scope"] == SCOPE, "Android preparation scope differs")
     value, original = policy(), _context(context)
+    if _hosted_selected(value):
+        _hosted_module().context_correspondence(value, host, context)
     root, owner = _absolute(record["materialRoot"]), (original["runnerUid"], original["runnerGid"])
     D.need(root.parent == Path(original["root"]).parent
            and root.name == "mrk-android-material-" + context["runId"] + "-" + context["runAttempt"],
@@ -2790,3 +2905,44 @@ def public_summary(record):
     return {"schemaVersion": 1, "scope": SCOPE, "policySha256": POLICY_SHA256,
             "materials": dict(materials), "publication": deepcopy(publication),
             "qualification": False, "newConsent": False}
+
+
+_RETAINED_MODULE = None
+
+
+def _retained_module():
+    global _RETAINED_MODULE
+    if _RETAINED_MODULE is None:
+        spec = importlib.util.spec_from_file_location("_android_local_retained", Path(__file__).with_name("android_local_retained.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RETAINED_MODULE = module
+    return _RETAINED_MODULE
+
+
+def _retained_api():
+    # Source-pinned modules are commonly loaded without a sys.modules entry.
+    # Expose this existing module's functions/data, not a second engine/owner.
+    from types import SimpleNamespace
+    return SimpleNamespace(**globals())
+
+
+def android_retained_host_inputs(native, bindings, *, bind_path, deadline):
+    return _retained_module().bind_host(_retained_api(), native, bindings, bind_path=bind_path, deadline=deadline)
+
+
+def prepare_retained(check, source, material_root, *, context, host):
+    D.need(not check.failed, "Android prior preparation failure is latched")
+    try:
+        return _retained_module().prepare(_retained_api(), check, source, material_root, context=context, host=host)
+    except BaseException:
+        check.failed = True
+        raise
+
+
+def validate_retained(record, *, context, host, deadline):
+    return _retained_module().validate(_retained_api(), record, context=context, host=host, deadline=deadline)
+
+
+def read_retained_record(path, expected, *, context, host, deadline):
+    return _retained_module().read_record(_retained_api(), path, expected, context=context, host=host, deadline=deadline)

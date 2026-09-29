@@ -28,6 +28,7 @@ def request_data():
                         "savedVersion": {"source": "release/version.properties", "bytes": 41,
                                          "sha256": "d" * 64, "name": "1.2.3", "build": 42},
                         "platform": "android", "operation": "android-build-inspect",
+                        "signing": None,
                         "artifactValidation": {"mode": "structure-and-version", "uploadCertificateSha256": None}},
             "native": {"profile": "linux-gnu-x86_64", "projectRoot": "/PRIVATE_PROJECT", "cwd": "/PRIVATE_CWD",
                        "rootIdentity": dict(identity), "toolchain": {"schemaVersion": 1,
@@ -55,9 +56,9 @@ def artifact():
                                   "architectures": ["arm64-v8a"]}, unknown_abi=False)
 
 
-def complete(request, findings=None):
+def complete(request, findings=None, *, signing=None):
     activity = wire.project_activity(report() if findings is None else findings, stage="disposing-work",
-                                     selection=selection(), command={"outcome": "exited", "exitCode": 0})
+                                     selection=selection(), command={"outcome": "exited", "exitCode": 0}, signing=signing)
     result = wire.project_result(activity, artifact(), used_config=request.context["savedConfig"],
                                  used_version=request.context["savedVersion"], toolchain_profile=wire.TOOLCHAIN_PROFILE,
                                  validation=request.context["artifactValidation"])
@@ -66,7 +67,8 @@ def complete(request, findings=None):
             "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": True,
                          "commands": 2, "profileCalls": 0, "inputClosed": True, "handlersRestored": True,
                          "invocationClosed": True, "artifactsClosed": True, "toolsClosed": True,
-                         "namespaceClosed": True, "stopObserved": "none"}}
+                         "namespaceClosed": True, "signingInputsClosed": True, "materialRetired": True,
+                         "stopObserved": "none"}}
 
 
 def command_failure(request, code=7):
@@ -92,12 +94,141 @@ def upload_complete(*, signature=Status.PASS, signer=Status.PASS, manifest=Statu
     return request, value
 
 
+def signed_request_data():
+    data = request_data()
+    data["context"]["artifactValidation"] = {"mode": "upload-signature", "uploadCertificateSha256": "a" * 64}
+    data["context"]["signing"] = {"source": "assigned-session", "contextRevision": 3, "assignments": [
+        {"kind": "android-keystore", "recordId": "e" * 32, "recordRevision": 2, "contextRevision": 3}]}
+    data["native"]["signingContext"] = {"bytes": 128, "sha256": "f" * 64}
+    return data
+
+
+def signed_complete(*, manifest=Status.PASS, signature=Status.PASS, signer=Status.PASS):
+    request = wire.parse_request(encoded(signed_request_data()))
+    signing = {"validationCommand": {"outcome": "exited", "exitCode": 0}, "validationPassed": True,
+               "signingCommand": {"outcome": "exited", "exitCode": 0}, "materialization": "restored"}
+    rows = [("android.aab.structure", Status.PASS), ("android.aab.manifest", manifest),
+            ("android.aab.signature", signature)]
+    if signer is not None:
+        rows.append(("android.aab.signer", signer))
+    value = complete(request, report(rows), signing=signing)
+    value["lifetime"]["commands"] = 5 if signer is None else 6
+    return request, value
+
+
+class SignedAndroidProtocolTests(unittest.TestCase):
+    def test_signed_contract_rejects_missing_context_wrong_roles_and_renderer_authority(self):
+        for change in ("no-signing", "no-native-context", "unsigned-with-context", "wrong-mode",
+                       "foreign-kind", "context-mismatch", "duplicate-record", "renderer-context"):
+            data = signed_request_data()
+            row = data["context"]["signing"]["assignments"][0]
+            if change == "no-signing":
+                del data["context"]["signing"]
+            elif change == "no-native-context":
+                del data["native"]["signingContext"]
+            elif change == "unsigned-with-context":
+                data["context"]["signing"] = None
+            elif change == "wrong-mode":
+                data["context"]["artifactValidation"] = {"mode": "structure-and-version", "uploadCertificateSha256": None}
+            elif change == "foreign-kind":
+                row["kind"] = "distribution-p12"
+            elif change == "context-mismatch":
+                row["contextRevision"] += 1
+            elif change == "duplicate-record":
+                data["context"]["signing"]["assignments"].append({**row, "kind": "android-firebase"})
+            else:
+                data["context"]["contextConfig"] = data["native"]["signingContext"]
+            with self.subTest(change=change), self.assertRaises(wire.ProtocolError):
+                wire.parse_request(encoded(data))
+
+    def test_complete_signed_result_requires_six_roles_and_real_new_close_facts(self):
+        request, value = signed_complete()
+        wire.validate_terminal(value, request)
+        self.assertEqual(value["result"]["assurances"]["toolkitSigning"], "verified")
+        self.assertIn("toolkit-signing-not-release-readiness", value["result"]["limitations"])
+        self.assertNotIn("PRIVATE_", json.dumps(value))
+        for count in (0, 1, 2, 3, 4, 5, 7):
+            changed = copy.deepcopy(value)
+            changed["lifetime"]["commands"] = count
+            with self.subTest(count=count), self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+        for field in ("signingInputsClosed", "materialRetired"):
+            changed = copy.deepcopy(value)
+            changed["lifetime"][field] = False
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(changed, request)
+            changed.update(outcome="unknown", reason="cleanup-unknown", result=None)
+            changed["disposition"]["artifacts"] = "retained-incomplete"
+            wire.validate_terminal(changed, request)
+
+    def test_manifest_negative_keeps_independent_signature_but_signature_negative_skips_leaf(self):
+        request, value = signed_complete(manifest=Status.FAIL)
+        wire.validate_terminal(value, request)
+        self.assertEqual(value["result"]["assurances"]["nativeManifest"], "failed")
+        self.assertEqual(value["result"]["assurances"]["toolkitSigning"], "verified")
+        request, value = signed_complete(signature=Status.FAIL, signer=None)
+        wire.validate_terminal(value, request)
+        self.assertEqual(value["lifetime"]["commands"], 5)
+        self.assertEqual(value["result"]["assurances"]["toolkitSigning"], "not-verified")
+
+    def test_preflight_failure_is_not_a_gradle_dispatch_or_refusal(self):
+        request, value = signed_complete()
+        unused = {"outcome": "not-dispatched", "exitCode": None}
+        signing = {"validationCommand": {"outcome": "exited", "exitCode": 7}, "validationPassed": False,
+                   "signingCommand": unused, "materialization": "not-started"}
+        value.update(outcome="failed", reason="signing-invalid", result=None)
+        value["activity"] = wire.project_activity(None, stage="validating-signing", selection=selection(),
+                                                 command=unused, signing=signing)
+        value["lifetime"]["commands"] = 1
+        value["disposition"]["artifacts"] = "retained-incomplete"
+        wire.validate_terminal(value, request)
+        for change in ("refused", "extra-command", "gradle-exit"):
+            other = copy.deepcopy(value)
+            if change == "refused":
+                other["outcome"] = "refused"
+            elif change == "extra-command":
+                other["lifetime"]["commands"] = 2
+            else:
+                other["activity"]["command"] = {"outcome": "exited", "exitCode": 0}
+            with self.subTest(change=change), self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(other, request)
+
+        # A known no-exec attempt may count once; it is not a dispatch. Refusal
+        # still requires positive nondispatch for each signed command role,
+        # matching the native/renderer parsers rather than a false aggregate.
+        refused = copy.deepcopy(value)
+        refused["outcome"] = "refused"
+        refused["lifetime"]["commandDispatched"] = False
+        refused["activity"]["signing"]["validationCommand"] = dict(unused)
+        for count in (0, 1):
+            refused["lifetime"]["commands"] = count
+            with self.subTest(no_exec_commands=count):
+                wire.validate_terminal(refused, request)
+            unknown = copy.deepcopy(refused)
+            unknown["activity"]["signing"]["validationCommand"] = {"outcome": "unknown", "exitCode": None}
+            with self.subTest(unknown_validation_commands=count), self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(unknown, request)
+
+    def test_signed_progress_is_nine_ordered_stages_under_same_deadlines(self):
+        request, value = signed_complete()
+        stream = wire.AndroidBuildFrames(request)
+        stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+        for stage in wire.SIGNED_STAGES:
+            stream.response("progress", {"schemaVersion": 1, "stage": stage})
+        stream.response("terminal", value)
+        self.assertEqual((stream._frames, wire.WORK_SECONDS, wire.FINALITY_SECONDS), (11, 3000, 3010))
+        stream = wire.AndroidBuildFrames(request)
+        stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+        with self.assertRaises(wire.ProtocolError):
+            stream.response("progress", {"schemaVersion": 1, "stage": "building"})
+
+
 class AndroidBuildProtocolTests(unittest.TestCase):
     def setUp(self):
         self.request = wire.parse_request(encoded(request_data()))
 
-    def test_v2_choice_is_required_closed_transport_and_not_a_fingerprint_override(self):
-        self.assertEqual((wire.PROTOCOL, wire.CONSENT), ("mrk-android-build/2", "saved-android-build-inspect-v2"))
+    def test_v3_choice_is_required_closed_transport_and_not_a_fingerprint_override(self):
+        self.assertEqual((wire.PROTOCOL, wire.CONSENT), ("mrk-android-build/3", "saved-android-build-inspect-v3"))
         for comparison in ({"mode": "structure-and-version", "uploadCertificateSha256": None},
                            {"mode": "upload-signature", "uploadCertificateSha256": "aB" * 32},
                            {"mode": "upload-signature", "uploadCertificateSha256": ":".join(["aB"] * 32)}):
@@ -507,3 +638,44 @@ class AndroidBuildProtocolTests(unittest.TestCase):
             stream.response("terminal", complete(self.request))
         with self.assertRaises(wire.ProtocolError):
             wire.AndroidBuildFrames(self.request).response("terminal", complete(self.request))
+
+
+class SigningDispatchTerminalTests(unittest.TestCase):
+    def test_pre_dispatch_failure_and_dispatched_cancel_allow_missing_signing_progress(self):
+        for dispatched in (False, True):
+            with self.subTest(dispatched=dispatched):
+                request, value = signed_complete()
+                value.update(outcome="cancelled" if dispatched else "failed",
+                             reason="cancelled" if dispatched else "signing-incomplete", result=None)
+                signing = {"validationCommand": {"outcome": "exited", "exitCode": 0}, "validationPassed": True,
+                           "signingCommand": {"outcome": "unknown" if dispatched else "not-dispatched", "exitCode": None},
+                           "materialization": "restored"}
+                value["activity"] = wire.project_activity(None, stage="signing", selection=selection(),
+                    command={"outcome": "exited", "exitCode": 0}, signing=signing)
+                value["disposition"]["artifacts"] = "retained-incomplete"
+                value["lifetime"].update(commands=3 if dispatched else 2, stopObserved="cancelled" if dispatched else "none")
+                stream = wire.AndroidBuildFrames(request)
+                stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+                for stage in wire.SIGNED_STAGES[:5]:  # Last emitted frame is capturing, internal stage is signing.
+                    stream.response("progress", {"schemaVersion": 1, "stage": stage})
+                parsed = json.loads(stream.response("terminal", value))
+                self.assertEqual(parsed["payload"]["activity"]["stage"], "signing")
+                self.assertTrue(stream._terminal)
+                self.assertEqual(stream._frames, 7)
+
+    def test_cancellation_keeps_observed_late_exit_without_advertising_a_signed_artifact(self):
+        request, value = signed_complete()
+        value.update(outcome="cancelled", reason="cancelled", result=None)
+        value["activity"] = wire.project_activity(None, stage="signing", selection=selection(),
+            command={"outcome": "exited", "exitCode": 0}, signing=value["activity"]["signing"])
+        value["disposition"]["artifacts"] = "retained-incomplete"
+        value["lifetime"].update(commands=3, stopObserved="cancelled")
+        wire.validate_terminal(value, request)  # Reality remains parseable; native cancellation credit must reject this.
+        self.assertIsNone(value["result"])
+        stream = wire.AndroidBuildFrames(request)
+        stream.response("accepted", {"schemaVersion": 1, "context": request.context})
+        for stage in wire.SIGNED_STAGES[:5]:
+            stream.response("progress", {"schemaVersion": 1, "stage": stage})
+        _, success = signed_complete()
+        with self.assertRaises(wire.ProtocolError):
+            stream.response("terminal", success)  # Missing dispatch/restoration events cannot produce complete success.

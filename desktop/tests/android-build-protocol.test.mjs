@@ -7,10 +7,10 @@ import test from 'node:test';
 import { ANDROID_BUILD_ABIS, ANDROID_BUILD_CHECK_IDS, ANDROID_BUILD_CONSENT, ANDROID_BUILD_CONSENT_MS,
   ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_COUNTER_MAX, ANDROID_BUILD_EVENT, ANDROID_BUILD_IPC_LIMIT,
   ANDROID_BUILD_LIMITATIONS, ANDROID_BUILD_MAX_AAB_BYTES, ANDROID_BUILD_MAX_FINDINGS, ANDROID_BUILD_SCOPE,
-  ANDROID_BUILD_SIGNER_MESSAGE, ANDROID_BUILD_STAGES, ANDROID_BUILD_STATUS_LIMIT, ANDROID_BUILD_TOOLCHAIN_PROFILE,
+  ANDROID_BUILD_SIGNER_MESSAGE, ANDROID_BUILD_STAGES, ANDROID_BUILD_SIGNED_STAGES, ANDROID_BUILD_STATUS_LIMIT, ANDROID_BUILD_TOOLCHAIN_PROFILE,
   androidBuildAvailabilityText, androidBuildCounter, androidBuildError, androidBuildFindingText, androidBuildLimitationText,
   androidBuildOperationProgress, androidBuildReasonText, copyAndroidBuildRequest, encodeAndroidBuildRequest,
-  parseAndroidBuildArtifactValidation, parseAndroidBuildResult, parseAndroidBuildSavedConfig, parseAndroidBuildSavedVersion, parseAndroidBuildStatus,
+  parseAndroidBuildArtifactValidation, parseAndroidBuildSigningPolicy, parseAndroidBuildResult, parseAndroidBuildSavedConfig, parseAndroidBuildSavedVersion, parseAndroidBuildStatus,
   sameAndroidBuildData, sameAndroidBuildIdentity, sameAndroidBuildSavedPair } from '../src/androidBuildProtocol.ts';
 
 const OP = 'a'.repeat(32), OWNER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
@@ -20,7 +20,7 @@ const ROWS = [['aab-structure', 'PASS'], ['aab-manifest', 'PASS'], ['signer', 'S
 const clone = (value) => structuredClone(value);
 const decode = (value) => JSON.parse(new TextDecoder().decode(value));
 const request = () => ({ projectId: 'inert-android', draftRevision: 2, baselineGeneration: 3, savedConfig: clone(CONFIG), savedVersion: clone(VERSION),
-  artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } });
+  artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null }, signing: null });
 const context = () => ({ ...request(), platform: 'android', operation: 'android-build-inspect' });
 const selection = () => ({ module: ':app', variant: 'release', applicationId: 'org.example.app', task: ':app:bundleRelease' });
 function inspection(rows = ROWS) {
@@ -30,7 +30,7 @@ function inspection(rows = ROWS) {
 }
 function report(rows = ROWS, assurancePatch = {}) {
   return { schemaVersion: 1, scope: ANDROID_BUILD_SCOPE, usedConfig: clone(CONFIG), usedVersion: clone(VERSION), artifactValidation: clone(request().artifactValidation),
-    selection: selection(), toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE, command: { outcome: 'exited', exitCode: 0 },
+    selection: selection(), toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE, command: { outcome: 'exited', exitCode: 0 }, signing: null,
     ...inspection(rows), artifacts: [{ logicalName: 'android-aab', platform: 'android', kind: 'aab', fileName: 'app-release.aab',
       size: 1024, sha256: 'f'.repeat(64), architectures: ['arm64-v8a'], unknownAbi: false, freshness: 'not-established' }],
     assurances: { structure: 'passed', nativeManifest: 'passed', applicationVersion: 'native-checked', signature: 'not-inspected', signer: 'not-inspected',
@@ -42,13 +42,13 @@ const operation = (patch = {}) => ({ operationId: OP, ownerGeneration: OWNER, co
 const status = (op = null, revision = 0, availability = 'available') => ({ schemaVersion: 1, statusRevision: revision, availability, operation: op });
 function completed(result = report()) {
   return operation({ phase: 'terminal', intentUsable: false, outcome: 'complete', stage: 'disposing-work',
-    activity: { stage: 'disposing-work', selection: clone(result.selection), command: clone(result.command),
+    activity: { stage: 'disposing-work', selection: clone(result.selection), command: clone(result.command), signing: clone(result.signing),
       findings: clone(result.findings), summary: clone(result.summary) },
     disposition: { work: 'removed', artifacts: 'retained-local-result' }, result: clone(result) });
 }
 function negative(reason = 'command-failed', exitCode = 7, patch = {}) {
   return operation({ phase: 'terminal', intentUsable: false, outcome: 'failed', reason, stage: 'disposing-work',
-    activity: { stage: 'disposing-work', selection: selection(), command: { outcome: 'exited', exitCode }, ...inspection([]) },
+    activity: { stage: 'disposing-work', selection: selection(), command: { outcome: 'exited', exitCode }, signing: null, ...inspection([]) },
     disposition: { work: 'removed', artifacts: 'not-created' }, ...patch });
 }
 function checkedOperation(op) {
@@ -304,7 +304,7 @@ test('known command failure, incomplete command and no dispatch cannot be silent
   unknown.reason = 'command-failed'; assert.equal(parseAndroidBuildStatus(status(unknown)), null);
   unknown.reason = 'command-incomplete'; unknown.activity.command.exitCode = 7; assert.equal(parseAndroidBuildStatus(status(unknown)), null);
   const refusal = operation({ phase: 'terminal', intentUsable: false, outcome: 'refused', reason: 'module-required', stage: 'accepted',
-    activity: { stage: 'accepted', selection: null, command: { outcome: 'not-dispatched', exitCode: null }, ...inspection([]) },
+    activity: { stage: 'accepted', selection: null, command: { outcome: 'not-dispatched', exitCode: null }, signing: null, ...inspection([]) },
     disposition: { work: 'not-created', artifacts: 'not-created' } });
   assert.ok(parseAndroidBuildStatus(status(refusal)));
   refusal.activity.command.exitCode = 0; assert.equal(parseAndroidBuildStatus(status(refusal)), null);
@@ -427,7 +427,7 @@ test('required nullable status keys and aggregate copied-DATA limits fail closed
 });
 
 test('fixed reasons/help distinguish failure from cleanup and errors never relay arbitrary native messages', () => {
-  const reasons = ['none', 'cancelled', 'context-changed', 'document-lost', 'shutdown', 'timed-out', 'protocol-error',
+  const reasons = ['signing-inputs-required', 'signing-invalid', 'signing-failed', 'signing-incomplete', 'none', 'cancelled', 'context-changed', 'document-lost', 'shutdown', 'timed-out', 'protocol-error',
     'runtime-unavailable', 'intent-expired', 'stale-intent', ...['config', 'version'].flatMap((kind) =>
       ['missing', 'invalid', 'changed', 'sensitive', 'unsafe', 'too-large'].map((reason) => `saved-${kind}-${reason}`)),
     'platform-disabled', 'module-required', 'toolchain-unavailable', 'toolchain-mismatch', 'project-admission-refused',
@@ -435,10 +435,11 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
     'input-limit', 'result-limit', 'work-retained', 'cleanup-unknown'];
   assert.deepEqual(Object.keys(androidBuildReasonText).sort(), reasons.sort());
   assert.deepEqual(Object.keys(androidBuildFindingText).sort(), [...ANDROID_BUILD_CHECK_IDS].sort());
-  assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS, 'upload-signature-check-not-store-enrollment'].sort());
+  assert.deepEqual(Object.keys(androidBuildLimitationText).sort(), [...ANDROID_BUILD_LIMITATIONS, 'upload-signature-check-not-store-enrollment', 'toolkit-signing-not-release-readiness'].sort());
   assert.match(androidBuildReasonText['command-failed'], /Possible causes/); assert.match(androidBuildReasonText['command-incomplete'], /no exit code/);
   assert.match(androidBuildReasonText['cleanup-unknown'], /further execution stays blocked/); assert.match(androidBuildReasonText.none, /not release approval/);
   assert.equal(ANDROID_BUILD_SIGNER_MESSAGE, 'Toolkit signing was not requested; artifact signer was not inspected. Project code may have signed this file.');
+  assert.match(androidBuildError({ code: 'android_build_signing_capacity', message: 'PRIVATE' }).message, /Remove unused session inputs/);
   assert.equal(ANDROID_BUILD_EVENT, 'android-build-state-changed'); assert.equal(ANDROID_BUILD_CONSENT_MS, 300_000);
   let reads = 0;
   const privateError = { code: 'android_build_owner', get message() { reads++; return 'PRIVATE'; }, retryable: true };
@@ -449,8 +450,8 @@ test('fixed reasons/help distinguish failure from cleanup and errors never relay
 });
 
 
-test('v2 inspection choice is required, default-off-shaped and preserves exact saved comparison text', () => {
-  assert.equal(ANDROID_BUILD_CONSENT, 'saved-android-build-inspect-v2');
+test('v3 inspection choice is required, default-off-shaped and preserves exact saved comparison text', () => {
+  assert.equal(ANDROID_BUILD_CONSENT, 'saved-android-build-inspect-v3');
   for (const fingerprint of ['Ab'.repeat(32), Array(32).fill('Ab').join(':')]) {
     const choice = { mode: 'upload-signature', uploadCertificateSha256: fingerprint };
     assert.deepEqual(clone(parseAndroidBuildArtifactValidation(choice)), choice);
@@ -514,4 +515,72 @@ test('availability text does not turn a closed gate into missing-SDK diagnosis o
   assert.match(androidBuildAvailabilityText['toolchain-unqualified'], /installs no tools and accepts no licenses/);
   assert.match(androidBuildAvailabilityText['unsupported-platform'], /no fallback runner/);
   assert.match(androidBuildAvailabilityText.available, /Saved-input review and explicit consent/);
+});
+
+
+const signingPolicy = () => ({ source: 'assigned-session', contextRevision: 1,
+  assignments: [['android-keystore', 'a'], ['android-firebase', 'b'], ['project-read-token', 'c']].map(([kind, id]) =>
+    ({ kind, recordId: id.repeat(32), recordRevision: 1, contextRevision: 1 })) });
+const signingActivity = () => ({ validationCommand: { outcome: 'exited', exitCode: 0 }, validationPassed: true,
+  signingCommand: { outcome: 'exited', exitCode: 0 }, materialization: 'restored' });
+function signedReport(signature = 'PASS', signer = 'PASS') {
+  const value = uploadReport(signature, signer); value.signing = signingActivity();
+  value.assurances.toolkitSigning = signature === 'PASS' && signer === 'PASS' ? 'verified' : 'not-verified';
+  value.limitations = value.limitations.map((item) => item === 'toolkit-signing-not-requested' ? 'toolkit-signing-not-release-readiness' : item);
+  return value;
+}
+function signedCompleted(signature = 'PASS', signer = 'PASS') {
+  const value = signedReport(signature, signer), op = completed(value);
+  op.context.artifactValidation = clone(value.artifactValidation); op.context.signing = signingPolicy(); return op;
+}
+
+test('signed v3 request carries only ordered current assignment references and cannot disable inspection', () => {
+  const input = { ...request(), artifactValidation: clone(uploadReport().artifactValidation), signing: signingPolicy() };
+  const copied = copyAndroidBuildRequest('prepare_android_build', input);
+  assert.deepEqual(clone(copied), input); assert.notEqual(copied.signing.assignments, input.signing.assignments);
+  assert.equal(decode(encodeAndroidBuildRequest('prepare_android_build', input)).signing.assignments.length, 3);
+  for (const change of [
+    (v) => { delete v.signing; }, (v) => { v.signing.contextRevision = 0; },
+    (v) => { v.signing.assignments[0].recordRevision = 0xffff_ffff; },
+    (v) => { v.signing.assignments[1].contextRevision = 2; },
+    (v) => { v.signing.assignments[1].recordId = v.signing.assignments[0].recordId; },
+    (v) => { v.signing.assignments.reverse(); }, (v) => { v.signing.assignments[0].keyPassword = 'PRIVATE'; },
+    (v) => { v.signing.contextConfig = CONFIG; }, (v) => { v.artifactValidation = request().artifactValidation; },
+  ]) { const wrong = clone(input); change(wrong); assert.equal(encodeAndroidBuildRequest('prepare_android_build', wrong), null); }
+  for (const count of [1, 2, 3]) {
+    const policy = signingPolicy(); policy.assignments.length = count; assert.ok(parseAndroidBuildSigningPolicy(policy));
+  }
+  assert.equal(encodeAndroidBuildRequest('start_android_build', { operationId: OP, ownerGeneration: OWNER, consentVersion: 'saved-android-build-inspect-v2' }), null);
+});
+
+test('signed terminal has independent validation/signing observations and never publishes provisional assurance', () => {
+  const good = signedCompleted(); assert.equal(checkedOperation(good).result.assurances.toolkitSigning, 'verified');
+  assert.equal(ANDROID_BUILD_SIGNED_STAGES.filter((stage) => stage !== 'accepted').length, 9);
+  for (const [signature, signer] of [['PASS', 'FAIL'], ['FAIL', null]]) {
+    const op = signedCompleted(signature, signer); assert.equal(checkedOperation(op).result.assurances.toolkitSigning, 'not-verified');
+    op.result.assurances.toolkitSigning = 'verified'; assert.equal(parseAndroidBuildStatus(status(op)), null);
+  }
+  for (const parent of ['context', 'activity', 'result']) {
+    const missing = clone(good); delete missing[parent].signing; assert.equal(parseAndroidBuildStatus(status(missing)), null);
+  }
+  for (const phase of ['running', 'stopping', 'unknown']) { const provisional = clone(good); provisional.phase = phase; assert.equal(parseAndroidBuildStatus(status(provisional)), null); }
+  for (const patch of [{ validationPassed: false }, { materialization: 'active' }, { materialization: 'unknown' },
+    { signingCommand: { outcome: 'exited', exitCode: 7 } }, { signingCommand: { outcome: 'not-dispatched', exitCode: null } }]) {
+    const wrong = clone(good); Object.assign(wrong.result.signing, patch); Object.assign(wrong.activity.signing, patch);
+    assert.equal(parseAndroidBuildStatus(status(wrong)), null);
+  }
+});
+
+test('signed preflight failure is not a fictitious Gradle dispatch and cannot be relabeled a no-command refusal', () => {
+  const signed = signingActivity(); signed.validationCommand.exitCode = 7; signed.validationPassed = false;
+  signed.signingCommand = { outcome: 'not-dispatched', exitCode: null }; signed.materialization = 'not-started';
+  const op = negative('signing-invalid', null, { stage: 'validating-signing',
+    context: { ...context(), signing: signingPolicy(), artifactValidation: clone(uploadReport().artifactValidation) },
+    activity: { stage: 'validating-signing', selection: selection(), command: { outcome: 'not-dispatched', exitCode: null },
+      signing: signed, ...inspection([]) } });
+  assert.equal(checkedOperation(op).activity.command.outcome, 'not-dispatched');
+  const refused = clone(op); refused.outcome = 'refused'; assert.equal(parseAndroidBuildStatus(status(refused)), null);
+  const later = clone(op); later.activity.command = { outcome: 'exited', exitCode: 0 }; assert.equal(parseAndroidBuildStatus(status(later)), null);
+  const erasedStage = clone(op); erasedStage.stage = 'disposing-work'; erasedStage.activity.stage = 'disposing-work';
+  assert.equal(parseAndroidBuildStatus(status(erasedStage)), null);
 });

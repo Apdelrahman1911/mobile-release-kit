@@ -356,7 +356,10 @@ mod session {
         }
         fn owner(profile: Profile, endpoint: Instant) -> Arc<Owner> {
             let (stop, _) = watch::channel(false);
-            Arc::new(Owner { key: 0, id: String::new(), profile, github_receipt: None,
+            Arc::new(Owner { key: 0, id: String::new(), profile, github_receipt: None, device_receipt: None,
+                preflight_receipt: None, preflight_request: None, preflight_gate: None, preflight_go_claimed: AtomicBool::new(false),
+                release_receipt: None, release_request: None, release_gate: None, input_receipt: None, input_context: None,
+                runner_receipt: None, runner_control: Mutex::new(None),
                 state: Mutex::new(OwnerState::new(endpoint, None)), resources: AsyncMutex::new(Resources::default()),
                 stop, changed: Notify::new(), permit: Mutex::new(None), driver: AsyncMutex::new(None),
                 watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None) })

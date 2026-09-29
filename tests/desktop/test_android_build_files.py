@@ -105,6 +105,7 @@ def inert_files():
     operation.operation_id = "a" * 32
     operation.close_claimed = False
     operation.invocation = None
+    operation.signing = None
     operation.files = None
     operation.counters = {}
     operation.cleanup_checkpoint = Mock(return_value=None)
@@ -499,7 +500,7 @@ if __name__ == "__main__":
 # Append-only orchestration coverage. The focused unittest discovery command
 # imports this module; the earlier reviewed direct-script entry stays unchanged.
 @contextmanager
-def inert_file_orchestration():
+def inert_file_orchestration(*, signed=False):
     """Two tiny fixed DATA trees, not a reusable filesystem/native fixture.
 
     Keep capture/walk, record checks, enumeration, copying, digest verification
@@ -531,6 +532,12 @@ def inert_file_orchestration():
         subject._directory(state.nodes[22]), creation={"state": "CREATED"})
     files.directories.extend((files._work, files._artifacts))
     files.operation.capture_ready = Mock(return_value=None)
+    if signed:
+        files.operation.signing = types.SimpleNamespace(inputs_closed=Mock(return_value=True))
+        files.operation._returned = {}
+        files.namespace = files._namespace_owner = types.SimpleNamespace(
+            path=Path("/inert/project/.mobile-release/desktop-android-build/owned"),
+            slots=[files._numbers[20]])
 
     def forbidden(*args, **kwargs):
         raise AssertionError("orchestration reached an unselected OS effect")
@@ -544,13 +551,15 @@ def inert_file_orchestration():
             assert slot.number is None and slot.open_state == "NEW"
             assert flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK
             if flags & os.O_CREAT:
-                assert (dir_fd, name) == (22, "app-release.aab")
-                assert flags & os.O_EXCL and flags & os.O_RDWR and name not in state.names[22]
-                assert files._snapshot.slot is slot and files._snapshot in files.file_records
-                number = 30
-                state.names[22][name] = number
+                staging = signed and (dir_fd, name) == (21, "signing-input.aab")
+                assert staging or (dir_fd, name) == (22, "app-release.aab")
+                assert flags & os.O_EXCL and flags & os.O_RDWR and name not in state.names[dir_fd]
+                record = files._staging if staging else files._snapshot
+                assert record.slot is slot and record in files.file_records
+                number = 31 if staging else 30
+                state.names[dir_fd][name] = number
                 state.data[number], positions[number] = bytearray(), 0
-                state.nodes[number] = observed(inode=1030, size=0)
+                state.nodes[number] = observed(inode=1000 + number, size=0)
             else:
                 number = state.names[dir_fd][name]
             state.events.append(("open", dir_fd, name, number))
@@ -581,7 +590,7 @@ def inert_file_orchestration():
         return entries
 
     def read(number, amount):
-        assert number in (16, 30) and 0 < amount <= 4
+        assert number in (16, 30, 31) and 0 < amount <= 4
         start = positions[number]
         result = bytes(state.data[number][start:start + amount])
         positions[number] += len(result)
@@ -589,7 +598,7 @@ def inert_file_orchestration():
         return result
 
     def write(number, view):
-        assert number == 30 and 0 < len(view) <= 4
+        assert number == (31 if signed else 30) and 0 < len(view) <= 4
         state.writes += 1
         state.events.append(("write", number, bytes(view)))
         if state.writes == 2 and state.write_fault == "disk":
@@ -607,13 +616,13 @@ def inert_file_orchestration():
         return count
 
     def seek(number, offset, whence):
-        assert number == 30 and offset == 0 and whence == os.SEEK_SET
+        assert number in (16, 30, 31) and offset == 0 and whence == os.SEEK_SET
         state.events.append(("seek", number, offset))
         positions[number] = offset
         return offset
 
     def sync(number):
-        assert number in (22, 30)
+        assert number in (21, 22, 30, 31)
         state.events.append(("fsync", number))
 
     def remove(name, *, dir_fd, directory):
@@ -644,6 +653,160 @@ def inert_file_orchestration():
          patch.object(subject.os, "rmdir", side_effect=lambda name, *, dir_fd: remove(name, dir_fd=dir_fd, directory=True)), \
          patch.object(subject, "_direct_refusal", side_effect=lambda *args: state.classified_refusal):
         yield state
+
+
+def signed_output_data(state, *, code=0):
+    """Invent a settled tool result and bytes. NOT a JDK or inode-preservation proof."""
+    state.files.operation._returned["jarsigner-sign"] = code
+    state.data[30] = bytearray(b"different-signed-aab")
+    state.nodes[30].st_size = len(state.data[30])
+    state.nodes[30].st_mtime_ns += 1
+    state.nodes[30].st_ctime_ns += 1
+
+
+class SignedCaptureAndCustodyTests(unittest.TestCase):
+    def test_reserved_final_is_not_an_artifact_until_original_signer_settles(self):
+        with inert_file_orchestration(signed=True) as state:
+            files = state.files
+            selected = files.capture_signing_input(":app", "release")
+            self.assertIsNone(files.artifact)
+            self.assertIs(selected._snapshot, files._staging)
+            self.assertNotEqual(files._staging.slot.number, files._snapshot.slot.number)
+            self.assertEqual(bytes(state.data[31]), bytes(state.data[16]))
+            self.assertEqual(bytes(state.data[30]), b"")
+            self.assertEqual(files._snapshot.identity["inode"], 1030)
+            before = list(state.events)
+            with self.assertRaises(subject.AndroidFileError):
+                files.capture_signed()
+            self.assertEqual(state.events, before)
+            with selected.native_input() as path:
+                self.assertEqual(path, files.work_path / "signing-input.aab")
+                self.assertEqual(files.signing_output(), files.namespace.path / "artifacts/app-release.aab")
+                self.assertIsNone(files.artifact)
+                signed_output_data(state)
+            self.assertFalse(selected._native)
+            self.assertTrue(selected._checked_after)
+            artifact = files.capture_signed()
+            self.assertIs(artifact, files.artifact)
+            self.assertIs(artifact, files._original_artifact)
+            self.assertIs(artifact._snapshot, files._snapshot)
+            self.assertEqual(artifact._snapshot.identity["inode"], 1030)
+            self.assertEqual(artifact.sha256, subject.hashlib.sha256(state.data[30]).hexdigest())
+            self.assertNotEqual(artifact.sha256, selected.sha256)
+            self.assertEqual(bytes(state.data[16]), b"original-aab")
+            self.assertEqual(bytes(state.data[31]), b"original-aab")
+            artifact.verify_bytes()
+            digest, before = artifact.sha256, list(state.events)
+            with self.assertRaises(subject.AndroidFileError):
+                files.capture_signed()
+            self.assertEqual(state.events, before)
+            reads = [event for event in state.events if event[0] in {"read", "open"}]
+            with self.assertRaises(subject.AndroidFileError):
+                with selected.native_input():
+                    self.fail("a second signing borrow must not be published")
+            self.assertEqual(artifact.sha256, digest)
+            self.assertEqual([event for event in state.events if event[0] in {"read", "open"}], reads)
+            self.assertEqual(sum(event[:3] == ("open", 22, "app-release.aab") for event in state.events), 1)
+
+    def test_signing_reservation_collision_never_adopts_or_overwrites_existing_entry(self):
+        for parent, name in ((21, "SIGNING-INPUT.AAB"), (22, "app-release.aab"), (22, "unrelated")):
+            with self.subTest(parent=parent, name=name), inert_file_orchestration(signed=True) as state:
+                state.names[parent][name] = 17
+                with self.assertRaises(subject.AndroidFileError) as raised:
+                    state.files.capture_signing_input(":app", "release")
+                self.assertEqual(raised.exception.reason, "artifact-unsafe")
+                self.assertEqual(state.names[parent][name], 17)
+                self.assertEqual(bytes(state.data[17]), b"note")
+                self.assertIsNone(state.files.artifact)
+                self.assertFalse(any(event[:2] == ("open", parent) and event[2] ==
+                                     ("signing-input.aab" if parent == 21 else "app-release.aab")
+                                     for event in state.events))
+
+    def test_final_output_substitution_size_mode_links_and_namespace_refuse_without_reopen(self):
+        for fault in ("inode", "mode", "links", "empty", "oversize", "extra-output", "extra-root"):
+            with self.subTest(fault=fault), inert_file_orchestration(signed=True) as state:
+                files = state.files
+                selected = files.capture_signing_input(":app", "release")
+                with selected.native_input():
+                    signed_output_data(state)
+                if fault == "inode":
+                    state.names[22]["app-release.aab"] = 17
+                elif fault == "mode":
+                    state.nodes[30].st_mode = stat.S_IFREG | 0o640
+                elif fault == "links":
+                    state.nodes[30].st_nlink = 2
+                elif fault in {"empty", "oversize"}:
+                    state.nodes[30].st_size = 0 if fault == "empty" else subject.MAX_AAB_BYTES + 1
+                else:
+                    state.names[22 if fault == "extra-output" else 20]["unowned"] = 17
+                before = sum(event[0] == "open" for event in state.events)
+                with self.assertRaises(subject.AndroidFileError):
+                    files.capture_signed()
+                self.assertIsNone(files.artifact)
+                self.assertEqual(sum(event[0] == "open" for event in state.events), before)
+                self.assertEqual(files._snapshot.slot.number, 30)
+                self.assertEqual(files._snapshot.identity["size"], 0)
+                self.assertFalse(files._signed_output_sealed)
+
+    def test_source_or_staging_drift_never_yields_signer_or_seals_final_output(self):
+        for number, timing in ((16, "before"), (31, "before"), (16, "after"), (31, "after")):
+            with self.subTest(number=number, timing=timing), inert_file_orchestration(signed=True) as state:
+                files = state.files
+                selected = files.capture_signing_input(":app", "release")
+                if timing == "before":
+                    # Same fabricated inode/size/timestamps: byte proof must still notice.
+                    state.data[number][0] ^= 1
+                    with self.assertRaises(subject.AndroidFileError):
+                        with selected.native_input():
+                            self.fail("drifted bytes cannot be given to signer")
+                    self.assertFalse(selected._borrowed)
+                else:
+                    with self.assertRaises(subject.AndroidFileError):
+                        with selected.native_input():
+                            signed_output_data(state)
+                            state.data[number][0] ^= 1
+                    self.assertFalse(selected._native)
+                    self.assertFalse(selected._checked_after)
+                    with self.assertRaises(subject.AndroidFileError):
+                        files.capture_signed()
+                self.assertIsNone(files.artifact)
+                self.assertFalse(files._signed_output_sealed)
+
+    def test_nonzero_signer_never_constructs_an_artifact_even_when_consumers_settled(self):
+        with inert_file_orchestration(signed=True) as state:
+            files = state.files
+            selected = files.capture_signing_input(":app", "release")
+            with selected.native_input():
+                signed_output_data(state, code=4)
+            self.assertTrue(selected._checked_after)
+            with self.assertRaises(subject.AndroidFileError):
+                files.capture_signed()
+            self.assertFalse(files._signed_output_sealed)
+            self.assertIsNone(files.artifact)
+            self.assertEqual(files.disposition()["artifacts"], "retained-incomplete")
+
+    def test_unknown_signer_or_active_materializer_prevents_work_walk_and_close(self):
+        for fault in ("unknown-consumer", "active-materializer"):
+            with self.subTest(fault=fault), inert_file_orchestration(signed=True) as state:
+                files = state.files
+                selected = files.capture_signing_input(":app", "release")
+                if fault == "unknown-consumer":
+                    with self.assertRaises(ProcessCleanupError):
+                        with selected.native_input():
+                            state.files.guard.lifetime_ledger.complete = False
+                    self.assertTrue(selected._native)
+                else:
+                    files.operation.signing.inputs_closed.return_value = False
+                before = len(state.scans)
+                with self.assertRaises(ProcessCleanupError):
+                    files.finish_work()
+                self.assertEqual(len(state.scans), before)
+                self.assertFalse(files.deletions)
+                if fault == "unknown-consumer":
+                    with self.assertRaises(ProcessCleanupError):
+                        files.close()
+                    self.assertTrue(all(slot.calls == 0 for slot in files.slots))
+                self.assertFalse(files.closed())
 
 
 class CaptureAndWorkOrchestrationTests(unittest.TestCase):

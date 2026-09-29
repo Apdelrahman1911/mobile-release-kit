@@ -1467,7 +1467,10 @@ pub(crate) mod github_fixture {
             let observed = lock(&owner.observation);
             json!({"id":owner.id,"terminal":state.terminal,"unknownLatched":state.unknown,
                 "permitRetained":lock(&owner.permit).is_some(),"native":observed.clone(),
-                "profile":match owner.profile { Profile::Passive(_) => "passive", Profile::GitHubReadOnly => "github-readonly" },
+                "profile":match owner.profile { Profile::Passive(_) => "passive", Profile::GitHubReadOnly => "github-readonly",
+                    Profile::GitHubDevice(_) => "github-device", Profile::GitHubPreflight => "github-preflight",
+                    Profile::GitHubRelease => "github-release", Profile::GitHubInputGroup => "github-input-group",
+                    Profile::GitHubRunnerPrerequisite => "github-runner-prerequisite" },
                 "observerJoined":observed.observer_joined,"firstError":state.error.as_ref().map(|error| &error.code),
                 "receipt":owner.github_receipt.as_ref().map(|receipt| receipt_result(&lock(receipt)))})
         }).collect::<Vec<_>>());

@@ -2562,7 +2562,7 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-store_document", "ruby-store_lane_lifetime",
+        ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-store_document", "ruby-store_lane_lifetime",
                 "ruby-store_lane_nested_validation", "ruby-store_lane_resources", "ruby-store_lane_runtime",
                 "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
@@ -2593,7 +2593,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
         self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
         catalogs = {}
-        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 58),
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 59),
                                                ("macos", "platform", expected["macos"], 41),
                                                ("macos", "native-python", native_python, 31),
                                                ("macos", "native-support", native_support, 39)):
@@ -6432,7 +6432,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             ".gitignore": (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n"
                            b".mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n"
                            b".mobile-release-metadata-text-cleanup/\n"
-                        b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n"),
+                           b".mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n"
+                           b".mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n"),
             "release/mobile-release.json": json.dumps(configuration).encode(),
         }
         for filename in ("title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt"):

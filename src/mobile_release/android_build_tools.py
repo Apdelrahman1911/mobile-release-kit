@@ -872,6 +872,51 @@ class AndroidValidationTools:
                 "MOBILE_RELEASE_VERSION_NAME": bound_release.name, "MOBILE_RELEASE_BUILD_NUMBER": str(bound_release.build),
                 "MOBILE_RELEASE_REQUIRE_SIGNING": "false"}
 
+    def signing_validation_command(self, signing, scratch, snapshot) -> tuple[str, ...]:
+        from ._desktop_android_signed_inputs import SignedAndroidInputs
+        from .build_inputs import FiniteScratch, InputSnapshot
+        from .credentials import _android_alias_operand
+        self._owner()
+        _need(type(signing) is SignedAndroidInputs and signing is self.operation.signing
+              and signing.operation is self.operation and signing.config_bound
+              and type(scratch) is FiniteScratch and scratch._desktop_binding is signing
+              and type(snapshot) is InputSnapshot and snapshot is signing.validation_snapshot
+              and scratch.require_input("android-keystore") is snapshot
+              and self._signature_ready and self._signature_claimed, "toolchain-unavailable")
+        work = self._work(self.files.work_path)
+        alias = signing.values["MOBILE_RELEASE_ANDROID_KEY_ALIAS"]
+        _need(_android_alias_operand(alias), "signing-invalid")
+        return (f"{self.binding.root}/{KEYTOOL_PATH}",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-J-Duser.timezone=UTC", "-list", "-v", "-keystore", str(scratch.require(snapshot)), "-alias", alias,
+                "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD")
+
+    def signing_command(self, signing, input_path: Path, output_path: Path) -> tuple[str, ...]:
+        from ._desktop_android_signed_inputs import SignedAndroidInputs
+        from ._desktop_android_build_files import OriginalAndroidSigningInput
+        from .credentials import _android_alias_operand
+        self._owner()
+        _need(type(signing) is SignedAndroidInputs and signing is self.operation.signing
+              and signing.operation is self.operation and self._signature_ready
+              and self._signature_claimed, "toolchain-unavailable")
+        signing.require_materialized(signing.materialization)
+        selected = self.files.signing_input
+        _need(type(selected) is OriginalAndroidSigningInput and selected.files is self.files
+              and selected._native and input_path == selected.path
+              and output_path == self.files.signing_output())
+        scratch = signing.materialization.scratch
+        snapshot = scratch.require_input("android-keystore")
+        alias = signing.values["MOBILE_RELEASE_ANDROID_KEY_ALIAS"]
+        _need(_android_alias_operand(alias), "stale-intent")
+        work = self._work(self.files.work_path)
+        return (f"{self.binding.root}/{JARSIGNER_PATH}",
+                *("-J" + option for option in _jvm_arguments(work, bundletool=True)),
+                "-keystore", str(scratch.require(snapshot)),
+                "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
+                "-signedjar", str(output_path), str(input_path), alias)
+
     def _inspection_input(self, snapshot_path: Path) -> tuple[Path, Path]:
         self._owner()
         _need(self._project_data is not None and not self._close_claimed, "toolchain-unavailable")

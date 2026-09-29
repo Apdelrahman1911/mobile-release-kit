@@ -2,78 +2,89 @@
   "schemaVersion": 1,
   "inputs": [
     {
-      "id": "repository", "label": "Application repository", "requiredness": "required",
-      "what": "The one GitHub OWNER/REPO whose account access and four workflow metadata records you want to observe.",
-      "why": "This application repository is separate from the toolkit repository used by local workflow templates. No Git remote or project file is consulted.",
-      "where": "Use the owner and repository name shown on your application's GitHub repository page. Do not paste a URL or a credential.",
+      "id": "repository",
+      "label": "Application repository",
+      "requiredness": "required",
+      "what": "The GitHub OWNER/REPO that contains your mobile application, for example your-team/your-app.",
+      "why": "The app checks your access to this one repository. It is separate from the Mobile Release Kit toolkit repository used by workflow templates.",
+      "where": "Open your application's repository on GitHub. Copy the owner and repository names from github.com/OWNER/REPO, without the URL.",
       "format": "Exactly OWNER/REPO, at most 140 ASCII bytes; the existing core repository grammar applies. No branch, URL, host override or trailing slash.",
       "failure": "Invalid input is refused. A missing or inaccessible repository is not proof that it does not exist. Changing the target retires the original session; no automatic reconnection occurs."
     },
     {
-      "id": "token", "label": "Advanced session-only user token", "requiredness": "conditional",
-      "what": "A future qualified native connection may accept an explicitly supplied user token for read-only GitHub observations. This source-preparation increment does not collect one.",
-      "why": "The preferred publisher App/device login is not configured. An advanced token would be an independent, explicitly consented session-only route, not a credential asset or persistent secret.",
-      "where": "GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens. Select only the application repository and minimal Metadata/Actions read permissions. Never paste the token into a repository field, chat, config or file.",
-      "format": "When separately enabled: nonempty printable ASCII without whitespace, at most 4096 bytes, entered only into the native gated password field. No trimming, prefix-based trust, file import or plaintext persistence.",
-      "failure": "Unqualified runtime, unavailable help or missing native ownership disables entry before collection. Unauthorized requires explicit new authentication after settlement. Forbidden can reflect token, organization or SSO policy; do not automatically escalate permissions."
+      "id": "token",
+      "label": "Advanced session-only user token",
+      "requiredness": "conditional",
+      "what": "An optional advanced alternative to Sign in with GitHub, available only when the installed native connection is qualified.",
+      "why": "Use it if publisher device sign-in is unavailable or your organization requires a separately created user token. The app keeps it only for this session.",
+      "where": "GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens. Select the application repository and Metadata/Actions read access for ordinary observations. The optional environment input check also needs Environments read access. Never put a token in project configuration, chat or a repository field.",
+      "format": "Nonempty printable ASCII, at most 4096 bytes, without whitespace. Paste only into the gated password field. The app does not trim it, infer permissions from its prefix, import it from a file or store it on disk.",
+      "failure": "A missing native profile or help resource disables entry before collection. Unauthorized requires a new deliberate sign-in after Disconnect settles. Forbidden can reflect repository, organization or SSO policy; do not automatically request broader access."
     }
   ],
   "guidance": [
     {
-      "id": "authentication", "label": "Account observation is not release readiness",
-      "what": "An authenticated account observation says which GitHub account answered the supplied read. Repository access is a separate fact.",
-      "why": "Account login, local Apply and workflow listing do not authorize release, dispatch or remote setup. Broad powers of a supplied token would not be exercised here.",
-      "where": "Read the account and repository sections separately. Preferred device login needs a publisher-registered GitHub App and a separately qualified native browser boundary.",
-      "format": "One original native document/session, one explicit application repository and one original observation at a time. No ambient gh login, environment token, credential helper or browser fallback.",
-      "failure": "Unqualified, runtime-unavailable, publisher-unconfigured and not-connected are distinct from failed authentication. Busy blocks new Connect/Refresh, never retained Status or immediate exact-session Disconnect."
+      "id": "authentication",
+      "label": "Sign in with GitHub",
+      "what": "The app requests a short code and opens GitHub's device verification page. You sign in and approve access on GitHub, never enter your GitHub password in this app.",
+      "why": "The code links this original desktop session to the publisher's registered GitHub App. Receiving a token is not yet a successful connection: the app must also check account and repository identity.",
+      "where": "Click Sign in with GitHub, then Open GitHub, or visit https://github.com/login/device yourself. Enter the displayed code and check that GitHub shows the same publisher name before approving.",
+      "format": "The displayed code looks like AB12-CD34. Copy it exactly into GitHub, not into project configuration. One sign-in lasts at most 15 minutes; the app waits and polls automatically at GitHub's allowed interval.",
+      "failure": "Publisher-unconfigured means the publisher must register/enable device flow; not-qualified means this installed native path is not available. A lost reply does not authorize another sign-in. Use Status and Cancel, then wait for the original cleanup."
     },
     {
-      "id": "permissions", "label": "Reported roles are not effective grants",
-      "what": "Pull, push and admin are reported repository-role observations: allowed, denied or unknown.",
-      "why": "These flags do not prove effective token permissions, organization approval, environment access or authorization of a future mutation.",
-      "where": "Review the selected repository and GitHub token settings manually. The existing core credential/environment checklist remains unknown/manual and is not reimplemented here.",
-      "format": "Use only Metadata/Actions read access for this proposed route. No secret, variable, protection, runner or repository Actions settings are queried.",
-      "failure": "401 means unauthorized; 403 is forbidden, possibly organization/SSO policy; 404 means not-found-or-inaccessible. None is converted into a verified absence or an automatic request for wider scope."
+      "id": "permissions",
+      "label": "Repository access and organization approval",
+      "what": "The publisher App requests Metadata read, Contents read and Actions write for the supported observation and explicitly confirmed workflow actions.",
+      "why": "Authentication alone does not guarantee access. The App installation, your account and your organization's approval must all allow the selected repository. Actions write is not permission for an automatic release.",
+      "where": "Ask a repository or organization administrator to install/approve the publisher App for the selected application repository. Check GitHub Settings > Applications and the organization's installed GitHub Apps if access is pending.",
+      "format": "Choose only the repositories you intend to manage. Reported pull/push/admin roles are separate observations, not proof of effective token scope or environment approval. Secret values and repository settings are not read by sign-in. A separate input-metadata check needs Environments read access; an unavailable grant is reported, never expanded automatically.",
+      "failure": "401 means unauthorized; 403 may mean organization/SSO or App permission policy; 404 means missing or inaccessible. Follow your organization's approval process rather than widening permissions automatically."
     },
     {
-      "id": "session-memory", "label": "Session-only lifetime and original settlement",
-      "what": "The proposed native route retains a credential only in private session memory, never in the public status, draft, history, logs or a credential asset.",
-      "why": "No persistence is required for a consented session-only connection. Absence of a qualified keyring never permits plaintext storage.",
-      "where": "Use Disconnect to retire local admission. Project/target/document changes, expiry and shutdown also require the native owner to stop its original consumers.",
-      "format": "Proposed ceiling: 60 minutes from acceptance, shortened by known expiry. Status reads, refreshes and navigation do not renew it. Display timestamps are not deadline authority.",
-      "failure": "Expired or cancelled facts are stale. Cleanup-unknown blocks further requests and cannot be cleared by late success. Dropping a Promise, disposing a view or requesting Disconnect is not proof of native settlement or memory erasure."
+      "id": "session-memory",
+      "label": "Session-only lifetime and original settlement",
+      "what": "The native app retains one credential only in private session memory. Device codes and refresh tokens are never public status, project files, logs, history or credential assets.",
+      "why": "Sign-in does not need persistent credential storage or an unlocked keyring. Refresh tokens are discarded, so this session cannot silently renew authentication.",
+      "where": "Use Disconnect or Cancel in the GitHub screen. Project/target changes, document loss, expiry and shutdown also retire the original consumers.",
+      "format": "The credential ceiling is 60 minutes from the original sign-in admission, including time spent approving the device code. Known expiry only shortens it. Status, Refresh, input-metadata checks, navigation and clock changes do not extend it.",
+      "failure": "Cleanup-unknown stays visible and blocks new work even after a late response. A click, closed screen or lost reply is not proof of native cleanup or complete memory erasure; keep the original app open for settlement."
     },
     {
-      "id": "repository-identity", "label": "Bind the original immutable identities",
+      "id": "repository-identity",
+      "label": "Bind the original immutable identities",
       "what": "Account, repository and remote workflow IDs are canonical positive decimal strings, not lossy JavaScript numbers.",
       "why": "A renamed, replaced or recreated target must not silently inherit the original observation or credential admission.",
-      "where": "The future original owner retains account/repository IDs and brackets repository identity. The pure core projector only checks supplied data; it cannot certify the transport or custody.",
-      "format": "At most five fixed HTTPS GETs, two 100-workflow pages, 256 KiB per body and 1 MiB combined, with no redirect/retry or returned-URL following. No network transport is activated by this increment.",
+      "where": "The native owner keeps the original account/repository IDs and checks repository identity before and after workflow listing or a separately requested environment input observation. The UI shows only the accepted safe observations.",
+      "format": "After authentication, at most five fixed HTTPS reads check account, repository and two workflow pages. There are no redirects, automatic read retries or returned-URL following. A device token is not shown as connected before these checks settle.",
       "failure": "Target-changed refuses new identity adoption. Network-unavailable, TLS-failed, response-invalid and response-limit are fixed local failures, never raw response text or a suggestion to disable TLS."
     },
     {
-      "id": "automation-observation", "label": "Workflow metadata is not local-file verification",
+      "id": "automation-observation",
+      "label": "Workflow metadata is not local-file verification",
       "what": "The four core-owned workflow IDs may be listed, not-listed or unknown, with active, disabled or unknown remote state.",
       "why": "Not-listed means only not returned by a complete bounded Actions listing. It says nothing about Git file absence, YAML compatibility, approvals or release readiness.",
-      "where": "Compare this section with Local workflow files without merging their claims. Repository Actions settings/policy, environments, secrets, variables, protections and runners remain unobserved.",
+      "where": "Compare this section with Local workflow files without merging their claims. Repository Actions settings/policy, protections and runners remain unobserved. The separate Environment inputs section observes one field's metadata only; it does not verify values, workflow contents or readiness.",
       "format": "Exactly four rows in the existing core roster order. Incomplete coverage cannot report not-listed. Duplicate/changing listings become limited/unknown, not a complete snapshot.",
       "failure": "Rate-limited has no automatic retry. After a lost reply, inspect original Status rather than repeating Connect/Refresh. A later explicit read requires actual original settlement and native cooldown admission."
     },
     {
-      "id": "remote-changes", "label": "Remote setup remains unavailable",
-      "what": "G1 is read-only: it neither edits remote repositories nor dispatches workflows. Local workflow Apply is a separate transaction and never means pushed.",
-      "why": "Remote mutation requires its own plan, exact immutable target, fresh preconditions, confirmation, original one-use owner and reconciliation. Authentication does not supply those gates.",
-      "where": "Keep Local workflow files, GitHub connection/observations and Remote setup visually separate. Existing protected-environment and Store guards remain unchanged.",
-      "format": "Remote mutation and dispatch remain false; template compatibility and release readiness remain unknown. No secret values, workflow content, logs or arbitrary URLs are requested or displayed.",
-      "failure": "There is no force, retry-write, latest-run adoption or secret-readback fallback. Ambiguous future writes must reconcile their original operation, not repeat it."
+      "id": "remote-changes",
+      "label": "Sign-in is not permission to release",
+      "what": "The connection screen observes GitHub. Local workflow Apply is a separate transaction and does not push files. Supported workflow dispatches use their own reviewed preview and explicit confirmation.",
+      "why": "A login does not approve a workflow run, bypass a protected environment or authorize a Store mutation. Build-once, provenance, recovery and release safeguards still apply.",
+      "where": "Use the separate workflow/release screen for an available action. Review its exact repository, immutable target, environment and effects before confirmation.",
+      "format": "The connection status keeps remote mutation/dispatch false and release readiness unknown. Other action screens have independent capability and one-use consent contracts; no general remote setup or secret readback is granted.",
+      "failure": "An ambiguous action must reconcile its original operation, never repeat a dispatch or adopt the latest run. Cancelling local sign-in does not cancel a remote workflow or revoke its GitHub grant."
     },
     {
-      "id": "revocation", "label": "Local Disconnect is not remote revocation",
+      "id": "revocation",
+      "label": "Local Disconnect is not remote revocation",
       "what": "Disconnect requests local retirement and cancellation of the exact original session, even while an observation is busy.",
       "why": "Remote grants remain controlled by GitHub. Starting a new login does not revoke an older token or grant.",
-      "where": "For manual revocation, use GitHub Settings > Developer settings > Personal access tokens, or the relevant authorized GitHub App settings. No general browser opener is added here.",
-      "format": "Status remains readable without renewing lifetime. Release of private material follows actual native settlement; unknown cleanup retains ownership.",
-      "failure": "Never assume successful cancellation or erasure from a click, closed view or lost reply. Keep cleanup-unknown visible and do not start another connection to repair it."
+      "where": "To revoke App access remotely, use GitHub Settings > Applications > Authorized GitHub Apps and select the publisher App. For an advanced token, use Settings > Developer settings > Personal access tokens. Organization installations may require an administrator.",
+      "format": "The Open GitHub button opens only https://github.com/login/device for the current waiting sign-in. It cannot open a supplied URL. Cancel stops local sign-in and clears the displayed code; Disconnect retires the original local session.",
+      "failure": "Failed or expired device sign-in cannot be refreshed or automatically restarted. Wait for Disconnect/Cancel to settle, then explicitly start a new sign-in. Cleanup-unknown is not cleared by a new token or late success."
     }
   ]
 }

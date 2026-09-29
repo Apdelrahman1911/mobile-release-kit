@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "accepted": [
+    {
+      "name": "sorted nested Unicode and integer values",
+      "input": "{\"z\":[true,null,-1,{\"é\":\"line\\nquote\\\"\\\\\",\"a\":18446744073709551615}],\"a\":\"🔐\"}",
+      "canonical": "{\"a\":\"🔐\",\"z\":[true,null,-1,{\"a\":18446744073709551615,\"é\":\"line\\nquote\\\"\\\\\"}]}"
+    },
+    {
+      "name": "signed lower boundary and control escapes",
+      "input": "{\"n\":-9223372036854775808,\"s\":\"\\b\\f\\r\\t/\",\"empty\":{}}",
+      "canonical": "{\"empty\":{},\"n\":-9223372036854775808,\"s\":\"\\b\\f\\r\\t/\"}"
+    },
+    {
+      "name": "ordering compares Unicode codepoints",
+      "input": "{\"𐀀\":0,\"é\":1,\"z\":2}",
+      "canonical": "{\"z\":2,\"é\":1,\"𐀀\":0}"
+    }
+  ],
+  "rejected": [
+    "{\"n\":1.0}",
+    "{\"n\":1e0}",
+    "{\"n\":18446744073709551616}",
+    "{\"n\":-9223372036854775809}",
+    "{\"n\":NaN}",
+    "{\"n\":Infinity}",
+    "{\"s\":\"\\ud800\"}"
+  ]
+}

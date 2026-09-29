@@ -245,6 +245,18 @@ impl DesktopBridge {
         runtime.select_github_preflight_observation(profile)?;
         Ok(Self::from_runtime(runtime))
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_installed_github_release_observation(resource_dir: PathBuf,
+        profile: Option<crate::runtime::GitHubReleaseObservationProfile>) -> Result<Self, BridgeError> {
+        let mut runtime = RuntimeConfig::packaged(resource_dir);
+        // The genuine Connect remains a separate read-only original. None
+        // leaves R normal-V: it is essential to the Pending journey.
+        runtime.select_github_readonly_observation(crate::runtime::GitHubReadOnlyObservationProfile::DialSyntheticCa)?;
+        if let Some(profile) = profile { runtime.select_github_release_observation(profile)?; }
+        Ok(Self::from_runtime(runtime))
+    }
     fn from_runtime(runtime: RuntimeConfig) -> Self {
         let installed_project_selection_available = runtime.project_selection_profile_available();
         let installed_project_path_selection_available = runtime.project_path_selection_profile_available();
@@ -353,6 +365,12 @@ impl DesktopBridge {
         let params = crate::lifecycle_evidence_protocol::params(root, stage)?;
         let value = self.supervisor.query(Method::ReleaseEvidenceObserve, params).await?;
         crate::lifecycle_evidence_protocol::result(value, stage)
+    }
+    pub(crate) async fn validate_metadata(&self, document: &crate::asset_session::DocumentBinding, input: crate::metadata_validation_protocol::Request) -> Result<crate::metadata_validation_protocol::Report, BridgeError> {
+        // A selected registry root and the original passive document owner only.
+        let root = self.project_root(&input.project_id)?;
+        let value = document.passive_query(self, Method::MetadataValidate, json!({"root":root,"platform":input.platform}))?.wait().await?;
+        crate::metadata_validation_protocol::result(value, input.platform)
     }
     pub(crate) async fn observe_metadata_text(&self, document: &crate::asset_session::DocumentBinding, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
         // Only the native-selected root reaches this bounded named-file query.
@@ -487,6 +505,41 @@ impl DesktopBridge {
         session_id: &str, plan_token: &str) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
         document.release_version_edit_admit(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration|
             bridge.edits.apply_release_version(window, session_id, plan_token, registration))
+    }
+    pub(crate) fn metadata_images_selection_available(&self) -> bool {
+        self.edits.metadata_images_selection_profile_available()
+    }
+    pub(crate) fn open_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_commands::Open) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        // Keep entropy outside the document mutex, but a matching selection
+        // must still be retired when ticket/admission preparation fails.
+        let ticket = self.edits.metadata_images_open_ticket(window);
+        let selected = args.project_id.clone();
+        document.metadata_images_import_admit(&selected, &args.selection_token, |bridge, registration, data, claimed|
+            bridge.edits.open_metadata_images(window, args.project_id, data, registration, ticket?, claimed))
+    }
+    pub(crate) fn open_metadata_images_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_commands::RecoveryOpen) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        use crate::metadata_images_commands::recovery_not_admitted;
+        let ticket = self.edits.metadata_images_open_ticket(window).map_err(recovery_not_admitted)?;
+        let selected = args.project_id.clone();
+        let mut entered_original_open = false;
+        let result = document.metadata_images_edit_admit(|_| Ok(selected), |bridge, registration| {
+            entered_original_open = true;
+            bridge.edits.open_metadata_images_recovery(window, args.project_id, registration, ticket)
+        });
+        result.map_err(|error| if entered_original_open { error } else { recovery_not_admitted(error) })
+    }
+    pub(crate) fn prepare_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_images_edit_protocol::PrepareMetadataImagesEdit) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        let session = args.session_id.clone();
+        document.metadata_images_edit_admit(|bridge| bridge.edits.metadata_images_project(window, &session), |bridge, registration|
+            bridge.edits.prepare_metadata_images(window, args, registration))
+    }
+    pub(crate) fn apply_metadata_images_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session: &str, plan: &str) -> Result<crate::metadata_images_edit_protocol::MetadataImagesEditStatus, BridgeError> {
+        document.metadata_images_edit_admit(|bridge| bridge.edits.metadata_images_project(window, session), |bridge, registration|
+            bridge.edits.apply_metadata_images(window, session, plan, registration))
     }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.

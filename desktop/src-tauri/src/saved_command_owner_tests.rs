@@ -350,6 +350,27 @@ fn recovery_core_terminal_is_provisional_and_never_mints_a_review_before_origina
 }
 
 #[test]
+fn signed_android_keeps_original_android_deadlines_and_separate_native_gate() {
+    let start = Instant::now(); let context = Context::AndroidBuild(android_wire::tests::signed_context());
+    let clocks = Clocks::for_context(&context, start);
+    assert!(context.any_signed() && context.signed_android() && !context.signed_ios());
+    assert!(!clocks.signed && !clocks.recovery); // No Apple account cleanup lease.
+    assert_eq!(clocks.work, start + ANDROID_WORK); assert_eq!(clocks.finality, start + ANDROID_HARD);
+    let failure = start + Duration::from_secs(2);
+    assert_eq!(clocks.settlement(Some(failure)), failure + SETTLEMENT);
+    assert_eq!(context.frame_limit(), 11); assert_eq!(Context::AndroidBuild(android_wire::tests::context()).frame_limit(), 8);
+    assert!(!ANDROID_SIGNED_NATIVE_QUALIFIED);
+    let owner = application(SavedCommandDomain::AndroidBuild);
+    assert!(!owner.inner.ios_mode_qualified(&context, None));
+    assert!(!application(SavedCommandDomain::OfflinePreflight).inner.ios_mode_qualified(&context, None));
+    let source = include_str!("saved_command_owner.rs");
+    let reconcile = source.split_once("fn reconcile(&self)").unwrap().1.split_once("fn ios_mode_qualified(").unwrap().0;
+    assert!(reconcile.find("Poll::Ready(result)").unwrap() < reconcile.find("material.take()").unwrap());
+    assert!(reconcile.find("final_clock_clear(").unwrap() < reconcile.find("material.take()").unwrap());
+    assert!(reconcile.find("original.retirement_exclusive()").unwrap() < reconcile.find("material.take()").unwrap());
+}
+
+#[test]
 fn signed_and_recovery_clocks_share_only_original_first_failure_cleanup_not_work_or_material() {
     let start = Instant::now();
     for (context, work, cleanup, hard, signed, recovery) in [

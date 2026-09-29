@@ -53,11 +53,11 @@ class CredentialGuideTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in resource["kinds"]], list(guide.KIND_IDS))
         self.assertEqual([item["id"] for item in resource["controls"]], list(guide.CONTROL_IDS))
         self.assertEqual([item["id"] for item in resource["states"]], list(guide.STATE_IDS))
-        self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 15)
+        self.assertEqual(sum(len(item["fields"]) for item in resource["kinds"]), 23)
         self.assertFalse(result["assurance"]["credentialsRead"])
-        self.assertEqual(METHODS, ("capabilities", "catalog", "project.snapshot", "config.validate",
-                                   "config.suggest", "config.preview", "github.setup.propose", "credentials.assess"))
-        self.assertTrue(all(not item["available"] for item in execute("capabilities", {})["actions"]))
+        caps = execute("capabilities", {})
+        self.assertEqual([row["method"] for row in caps["methods"]], list(METHODS))
+        self.assertTrue(all(not item["available"] for item in caps["actions"]))
         # Pure supplied-input policy is additive; no native/vault action or
         # general credential operation becomes a method through guide loading.
         self.assertIn("credentials.assess", METHODS)
@@ -146,11 +146,24 @@ class CredentialGuideTests(unittest.TestCase):
                     self.assertTrue(field[key].strip(), (kind["id"], field["id"], key))
         legacy_names = {item["name"] for item in result["credentials"]}
         self.assertEqual(legacy_names, set(by_name))
-        self.assertLess(guided, legacy_names)
-        for suffix in ("OPERATION_COMMITMENT_KEY_BASE64", "OPERATION_COMMITMENT_KEY_VERSION",
-                       "APPLE_REVIEW_CONTACT_EMAIL", "APPLE_DEMO_ACCOUNT_PASSWORD"):
-            self.assertIn("MOBILE_RELEASE_" + suffix, legacy_names - guided)
+        self.assertEqual(guided, legacy_names)
         self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", guided)
+        expected = {"apple-review-contact": ["firstName", "lastName", "email", "phone"],
+                    "apple-review-demo-account": ["username", "password"]}
+        for identity, fields in expected.items():
+            kind = next(item for item in result["credentialGuide"]["kinds"] if item["id"] == identity)
+            self.assertEqual([field["id"] for field in kind["fields"]], fields)
+            self.assertTrue(all(field["input"] == "secret" and field["alternatives"] == [] for field in kind["fields"]))
+            self.assertEqual(kind["platform"], "ios")
+        self.assertIn("MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL", guided)
+        self.assertIn("MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD", guided)
+        commitment = next(item for item in result["credentialGuide"]["kinds"] if item["id"] == "apple-operation-commitment")
+        self.assertEqual([(field["id"], field["input"]) for field in commitment["fields"]],
+                         [("keyBase64", "secret"), ("keyVersion", "text")])
+        self.assertEqual(commitment["platform"], "ios")
+        self.assertIn("standard base64", commitment["fields"][0]["format"])
+        self.assertNotIn("canonical", commitment["fields"][0]["format"])
+        self.assertTrue(all(field["alternatives"] == [] for field in commitment["fields"]))
 
     def test_requirements_remain_the_only_stage_platform_purpose_selector(self):
         config = ReleaseConfig(Path("unused"), Path("."), all_branches())
@@ -163,7 +176,7 @@ class CredentialGuideTests(unittest.TestCase):
             if stage != "candidate":
                 self.assertEqual(signing, set())
         # The project-token branch is deliberately not rewritten as a platform
-        # requirement or conditioned on the catalogue's eight kind descriptors.
+        # requirement or conditioned on the catalogue's kind descriptors.
         selected = requirements(config, "candidate", purpose="signing", platforms=())
         self.assertEqual([(item.name, item.platform) for item in selected],
                          [("MOBILE_RELEASE_PROJECT_READ_TOKEN", "project")])

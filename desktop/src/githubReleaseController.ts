@@ -247,6 +247,27 @@ export class GitHubReleaseController {
     const c = context(this.connection()), saved = this.state.status?.pending.find((r) => r.prepared.target.marker === record.prepared.target.marker);
     return c && saved && sameConnectionData(saved, record) && inContext(record.prepared, c) ? null : 'Reconnect the original project, account and repository before observing this intent.';
   }
+  recoveryPrefillReason(record: GitHubReleaseRecord): string | null {
+    const reason = this.recordReason(record); if (reason) return reason;
+    const o = this.observer, s = this.state.status, c = context(this.connection());
+    if (!o || !o.active || o.api !== this.api || !o.accepted || !s || s !== o.accepted
+        || !c || !sameConnectionData(c, this.current)) return 'Read local Status for the current project connection before copying declarations.';
+    if (record.runId === null) return 'Reconcile this exact original request first; its run ID is still unknown.';
+    if (!s.run || s.run.id !== record.runId || s.run.status !== 'completed') return 'Track this exact original run and wait until it finishes before copying declarations.';
+    return null;
+  }
+  prefillRecovery(record: GitHubReleaseRecord): boolean {
+    if (this.recoveryPrefillReason(record) || record.runId === null) return false;
+    const p = record.prepared, selected = p.target.selection, version = selected.originalVersion ?? p.currentVersion;
+    // An unfinished recovery dispatch is not an alias for its original intent.
+    // These are editable request declarations, never authenticated evidence.
+    this.invalidate({ branch: p.target.branch, platform: p.target.platform, stage: selected.stage, recovery: true,
+      candidateRunId: selected.candidateRunId ?? '', externalRunId: selected.externalRunId ?? '',
+      recoveryRunId: selected.recoveryRunId ?? record.runId,
+      originalSourceSha: selected.originalSourceSha ?? p.sourceSha,
+      originalVersionName: version.name, originalVersionBuild: String(version.build), error: null });
+    return true;
+  }
   private begin(kind: GitHubReleaseKind, marker: string | null, invoke: (api: Port, c: Context, revision: number) => Promise<GitHubReleaseStatus>): void {
     if (this.disposed || this.startReason()) return;
     const o = this.observer!, c = context(this.connection())!, s = this.state.status!;

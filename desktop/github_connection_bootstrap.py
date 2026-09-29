@@ -1,7 +1,8 @@
-"""Fixed Linux GitHub read-only entry; no mode, host, trust or token arguments.
+"""Fixed Linux GitHub connection entry; no mode, host, trust or token arguments.
 
 This source does not qualify a development or packaged runtime. The native
-original owner must separately admit the interpreter, imports and sibling CA.
+original owner must separately admit its read/device domain, interpreter,
+imports and sibling CA. Closed private framing selects no arbitrary endpoint.
 """
 import os
 import sys

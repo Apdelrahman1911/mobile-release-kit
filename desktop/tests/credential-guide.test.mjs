@@ -19,7 +19,18 @@ test('core-owned guide is compatible, complete, and detached from its provider',
   input.kinds[0].fields[0].where = 'changed after delivery';
   input.controls[0].what = 'changed after delivery';
   assert.deepEqual(result, guide);
-  assert.equal(result.kinds.length, 8);
+  assert.equal(result.kinds.length, 11);
+  for (const [identity, names] of [['apple-review-contact', ['firstName', 'lastName', 'email', 'phone']], ['apple-review-demo-account', ['username', 'password']], ['apple-operation-commitment', ['keyBase64', 'keyVersion']]]) {
+    const kind = result.kinds.find((entry) => entry.id === identity);
+    assert.equal(kind.platform, 'ios'); assert.deepEqual(kind.fields.map((field) => field.id), names);
+    for (const field of kind.fields) {
+      assert.equal(field.input, field.id === 'keyVersion' ? 'text' : 'secret'); assert.equal(field.requiredness, 'conditional');
+      assert.deepEqual(field.alternatives, []); assert.deepEqual(field.suffixes, []);
+      for (const key of ['what', 'why', 'where', 'format', 'requiredWhen', 'failure']) assert.ok(field[key].trim());
+      assert.match(field.format, field.id === 'keyVersion' ? /write-only/u : /private and write-only/u);
+      if (field.id === 'keyBase64') { assert.match(field.format, /standard base64/u); assert.doesNotMatch(field.format, /canonical/u); }
+    }
+  }
 });
 
 test('future or enabled-looking guide contracts never imply collection authority', () => {

@@ -1,7 +1,8 @@
 import { diagnosticsAvailabilityText } from '../environmentDiagnosticsController.ts';
 import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
 import type { EnvironmentCheckId, EnvironmentCheckReason, EnvironmentDiagnosticsProjection } from '../environmentDiagnosticsTypes.ts';
-import { Badge, ErrorNotice, SectionHeading } from './Common.tsx';
+import type { HelpContent } from '../types.ts';
+import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
 const labels: Record<EnvironmentCheckId, string> = {
@@ -16,13 +17,67 @@ const reasons: Record<EnvironmentCheckReason, string> = {
   'nonzero-exit': 'Complete command returned a nonzero exit', 'version-unrecognized': 'Complete output did not match the version format',
   'selection-unrecognized': 'Complete output did not match the selection format',
 };
+// Local explanation only: does not select, install, probe or authorize tools.
+const toolHelp: Record<EnvironmentCheckId, HelpContent> = {
+  "git": {
+    "label": "Git",
+    "requiredness": "conditional",
+    "requiredWhen": "For local project and release operations that use Git.",
+    "what": "The version-control tool that records project changes.",
+    "why": "Release operations use source information; this check observes only the tool version, not your repository.",
+    "where": "Linux: your distribution’s Git package. macOS: Apple’s Command Line Tools or full Xcode; the app checks the selected developer installation.",
+    "format": "Nothing to enter here. Choose Check build tools to request an observed version from the supported installation.",
+    "failure": "Not found means missing from the supported lookup, not necessarily from your computer. Custom per-user installations are not automatically used."
+  },
+  "java": {
+    "label": "Java runtime from a JDK",
+    "requiredness": "conditional",
+    "requiredWhen": "For local Android builds. iOS-only projects do not require a JDK.",
+    "what": "The Java runtime used by Java-based Android build tools.",
+    "why": "Android builds need a complete Java Development Kit (JDK), not only a runtime (JRE).",
+    "where": "Use the JDK vendor and version recommended by your project’s Android Gradle setup: a system package on Linux or a system-wide JDK installer on macOS. Android Studio’s private runtime may be outside this lookup.",
+    "format": "Nothing to enter here. On Linux, the system Java and javac alternatives must select the same supported JDK. On macOS, this check needs exactly one admitted system JDK pair.",
+    "failure": "A missing or ambiguous JDK stops the relevant check. The app does not change your selection or remove other JDKs. A version observation does not prove project or Gradle compatibility."
+  },
+  "javac": {
+    "label": "Java compiler (javac)",
+    "requiredness": "conditional",
+    "requiredWhen": "For local Android builds that need a full JDK.",
+    "what": "The Java compiler included with a JDK. A runtime-only JRE is not enough.",
+    "why": "Checking both Java and its compiler helps identify an incomplete or mismatched JDK installation.",
+    "where": "Install the full JDK recommended by your project, rather than a Java runtime-only package. It includes both Java and javac; no separate compiler download or manual file copying is needed.",
+    "format": "Nothing to enter here. Linux Java and javac must come from the same supported system-alternatives JDK; macOS must expose exactly one admitted system JDK pair.",
+    "failure": "An absent compiler or conflicting selection leaves the check incomplete. Do not remove another project’s JDK to force a pass. The app does not select a build JDK or establish Android SDK compatibility."
+  },
+  "xcode": {
+    "label": "Full Xcode",
+    "requiredness": "conditional",
+    "requiredWhen": "For local iOS archives, signing and IPA export on macOS.",
+    "what": "Apple’s development application, including the iOS SDK and archive/export tools.",
+    "why": "Command Line Tools alone do not provide the full iOS build environment.",
+    "where": "Get Xcode from the Mac App Store or Apple Developer Downloads. Open it to finish Apple’s setup, then choose it under Xcode → Settings → Locations → Command Line Tools.",
+    "format": "Nothing to enter here. The check reads Xcode’s version and build from the selected supported installation.",
+    "failure": "Missing or unselected full Xcode blocks the iOS check. This app does not install Xcode, accept licenses, change the selection or verify signing credentials."
+  },
+  "developer-selection": {
+    "label": "macOS developer selection",
+    "requiredness": "conditional",
+    "requiredWhen": "When checking Apple developer tools on macOS. Full Xcode is needed for iOS.",
+    "what": "The macOS setting that chooses which Apple developer installation tools use.",
+    "why": "Installing Xcode does not necessarily make it the selected developer installation.",
+    "where": "Open Xcode → Settings → Locations and choose the intended Xcode version in Command Line Tools. Use Apple’s normal setup; do not copy tools into this app’s folders.",
+    "format": "Nothing to enter here. The app reads the current selection; a supported full Xcode installation or Command Line Tools is observed, not chosen automatically.",
+    "failure": "An unsupported, missing or ambiguous selection can prevent later checks. Command Line Tools alone cannot satisfy an iOS build. This observation is not SDK completeness or release readiness."
+  }
+};
+
 function StateBadges({ row }: { row: EnvironmentDiagnosticsProjection }) {
   return <div className="button-row"><Badge>Phase: {row.phase}</Badge><Badge>Outcome: {row.outcome ?? 'not reported'}</Badge>
     <Badge tone={row.finality === 'settled' ? 'info' : 'warning'}>Native finality: {row.finality}</Badge></div>;
 }
 
-export function EnvironmentDiagnostics({ state, controller, compact = false, loading = false, onShow }: {
-  state: EnvironmentDiagnosticsState; controller: EnvironmentDiagnosticsController; compact?: boolean; loading?: boolean; onShow?: () => void;
+export function EnvironmentDiagnostics({ state, controller, compact = false, loading = false, onShow, onHelp }: {
+  state: EnvironmentDiagnosticsState; controller: EnvironmentDiagnosticsController; compact?: boolean; loading?: boolean; onShow?: () => void; onHelp?: (help: HelpContent) => void;
 }) {
   const attempt = state.attempt;
   const active = state.status?.active ?? (attempt?.projection?.finality === 'pending' ? attempt.projection : null);
@@ -71,7 +126,7 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
       {observation.projection.finality === 'pending' && <p className="review-caution">Core result received; native settlement is still pending. These observations do not free the native slot.</p>}
       <p><strong>Complete means the finite check roster finished, not that every tool matched.</strong> Dependency completeness and release readiness remain unknown.</p>
       <div className="environment-requirements">{result.checks.map((row) => <article className="tool-card" key={row.id}>
-        <h3>{labels[row.id]}</h3><div className="button-row"><Badge>{row.state}</Badge><Badge tone={row.assessment === 'mismatch' ? 'warning' : 'neutral'}>{row.assessment}</Badge></div>
+        <div className="inline-heading"><h3>{labels[row.id]}</h3>{onHelp && <HelpButton content={toolHelp[row.id]} onHelp={onHelp} />}</div><div className="button-row"><Badge>{row.state}</Badge><Badge tone={row.assessment === 'mismatch' ? 'warning' : 'neutral'}>{row.assessment}</Badge></div>
         <p>{reasons[row.reason]}</p>
         <dl className="environment-baseline"><dt>Observed version</dt><dd>{row.version ?? 'Not assessed'}{row.build && ` · build ${row.build}`}</dd>
           <dt>{row.baseline.kind === 'workflow-reference' ? 'Workflow reference · not a local compatibility rule' : row.baseline.kind === 'exact-pin' ? 'Expected exact core baseline · not the observation' : 'No local version policy'}</dt>

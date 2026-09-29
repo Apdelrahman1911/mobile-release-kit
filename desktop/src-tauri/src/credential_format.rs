@@ -39,7 +39,7 @@ const NO_KEY: u32 = u32::MAX;
 const PARSE_ERROR: &str = "credential document refused";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile }
+pub(crate) enum FileKind { AndroidKeystore, AndroidFirebase, IosFirebase, AppleP12, AppleProfile, AscP8 }
 
 pub(crate) struct Interrupted;
 
@@ -78,6 +78,8 @@ enum Observed {
     Pkcs12 { #[serde(rename = "byteCount")] byte_count: u64, version: u8, #[serde(rename = "authSafe")] auth_safe: Pkcs12AuthSafe },
     #[serde(rename = "cms-signed-data")]
     CmsSignedData { #[serde(rename = "byteCount")] byte_count: u64, encoding: CmsEncoding },
+    #[serde(rename = "pkcs8")]
+    Pkcs8 { #[serde(rename = "byteCount")] byte_count: u64, encoding: Pkcs8Encoding, algorithm: Pkcs8Algorithm, curve: Option<Pkcs8Curve> },
 }
 
 #[derive(Serialize)]
@@ -91,6 +93,18 @@ enum Pkcs12AuthSafe { Data, SignedData }
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum CmsEncoding { Der }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Encoding { Pem, Der }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Algorithm { Ec, Rsa, Other }
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Pkcs8Curve { P256, Other }
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -138,18 +152,20 @@ pub(crate) fn inspect(
 ) -> Result<FileObservation, Interrupted> {
     if stop() { return Err(Interrupted); }
     let maximum = match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => JKS_LIMIT,
-        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile => JSON_LIMIT };
+        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => JSON_LIMIT };
     let observation = if bytes.len() > maximum {
         FileObservation::unavailable(UnavailableReason::MaterialLimit)
     } else if bytes.is_empty() {
         FileObservation::rejected(RejectedReason::EmptyFile)
     } else {
         let parsed = match kind {
+            FileKind::AndroidKeystore if bytes.first() == Some(&0x30) => apple::pfx(bytes, stop),
             FileKind::AndroidKeystore => Ok(jks(bytes)),
             FileKind::AndroidFirebase => firebase_json(bytes, stop),
             FileKind::IosFirebase => plist_xml::inspect(bytes, stop),
             FileKind::AppleP12 => apple::pfx(bytes, stop),
             FileKind::AppleProfile => apple::profile(bytes, stop),
+            FileKind::AscP8 => apple::p8(bytes, stop),
         };
         match parsed {
             Ok(observation) => observation,
@@ -597,6 +613,24 @@ mod tests {
     fn projected(name: Value) -> Value { json!({"clientInfo":{"androidClientInfo":{"packageName":name}}}) }
     fn is_observed(kind: FileKind, bytes: &[u8]) -> bool {
         match inspect(kind, bytes, &mut || false) { Ok(value) => value.is_observed(), Err(_) => false }
+    }
+
+    #[test]
+    fn android_pkcs12_reuses_bounded_envelope_parser_not_extension_or_key_validity() {
+        use der_07::{asn1::{Any, ObjectIdentifier}, Encode, Tag};
+        let bytes = pkcs12::pfx::Pfx { version: pkcs12::pfx::Version::V3,
+            auth_safe: cms::content_info::ContentInfo {
+                content_type: ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1"),
+                content: Any::new(Tag::OctetString, b"opaque-format-only-canary".to_vec()).unwrap(),
+            }, mac_data: None }.to_der().unwrap();
+        let result = wire(FileKind::AndroidKeystore, &bytes);
+        assert_eq!(result, wire(FileKind::AppleP12, &bytes));
+        assert_eq!(result["format"], "pkcs12"); assert_eq!(result["status"], "observed");
+        assert!(!result.to_string().contains("opaque-format-only-canary"));
+        for bad in [&bytes[..bytes.len()-1], &[0x30, 0x84, 0x7f, 0xff, 0xff, 0xff][..]] {
+            assert_ne!(wire(FileKind::AndroidKeystore, bad)["status"], "observed");
+        }
+        assert!(inspect(FileKind::AndroidKeystore, &bytes, &mut || true).is_err());
     }
 
     #[test]

@@ -17,6 +17,7 @@ PROTOCOL = "mrk-config-edit/1"
 WORKFLOW_PROTOCOL = "mrk-github-workflows/1"
 METADATA_PROTOCOL = "mrk-metadata-text/1"
 VERSION_PROTOCOL = "mrk-release-version/1"
+IMAGES_PROTOCOL = "mrk-metadata-images/1"
 REQUEST_LIMIT = 1024 * 1024
 RESPONSE_LIMIT = 4 * 1024 * 1024
 WORKFLOW_RESPONSE_LIMIT = 256 * 1024
@@ -79,6 +80,9 @@ def _workflow_value(value: object, *, depth_limit: int, byte_limit: int) -> None
 
 def parse_request(raw: bytes, *, sequence: int, session: str | None,
                   protocol: str = PROTOCOL) -> EditRequest:
+    if protocol == IMAGES_PROTOCOL:
+        from ._desktop_images_protocol import parse_request as parse_images
+        return parse_images(raw, sequence=sequence, session=session)
     if (type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}
             or type(raw) is not bytes or not 2 <= len(raw) <= (VERSION_REQUEST_LIMIT if protocol == VERSION_PROTOCOL else REQUEST_LIMIT)
             or not raw.endswith(b"\n") or raw[:1] != b"{" or raw[-2:-1] != b"}"
@@ -168,6 +172,9 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
 
 
 def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
+    if request.protocol == IMAGES_PROTOCOL:
+        from ._desktop_images_protocol import response as images_response
+        return images_response(request, kind, result)
     if kind not in {"opened", "prepared", "terminal"} or request.protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
         raise ProtocolError("Invalid edit response")
     if request.protocol == VERSION_PROTOCOL:

@@ -2004,6 +2004,7 @@ class CICoordinatorResultTests(unittest.TestCase):
 
         suites = {
             "ruby-support": ("test_fastlane_support.rb", {"FastlaneReleaseSupportTest"}, 12),
+            "ruby-metadata-image-catalog": ("test_metadata_image_catalog.rb", {"MetadataImageCatalogTest"}, 1),
             "ruby-store_document": ("test_store_document.rb", {"StoreDocumentPublicationTest"}, 13),
             "ruby-store_lane_lifetime": ("test_store_lane_lifetime.rb", {"StoreLaneLifetimeTest"}, 19),
             "ruby-store_lane_nested_validation": ("test_store_lane_nested_validation.rb", {"StoreLaneNestedValidationTest"}, 13),

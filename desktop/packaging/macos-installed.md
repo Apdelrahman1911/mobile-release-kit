@@ -301,28 +301,45 @@ any unexpected result stops that route. Actual app/Save/Aqua remain separate.
 
 ## Reused payload and explicit build bindings
 
-Retained M: source `aa455fa2a5bffe9cc05c0593830f4359946888ec`,
+Historical supplier M: source `aa455fa2a5bffe9cc05c0593830f4359946888ec`,
 run **35602474108/1**, artifact **10639324707**. Accepted ZIP SHA256
 `42a6abab90f9641ba1b8c4aa9bb4202b153d676cc6d135b8227d8690e18275be`;
 its `payload.tar` SHA256
 `c927caedfc5a40290da443989534e85bfdf192934f4650c3747a70c53f68d35a`;
 original manifest SHA256
 `7e0b042c82ff567ccfa156974118911e2ba159dbe45020344aaf4d71a28acc44`.
-The source-staged notices are additional files under `python/licenses/`.
-Everything else—including Mach-O, core and all six bootstraps—must be identical.
-No interpreter source acquisition, rebuild, payload re-signing or replacement
-manifest is inferred from the old native acceptance.
-
-The independently accepted DATA01 result established the successor manifest:
+The historical DATA01 recipe added the two source-staged notices under
+`python/licenses/`; every other supplier byte, including its then-current core
+and six bootstraps, remained identical. Its independently accepted manifest was
 **82483 bytes, 586 rows** (584 original files plus exactly two notices), SHA256
-`2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef`.
-That exact digest is now the explicit
-`MRK_BUNDLED_RUNTIME_MANIFEST_SHA256` input and the workflow admission pin.
-`describe-runtime` remains read-only description, never automatic authority;
-`runtime` refuses a mismatching explicit digest before creating output. This
-accepted DATA result is not a native rebuild/install result. Protocol remains
+`2cbf9b45a1a7189e28654f62707f10705ba71d29df93e8eee7cf66b436a9abef`,
+with historical protocol
 `860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e`.
-`build.rs` never discovers either anchor from an adjacent file.
+Those facts remain supplier provenance, not current-core or native acceptance.
+The unchanged historical `runtime` subcommand still enforces that old profile.
+
+The ordinary installed workflow now binds the already independently accepted
+current-payload DATA:
+- M (manifest): `bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37`.
+- S (source inputs): `f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371`.
+- Q (protocol): `083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5`.
+
+Its existing `current-runtime` action reuses only the accepted interpreter
+supplier and the two pinned notices, and prepares the current core/bootstrap/CA
+bytes from the reviewed source. The fixed private
+`$MRK_MACOS_WORK/current-runtime-preparation` path must be absent; the action
+requires explicit S/M before publishing the fresh final runtime. The subsequent
+`input --current-runtime` selects the current protocol/roster rather than the
+historical default. Both packages use that one completed app/runtime inventory.
+
+The combined source requires a new independently accepted correspondence for
+its 139 source inputs and 142 descriptor inputs: the canonical core changes
+invalidate the earlier source digest, core ZIP and runtime manifest. The M/S
+values above bind that new descriptor. The workflow/test/guide-only consumer
+pin updates do not alter its payload closure. The accepted interpreter supplier
+is unchanged, so no interpreter source acquisition or CPython rebuild is needed.
+These DATA bindings do not sign the runtime or grant native/GUI/distribution
+acceptance. `build.rs` never discovers an anchor from an adjacent file.
 
 The application is a normal Cargo-built Tauri bundled-asset binary in a standard
 `.app` wrapper (`Info.plist`, icon, `PkgInfo`). No CLI/plugin runner is added.
@@ -372,19 +389,27 @@ Mac project discovery never creates an asset session or enables C/P2.
 registers the workflow without merging unverified code into default main; it is
 not a broad push trigger or an automatic retry. Both expected and Installer
 source bind to `github.sha`, with exact event/ref/workflow-source/path checks,
-nonroot disposable ARM64 macOS26 admission and the literal accepted M-plus-notices
-digest plus its independent equality check. Permissions remain read-only and
-checkout retains no credentials. There is no release/Store or payload rebuild.
+nonroot disposable ARM64 macOS26 admission and literal accepted current M/S/Q
+with separate 64-hex/equality guards. Permissions remain read-only and checkout
+retains no credentials. There is no release/Store action, new descriptor or
+interpreter rebuild.
 
 The same job records actual Rust/Cargo, selected CLT SDK/compiler, Node and
 stager-Python versions with source/run bindings. It makes one normal app build,
-then binds the completed frontend, signed app and unchanged runtime into one
+then binds the completed frontend, signed app and current-source runtime into one
 install inventory. Before either privileged package invocation, it runs the five
 existing regressions below as nonroot, grouped **2+1+2**, using the same locked
 dependency graph, release profile, ARM64 target and build bindings/target cache.
 Only selected libtest artifacts are additionally compiled; no second ordinary
 app or interpreter build is scheduled. The native ABI package is selected from
 the parent manifest/lock, not from a new standalone dependency resolution.
+
+The ordinary workflow does not invoke the Aqua owner; ordinary4 remains a separate later obligation.
+Its first-save, noop-stale, picker-loss and save-loss cases require their own
+reviewed fresh namespace, not a second invocation in the retained native9 root.
+No normal P2/project-picker qualification bit is enabled by this payload rebind.
+The ordinary release binary, separate Installer observations, instrumented Aqua
+P2/native9 and normal app/Save acceptance remain distinct evidence.
 
 Each invocation retains at most a 128-KiB log tail and the original Cargo/tee/tail
 statuses. The gate requires exactly the selected successful test names and
@@ -400,9 +425,11 @@ The original six tests in `tests/desktop/test_macos_installed_staging.py` passed
 under DATA01 with unchanged exercised closures. The three added methods passed
 **DATA03, 3/3**, under separate command and result review: fixed package identity,
 bound/timely original results and exact fixture-schema refusal of unexpected
-native uncertainty. Their stager/test bytes are unchanged here. Reuse these
-accepted results; do not repeat the six tests, DATA03 or M description for a
-workflow/doc scheduling change. No parser fixture witnesses the seven actual
+native uncertainty. Their exercised stager/test callable bodies stay unchanged.
+Two new ordinary current-payload source-contract methods check only the changed
+workflow bindings and preserved scope; their execution is a separate gate, not
+claimed here. Reuse prior accepted results; do not repeat the six tests, DATA03
+or the accepted descriptor for this workflow/test/guide change. No parser fixture witnesses the seven actual
 Installer cases, Darwin ACL/rename/fsync, native close finality or panel ordering.
 
 The exact hosted selections are shown below for command review, **not standalone

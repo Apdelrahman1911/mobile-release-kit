@@ -150,7 +150,8 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-            "ios_archive_bootstrap.py", "github_release_bootstrap.py",
+            "ios_archive_bootstrap.py", "github_release_bootstrap.py", "github_input_group_bootstrap.py",
+            "github_runner_prerequisite_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS),
@@ -180,6 +181,49 @@ class RuntimePreparationTests(unittest.TestCase):
             self.assertEqual({row["path"] for row in manifest["files"]},
                 set(preparation.CURRENT_BOOTSTRAPS) | {"core.zip", "github-ca.pem", "python/bin/python3"})
             self.assertTrue(set(current_only).isdisjoint(preparation.BOOTSTRAPS))
+
+    def test_input_group_entry_is_a_fixed_family_without_changing_old_entries(self):
+        # Source DATA only: never import/execute a runtime bootstrap. Exact
+        # sibling shape preserves isolation, argc/platform checks and failure
+        # handling instead of accepting a caller/environment family selector.
+        release = (_SOURCE / "desktop/github_release_bootstrap.py").read_text(encoding="utf-8")
+        input_group = (_SOURCE / "desktop/github_input_group_bootstrap.py").read_text(encoding="utf-8")
+        expected = release.replace(
+            '"""Fixed Linux release-request entry. It cannot select a CLI or Store engine."""',
+            '"""Fixed Linux input-group entry. It cannot select a CLI or another action family."""',
+            1,
+        ).replace("family=Family.RELEASE", "family=Family.INPUT_GROUP", 1)
+        self.assertNotEqual(input_group, release)
+        self.assertEqual(input_group, expected)
+        self.assertEqual(input_group.count("family=Family.INPUT_GROUP"), 1)
+        self.assertNotIn("github_input_group_bootstrap.py", preparation.BOOTSTRAPS)
+        self.assertIn("github_input_group_bootstrap.py", preparation.CURRENT_BOOTSTRAPS)
+
+    def test_runner_prerequisite_entry_is_fixed_without_changing_old_entries(self):
+        # Source DATA only: never import/execute a bootstrap. Reuse the complete
+        # original isolation, argv/platform and opaque exception guards while
+        # fixing the private engine role at this single entry.
+        connection = (_SOURCE / "desktop/github_connection_bootstrap.py").read_text(encoding="utf-8")
+        runner = (_SOURCE / "desktop/github_runner_prerequisite_bootstrap.py").read_text(encoding="utf-8")
+        expected = connection.replace(
+            "Fixed Linux GitHub connection entry;",
+            "Fixed Linux GitHub runner-prerequisite entry;",
+            1,
+        ).replace(
+            "original owner must separately admit its read/device domain, interpreter,",
+            "original owner must separately admit its runner-prerequisite domain, interpreter,",
+            1,
+        ).replace(
+            "run_engine(started=started, runtime_dir=runtime_dir)",
+            "run_engine(started=started, runtime_dir=runtime_dir, runner_prerequisite=True)",
+            1,
+        )
+        self.assertNotEqual(runner, connection)
+        self.assertEqual(runner, expected)
+        self.assertEqual(runner.count("runner_prerequisite=True"), 1)
+        self.assertNotIn("runner_prerequisite", connection)
+        self.assertNotIn("github_runner_prerequisite_bootstrap.py", preparation.BOOTSTRAPS)
+        self.assertIn("github_runner_prerequisite_bootstrap.py", preparation.CURRENT_BOOTSTRAPS)
 
     def test_payload_capacity_refuses_before_creating_any_generated_output(self):
         with tempfile.TemporaryDirectory() as temporary:

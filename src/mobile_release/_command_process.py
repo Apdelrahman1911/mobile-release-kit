@@ -3115,9 +3115,22 @@ class _Outer:
         self.handlers_complete = self.local_cleanup_complete = self.cleanup_entered = False
         self.text = text
         self.decoded: tuple[str, str] | tuple[bytes, bytes] | None = None
+        self._android_signing = None
         self.observation: FenceObservationDecoder | None = None
         if binding is not None and binding.fence_observation is FenceObservationPolicy.TRACE_V1:
             self.observation = FenceObservationDecoder(self.nonce, binding._fields["sequence"], uid=binding._fields["uid"])
+        # Closed Android signing observation only. This original-slot binding
+        # is resource-free and must not poll STOP before CleanupScope exists.
+        android_source = guard._android_build_source
+        if android_source is not None and android_source.signed:
+            from ._desktop_android_build_control import AndroidBuildInput
+            _require(type(android_source) is AndroidBuildInput)
+            operation = android_source.require_operation()
+            if operation._pending == "jarsigner-sign":
+                from ._desktop_android_signed_inputs import SignedAndroidInputs
+                _require(type(operation.signing) is SignedAndroidInputs)
+                self._android_signing = operation.signing
+                self._android_signing.bind_command_slot(self, self.slot)
 
     def prepared_reservation(self) -> bool:
         self.ctx.check()
@@ -3307,10 +3320,22 @@ class _Outer:
         self._until(lambda: self.ready)
         ctx.check()
         _require(not self.sealed and not self.run_route.retired)
-        self.phase = "RUNNING"
-        _send(self.wire, Tag.RUN_TOOL, _scalar(self.nonce), self._pump, route=self.run_route)
+        self._dispatch_run_tool()
         self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof))
         _require(not self.protocol_failed and not self.output_failed)
+
+    def _dispatch_run_tool(self) -> None:
+        """Existing original send, then a closed saved-signing observation.
+
+        PREPARED/on_start and a possibly consuming partial write are not this
+        event. The notification cannot grant execution or change any deadline.
+        """
+        _require(self.phase == "WAIT_READY" and self.ready and self.wire is not None
+                 and not self.sealed and not self.run_route.retired)
+        self.phase = "RUNNING"
+        _send(self.wire, Tag.RUN_TOOL, _scalar(self.nonce), self._pump, route=self.run_route)
+        if self._android_signing is not None:
+            self._android_signing.command_dispatched(self, self.slot)
 
     def _safe_pump(self) -> None:
         try:

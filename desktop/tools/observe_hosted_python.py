@@ -17,6 +17,8 @@ ROUTES = (('refs/heads/verify/desktop-project-recovery', 'compile', 'compile'),
           ('refs/heads/verify/desktop-installed-github-readonly', 'observe', 'compile'),
           ('refs/heads/verify/desktop-installed-github-preflight', 'compile', 'compile'),
           ('refs/heads/verify/desktop-installed-github-preflight', 'observe', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-release', 'compile', 'compile'),
+          ('refs/heads/verify/desktop-installed-github-release', 'observe', 'compile'),
           ('refs/heads/verify/desktop-installed-github-normal-boundaries', 'compile', 'compile'),
           ('refs/heads/verify/desktop-installed-github-normal-boundaries', 'observe', 'compile'))
 

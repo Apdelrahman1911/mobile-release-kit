@@ -348,3 +348,7 @@ export function metadataTextError(error: unknown): ApiError {
   } catch { /* Never echo arbitrary bridge rejection values. */ }
   return { code, message: errors[code]!, retryable: false };
 }
+
+// Reuse this existing closed DATA boundary for the saved whole-metadata report.
+export { boundedJson as metadataBoundedJson, keys as metadataKeys,
+  relativePath as metadataRelativePath, assurance as metadataAssurance };

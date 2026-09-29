@@ -6,7 +6,6 @@ import json
 import os
 import re
 import stat
-import struct
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -289,56 +288,9 @@ def _image_dimensions(path: Path, *, budget=None) -> tuple[int, int] | None:
         stream = io.BytesIO(raw)
     else:
         stream = path.open("rb")
+    from .metadata_image_header import image_dimensions
     with stream as handle:
-        header = handle.read(32)
-        if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
-            return struct.unpack(">II", header[16:24])
-        if header.startswith(b"\xff\xd8"):
-            handle.seek(2)
-            while True:
-                if budget is not None:
-                    budget.check()
-                marker_start = handle.read(1)
-                if not marker_start:
-                    return None
-                if marker_start != b"\xff":
-                    continue
-                marker = handle.read(1)
-                while marker == b"\xff":
-                    if budget is not None:
-                        budget.check()
-                    marker = handle.read(1)
-                if not marker:
-                    return None
-                if marker in {b"\xd8", b"\xd9", b"\x01"} or 0xD0 <= marker[0] <= 0xD7:
-                    continue
-                raw_length = handle.read(2)
-                if len(raw_length) != 2:
-                    return None
-                length = struct.unpack(">H", raw_length)[0]
-                if length < 2:
-                    return None
-                if marker[0] in {
-                    0xC0,
-                    0xC1,
-                    0xC2,
-                    0xC3,
-                    0xC5,
-                    0xC6,
-                    0xC7,
-                    0xC9,
-                    0xCA,
-                    0xCB,
-                    0xCD,
-                    0xCE,
-                    0xCF,
-                }:
-                    payload = handle.read(length - 2)
-                    if len(payload) < 5:
-                        return None
-                    return struct.unpack(">HH", payload[1:5])[::-1]
-                handle.seek(length - 2, os.SEEK_CUR)
-    return None
+        return image_dimensions(handle, checkpoint=budget.check if budget is not None else None)
 
 
 def metadata_findings(

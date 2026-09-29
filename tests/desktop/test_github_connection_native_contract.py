@@ -10,7 +10,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 COMMANDS = (
     "github_connection_status", "github_connection_connect_token",
-    "github_connection_refresh", "github_connection_disconnect",
+    "github_connection_start_device", "github_connection_open_device_page",
+    "github_connection_refresh", "github_connection_inspect", "github_connection_disconnect",
 )
 
 
@@ -107,6 +108,81 @@ class GitHubNativeWiringTests(unittest.TestCase):
         self.assertIn("document.github_connection_status()", relay)
         self.assertIn("github_connection_wire::EVENT", relay)
         self.assertEqual(relay.count("Duration::from_millis(100)"), 1)
+
+    def test_device_original_admission_mailbox_and_browser_claim_are_separate(self):
+        supervisor = source("desktop/src-tauri/src/supervisor.rs")
+        session = source("desktop/src-tauri/src/github_connection_session.rs")
+        document = source("desktop/src-tauri/src/asset_session.rs")
+        shell = source("desktop/src-tauri/src/shell.rs")
+        protocol = source("desktop/src-tauri/src/github_device_protocol.rs")
+        self.assertIn('include_bytes!("../../github-device-publisher.json")', protocol)
+        self.assertEqual(json.loads(source("desktop/github-device-publisher.json"))["schemaVersion"], 1)
+        begin = section(session, "pub(crate) fn begin_device(", "\n    fn consume_device_original(")
+        self.assertIn('format!("github-authorize-{sequence}")', begin)
+        self.assertIn("supervisor.start_github_device(", begin)
+        reconcile = section(session, "pub(crate) fn reconcile(", "\n    fn accept_final(")
+        self.assertNotIn("start_github", reconcile); self.assertNotIn("advance_device_if_due", reconcile)
+        take = section(supervisor, "pub(crate) fn take_settled(", "\n    }")
+        self.assertIn("outcome.take()", take); self.assertNotIn(".clone()", take)
+        outer = section(supervisor, "enum ReadOutcome {", "\n#[derive(Clone, Copy)]")
+        self.assertNotIn("derive", outer); self.assertNotIn("Debug", outer)
+        start = section(supervisor, "pub(crate) fn start_github_device(", "\n    pub(crate) fn start_github_preflight(")
+        self.assertIn("original_end.min(started_at + OPERATION_TIME)", start)
+        self.assertIn("self.admit_until(", start)
+        browser = section(shell, "async fn github_connection_open_device_page(", "\n}")
+        self.assertLess(browser.index("app.run_on_main_thread"), browser.index("document.claim_github_device_page"))
+        self.assertLess(browser.index("document.claim_github_device_page"), browser.index("open_fixed_device_page"))
+        claim = section(document, "pub(crate) fn claim_github_device_page(", "\n    }")
+        for required in ("self.github_gate(&state)", "github_registration(project)", "generation != original", "state.github.allow_device_page"):
+            self.assertIn(required, claim)
+        for forbidden in ("self.expire(", ".reconcile(", "open_fixed_device_page", "start_github", ".await"):
+            self.assertNotIn(forbidden, claim)
+        refresh = section(session, "pub(crate) fn refresh(", "\n    pub(crate) fn disconnect(")
+        self.assertLess(refresh.index("private.retirement"), refresh.index("supervisor.start_github_readonly"))
+        self.assertIn("op.kind != OperationKind::Authorize", refresh)
+
+    def test_metadata_inspection_reuses_connection_owner_and_has_no_filesystem_request_authority(self):
+        document = source("desktop/src-tauri/src/asset_session.rs")
+        session = source("desktop/src-tauri/src/github_connection_session.rs")
+        supervisor = source("desktop/src-tauri/src/supervisor.rs")
+        inspect = section(document, "pub(crate) fn github_connection_inspect(", "\n    }")
+        self.assertLess(inspect.index("self.expire("), inspect.index("decode_command_value"))
+        self.assertLess(inspect.index("self.github_gate("), inspect.index("decode_command_value"))
+        self.assertIn("state.github.inspect(args", inspect)
+        for forbidden in ("std::fs", "project.root", "project.path", ".await"):
+            self.assertNotIn(forbidden, inspect)
+        selected = section(session, "fn refresh_selected(", "\n    pub(crate) fn disconnect(")
+        for required in ("private.retirement", "private.clock.end", "private.account_pin", "private.repository_pin",
+                         "self.status.account.state != FactState::Observed", "self.status.repository.state != FactState::Observed",
+                         "private.inspection = selection", "self.fact_retirement(Reason::Stale)"):
+            self.assertIn(required, selected)
+        final = section(session, "fn accept_final(", "\n    fn accept_facts(")
+        self.assertLess(final.index("private.inspection.take()"), final.index("outcome.metadata"))
+        self.assertLess(final.index("self.apply_control("), final.index("expected_inspection.as_ref()"))
+        self.assertLess(final.index("expected_inspection.as_ref()"), final.index("self.accept_facts("))
+        owner = section(supervisor, "pub(crate) fn start_github_metadata(", "\n    pub(crate) fn start_github_device(")
+        self.assertIn("Some(original_end), Some(selection)", owner)
+        self.assertIn("CompletionTarget::GitHub(receipt.clone())", owner)
+        self.assertNotIn("tokio::spawn", owner)
+        self.assertNotIn("CompletionTarget::Metadata", supervisor)
+
+    def test_device_helper_is_one_exchange_without_auto_poll_or_dynamic_publisher_resource(self):
+        transport = source("src/mobile_release/_github_connection_transport.py")
+        step = section(transport, "def device_step(", "\ndef _make_live_reader(")
+        self.assertEqual(step.count('exchange("POST", path, body)'), 1)
+        self.assertNotIn("while ", step); self.assertNotIn("sleep(", step)
+        self.assertIn('result.observation["body"].clear()', step)
+        exchange = section(transport, "def _make_live_exchange(", "\ndef _device_form(")
+        self.assertIn("if device_claimed:", exchange); self.assertIn("device_claimed = True", exchange)
+        self.assertIn("connection.auto_open = 0", exchange)
+        self.assertIn("context.keylog_filename = None", exchange)
+        self.assertIn("original.close()", exchange)
+        self.assertNotIn("github-device-publisher.json", source("desktop/tools/prepare_runtime.py"))
+        self.assertNotIn("github-device-publisher.json", source("src/mobile_release/_desktop_github_engine.py"))
+        profile = section(source("desktop/src-tauri/src/runtime.rs"), "impl GitHubDeviceInstalledProfile {", "\n}")
+        self.assertIn("SOURCE_BINDING", profile)
+        self.assertIn("DEVICE_PUBLISHER_ANCHOR", profile)
+        self.assertNotIn("std::env", profile)
 
     def test_real_document_retirement_and_exit_do_not_change_vault_lock_semantics(self):
         document = source("desktop/src-tauri/src/asset_session.rs")

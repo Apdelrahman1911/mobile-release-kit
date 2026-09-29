@@ -4,13 +4,17 @@ import type { CoreEditOutcome, EditAvailability, GitHubSetupProposed, GitHubWork
 
 export type WorkflowObservation = { state: 'absent' } | { state: 'present'; byteLength: number; sha256: string };
 export type WorkflowObservedFile = WorkflowObservation & { id: GitHubWorkflowId };
-export interface WorkflowPreparedFile {
+export interface WorkflowContent { content: string; byteLength: number; sha256: string }
+interface WorkflowPreparedFileBase {
   id: GitHubWorkflowId;
   path: GitHubWorkflowPath;
-  action: 'create' | 'preserve';
-  observed: WorkflowObservation;
-  generated: { content: string; byteLength: number; sha256: string };
+  generated: WorkflowContent;
 }
+export type WorkflowPreparedFile = WorkflowPreparedFileBase & (
+  { action: 'create'; observed: Extract<WorkflowObservation, { state: 'absent' }>; previous?: never } |
+  { action: 'preserve'; observed: Extract<WorkflowObservation, { state: 'present' }>; previous?: never } |
+  { action: 'update'; observed: Extract<WorkflowObservation, { state: 'present' }>; previous: WorkflowContent }
+);
 export interface WorkflowPreparedView {
   schemaVersion: 1;
   files: WorkflowPreparedFile[];

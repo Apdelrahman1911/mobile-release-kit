@@ -1,8 +1,9 @@
-"""Finite G1B DATA fixtures, not socket/TLS/bootstrap/native qualification.
+"""Finite GitHub transport DATA fixtures, not socket/TLS/native qualification.
 
-Select this class explicitly. It uses bytes, supplied clocks and a fixed fake
-reader only: no trust-file read, SSL context, DNS, socket, thread or child. The
-HTTPResponse delegate is exercised; its live-only stdlib subclass/factory is not.
+Select classes explicitly. Fixtures use bytes, supplied clocks and inert IO: no
+real trust-file read, SSL context, DNS, socket, thread or child is created. The
+input-group class also enters the actual stdlib subclass/factory with supplied
+inert plumbing to check response lifetime and automatic-close ordering.
 """
 from __future__ import annotations
 
@@ -114,6 +115,96 @@ def _control_for(status: int = 200, *headers: tuple[str, str], wall=1000) -> dic
 
 
 class GitHubConnectionTransportTests(unittest.TestCase):
+    def test_device_frames_are_role_bound_and_never_accept_renderer_endpoints(self):
+        def frame(step="start", **changes):
+            params = {"step": step, "clientId": "Iv1.synthetic", "deviceCode": None if step == "start" else "d" * 40}
+            params.update(changes)
+            return _json({"protocol": engine.DEVICE_PROTOCOL, "id": "original-device", "params": params}) + b"\n"
+        start = engine.parse_request(frame())
+        poll = engine.parse_request(frame("poll"))
+        self.assertEqual((start.step, start.device_code), ("start", None))
+        self.assertEqual((poll.step, poll.device_code), ("poll", "d" * 40))
+        self.assertNotIn("d" * 40, repr(poll))
+        for raw in (frame("start", deviceCode="d" * 40), frame("poll", deviceCode=None), frame("poll", deviceCode="d" * 39),
+                    frame("poll", deviceCode="d" * 39 + "\n"), frame("retry"), frame(clientId="wrong client"),
+                    frame(endpoint="https://unselected.invalid"), frame(scope="repo"), frame()[:-1], frame() + frame(),
+                    frame().replace(b'"step":"start"', b'"step":"start","step":"poll"')):
+            with self.assertRaises(engine.ProtocolError): engine.parse_request(raw)
+
+    def test_device_code_errors_and_slowdown_are_strict_private_projection_data(self):
+        start = engine.DeviceRequest("original-device", "start", "Iv1.synthetic", None)
+        poll = engine.DeviceRequest("original-device", "poll", "Iv1.synthetic", "d" * 40)
+        code = {"device_code": "d" * 40, "user_code": "AB12-CD34", "verification_uri": engine.DEVICE_VERIFICATION_URI,
+                "expires_in": 900, "interval": 5}
+        project = lambda request, body: engine.project_device_result(request,
+            {"status": 200, "body": body, "failure": "none"}, transport._control())
+        expected = {"kind": "code", "deviceCode": "d" * 40, "userCode": "AB12-CD34", "expiresIn": 900, "interval": 5}
+        self.assertEqual(project(start, code), expected)
+        self.assertEqual(project(poll, code)["reason"], "response-invalid")
+        for key, value in (("verification_uri", "https://unselected.invalid"), ("expires_in", True),
+                           ("interval", 0), ("user_code", "ab12-cd34"), ("device_code", "d" * 41)):
+            invalid = dict(code); invalid[key] = value
+            self.assertEqual(project(start, invalid)["kind"], "failed")
+        self.assertEqual(project(poll, {"error": "authorization_pending"}), {"kind": "pending", "interval": None})
+        self.assertEqual(project(poll, {"error": "slow_down", "interval": 10}), {"kind": "slow-down", "interval": 10})
+        for error, reason in (("access_denied", "unauthorized"), ("expired_token", "expired"),
+                              ("device_flow_disabled", "publisher-unconfigured"), ("unexpected", "response-invalid")):
+            result = project(poll, {"error": error, "error_description": _SENTINEL, "error_uri": "https://unselected.invalid"})
+            self.assertEqual(result["reason"], reason); self.assertNotIn(_SENTINEL, repr(result))
+        for body in ({"error": "slow_down"}, {"error": "authorization_pending", "access_token": _SENTINEL},
+                     {"error": "authorization_pending", "interval": False}):
+            self.assertEqual(project(poll, body)["reason"], "response-invalid")
+        limited = engine.project_device_result(poll, {"status": 429, "body": None, "failure": "none"}, transport._control("rate-limited", 60))
+        self.assertEqual(limited, {"kind": "failed", "reason": "rate-limited", "cooldownSeconds": 60, "cooldownBlocked": False})
+
+    def test_device_token_frame_discards_refresh_material_and_rejects_partial_groups(self):
+        request = engine.DeviceRequest("original-device", "poll", "Iv1.synthetic", "d" * 40)
+        token = {"access_token": "ghu_SYNTHETIC_NOT_A_CREDENTIAL", "token_type": "bearer", "scope": ""}
+        project = lambda body: engine.project_device_result(request,
+            {"status": 200, "body": body, "failure": "none"}, transport._control())
+        self.assertEqual(project(token), {"kind": "token", "token": token["access_token"], "expiresIn": None})
+        expiring = dict(token, expires_in=28_800, refresh_token="ghr_SYNTHETIC_NOT_A_CREDENTIAL", refresh_token_expires_in=15_897_600)
+        selected = project(expiring)
+        raw = engine.encode_device_response(request.id, selected)
+        self.assertEqual(json.loads(raw), {"protocol": engine.DEVICE_PROTOCOL, "id": request.id,
+            "result": {"kind": "token", "token": token["access_token"], "expiresIn": 28_800}})
+        self.assertNotIn(b"ghr_", raw); self.assertNotIn(b"refresh", raw)
+        self.assertNotIn(token["access_token"], repr(_ok(expiring)))
+        for bad in (dict(token, scope="repo"), dict(token, access_token="ghp_wrong_type"), dict(token, expires_in=28_800),
+                    dict(expiring, expires_in=True), dict(expiring, refresh_token_expires_in=1), dict(token, url=_SENTINEL)):
+            self.assertEqual(project(bad)["reason"], "response-invalid")
+        for bad in (dict(selected, refreshToken="ghr_SYNTHETIC"), {"kind": "token", "token": token["access_token"]},
+                    {"kind": "failed", "reason": "rate-limited", "cooldownSeconds": None, "cooldownBlocked": False}):
+            with self.assertRaises(engine.ProtocolError): engine.encode_device_response(request.id, bad)
+
+    def test_device_form_host_tls_parameters_and_body_budget_are_fixed_without_io(self):
+        from urllib.parse import parse_qs
+        roles = [("start", transport._ExchangeProfile.DEVICE_START, "/login/device/code"),
+                 ("poll", transport._ExchangeProfile.DEVICE_POLL, "/login/oauth/access_token")]
+        class Context:
+            options = 8
+            def wrap_socket(self, source, **kwargs): self.original = source; self.kwargs = kwargs; return "synthetic-return"
+        for step, profile, path in roles:
+            request = engine.DeviceRequest("original-device", step, "Iv1.synthetic", None if step == "start" else "d" * 40)
+            selected, target, body = transport._device_form(request)
+            self.assertEqual((selected, target), (profile, path)); self.assertEqual(transport._fixed_host(profile), "github.com")
+            values = parse_qs(body.decode("ascii"), strict_parsing=True)
+            self.assertEqual(set(values), {"client_id"} if step == "start" else {"client_id", "device_code", "grant_type"})
+            self.assertEqual(values["client_id"], ["Iv1.synthetic"])
+            if step == "poll": self.assertEqual(values["grant_type"], ["urn:ietf:params:oauth:grant-type:device_code"])
+            self.assertEqual(transport._request_limits(profile, transport._ResponseRole.STANDARD, "POST", path), (65536, 128))
+            for method, bad_path in (("GET", path), ("POST", "/user"), ("POST", path + "?scope=repo")):
+                with self.assertRaises(ValueError): transport._request_limits(profile, transport._ResponseRole.STANDARD, method, bad_path)
+            with self.assertRaises(ValueError): transport._role_limits(profile, transport._ResponseRole.RELEASE_CONFIG)
+            context = Context(); source = object()
+            self.assertEqual(transport._wrap_fixed_tls(context, source, ignore_eof_option=8, _profile=profile), "synthetic-return")
+            self.assertIs(context.original, source)
+            self.assertEqual(context.kwargs, {"server_hostname": "github.com", "suppress_ragged_eofs": False})
+            budget = transport._Budget(100.0, monotonic=lambda: 100.0, wall=lambda: 1000, _profile=profile)
+            response = transport._ResponseBody(io.BytesIO(_wire(b"x" * (65536 + 1))), budget)
+            self.assertEqual(transport._response_result(response, budget).control["reason"], "response-limit")
+        self.assertEqual(transport._fixed_host(transport._ExchangeProfile.STANDARD), "api.github.com")
+
     def test_private_request_frame_is_closed_and_secret_bounded(self):
         request = engine.parse_request(_frame(token="a" * 4096, expectedAccountId="7", expectedRepositoryId="11"))
         self.assertEqual((request.id, request.repository, request.expected_account_id, request.expected_repository_id),
@@ -707,3 +798,216 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         finally:
             transport._make_live_reader, transport._fixed_ca = original_factory, original_ca
         self.assertEqual({name: sys.modules.get(name) for name in before}, before)
+
+
+class GitHubInputGroupTransportTests(unittest.TestCase):
+    """Bounded HTTP-head/close DATA with inert stdlib plumbing, not TLS evidence."""
+    def parsed_write(self, status=201, *, headers=(), body=b""):
+        budget = transport._Budget(100.0, monotonic=lambda: 100.0,
+                                    _profile=transport._ExchangeProfile.INPUT_GROUP)
+        response = transport._ResponseBody(io.BytesIO(_wire(body, status=status, headers=headers)),
+                                           budget, _role=transport._ResponseRole.INPUT_GROUP_WRITE)
+        return transport._input_write_result(response, budget)
+
+    def test_only_exact_validated_head_status_categories_can_acknowledge(self):
+        for status, state in ((201, "acknowledged-created"), (204, "acknowledged-updated"),
+            (401, "explicitly-rejected"), (403, "explicitly-rejected"), (404, "explicitly-rejected"),
+            (422, "explicitly-rejected"), (429, "explicitly-rejected"),
+            (200, "attempted-outcome-unknown"), (202, "attempted-outcome-unknown"),
+            (500, "attempted-outcome-unknown"), (503, "attempted-outcome-unknown")):
+            result = self.parsed_write(status)
+            self.assertEqual(result.write["state"], state)
+            self.assertEqual(result.cleanup, "pending")
+            self.assertFalse(result.observation_sent)
+        malformed = self.parsed_write(201, headers=(("Transfer-Encoding", "chunked"),))
+        self.assertEqual(malformed.write["state"], "attempted-outcome-unknown")
+        self.assertFalse(malformed.head_valid)
+        self.assertEqual(self.parsed_write(204, body=b"invalid").write["state"], "attempted-outcome-unknown")
+        invalid_control = self.parsed_write(201, headers=(("Retry-After", "not-a-delay"),))
+        self.assertEqual(invalid_control.write["state"], "acknowledged-created")
+        self.assertEqual(invalid_control.control["reason"], "response-invalid")
+        # Old200-only behavior is unchanged, not widened by the new role.
+        self.assertEqual(transport._status_reason(201), "response-invalid")
+        self.assertEqual(_parsed(_wire(status=204)).control["reason"], "response-invalid")
+
+    def test_observation_precedes_each_original_close_and_ack_survives_close_failure(self):
+        result = self.parsed_write(204)
+        events = []
+        def observed(write, control):
+            events.append(("observed", write["state"]))
+            write["state"] = "not-attempted"  # Notification cannot rewrite the latch.
+            control["reason"] = "none"
+        transport._publish_input_write(result, observed)
+        class Original:
+            def __init__(self, role): self.role = role
+            def close(self):
+                events.append(("closed", self.role))
+                raise OSError("Synthetic original close failure")
+        transport._settle_originals((Original("response"), Original("connection")), [False], result)
+        self.assertEqual(events, [("observed", "acknowledged-updated"), ("closed", "response"), ("closed", "connection")])
+        self.assertEqual(result.write, {"state": "acknowledged-updated", "statusCode": 204})
+        self.assertTrue(result.observation_sent)
+        self.assertEqual(result.cleanup, "unknown")
+        self.assertEqual(result.control["reason"], "response-invalid")
+        with self.assertRaises(transport._CloseFailure):
+            transport._settle_originals((None, None), [True])
+
+    def test_failed_observer_or_bad_head_never_fabricates_native_acknowledgement(self):
+        result = self.parsed_write(201)
+        def failed(*_): raise OSError("Synthetic original output failure")
+        transport._publish_input_write(result, failed)
+        transport._settle_originals((None, None), [False], result)
+        self.assertEqual(result.write["state"], "acknowledged-created")
+        self.assertFalse(result.observation_sent)
+        self.assertEqual(result.cleanup, "confirmed")
+        self.assertEqual(result.control["reason"], "response-invalid")
+        malformed = self.parsed_write(201, headers=(("Content-Length", "0"),))
+        observed = []
+        transport._publish_input_write(malformed, lambda *args: observed.append(args))
+        self.assertEqual(observed, [])
+        self.assertFalse(malformed.observation_sent)
+
+    def test_closed_input_roles_keep_one_original_budget_and_no_cross_profile_expansion(self):
+        profile, role = transport._ExchangeProfile, transport._ResponseRole
+        selected = profile.INPUT_GROUP
+        base = "/repos/owner/app/environments/mobile-candidate/secrets/"
+        secret = "MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1"
+        self.assertEqual(transport._request_limits(selected, role.INPUT_GROUP_WRITE, "PUT", base + secret),
+                         (transport.MAX_BODY_BYTES, 1024))
+        for p, r, method, path in (
+            (profile.STANDARD, role.INPUT_GROUP_WRITE, "PUT", base + secret),
+            (profile.RELEASE_PREPARE, role.INPUT_GROUP_CONFIG, "GET", "/repos/owner/app/contents/release/mobile-release.json?ref=" + "a" * 40),
+            (selected, role.STANDARD, "PUT", base + secret),
+            (selected, role.STANDARD, "POST", "/repos/owner/app/actions/workflows/1/dispatches"),
+            (selected, role.INPUT_GROUP_WRITE, "PUT", base + "ARBITRARY_SECRET"),
+            (selected, role.INPUT_GROUP_WRITE, "DELETE", base + secret),
+            (selected, role.STANDARD, "GET", "/repos/owner/app/environments/other/secrets/" + secret),
+        ):
+            with self.assertRaises(ValueError):
+                transport._request_limits(p, r, method, path)
+        config = "/repos/owner/app/contents/release/mobile-release.json?ref=" + "a" * 40
+        self.assertEqual(transport._request_limits(selected, role.INPUT_GROUP_CONFIG, "GET", config)[0], 768 * 1024)
+        clock = [100.0]
+        budget = transport._Budget(100.0, monotonic=lambda: clock[0], _profile=selected)
+        self.assertEqual(budget.body_total_limit, 2 * 1024 * 1024)
+        clock[0] = 109.0
+        self.assertEqual(budget.remaining(), 1.0)
+        clock[0] = 110.0
+        with self.assertRaises(transport.ReadFailure):
+            budget.remaining()
+
+    def test_stdlib_original_response_does_not_retain_get_payload_and_write_ack_precedes_auto_close(self):
+        # Real factory/HTTPResponse/getresponse control flow, but no real SSL
+        # context, socket, trust-file read, DNS, thread or child is created.
+        import base64
+        import http.client
+        import ssl
+        import weakref
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        original_budget = transport._Budget
+        response_init = http.client.HTTPResponse.__init__
+
+        def exchanged(*, writing=False, close_failure=False, profile=transport._ExchangeProfile.INPUT_GROUP):
+            events, responses = [], []
+            data = b"" if writing else _json({"private": _SENTINEL})
+
+            class Source:
+                def __init__(self):
+                    self.fp = io.BytesIO(_wire(data, status=204 if writing else 200,
+                                               headers=(("Connection", "close"),)))
+
+                def makefile(self, mode):
+                    if mode != "rb":
+                        raise AssertionError("Synthetic source was not requested as binary input")
+                    return self.fp
+
+                def settimeout(self, remaining):
+                    if remaining != 10.0:
+                        raise AssertionError("Original supplied budget changed")
+
+                def sendall(self, _data):
+                    events.append(("request-bytes",))
+
+                def close(self):
+                    events.append(("socket-close",))
+                    if close_failure:
+                        raise OSError("Synthetic original connection close")
+
+            source = Source()
+
+            class Context:
+                options = int(ssl.OP_IGNORE_UNEXPECTED_EOF) | 0x20000
+
+                def set_alpn_protocols(self, values):
+                    if values != ["http/1.1"]:
+                        raise AssertionError("Unexpected fixed protocol")
+
+                def load_verify_locations(self, *, cadata):
+                    if cadata != "synthetic-trust-not-a-certificate":
+                        raise AssertionError("Unexpected fixed trust DATA")
+
+                def wrap_socket(self, supplied, *, server_hostname, suppress_ragged_eofs):
+                    if supplied is not source or server_hostname != "api.github.com" or suppress_ragged_eofs:
+                        raise AssertionError("Unexpected fixed wrap arguments")
+                    return supplied
+
+            def capture(original, *args, **kwargs):
+                response_init(original, *args, **kwargs)
+                responses.append(original)  # Deliberately keep the closed response alive.
+
+            def budget(started, *, _profile):
+                return original_budget(started, monotonic=lambda: 100.0, wall=lambda: 1000,
+                                       _profile=_profile)
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(ssl, "SSLContext", return_value=Context()))
+                stack.enter_context(patch.object(transport, "_fixed_ca", return_value="synthetic-trust-not-a-certificate"))
+                stack.enter_context(patch.object(transport, "_Budget", side_effect=budget))
+                stack.enter_context(patch.object(http.client.HTTPConnection, "connect",
+                                                new=lambda connection: setattr(connection, "sock", source)))
+                stack.enter_context(patch.object(http.client.HTTPResponse, "__init__", new=capture))
+                exchange = transport._make_live_exchange(_SENTINEL, started=100.0, runtime_dir="/unopened",
+                    api_version="2026-03-10" if profile is transport._ExchangeProfile.INPUT_GROUP else "2022-11-28",
+                    _profile=profile)
+                if writing:
+                    body = _json({"encrypted_value": base64.b64encode(b"x" * 80).decode(),
+                                  "key_id": "fixture-key_1"})
+                    result = exchange("PUT", "/repos/owner/app/environments/mobile-candidate/secrets/"
+                        "MOBILE_RELEASE_INPUT_GOOGLE_WIF_V1", body,
+                        _role=transport._ResponseRole.INPUT_GROUP_WRITE,
+                        _on_write_status=lambda write, _control: events.append(("observed", write["state"])))
+                else:
+                    result = exchange("GET", "/user")
+            self.assertEqual(len(responses), 1)
+            self.assertTrue(responses[0].will_close)
+            self.assertTrue(responses[0].isclosed())
+            self.assertTrue(source.fp.closed)
+            self.assertEqual(events.count(("socket-close",)), 1)
+            return result, responses, events
+
+        class Probe:
+            pass
+
+        for profile in (transport._ExchangeProfile.STANDARD, transport._ExchangeProfile.INPUT_GROUP):
+            result, originals, _events = exchanged(profile=profile)
+            self.assertIs(type(result), transport.ReadResult)
+            self.assertEqual(result.observation["body"], {"private": _SENTINEL})
+            # ReadResult uses slots without weakref support. A unique weakref
+            # probe in its original body measures the same retained reference,
+            # without altering production types or invoking cyclic collection.
+            probe = Probe()
+            retained = weakref.ref(probe)
+            result.observation["body"]["retention-probe"] = probe
+            del probe, result
+            self.assertIsNone(retained())
+            self.assertTrue(originals[0].isclosed())
+
+        for close_failure in (False, True):
+            result, _originals, events = exchanged(writing=True, close_failure=close_failure)
+            self.assertEqual(result.write, {"state": "acknowledged-updated", "statusCode": 204})
+            self.assertTrue(result.observation_sent)
+            self.assertEqual(result.cleanup, "unknown" if close_failure else "confirmed")
+            self.assertEqual(result.control["reason"], "response-invalid" if close_failure else "none")
+            self.assertLess(events.index(("observed", "acknowledged-updated")), events.index(("socket-close",)))

@@ -302,18 +302,18 @@ class HostedAndroidDataContracts(unittest.TestCase):
         steps = workflow.split("      - name: ")[1:]
         prerequisites = next(s for s in steps if s.startswith("Prepare shared Ubuntu shell inputs only on this disposable runner\n"))
         self.assertIn("packages=(libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy)", prerequisites)
-        self.assertIn('if [[ "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 ]]; then\n'
+        self.assertIn('if [[ "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 || "$MRK_INSTALLED_SHELL_CASE" == host-metadata-only ]]; then\n'
                       + '            packages+=(libgif7)\n          fi\n', prerequisites)
         self.assertEqual(prerequisites.count("libgif7"), 1)
         self.assertIn('sudo apt-get install -y --no-install-recommends "${packages[@]}"', prerequisites)
         self.assertIn('dpkg-query -W -f=\'${Package} ${Version}\\n\' "${packages[@]}"', prerequisites)
-        observer = next(s for s in steps if s.startswith("Observe only the fixed public SDK and network DATA subset\n"))
-        for item in ("if: github.ref == '" + S.METADATA_REF + "'", "timeout-minutes: 2", "/usr/bin/env -i",
-                     "--signal=TERM --kill-after=2s 60s", "python3.12 -I -S -B desktop/tools/observe_hosted_android.py </dev/null",
+        observer = next(s for s in steps if s.startswith("Observe only fixed Android host-profile DATA\n"))
+        for item in ("if: github.ref == '" + S.METADATA_REF + "'", "timeout-minutes: 3", "/usr/bin/env -i",
+                     "--signal=TERM --kill-after=2s 133s", "python3.12 -I -S -B desktop/tools/observe_android_host_profile.py </dev/null",
                      'GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP"'):
             self.assertIn(item, observer)
-        output = next(s for s in steps if s.startswith("Retain only the bounded public host delta"))
-        self.assertIn("path: ${{ steps.host_metadata.outputs.root }}/" + S.OUTPUT_NAME, output)
+        output = next(s for s in steps if s.startswith("Retain only the bounded public host profile"))
+        self.assertIn("path: ${{ steps.host_metadata.outputs.root }}/android-host-profile.json", output)
         self.assertNotIn("**", output)
         self.assertIn('mkdir -m 700 -- "$root"', observer)
         self.assertIn('"$GITHUB_RUN_ATTEMPT" == 1', observer)
@@ -321,12 +321,17 @@ class HostedAndroidDataContracts(unittest.TestCase):
             self.assertNotIn(forbidden, observer)
         for label in ("Select the fixed frontend compiler", "Prepare a fresh bounded compiler owner",
                       "Compile the normal shell", "Observe only the fixed installed shell route",
-                      "Prepare shared Ubuntu shell inputs", "Prepare the fixed JDK17 pair",
-                      "Establish only the reviewed forward glibc tuple set", "Prepare only fixed disposable Ubuntu DATA modes"):
+                      "Prepare the fixed JDK17 pair", "Prepare only the reviewed saved3 provider DATA"):
             step = next(s for s in steps if s.startswith(label))
             condition = next(line for line in step.splitlines() if line.strip().startswith("if:"))
             self.assertNotIn(S.METADATA_REF, condition)
             self.assertIn("steps.route.outputs.native == 'true'", condition)
+        for label in ("Prepare shared Ubuntu shell inputs", "Establish only the reviewed forward glibc tuple set",
+                      "Prepare only fixed disposable Ubuntu DATA modes"):
+            step = next(s for s in steps if s.startswith(label))
+            condition = next(line for line in step.splitlines() if line.strip().startswith("if:"))
+            self.assertIn("steps.route.outputs.native == 'true'", condition)
+            self.assertIn(S.METADATA_REF, condition)
         # The observer's dynamic modules are closed DATA helpers;
         # inspect source without executing either its main or any provider.
         module = ast.parse((SOURCE / "desktop/tools/observe_hosted_android.py").read_bytes())

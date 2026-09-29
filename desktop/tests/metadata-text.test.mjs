@@ -127,7 +127,7 @@ function harness({ config = BASE, nativeStatus = status(), subscribeGate = null 
   const h = { controller, api, selected, calls, info,
     get state() { return controller.getSnapshot(); }, get workspace() { return workspace; }, get frame() { return registry; },
     count: (kind) => calls.filter((call) => call.kind === kind).length, last: (kind) => calls.filter((call) => call.kind === kind).at(-1),
-    dispatch: (action) => { workspace = workspaceReducer(workspace, action); controller.syncProject(); },
+    dispatch: (action, synchronize = true) => { workspace = workspaceReducer(workspace, action); if (synchronize) controller.syncProject(); },
     add: (id, data = BASE) => { workspace = addProject(workspace, id, data); controller.syncProject(); },
     blockOther: (value) => { otherReason = value; }, blockOperation: (value) => { operationReason = value; }, advance: (amount) => { clock += amount; },
     deferStatus: () => { const value = deferred(); reads.push(value); return value; },
@@ -628,4 +628,265 @@ test('retained draft still requires fresh validation and a separate native save 
   const local = unavailable.h.controller.reviewRetainedDraft(unavailable.sourceKey); assert.ok(local);
   assert.equal(unavailable.h.controller.adoptRetainedDraft(local), true); await validate(unavailable.h);
   assert.equal(unavailable.h.controller.start(), false); assert.equal(unavailable.h.count('open'), 0);
+});
+
+async function localeCheckHarness(options) {
+  const h = await connected(options), data = h.selected().baseline;
+  const observed = snapshot(data), content = digest(JSON.stringify(data));
+  // Exact observed-byte assertions in inert DATA, not production serialization.
+  observed.config.content = { bytes: content.byteLength, sha256: content.sha256 };
+  h.dispatch({ type: 'snapshot-start', projectId: 'a', requestId: 2 });
+  h.dispatch({ type: 'snapshot-done', projectId: 'a', requestId: 2, snapshot: observed, observedAt: 1 });
+  return h;
+}
+async function finishCheckedLocale(h, { values, valid = true } = {}) {
+  assert.equal(h.state.localeChecks.current.step, 'observe');
+  const call = h.last('observe'), before = h.count('validate');
+  call.resolve(observation(call.args.platform, call.args.locale, values ?? texts(call.args.platform), h.selected().baseline));
+  await flush(); assert.equal(h.count('validate'), before + 1);
+  const check = h.last('validate');
+  check.resolve(validation(check.args.platform, check.args.fields, valid)); await flush();
+}
+
+test('saved public locale checks serialize only existing passive methods and preserve every editor draft and baseline', async () => {
+  const h = await localeCheckHarness();
+  try {
+    const entry = await load(h); h.controller.editField(entry.context.key, 'title.txt', 'An unsaved title');
+    await validate(h);
+    const entries = h.state.entries, workspace = clone(h.workspace), selected = h.state.selectedKey, offset = h.calls.length;
+    const pending = h.controller.checkSavedLocales();
+    assert.equal(h.state.localeChecks.active, true); assert.ok(h.controller.passiveBusyReason()); assert.ok(metadataOwnerReason(h.state, 'a'));
+    assert.equal(await h.controller.checkSavedLocales(), false);
+    assert.ok(h.controller.loadReason()); assert.ok(h.controller.validateReason()); assert.ok(h.controller.startReason());
+    for (const choice of h.state.localeChecks.binding.choices) {
+      assert.deepEqual(h.last('observe').args, { projectId: 'a', platform: choice.platform, locale: choice.locale });
+      await finishCheckedLocale(h);
+      assert.deepEqual(h.last('validate').args.fields, METADATA_TEXT_IDS[choice.platform].map((id, index) => ({ id, text: texts(choice.platform)[index] })));
+    }
+    assert.equal(await pending, true); assert.equal(h.state.localeChecks.complete, true); assert.equal(h.state.localeChecks.active, false);
+    assert.equal(h.state.localeChecks.results.length, 3); assert.equal(h.controller.passiveBusyReason(), null);
+    assert.equal(metadataOwnerReason(h.state, 'a'), null); assert.equal(h.controller.savedLocaleChecksCurrent(), true);
+    assert.strictEqual(h.state.entries, entries); assert.equal(h.state.selectedKey, selected); assert.deepEqual(h.workspace, workspace);
+    assert.deepEqual(h.calls.slice(offset).map((call) => call.kind), ['observe', 'validate', 'observe', 'validate', 'observe', 'validate']);
+    assert.ok(!JSON.stringify(h.state.localeChecks).includes(texts()[1]));
+    for (const result of h.state.localeChecks.results) for (const field of result.baseline) assert.equal(Object.hasOwn(field, 'text'), false);
+    const beforeSelect = h.calls.length, target = h.state.localeChecks.results.at(-1).context.key;
+    assert.equal(h.controller.selectCheckedLocale('foreign-result'), false);
+    assert.equal(h.controller.selectCheckedLocale(target), true); assert.equal(h.state.selectedKey, target);
+    assert.deepEqual(h.state.entries, entries); assert.equal(h.calls.length, beforeSelect);
+    assert.equal(h.controller.savedLocaleChecksCurrent(), false); assert.equal(h.state.localeChecks.stale, true);
+    assert.equal(h.controller.selectCheckedLocale(selected), false);
+  } finally { h.controller.dispose(); }
+});
+
+test('saved locale checks distinguish missing from empty and never substitute success for an unsafe or mismatched response', async () => {
+  const h = await localeCheckHarness();
+  try {
+    const pending = h.controller.checkSavedLocales(), first = h.last('observe');
+    first.resolve(observation('android', 'en-US', [null, '', 'Complete public description.'])); await flush();
+    const call = h.last('validate'), result = validation(call.args.platform, call.args.fields);
+    result.valid = false; result.state = 'invalid';
+    for (const index of [0, 1]) Object.assign(result.fields[index], { valid: false,
+      issues: [{ code: 'metadata.empty-text', status: 'INVALID', message: 'Public Store text must contain non-whitespace content.' }] });
+    call.resolve(result); await flush();
+    assert.equal(h.state.localeChecks.results[0].baseline[0].state, 'absent');
+    assert.equal(h.state.localeChecks.results[0].baseline[1].state, 'present');
+    assert.equal(h.state.localeChecks.results[0].baseline[1].byteLength, 0);
+    assert.equal(h.state.localeChecks.results[0].validation.valid, false);
+    await finishCheckedLocale(h); await finishCheckedLocale(h);
+    assert.equal(await pending, true); assert.equal(h.state.localeChecks.results.length, 3);
+  } finally { h.controller.dispose(); }
+
+  for (const failure of ['changed-config', 'malformed-observation', 'unsafe-read', 'wrong-validation-platform']) {
+    const current = await localeCheckHarness();
+    try {
+      const pending = current.controller.checkSavedLocales(), first = current.last('observe'), value = observation();
+      if (failure === 'changed-config') value.baseline.config.sha256 = '0'.repeat(64);
+      if (failure === 'malformed-observation') value.fields.pop();
+      if (failure === 'unsafe-read') first.reject({ code: 'metadata_text_unsafe', message: 'PRIVATE-DO-NOT-ECHO' });
+      else first.resolve(value);
+      await flush();
+      if (failure === 'wrong-validation-platform') {
+        const fields = METADATA_TEXT_IDS.ios.map((id, index) => ({ id, text: texts('ios')[index] }));
+        current.last('validate').resolve(validation('ios', fields));
+      }
+      assert.equal(await pending, false); assert.equal(current.state.localeChecks.complete, false);
+      assert.equal(current.state.localeChecks.results.length, 0); assert.equal(current.count('observe'), 1);
+      assert.equal(current.count('validate'), failure === 'wrong-validation-platform' ? 1 : 0);
+      assert.ok(!JSON.stringify(current.state.localeChecks).includes('PRIVATE-DO-NOT-ECHO'));
+      assert.equal(current.controller.passiveBusyReason(), null);
+    } finally { current.controller.dispose(); }
+  }
+  const partial = await localeCheckHarness();
+  try {
+    const pending = partial.controller.checkSavedLocales(); await finishCheckedLocale(partial);
+    partial.last('observe').reject({ code: 'metadata_text_sensitive' });
+    assert.equal(await pending, false); assert.equal(partial.state.localeChecks.results.length, 1);
+    assert.equal(partial.state.localeChecks.binding.choices.length, 3); assert.equal(partial.count('observe'), 2);
+    assert.equal(partial.count('validate'), 1); assert.equal(partial.state.localeChecks.complete, false);
+  } finally { partial.controller.dispose(); }
+});
+
+test('saved locale batches reject getter-visible context changes and subscriber retirement before the next passive call', async () => {
+  for (const change of [
+    (h) => h.dispatch({ type: 'edit', projectId: 'a', path: 'metadata.root', value: 'release/changed' }, false),
+    (h) => h.dispatch({ type: 'select', project: { id: 'b', name: 'Other inert project', path: '/inert-not-used' } }, false),
+    (h) => h.dispatch({ type: 'snapshot-start', projectId: 'a', requestId: 3 }, false),
+    (h) => { h.controller.setConnection({ ...h.api }, h.info); h.controller.setConnection(h.api, h.info); },
+    (h) => { const old = h.state.selectedKey; h.controller.selectContext(h.state.choices[1].key); h.controller.selectContext(old); },
+    (h) => h.blockOther('Another original file edit is active.'),
+  ]) {
+    const h = await localeCheckHarness();
+    try {
+      const entries = h.state.entries, pending = h.controller.checkSavedLocales(), call = h.last('observe');
+      change(h); assert.ok(h.controller.passiveBusyReason());
+      call.resolve(observation()); assert.equal(await pending, false);
+      assert.equal(h.count('observe'), 1); assert.equal(h.count('validate'), 0); assert.deepEqual(h.state.entries, entries);
+      assert.equal(h.state.localeChecks.complete, false); assert.equal(h.state.localeChecks.stopReason, 'context-changed');
+    } finally { h.controller.dispose(); }
+  }
+  for (const phase of ['observe', 'validate']) {
+    const h = await localeCheckHarness();
+    try {
+      const originalProject = clone(h.selected().project), pending = h.controller.checkSavedLocales();
+      await finishCheckedLocale(h);
+      if (phase === 'validate') {
+        const call = h.last('observe');
+        call.resolve(observation(call.args.platform, call.args.locale, texts(call.args.platform), h.selected().baseline));
+        await flush();
+      }
+      const key = h.state.localeChecks.results[0].context.key;
+      h.dispatch({ type: 'select', project: { id: 'other', name: 'Other inert project', path: '/inert-not-used' } }, false);
+      h.last(phase).reject({ code: 'metadata_text_unsafe' });
+      assert.equal(await pending, false);
+      assert.equal(h.state.localeChecks.stopReason, 'context-changed'); assert.equal(h.state.localeChecks.stale, true);
+      assert.equal(h.state.localeChecks.results.length, 1); assert.equal(h.count('observe'), 2);
+      assert.equal(h.count('validate'), phase === 'validate' ? 2 : 1);
+      h.dispatch({ type: 'select', project: originalProject }, false);
+      const calls = h.calls.length;
+      assert.equal(h.controller.savedLocaleChecksCurrent(), false);
+      assert.ok(h.controller.checkedLocaleReason(key)); assert.equal(h.controller.selectCheckedLocale(key), false);
+      assert.equal(h.calls.length, calls);
+    } finally { h.controller.dispose(); }
+  }
+  const completed = await localeCheckHarness();
+  try {
+    const originalProject = clone(completed.selected().project), pending = completed.controller.checkSavedLocales();
+    for (let index = 0; index < completed.state.localeChecks.binding.choices.length; index += 1) await finishCheckedLocale(completed);
+    assert.equal(await pending, true);
+    const key = completed.state.localeChecks.results[0].context.key, calls = completed.calls.length;
+    completed.dispatch({ type: 'select', project: { id: 'other', name: 'Other inert project', path: '/inert-not-used' } }, false);
+    assert.equal(completed.controller.savedLocaleChecksCurrent(), false);
+    completed.dispatch({ type: 'select', project: originalProject }, false);
+    assert.equal(completed.controller.savedLocaleChecksCurrent(), false);
+    assert.ok(completed.controller.checkedLocaleReason(key)); assert.equal(completed.controller.selectCheckedLocale(key), false);
+    assert.equal(completed.calls.length, calls); assert.equal(completed.state.localeChecks.results.length, 3);
+  } finally { completed.controller.dispose(); }
+  for (const boundary of ['initial-publication', 'before-validation']) {
+    const h = await localeCheckHarness(); let changed = false;
+    const unlisten = h.controller.subscribe(() => {
+      const report = h.state.localeChecks;
+      if (changed || !report?.active || (boundary === 'initial-publication' ? report.current !== null : report.current?.step !== 'validate')) return;
+      changed = true;
+      h.dispatch({ type: 'edit', projectId: 'a', path: 'metadata.root', value: 'release/changed' }, false);
+    });
+    try {
+      const pending = h.controller.checkSavedLocales();
+      if (boundary === 'before-validation') { h.last('observe').resolve(observation()); await flush(); }
+      assert.equal(await pending, false); assert.equal(changed, true);
+      assert.equal(h.count('observe'), boundary === 'initial-publication' ? 0 : 1); assert.equal(h.count('validate'), 0);
+    } finally { unlisten(); h.controller.dispose(); }
+  }
+});
+
+test('saved locale Stop deadline and disposal retain the original pending call and never complete partial work', async () => {
+  for (const phase of ['observe', 'validate']) {
+    const h = await localeCheckHarness();
+    try {
+      const pending = h.controller.checkSavedLocales();
+      if (phase === 'validate') { h.last('observe').resolve(observation()); await flush(); }
+      assert.equal(h.controller.stopSavedLocales(), true); assert.equal(h.controller.stopSavedLocales(), false);
+      assert.equal(h.state.localeChecks.active, true); assert.ok(h.controller.passiveBusyReason()); assert.ok(metadataOwnerReason(h.state, 'a'));
+      assert.equal(await h.controller.checkSavedLocales(), false); assert.equal(await h.controller.load(), false);
+      h.advance(120001);
+      const call = h.last(phase);
+      call.resolve(phase === 'observe' ? observation() : validation(call.args.platform, call.args.fields));
+      assert.equal(await pending, false); assert.equal(h.state.localeChecks.stopReason, 'user');
+      assert.equal(h.state.localeChecks.active, false); assert.equal(h.state.localeChecks.complete, false);
+      assert.equal(h.controller.passiveBusyReason(), null); assert.equal(h.count('observe'), 1);
+      assert.equal(h.count('validate'), phase === 'validate' ? 1 : 0);
+    } finally { h.controller.dispose(); }
+  }
+  const deadline = await localeCheckHarness();
+  try {
+    const pending = deadline.controller.checkSavedLocales(); deadline.advance(120000);
+    deadline.last('observe').resolve(observation()); assert.equal(await pending, false);
+    assert.equal(deadline.state.localeChecks.stopReason, 'time-limit'); assert.equal(deadline.count('validate'), 0);
+  } finally { deadline.controller.dispose(); }
+  const between = await localeCheckHarness(); let expired = false;
+  const unlisten = between.controller.subscribe(() => {
+    if (!expired && between.state.localeChecks?.results.length === 1) { expired = true; between.advance(120000); }
+  });
+  try {
+    const pending = between.controller.checkSavedLocales(); await finishCheckedLocale(between);
+    assert.equal(await pending, false); assert.equal(between.count('observe'), 1);
+    assert.equal(between.state.localeChecks.results.length, 1); assert.equal(between.state.localeChecks.stopReason, 'time-limit');
+  } finally { unlisten(); between.controller.dispose(); }
+  const disposed = await localeCheckHarness();
+  const pending = disposed.controller.checkSavedLocales(), original = disposed.last('observe');
+  disposed.controller.dispose(); assert.ok(disposed.controller.passiveBusyReason());
+  original.resolve(observation()); assert.equal(await pending, false);
+  assert.equal(disposed.controller.passiveBusyReason(), null); assert.equal(disposed.count('validate'), 0);
+  assert.equal(disposed.state.localeChecks.complete, false);
+});
+
+test('saved public checks refuse partial locale rosters and unresolved owners without borrowing writer availability', async () => {
+  for (const locales of [[], ['en-US', 'en-US'], [123], 'en-US', Array.from({ length: 251 }, (_, index) => 'en-' + String(index + 1).padStart(3, '0'))]) {
+    const config = clone(BASE); config.metadata.iosLocales = locales;
+    const h = await localeCheckHarness({ config });
+    try {
+      assert.ok(metadataConfiguredChoices(h.selected()).some((choice) => choice.platform === 'android'));
+      assert.ok(h.controller.checkSavedLocalesReason()); assert.equal(await h.controller.checkSavedLocales(), false); assert.equal(h.count('observe'), 0);
+    } finally { h.controller.dispose(); }
+  }
+  const maximum = clone(BASE), locales = Array.from({ length: 250 }, (_, index) => 'en-' + String(index + 1).padStart(3, '0'));
+  maximum.metadata.androidLocales = locales; maximum.metadata.iosLocales = locales;
+  const h = await localeCheckHarness({ config: maximum });
+  try {
+    assert.equal(h.controller.checkSavedLocalesReason(), null);
+    const pending = h.controller.checkSavedLocales(); assert.equal(h.state.localeChecks.binding.choices.length, 500);
+    h.controller.stopSavedLocales(); h.last('observe').resolve(observation('android', locales[0], texts(), maximum));
+    assert.equal(await pending, false); assert.equal(h.count('observe'), 1); assert.equal(h.count('validate'), 0);
+  } finally { h.controller.dispose(); }
+  for (const reason of ['shutdown', 'other_edit_active', 'cleanup_unknown']) {
+    const blocked = await localeCheckHarness({ nativeStatus: status(0, null, null, reason) });
+    try { assert.ok(blocked.controller.checkSavedLocalesReason()); assert.equal(await blocked.controller.checkSavedLocales(), false); assert.equal(blocked.count('observe'), 0); }
+    finally { blocked.controller.dispose(); }
+  }
+  for (const reason of ['unsupported_platform', 'runtime_unqualified']) {
+    const passive = await localeCheckHarness({ nativeStatus: status(0, null, null, reason) });
+    try {
+      assert.equal(passive.controller.checkSavedLocalesReason(), null);
+      const pending = passive.controller.checkSavedLocales(); passive.controller.stopSavedLocales(); passive.last('observe').resolve(observation());
+      assert.equal(await pending, false); assert.equal(passive.count('open'), 0);
+    } finally { passive.controller.dispose(); }
+  }
+  const reading = await localeCheckHarness();
+  try {
+    const gate = reading.deferStatus(), pending = reading.controller.checkStatus(); await flush();
+    assert.ok(reading.controller.checkSavedLocalesReason()); assert.equal(await reading.controller.checkSavedLocales(), false);
+    assert.equal(reading.count('observe'), 0); gate.resolve(reading.frame); await pending;
+    reading.blockOperation('Another original operation is active.'); assert.ok(reading.controller.checkSavedLocalesReason());
+  } finally { reading.controller.dispose(); }
+  const noBytes = await connected();
+  try { assert.ok(noBytes.controller.checkSavedLocalesReason()); assert.equal(await noBytes.controller.checkSavedLocales(), false); assert.equal(noBytes.count('observe'), 0); }
+  finally { noBytes.controller.dispose(); }
+  const saved = await localeCheckHarness({ config: { ...clone(BASE), ios: { enabled: false }, metadata: { ...clone(BASE.metadata), androidLocales: ['en-US'] } } });
+  try {
+    const entry = await load(saved); saved.controller.editField(entry.context.key, 'title.txt', 'An unsaved title'); await validate(saved);
+    const pending = saved.controller.checkSavedLocales(); await finishCheckedLocale(saved); assert.equal(await pending, true);
+    assert.equal(saved.controller.savedLocaleChecksCurrent(), true); assert.equal(saved.controller.start(), true);
+    assert.equal(saved.controller.savedLocaleChecksCurrent(), false); assert.equal(saved.state.localeChecks.stale, true);
+    assert.ok(saved.controller.checkSavedLocalesReason()); assert.equal(saved.count('apply'), 0);
+  } finally { saved.controller.dispose(); }
 });

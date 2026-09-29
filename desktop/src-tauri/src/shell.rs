@@ -9,6 +9,7 @@ use crate::{
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
     github_workflow_edit_protocol::WorkflowEditStatus,
     metadata_text_commands, metadata_text_edit_protocol::{self as metadata_text_wire, MetadataTextEditStatus},
+    metadata_images_commands, metadata_images_edit_protocol::{self as images_wire, MetadataImagesEditStatus},
     release_version_edit_commands, release_version_edit_protocol::{self as release_version_wire, ReleaseVersionEditStatus},
     github_connection_protocol::{self as github_connection_wire, Status as GitHubConnectionStatus, Reason as GitHubConnectionReason},
     github_connection_session,
@@ -719,6 +720,15 @@ async fn release_version_observe(webview: Webview, request: tauri::ipc::Request<
     result
 }
 #[tauri::command]
+async fn metadata_validate(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::metadata_validation_protocol::Report, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = crate::metadata_validation_protocol::request(request_body(&request)?)?;
+    not_closing(&state)?;
+    // No installed-observer success receipt is fabricated for this new method.
+    state.bridge.validate_metadata(&state.document, args).await
+}
+#[tauri::command]
 async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::Observation, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
@@ -806,6 +816,92 @@ async fn metadata_text_edit_status(webview: Webview, request: tauri::ipc::Reques
     result
 }
 
+#[tauri::command]
+async fn metadata_images_catalog(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    not_closing(&state)?;
+    images_wire::catalog()
+}
+#[tauri::command]
+async fn metadata_images_choose(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<images_wire::SelectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let args = (|| {
+        edit_window(&webview)?;
+        let args = metadata_images_commands::choose(request_body(&request)?)?;
+        not_closing(&state)?;
+        Ok(args)
+    })().map_err(metadata_images_commands::selection_not_admitted)?;
+    state.document.metadata_images_selection_start(webview.app_handle().clone(), args)
+}
+#[tauri::command]
+async fn metadata_images_selection_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<images_wire::SelectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    state.document.metadata_images_selection_status()
+}
+#[tauri::command]
+async fn metadata_images_selection_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<images_wire::SelectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = metadata_images_commands::selection_cancel(request_body(&request)?)?;
+    state.document.metadata_images_selection_cancel(args)
+}
+#[tauri::command]
+async fn metadata_images_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let (window, args) = (|| {
+        let window = edit_window(&webview)?;
+        let args = metadata_images_commands::open(request_body(&request)?)?;
+        not_closing(&state)?;
+        Ok((window, args))
+    })().map_err(metadata_images_commands::import_not_matched)?;
+    state.bridge.open_metadata_images_edit(&state.document, window, args)
+}
+#[tauri::command]
+async fn metadata_images_recovery_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let (window, args) = (|| {
+        let window = edit_window(&webview)?;
+        let args = metadata_images_commands::recovery_open(request_body(&request)?)?;
+        not_closing(&state)?;
+        Ok((window, args))
+    })().map_err(metadata_images_commands::recovery_not_admitted)?;
+    state.bridge.open_metadata_images_recovery(&state.document, window, args)
+}
+#[tauri::command]
+async fn metadata_images_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = metadata_images_commands::prepare(request_body(&request)?)?;
+    not_closing(&state)?;
+    state.bridge.prepare_metadata_images_edit(&state.document, window, args)
+}
+#[tauri::command]
+async fn metadata_images_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::apply(request_body(&request)?)?;
+    not_closing(&state)?;
+    state.bridge.apply_metadata_images_edit(&state.document, window, &args.session_id, &args.plan_token)
+}
+#[tauri::command]
+async fn metadata_images_edit_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::close(request_body(&request)?)?;
+    // Original STOP is still available during Quit, without fresh root lookup.
+    state.bridge.edits.close_metadata_images(window, &args.session_id)
+}
+#[tauri::command]
+async fn metadata_images_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataImagesEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    state.bridge.edits.metadata_images_status()
+}
 #[tauri::command]
 async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -898,6 +994,32 @@ async fn github_connection_connect_token(webview: Webview, request: tauri::ipc::
     result
 }
 #[tauri::command]
+async fn github_connection_start_device(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    state.document.github_connection_start_device(github_connection_body(&webview, &request)?)
+}
+#[tauri::command]
+async fn github_connection_open_device_page(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<(), BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    let github_connection_wire::Command::OpenDevicePage(args) = github_connection_wire::decode_command_value(
+        "github_connection_open_device_page", github_connection_body(&webview, &request)?)
+        .map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))?
+        else { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); };
+    let document = state.document.clone(); let app = webview.app_handle().clone();
+    let (reply, receiver) = oneshot::channel();
+    // Reuse the existing OS main-thread dispatcher, not a detached plugin,
+    // browser helper or new process owner. Queueing is NOT handoff permission:
+    // revalidate original context/revision/expiry inside the callback itself.
+    app.run_on_main_thread(move || {
+        let result = document.claim_github_device_page(&args)
+            .and_then(|()| crate::github_device_browser::open_fixed_device_page());
+        // The final claim released all document/registry locks before OS code.
+        // Losing this response does not replay/recall the user's fixed handoff.
+        let _ = reply.send(result);
+    }).map_err(|_| BridgeError::unavailable("The browser handoff was not confirmed. Open https://github.com/login/device manually."))?;
+    receiver.await.map_err(|_| BridgeError::unavailable("The browser handoff result was not received. Use the displayed manual GitHub URL."))?
+}
+#[tauri::command]
 async fn github_connection_refresh(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
     let result = state.document.github_connection_refresh(github_connection_body(&webview, &request)?);
@@ -906,12 +1028,66 @@ async fn github_connection_refresh(webview: Webview, request: tauri::ipc::Reques
     result
 }
 #[tauri::command]
+async fn github_connection_inspect(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    state.document.github_connection_inspect(github_connection_body(&webview, &request)?)
+}
+#[tauri::command]
 async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
     let result = state.document.github_connection_disconnect(github_connection_body(&webview, &request)?);
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(q) = &state.observation { q.github_result(installed_observation::github::Command::Disconnect, &result); }
     result
+}
+
+#[tauri::command]
+async fn github_input_group_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_group_status",request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_input_runner_check(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_runner_check",request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_input_group_prepare(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_group_prepare",request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_input_group_apply(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_group_apply",request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_input_group_reconcile(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_group_reconcile",request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_input_group_pending(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_group_pending",request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_input_group_cancel(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>) -> Result<crate::github_input_group_protocol::Status,BridgeError> {
+    fixture_command!(state,Forbidden,observed,crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::Unqualified));
+    if webview.label()!=MAIN_WINDOW {return Err(crate::github_input_group_session::refused(crate::github_input_group_protocol::Reason::InvalidInput));}
+    state.document.github_input_group_command("github_input_group_cancel",request_body(&request)?)
 }
 
 #[tauri::command]
@@ -989,49 +1165,84 @@ async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<
 async fn github_release_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_status", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_status", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_status", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_prepare", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_prepare", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_prepare", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_dispatch(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_dispatch", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_dispatch", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_dispatch", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_track(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_track", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_track", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_track", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_reconcile", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_reconcile", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_reconcile", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_pending", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_pending", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_pending", &result); }
+    result
 }
 
 #[tauri::command]
 async fn github_release_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
-    state.document.github_release_command("github_release_cancel", request_body(&request)?)
+    let result = state.document.github_release_command("github_release_cancel", request_body(&request)?);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.release_result("github_release_cancel", &result); }
+    result
 }
 
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
@@ -1240,13 +1451,17 @@ async fn choose_project_path(webview: Webview, app: tauri::AppHandle, request: t
     let result: Result<Option<asset_commands::ProjectPathResult>, AssetError> = async {
         asset_window(&webview)?;
         let args = asset_commands::choose_project_path(asset_body(&request)?)?;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64",
+                feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if let Some(q) = &state.observation { q.path_request(&args); }
         let owner = state.document.choose_project_path(app, args)?;
         state.document.project_path_result(owner).await
     }.await;
     let result = result.map_err(|error| asset_commands::project_path_error(error.reason));
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64",
+            feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.path_result(&result); }
     result
 }
@@ -1300,10 +1515,13 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
+        let mut images_edit_revision = None;
+        let mut images_selection_revision = None;
         let mut release_version_revision = None;
         let mut diagnostics_revision = None;
         let mut github_preflight_revision = None;
         let mut github_release_revision = None;
+        let mut github_input_group_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
         let mut project_recovery_revision = None;
@@ -1350,8 +1568,24 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     let _ = app.emit_to(MAIN_WINDOW, release_version_wire::EVENT, &status);
                 }
             }
+            if images_edit_revision != Some(revision) {
+                if let Ok(status) = edits.metadata_images_status() {
+                    images_edit_revision = Some(status.status_revision);
+                    let _ = app.emit_to(MAIN_WINDOW, images_wire::EVENT, &status);
+                }
+            }
+            // The existing relay observes BOTH edit and document subscriptions.
+            // Capability-only changes synchronize the image selection revision;
+            // neither an event nor this observer creates selection authority.
+            if let Ok(status) = document.metadata_images_selection_status() {
+                if images_selection_revision != Some(status.status_revision) {
+                    images_selection_revision = Some(status.status_revision);
+                    let _ = app.emit_to(MAIN_WINDOW, images_wire::SELECTION_EVENT, &status);
+                }
+            }
             let status = document.status();
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
+            document.advance_github_device_if_due(); // Separate execution driver; status remains observation-only.
             let status = document.github_connection_status();
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
@@ -1364,9 +1598,18 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_preflight_protocol::EVENT, &status);
             }
             let status = document.github_release_status();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.release_status(&status); }
             if github_release_revision != Some(status.revision) {
                 github_release_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_release_protocol::EVENT, &status);
+            }
+            let status = document.github_input_group_status();
+            if github_input_group_revision != Some(status.revision) {
+                github_input_group_revision = Some(status.revision);
+                let _ = app.emit_to(MAIN_WINDOW,crate::github_input_group_protocol::EVENT,&status);
             }
             if let Ok(status) = document.environment_diagnostics_status() {
                 if diagnostics_revision != Some(status.status_revision) {
@@ -1547,11 +1790,18 @@ fn request_shutdown(app: &tauri::AppHandle) {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit }
+pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit }
 
 #[cfg(target_os = "linux")]
 fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
-    matches!(choice, DialogChoice::File(_) | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
+    matches!(choice, DialogChoice::File(_) | DialogChoice::PublicImages | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
+}
+
+// Public-image support is purpose-specific and separately qualified. macOS
+// remains unsupported; credential/project support is never an image receipt.
+#[cfg(not(any(target_os = "linux", all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+pub(crate) async fn run_owned_images_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<std::path::PathBuf>>, Reason> {
+    owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
 
 #[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
@@ -1569,10 +1819,10 @@ pub(crate) use owned_macos::run_owned_dialog;
 #[path = "shell_windows.rs"]
 mod owned_windows;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-pub(crate) use owned_windows::run_owned_dialog;
+pub(crate) use owned_windows::{run_owned_dialog, run_owned_images_dialog};
 
 #[cfg(target_os = "linux")]
-pub(crate) use owned_gtk::run_owned_dialog;
+pub(crate) use owned_gtk::{run_owned_dialog, run_owned_images_dialog};
 
 #[cfg(target_os = "linux")]
 mod owned_gtk {
@@ -1617,6 +1867,25 @@ mod owned_gtk {
         let path = dialog.filename().ok_or(Reason::SourceRefused)?;
         crate::asset_source::path_hint(&path)?; Ok(path)
     }
+    fn native_image_paths(dialog: &gtk::FileChooserDialog, call: &GuiCall) -> Result<Vec<PathBuf>, Reason> {
+        // The documented GTK API returns transient GFile references, not paths
+        // or file contents. Reject its count BEFORE asking for any local path.
+        // GTK/provider storage and this reference list are not a total-dialog
+        // RSS bound. Application-retained paths/bytes have separate hard caps.
+        let files = dialog.files();
+        if !(1..=crate::asset_source::PUBLIC_IMAGE_FILES).contains(&files.len()) { return Err(Reason::MaterialLimit); }
+        let mut paths = Vec::new(); paths.try_reserve_exact(files.len()).map_err(|_| Reason::Capacity)?;
+        for file in files {
+            if call.owner().is_none_or(|owner| owner.interrupted()) { return Err(Reason::UserCancelled); }
+            // Remote/provider-only objects have no native filesystem authority.
+            if !file.is_native() { return Err(Reason::SourceRefused); }
+            let path = file.path().ok_or(Reason::SourceRefused)?;
+            crate::asset_source::path_hint(&path)?;
+            if path.capacity() > crate::asset_source::PATH_LIMIT { return Err(Reason::MaterialLimit); }
+            paths.push(path);
+        }
+        Ok(paths)
+    }
     fn not_created(call: &Arc<GuiCall>, reason: Reason) { call.not_created(reason); call.failed(reason); }
 
     fn construct(app: tauri::AppHandle, call: Arc<GuiCall>, choice: DialogChoice, initial_folder: Option<PathBuf>) {
@@ -1639,14 +1908,17 @@ mod owned_gtk {
         if owner.interrupted() { not_created(&call, Reason::UserCancelled); return; }
         let object = match choice {
             DialogChoice::File(kind) => {
-                let title = match kind { FileKind::AndroidKeystore => "Choose an Android JKS keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON",
+                let title = match kind { FileKind::AndroidKeystore => "Choose an Android upload keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON",
                     FileKind::IosFirebase => "Choose iOS Firebase XML plist",
+                    FileKind::AscP8 => "Choose an original App Store Connect P8",
                     FileKind::AppleP12 | FileKind::AppleProfile => { not_created(&call, Reason::UnsupportedPlatform); return; } };
                 Object::File(gtk::FileChooserDialog::with_buttons(Some(title), Some(&parent), gtk::FileChooserAction::Open,
                     &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)]))
             }
             DialogChoice::Project => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a mobile project folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
                 &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)])),
+            DialogChoice::PublicImages => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose public listing images (up to 10)"), Some(&parent), gtk::FileChooserAction::Open,
+                &[("Cancel", gtk::ResponseType::Cancel), ("Select images", gtk::ResponseType::Accept)])),
             DialogChoice::ProjectPath(field) => {
                 let title = match field {
                     asset_commands::ProjectPathField::VersionSource => "Choose an existing version source inside the project",
@@ -1688,7 +1960,7 @@ mod owned_gtk {
             let response_call = Arc::downgrade(&call); let destroy_call = Arc::downgrade(&call);
             match &entry.object {
                 Object::File(dialog) => {
-                    dialog.set_local_only(true); dialog.set_select_multiple(false); dialog.set_create_folders(false);
+                    dialog.set_local_only(true); dialog.set_select_multiple(matches!(choice, DialogChoice::PublicImages)); dialog.set_create_folders(false);
                     dialog.set_modal(true); dialog.set_destroy_with_parent(true);
                     // Private native hint from the captured registration, never
                     // a renderer path/current value or a fallback to recents.
@@ -1700,8 +1972,8 @@ mod owned_gtk {
                         let filter = gtk::FileFilter::new();
                         match kind {
                             FileKind::AndroidKeystore => {
-                                filter.set_name(Some("JKS keystore (.jks, .keystore)"));
-                                for pattern in ["*.jks", "*.JKS", "*.keystore", "*.KEYSTORE"] { filter.add_pattern(pattern); }
+                                filter.set_name(Some("Upload keystore (.jks, .keystore, .p12, .pfx)"));
+                                for pattern in ["*.jks", "*.JKS", "*.keystore", "*.KEYSTORE", "*.p12", "*.P12", "*.pfx", "*.PFX"] { filter.add_pattern(pattern); }
                             }
                             FileKind::AndroidFirebase => {
                                 filter.set_name(Some("Android Firebase JSON (.json)"));
@@ -1711,10 +1983,19 @@ mod owned_gtk {
                                 filter.set_name(Some("iOS Firebase XML plist (.plist)"));
                                 for pattern in ["*.plist", "*.PLIST"] { filter.add_pattern(pattern); }
                             }
+                            FileKind::AscP8 => {
+                                filter.set_name(Some("App Store Connect private key (.p8)"));
+                                for pattern in ["*.p8", "*.P8"] { filter.add_pattern(pattern); }
+                            }
                             // Refused before object construction above. Keep the
                             // closed match fail-safe if this path ever changes.
                             FileKind::AppleP12 | FileKind::AppleProfile => { call.failed(Reason::UnsupportedPlatform); return; }
                         }
+                        dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
+                    }
+                    if matches!(choice, DialogChoice::PublicImages) {
+                        let filter = gtk::FileFilter::new(); filter.set_name(Some("PNG and JPEG listing images"));
+                        for pattern in ["*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG"] { filter.add_pattern(pattern); }
                         dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
                     }
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1727,7 +2008,7 @@ mod owned_gtk {
                         gtk_fixture!(call, ResponseEnter, match response { gtk::ResponseType::Accept => 1,
                             gtk::ResponseType::Cancel => 2, gtk::ResponseType::DeleteEvent => 3, _ => 4 });
                         // Latch the actual response/endpoint under the real
-                        // admission lock BEFORE calling filename(), without
+                        // admission lock BEFORE reading any native selection, without
                         // holding that lock over any GTK API.
                         let response = match response {
                             gtk::ResponseType::Accept => NativeResponse::Accept,
@@ -1736,7 +2017,10 @@ mod owned_gtk {
                         };
                         let read_one_path = call.begin_response(response, false);
                         if read_one_path == Some(true) {
-                            let path = native_path(dialog, &call);
+                            if matches!(choice, DialogChoice::PublicImages) {
+                                call.selected_public_images(native_image_paths(dialog, &call));
+                            } else {
+                                let path = native_path(dialog, &call);
                             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                             if let Some(q) = response_observation.as_ref().and_then(Weak::upgrade) {
                                 match choice {
@@ -1747,7 +2031,8 @@ mod owned_gtk {
                                     _ => q.unexpected(),
                                 }
                             }
-                            call.selected_path(path);
+                                call.selected_path(path);
+                            }
                         }
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                         if let Some(q) = response_observation.as_ref().and_then(Weak::upgrade) {
@@ -2125,7 +2410,7 @@ mod owned_gtk {
         if !original_facts { q.session_file_failed(R::GtkOwnerFacts); return Err(()); }
         let (kind, select, parent_navigation_reserved) = q.session_file_dialog(id, index)?;
         let title = match kind {
-            "android-keystore" => "Choose an Android JKS keystore",
+            "android-keystore" => "Choose an Android upload keystore",
             "android-firebase" => "Choose Android Firebase JSON",
             "ios-firebase" => "Choose iOS Firebase XML plist",
             _ => { q.session_file_failed(R::GtkDialogProperties); return Err(()); },
@@ -2444,7 +2729,24 @@ mod owned_gtk {
         }
     }
 
+    enum DialogResult { Single(PathBuf), Images(Vec<PathBuf>) }
+
     pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice, initial_folder: Option<PathBuf>) -> Result<Option<PathBuf>, Reason> {
+        if matches!(choice, DialogChoice::PublicImages) { not_created(&owner.gui, Reason::InvalidRequest); return Err(Reason::InvalidRequest); }
+        match run_owned_choice(app, owner, choice, initial_folder).await? {
+            Some(DialogResult::Single(path)) => Ok(Some(path)), None => Ok(None),
+            Some(DialogResult::Images(_)) => Err(Reason::CleanupUnknown),
+        }
+    }
+    pub(crate) async fn run_owned_images_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<PathBuf>>, Reason> {
+        match run_owned_choice(app, owner, DialogChoice::PublicImages, None).await? {
+            Some(DialogResult::Images(paths)) => Ok(Some(paths)), None => Ok(None),
+            Some(DialogResult::Single(_)) => Err(Reason::CleanupUnknown),
+        }
+    }
+    // One original native create/response/close/release loop for both result
+    // shapes. A multi-selection never passes through the credential path cell.
+    async fn run_owned_choice(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice, initial_folder: Option<PathBuf>) -> Result<Option<DialogResult>, Reason> {
         let call = owner.gui.clone();
         // Exactly this new purpose needs a native registration folder. Existing
         // File/Project/Evidence/Quit callers must continue to pass None.
@@ -2481,9 +2783,12 @@ mod owned_gtk {
                     else if facts.destroyed && facts.released && facts.close_ack {
                         if matches!(choice, DialogChoice::Quit) { Some(Ok(None)) }
                         else if let Some(reason) = facts.refusal { Some(Err(reason)) }
-                        else if matches!(choice, DialogChoice::ProjectPath(_)) && facts.declined && !facts.accepted { Some(Ok(None)) }
+                        else if matches!(choice, DialogChoice::ProjectPath(_) | DialogChoice::PublicImages) && facts.declined && !facts.accepted { Some(Ok(None)) }
                         else if !facts.accepted || owner.interrupted() { Some(Err(Reason::UserCancelled)) }
-                        else { Some(facts.selected.take().map(Some).ok_or(Reason::SourceRefused)) }
+                        else if matches!(choice, DialogChoice::PublicImages) {
+                            Some(call.take_public_images().and_then(|paths| paths.map(DialogResult::Images).map(Some).ok_or(Reason::SourceRefused)))
+                        }
+                        else { Some(facts.selected.take().map(DialogResult::Single).map(Some).ok_or(Reason::SourceRefused)) }
                     } else { None };
                 let close = facts.created && (facts.response || facts.destroyed || owner.interrupted()) && !facts.close_queued;
                 if close { facts.close_queued = true; }
@@ -2491,7 +2796,15 @@ mod owned_gtk {
                 if release { facts.release_queued = true; }
                 (close, release, outcome)
             };
-            if let Some(outcome) = outcome { return outcome; }
+            if let Some(outcome) = outcome {
+                if matches!(choice, DialogChoice::PublicImages) {
+                    // Known original native settlement precedes dropping any
+                    // accepted paths on cancellation/refusal. Unknown GUI
+                    // owners keep the original cell for later reconciliation.
+                    drop(call.take_public_images()?);
+                }
+                return outcome;
+            }
             if close {
                 if gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); }
                 else {
@@ -2590,7 +2903,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; }
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2793,15 +3106,21 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
             github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,
             github_workflow_edit_close, github_workflow_edit_status,
-            metadata_text_observe, metadata_text_validate, metadata_text_edit_open, metadata_text_edit_prepare,
+            metadata_validate, metadata_text_observe, metadata_text_validate, metadata_text_edit_open, metadata_text_edit_prepare,
             metadata_text_edit_apply, metadata_text_edit_close, metadata_text_edit_status,
+            metadata_images_catalog, metadata_images_choose, metadata_images_selection_status, metadata_images_selection_cancel,
+            metadata_images_edit_open, metadata_images_recovery_open, metadata_images_edit_prepare,
+            metadata_images_edit_apply, metadata_images_edit_close, metadata_images_edit_status,
             release_version_edit_open, release_version_edit_prepare, release_version_edit_apply,
             release_version_edit_close, release_version_edit_status,
-            github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+            github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_inspect, github_connection_disconnect,
+            github_connection_start_device, github_connection_open_device_page,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
             github_release_reconcile, github_release_pending, github_release_cancel,
+            github_input_group_status, github_input_runner_check, github_input_group_prepare, github_input_group_apply,
+            github_input_group_reconcile, github_input_group_pending, github_input_group_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
             ];

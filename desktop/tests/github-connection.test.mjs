@@ -6,9 +6,10 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { GITHUB_WORKFLOWS } from '../src/githubSetupProtocol.ts';
 import { GitHubConnectionController } from '../src/githubConnectionController.ts';
+import { savedGitHubInputs } from '../src/githubEnvironmentInputs.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { GITHUB_CONNECTION_ENTRY_AVAILABLE, connectionProgress, githubConnectionError, githubConnectionRequestFits,
-  parseGitHubConnectionHelp, parseGitHubConnectionStatus } from '../src/githubConnectionProtocol.ts';
+  parseGitHubConnectionHelp, parseGitHubConnectionStatus, connectionRetryable, currentGitHubAuthorization } from '../src/githubConnectionProtocol.ts';
 
 const HELP = JSON.parse(readFileSync(new URL('../../src/mobile_release/api/data/github-connection-v1.json', import.meta.url), 'utf8'));
 const TIME = '2026-09-17T12:00:00Z'; const EXPIRY = '2026-09-17T13:00:00Z';
@@ -17,9 +18,9 @@ const CONTEXT = { documentId: 'document-a', projectId: 'project-a', projectGener
 const clone = (value) => structuredClone(value);
 function fact(value = null) { return { state: value === null ? 'not-observed' : 'observed', value, observedAt: value === null ? null : TIME, reason: value === null ? 'not-connected' : 'none' }; }
 function idle(revision = 1, available = false) {
-  return { schemaVersion: 1, revision,
-    capability: { readOnlySessionAvailable: available, reason: available ? 'none' : 'unqualified', deviceLogin: 'publisher-unconfigured', storage: 'session-only' },
-    session: null, operation: null, account: fact(), repository: fact(), automation: fact(),
+  return { schemaVersion: 2, revision,
+    capability: { readOnlySessionAvailable: available, reason: available ? 'none' : 'unqualified', deviceLogin: 'publisher-unconfigured', publisherName: null, storage: 'session-only' },
+    session: null, operation: null, authorization: null, account: fact(), repository: fact(), automation: fact(),
     facts: { remoteMutationAvailable: false, dispatchAvailable: false, repositoryActionsSettingsObservation: 'not-run', environmentObservation: 'not-run',
       secretObservation: 'not-run', variableObservation: 'not-run', protectionObservation: 'not-run', runnerObservation: 'not-run', templateCompatibility: 'unknown', releaseReadiness: 'unknown' } };
 }
@@ -35,6 +36,9 @@ function connected(revision = 2, operationId = 'connect-a') {
 function staleFacts(value, reason = 'stale') {
   const status = clone(value);
   for (const key of ['account', 'repository', 'automation']) if (status[key].value) { status[key].state = 'stale'; status[key].reason = reason; }
+  if (status.inputMetadata) for (const key of ['environment', 'field']) if (status.inputMetadata[key].value) {
+    status.inputMetadata[key].state = 'stale'; status.inputMetadata[key].reason = reason;
+  }
   return status;
 }
 function checking(revision = 3) {
@@ -75,7 +79,10 @@ function harness({ registry = connected(), mode = 'native', subscribeGate = null
       return () => { row.active = false; unlistened += 1; };
     },
     status: () => { calls.push({ kind: 'status' }); return reads.length ? reads.shift().promise : Promise.resolve(clone(current)); },
+    startDevice: (args) => { const work = deferred(); calls.push({ kind: 'authorize', args: clone(args), ...work }); return work.promise; },
+    openDevicePage: (args) => { const work = deferred(); calls.push({ kind: 'browser', args: clone(args), ...work }); return work.promise; },
     refresh: (args) => { const work = deferred(); calls.push({ kind: 'refresh', args: clone(args), ...work }); return work.promise; },
+    inspect: (args) => { const work = deferred(); calls.push({ kind: 'inspect', args: clone(args), ...work }); return work.promise; },
     disconnect: (args) => { const work = deferred(); calls.push({ kind: 'disconnect', args: clone(args), ...work }); return work.promise; },
   };
   const controller = new GitHubConnectionController(); controller.setContext(CONTEXT); controller.setHelp(HELP);
@@ -94,6 +101,110 @@ function harness({ registry = connected(), mode = 'native', subscribeGate = null
   };
 }
 async function attached(options) { const h = harness(options); await h.controller.attach(h.port); return h; }
+
+const INPUT_NAME = 'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION';
+function inspecting(revision = 3) {
+  const value = checking(revision); value.operation.id = 'inspect-a'; value.operation.kind = 'inspect'; return value;
+}
+function inspected(revision = 4, name = INPUT_NAME) {
+  const value = connected(revision, 'inspect-a'); value.operation.kind = 'inspect';
+  value.automation.state = 'stale'; value.automation.reason = 'cancelled';
+  value.inputMetadata = { selection: { stage: 'production', name },
+    environment: fact({ id: '33', name: 'mobile-production' }),
+    field: fact({ name, kind: 'variable', createdAt: TIME, updatedAt: TIME }) };
+  value.facts.environmentObservation = 'metadata-only'; value.facts.variableObservation = 'metadata-only';
+  return value;
+}
+
+test('environment input metadata is closed, request bounded and never remote authority', () => {
+  const value = inspected(); assert.ok(parseGitHubConnectionStatus(value));
+  const args = { sessionId: 'session-a', expectedRevision: 2, stage: 'production', name: INPUT_NAME };
+  assert.equal(githubConnectionRequestFits('github_connection_inspect', args), true);
+  for (const extra of ['url', 'root', 'kind', 'token', 'fields'])
+    assert.equal(githubConnectionRequestFits('github_connection_inspect', { ...args, [extra]: SECRET }), false);
+  for (const [key, invalid] of [['stage', 'unknown'], ['name', 'MOBILE_RELEASE_'], ['expectedRevision', true], ['name', INPUT_NAME + '\n']])
+    assert.equal(githubConnectionRequestFits('github_connection_inspect', { ...args, [key]: invalid }), false);
+  for (const change of [
+    (v) => { v.inputMetadata.field.value.value = SECRET; },
+    (v) => { v.inputMetadata.field.value.name = 'MOBILE_RELEASE_OTHER'; },
+    (v) => { v.inputMetadata.environment.value.name = 'mobile-candidate'; },
+    (v) => { v.inputMetadata = null; },
+    (v) => { v.facts.remoteMutationAvailable = true; },
+    (v) => { v.facts.variableObservation = 'not-run'; },
+    (v) => { v.inputMetadata.field.observedAt = null; },
+    (v) => { v.operation.kind = 'connect'; },
+  ]) { const invalid = clone(value); change(invalid); assert.equal(parseGitHubConnectionStatus(invalid), null); }
+  assert.equal(connectionProgress(inspecting(), value), true);
+  const stale = staleFacts(value); stale.revision = 5; stale.session.state = 'checking';
+  stale.operation = { id: 'refresh-b', kind: 'refresh', phase: 'running', reason: 'none' };
+  assert.ok(parseGitHubConnectionStatus(stale)); assert.equal(connectionProgress(value, stale), true);
+  const revived = clone(stale); revived.revision += 1; revived.inputMetadata = clone(value.inputMetadata);
+  assert.equal(connectionProgress(stale, revived), false);
+  const renamed = clone(stale); renamed.revision += 1; renamed.inputMetadata.selection.name = 'MOBILE_RELEASE_ANDROID_KEY_ALIAS';
+  renamed.inputMetadata.field.value.name = renamed.inputMetadata.selection.name;
+  assert.equal(connectionProgress(stale, renamed), false);
+});
+
+test('one explicit input check settles only its exact original selection and can then be refreshed', async () => {
+  const h = await attached(); assert.equal(h.controller.canInspect(), true);
+  assert.equal(h.controller.inspect('production', INPUT_NAME), true);
+  assert.deepEqual(h.last('inspect').args, { sessionId: 'session-a', expectedRevision: 2, stage: 'production', name: INPUT_NAME });
+  assert.equal(h.controller.inspect('production', INPUT_NAME), false);
+  assert.equal(h.controller.canRefresh(), false);
+  h.publish(inspecting()); h.last('inspect').resolve(inspected()); await flush();
+  assert.equal(h.state.busy, null); assert.equal(h.state.uncertain, false);
+  assert.equal(h.state.status.inputMetadata.field.state, 'observed');
+  assert.equal(h.controller.canInspect(), true); assert.equal(h.controller.canRefresh(), true);
+  assert.equal(h.count('inspect'), 1);
+  h.controller.disconnect(); h.last('disconnect').resolve(idle(5, true)); await flush(); h.controller.dispose();
+});
+
+test('lost input reply retains original ownership and context change retires it without replay', async () => {
+  const h = await attached(); h.controller.inspect('production', INPUT_NAME);
+  h.last('inspect').reject(new Error('inert lost acknowledgement')); await flush();
+  assert.equal(h.state.uncertain, true); assert.equal(h.controller.canInspect(), false);
+  h.publish(inspecting()); h.controller.setContext({ ...CONTEXT, projectGeneration: 2 });
+  assert.equal(h.count('disconnect'), 1); assert.equal(h.last('disconnect').args.sessionId, 'session-a');
+  h.publish(inspected()); assert.equal(h.state.status, null);
+  h.last('disconnect').resolve(idle(5, true)); await flush();
+  assert.equal(h.state.retirementPending, false); assert.equal(h.count('inspect'), 1);
+  h.controller.dispose();
+});
+
+test('input check rechecks synchronous invalidation and refuses mismatched positive selection', async () => {
+  const h = await attached();
+  const stop = h.controller.subscribe(() => {
+    if (h.state.busy === 'inspect') h.controller.setContext({ ...CONTEXT, projectGeneration: 2 });
+  });
+  assert.equal(h.controller.inspect('production', INPUT_NAME), false);
+  assert.equal(h.count('inspect'), 0); stop();
+  h.last('disconnect').resolve(idle(3, true)); await flush(); h.controller.dispose();
+  const other = await attached(); other.controller.inspect('production', INPUT_NAME);
+  other.last('inspect').resolve(inspected(4, 'MOBILE_RELEASE_ANDROID_KEY_ALIAS')); await flush();
+  assert.equal(other.state.uncertain, true); assert.equal(other.controller.canInspect(), false);
+  other.controller.disconnect(); other.last('disconnect').resolve(idle(5, true)); await flush(); other.controller.dispose();
+});
+
+test('saved-local requirements must match an observed saved snapshot, never the unsaved draft alone', () => {
+  const input = { name: INPUT_NAME, kind: 'variable', stage: 'production', platform: 'ios',
+    environment: 'mobile-production', alternatives: [], reason: 'Operation commitment version', state: 'unknown' };
+  const original = {
+    snapshot: { observedAt: TIME, config: { state: 'format-valid', data: { schemaVersion: 1 } } },
+    snapshotRequest: null, snapshotError: null, snapshotPredatesSave: false, saveRecoveryRequired: false, sourceChanged: false,
+    validationRequest: null, validationError: null, revision: 2, validatedRevision: 2, baselineGeneration: 3, validatedBaselineGeneration: 3,
+    draft: { schemaVersion: 1 }, validation: { valid: true, requirements: [input] },
+  };
+  assert.deepEqual(savedGitHubInputs(original), { observedAt: TIME, inputs: [input] });
+  for (const change of [
+    (s) => { s.draft.schemaVersion = 2; }, (s) => { s.validatedRevision = 1; },
+    (s) => { s.validatedBaselineGeneration = 2; }, (s) => { s.snapshotRequest = 4; },
+    (s) => { s.snapshotPredatesSave = true; }, (s) => { s.validationRequest = {}; },
+    (s) => { s.sourceChanged = true; }, (s) => { s.saveRecoveryRequired = true; },
+    (s) => { s.snapshotError = { code: 'failed' }; }, (s) => { s.validation.valid = false; },
+  ]) { const stale = clone(original); change(stale); assert.equal(savedGitHubInputs(stale), null); }
+  const result = savedGitHubInputs(original); result.inputs[0].alternatives.push('DISPLAY_ONLY');
+  assert.deepEqual(original.validation.requirements[0].alternatives, []);
+});
 
 test('closed status graph requires explicit nulls, nonlossy IDs and false remote gates', () => {
   assert.ok(parseGitHubConnectionStatus(idle())); assert.ok(parseGitHubConnectionStatus(connected()));
@@ -248,11 +359,11 @@ test('subscribe precedes first status; observation port and preview have no cred
   const source = readFileSync(new URL('../src/components/GitHubConnection.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|\bfetch\(|\binvoke\(|window\.open|localStorage|sessionStorage/);
   assert.match(source, /entryReady\s*=\s*GITHUB_CONNECTION_ENTRY_AVAILABLE/);
-  assert.match(source, /\{entryReady && <form/);
+  assert.match(source, /\{entryReady && <details/);
   assert.match(source, /ref=\{tokenInput\}[^\n]*type="password"/);
   assert.match(source, /finally \{ clearToken\(\); \}/);
   assert.match(source, /useLayoutEffect/);
-  assert.match(source, /Connect · unavailable/);
+  assert.match(source, /Sign in with GitHub/);
 });
 
 test('Busy refuses a second Refresh but not retained Status or immediate Disconnect', async () => {
@@ -439,8 +550,8 @@ test('expiry is native status, not a renderer clock or renewal; disposal only re
   assert.equal(queued.count('disconnect'), 1);
 });
 
-test('only nine exact refusal codes acknowledge no admission; arbitrary diagnostics never escape', () => {
-  const suffixes = ['unqualified', 'runtime_unavailable', 'invalid_input', 'busy', 'target_changed', 'rate_limited', 'expired', 'cancelled', 'cleanup_unknown'];
+test('only ten exact refusal codes acknowledge no admission; arbitrary diagnostics never escape', () => {
+  const suffixes = ['unqualified', 'publisher_unconfigured', 'runtime_unavailable', 'invalid_input', 'busy', 'target_changed', 'rate_limited', 'expired', 'cancelled', 'cleanup_unknown'];
   for (const suffix of suffixes) {
     const error = githubConnectionError({ code: `github_connection_refused_${suffix}`, message: SECRET, token: SECRET });
     assert.equal(error.admission, 'not-admitted'); assert.equal(error.retryable, false);
@@ -456,7 +567,7 @@ test('only nine exact refusal codes acknowledge no admission; arbitrary diagnost
   assert.equal(reads, 0);
 });
 
-test('fixed bridge dispatches the four native commands once without a browser or preview credential route', async () => {
+test('fixed bridge dispatches the five explicit read/session commands without a browser or preview credential route', async () => {
   const calls = []; const seen = []; let eventName; let event;
   const api = createNativeApi('native', (command, args) => {
     calls.push(command === 'github_connection_connect_token'
@@ -471,12 +582,14 @@ test('fixed bridge dispatches the four native commands once without a browser or
   assert.equal(seen[0].session.id, 'session-a'); assert.equal(seen[1], null); stop();
   await api.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: SECRET });
   await api.refreshGitHubConnection({ sessionId: 'session-a', expectedRevision: 2 });
+  await api.inspectGitHubEnvironmentInput({ sessionId: 'session-a', expectedRevision: 2, stage: 'production', name: INPUT_NAME });
   await assert.rejects(api.disconnectGitHubConnection({ sessionId: 'session-a', token: SECRET }),
     (error) => error.code === 'github_connection_refused_invalid_input');
   assert.deepEqual(calls, [{ command: 'github_connection_status', args: {} },
     { command: 'github_connection_disconnect', args: { sessionId: 'session-a' } },
     { command: 'github_connection_connect_token', args: { projectId: 'project-a', repository: 'Owner/App' }, tokenMatched: true },
-    { command: 'github_connection_refresh', args: { sessionId: 'session-a', expectedRevision: 2 } }]);
+    { command: 'github_connection_refresh', args: { sessionId: 'session-a', expectedRevision: 2 } },
+    { command: 'github_connection_inspect', args: { sessionId: 'session-a', expectedRevision: 2, stage: 'production', name: INPUT_NAME } }]);
   const bad = createNativeApi('native', () => Promise.reject({ code: 'PrivateNativeFailure', message: SECRET }));
   await assert.rejects(bad.githubConnectionStatus(), (error) => error.admission === 'unknown' && !JSON.stringify(error).includes(SECRET));
   const refused = createNativeApi('native', () => Promise.reject({ code: 'github_connection_refused_unqualified', message: SECRET }));
@@ -485,6 +598,7 @@ test('fixed bridge dispatches the four native commands once without a browser or
   for (const mode of ['preview', 'unavailable']) {
     const unavailable = createNativeApi(mode, () => { throw new Error('MUST NOT INVOKE'); });
     await assert.rejects(unavailable.githubConnectionStatus(), (error) => error.code === 'github_connection_refused_runtime_unavailable');
+    await assert.rejects(unavailable.inspectGitHubEnvironmentInput({ sessionId: 'session-a', expectedRevision: 2, stage: 'production', name: INPUT_NAME }));
     await assert.rejects(unavailable.connectGitHubToken({ projectId: 'project-a', repository: 'Owner/App', token: SECRET }),
       (error) => error.code === 'github_connection_refused_runtime_unavailable');
   }
@@ -638,4 +752,244 @@ test('settled retryable failures require live native capability and a DIFFERENT 
   assert.equal(limited.controller.canRefresh(), false); assert.equal(limited.count('refresh'), 0);
   limited.publish(failed(5, 'rate-limited', true)); assert.equal(limited.controller.canRefresh(), true);
   assert.equal(limited.count('refresh'), 0, 'native capability changes never automatically retry');
+});
+
+
+// Device-flow tests use only public synthetic DATA and the existing fake port.
+// No OAuth exchange, native polling, OS browser or successful login is claimed.
+const AUTH_EXPIRY = '2026-09-17T12:15:00Z';
+function deviceIdle(revision = 1) {
+  const value = idle(revision, true);
+  value.capability.deviceLogin = 'available'; value.capability.publisherName = 'Mobile Release Kit';
+  return value;
+}
+function authorizing(revision = 2, phase = 'requesting-code') {
+  const value = deviceIdle(revision);
+  value.session = { id: 'session-a', projectId: 'project-a', targetRepository: 'Owner/App', state: 'checking', expiresAt: EXPIRY };
+  value.operation = { id: 'authorize-a', kind: 'authorize', phase: 'running', reason: 'none' };
+  value.authorization = { phase, userCode: ['waiting', 'slow-down'].includes(phase) ? 'ABCD-EFGH' : null,
+    expiresAt: phase === 'requesting-code' ? null : AUTH_EXPIRY };
+  return value;
+}
+function authorized(revision = 5) {
+  const value = connected(revision);
+  value.capability = deviceIdle().capability;
+  value.operation = { id: 'authorize-a', kind: 'authorize', phase: 'settled', reason: 'none' };
+  return value;
+}
+function authorizationFailed(revision = 3, reason = 'network-unavailable') {
+  const value = authorizing(revision);
+  value.session.state = 'failed'; value.operation.phase = 'settled'; value.operation.reason = reason;
+  value.authorization = null; return value;
+}
+async function waitingDevice() {
+  const h = await attached({ registry: deviceIdle() });
+  assert.equal(h.controller.startDevice(), true);
+  h.last('authorize').resolve(authorizing(2, 'waiting')); await flush();
+  return h;
+}
+
+test('device v2 DATA is closed; code, phase, publisher and original clock cannot be replaced', () => {
+  for (const phase of ['requesting-code', 'waiting', 'slow-down', 'checking-access'])
+    assert.ok(parseGitHubConnectionStatus(authorizing(2, phase)), phase);
+  assert.ok(parseGitHubConnectionStatus(authorized()));
+  const mutations = [
+    (v) => { v.schemaVersion = 1; }, (v) => { delete v.authorization; },
+    (v) => { v.authorization.deviceCode = SECRET; }, (v) => { v.authorization.verificationUri = 'https://example.invalid'; },
+    (v) => { v.authorization.userCode = 'abcd-efgh'; }, (v) => { v.authorization.userCode = 'ABCD-EFGH\n'; },
+    (v) => { v.authorization.userCode = null; }, (v) => { v.authorization.expiresAt = true; },
+    (v) => { v.authorization.phase = 'completed'; }, (v) => { v.authorization.phase = 'checking-access'; },
+    (v) => { v.operation.kind = 'connect'; }, (v) => { v.operation.phase = 'settled'; },
+    (v) => { v.capability.publisherName = null; }, (v) => { v.capability.publisherName = 'x'.repeat(97); },
+    (v) => { v.capability.publisherName = 'wrong\u202e'; },
+  ];
+  for (const change of mutations) {
+    const value = authorizing(2, 'waiting'); change(value); assert.equal(parseGitHubConnectionStatus(value), null);
+  }
+  const waiting = authorizing(2, 'waiting');
+  assert.equal(connectionProgress(waiting, authorizing(3, 'slow-down')), true);
+  assert.equal(connectionProgress(waiting, authorizing(3, 'checking-access')), true);
+  assert.equal(connectionProgress(authorizing(2, 'checking-access'), authorizing(3, 'waiting')), false);
+  assert.equal(connectionProgress(waiting, authorizing(3, 'requesting-code')), false);
+  for (const change of [
+    (v) => { v.authorization.userCode = 'WXYZ-1234'; },
+    (v) => { v.authorization.expiresAt = '2026-09-17T12:14:59Z'; },
+    (v) => { v.authorization.expiresAt = '2026-09-17T12:15:01Z'; },
+    (v) => { v.operation.id = 'replacement-authorize'; },
+    (v) => { v.capability.publisherName = 'Replacement publisher'; },
+  ]) {
+    const value = authorizing(3, 'waiting'); change(value); assert.equal(connectionProgress(waiting, value), false);
+  }
+  const unavailable = authorizing(3, 'waiting');
+  unavailable.capability.readOnlySessionAvailable = false; unavailable.capability.reason = 'busy';
+  assert.ok(parseGitHubConnectionStatus(unavailable), 'profile support is not transient Start permission');
+});
+
+test('device bridge uses only two fixed commands and a null-only browser reply; preview never invokes', async () => {
+  const calls = [];
+  const api = createNativeApi('native', (command, args) => {
+    calls.push({ command, args: clone(args) });
+    return Promise.resolve(command === 'github_connection_open_device_page' ? null : authorizing());
+  });
+  await api.startGitHubDevice({ projectId: 'project-a', repository: 'Owner/App' });
+  assert.equal(await api.openGitHubDevicePage({ sessionId: 'session-a', expectedRevision: 2 }), null);
+  assert.deepEqual(calls, [
+    { command: 'github_connection_start_device', args: { projectId: 'project-a', repository: 'Owner/App' } },
+    { command: 'github_connection_open_device_page', args: { sessionId: 'session-a', expectedRevision: 2 } },
+  ]);
+  for (const extra of ['url', 'userCode', 'deviceCode', 'token', 'clientId', 'scope']) {
+    await assert.rejects(api.startGitHubDevice({ projectId: 'project-a', repository: 'Owner/App', [extra]: SECRET }),
+      (error) => error.admission === 'not-admitted' && error.reason === 'invalid-input');
+    await assert.rejects(api.openGitHubDevicePage({ sessionId: 'session-a', expectedRevision: 2, [extra]: SECRET }),
+      (error) => error.admission === 'not-admitted' && error.reason === 'invalid-input');
+  }
+  assert.equal(calls.length, 2);
+  const malformed = createNativeApi('native', () => Promise.resolve({ token: SECRET }));
+  await assert.rejects(malformed.openGitHubDevicePage({ sessionId: 'session-a', expectedRevision: 2 }),
+    (error) => error.admission === 'unknown' && !JSON.stringify(error).includes(SECRET));
+  for (const mode of ['preview', 'unavailable']) {
+    const preview = createNativeApi(mode, () => { throw new Error('MUST NOT INVOKE'); });
+    await assert.rejects(preview.startGitHubDevice({ projectId: 'project-a', repository: 'Owner/App' }));
+    await assert.rejects(preview.openGitHubDevicePage({ sessionId: 'session-a', expectedRevision: 2 }));
+  }
+  const previewSource = readFileSync(new URL('../src/preview.ts', import.meta.url), 'utf8');
+  assert.match(previewSource, /startGitHubDevice: connectionUnavailable/);
+  assert.match(previewSource, /openGitHubDevicePage: connectionUnavailable/);
+});
+
+test('one acknowledged authorize spans waiting and access checks; only native settled facts connect', async () => {
+  const missing = await attached({ registry: idle(1, true) });
+  assert.equal(missing.controller.canConnect(), true);
+  assert.equal(missing.controller.startDevice(), false, 'token support is not publisher/device support');
+  const h = await attached({ registry: deviceIdle() });
+  assert.equal(h.controller.startDevice(), true); assert.equal(h.count('authorize'), 1);
+  assert.equal(h.controller.startDevice(), false); assert.equal(h.controller.connectToken(SECRET, h.handoff), false);
+  assert.equal(h.controller.canDisconnect(), false, 'no original session ID is guessed');
+  h.last('authorize').resolve(authorizing(2, 'waiting')); await flush();
+  assert.equal(h.state.busy, 'authorize'); assert.equal(h.controller.canDisconnect(), true);
+  assert.equal(currentGitHubAuthorization(h.state).userCode, 'ABCD-EFGH');
+  h.publish(authorizing(3, 'slow-down'));
+  assert.equal(h.state.status.operation.id, 'authorize-a');
+  assert.equal(h.controller.canOpenDevicePage(), true);
+  h.publish(authorizing(4, 'checking-access'));
+  assert.equal(currentGitHubAuthorization(h.state).userCode, null);
+  assert.equal(h.controller.canOpenDevicePage(), false); assert.equal(h.controller.canRefresh(), false);
+  h.publish(authorized(5));
+  assert.equal(h.state.busy, null); assert.equal(currentGitHubAuthorization(h.state), null);
+  assert.equal(h.controller.canRefresh(), true); assert.equal(h.count('authorize'), 1);
+  assert.equal(h.state.status.facts.remoteMutationAvailable, false);
+  assert.equal(h.state.status.facts.dispatchAvailable, false);
+  assert.equal(JSON.stringify(h.state).includes(SECRET), false);
+});
+
+test('current-only code projection refuses retained, uncertain, changed-context and unavailable views', async () => {
+  const h = await waitingDevice(); assert.ok(currentGitHubAuthorization(h.state));
+  for (const patch of [
+    { status: null, retained: h.state.status }, { uncertain: true }, { blocked: true },
+    { retirementPending: true }, { error: 'response-invalid' }, { helpState: 'previous' },
+    { mode: 'preview' }, { context: { ...CONTEXT, repository: 'Owner/Other' } },
+  ]) assert.equal(currentGitHubAuthorization({ ...h.state, ...patch }), null);
+  const component = readFileSync(new URL('../src/components/GitHubConnection.tsx', import.meta.url), 'utf8');
+  assert.match(component, /const authorization = currentGitHubAuthorization\(state\)/);
+  assert.doesNotMatch(component, /href=|window\.open|localStorage|sessionStorage|dangerouslySetInnerHTML/);
+  const controller = readFileSync(new URL('../src/githubConnectionController.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(controller, /Date\.now|setInterval|setTimeout|\bfetch\(/);
+});
+
+test('lost Start stays uncertain even with later admission; only exact original Status/Cancel recovers', async () => {
+  const h = await attached({ registry: deviceIdle() });
+  h.controller.startDevice(); h.last('authorize').reject(new Error(SECRET)); await flush();
+  assert.equal(h.state.uncertain, true); assert.equal(h.controller.canDisconnect(), false);
+  h.publish(authorizing(2, 'waiting')); await h.controller.checkStatus();
+  assert.equal(h.state.uncertain, true); assert.equal(currentGitHubAuthorization(h.state), null);
+  assert.equal(h.controller.openDevicePage(), false); assert.equal(h.controller.startDevice(), false);
+  assert.equal(h.controller.canDisconnect(), true); assert.equal(h.controller.disconnect(), true);
+  assert.deepEqual(h.last('disconnect').args, { sessionId: 'session-a' });
+  assert.equal(h.count('authorize'), 1); assert.equal(h.count('browser'), 0);
+  h.last('disconnect').resolve(deviceIdle(3)); await flush();
+  assert.equal(h.state.uncertain, false); assert.equal(h.controller.canStartDevice(), true);
+  assert.equal(h.count('authorize'), 1, 'original settlement never automatically restarts authorization');
+  assert.equal(JSON.stringify(h.state).includes(SECRET), false);
+});
+
+test('device Start retains its original across away-and-back, help/service loss and disposal', async () => {
+  for (const cause of ['context', 'help', 'service', 'dispose']) {
+    const h = await attached({ registry: deviceIdle() }); h.controller.startDevice();
+    if (cause === 'context') { h.controller.setContext(null); h.controller.setContext(CONTEXT); }
+    if (cause === 'help') { h.controller.setHelp(null); h.controller.setHelp(HELP); }
+    if (cause === 'service') await h.controller.attach(harness({ registry: deviceIdle() }).port);
+    if (cause === 'dispose') h.controller.dispose();
+    assert.equal(h.count('disconnect'), 0, cause); assert.equal(h.controller.startDevice(), false, cause);
+    h.last('authorize').resolve(authorizing(2, 'waiting')); await flush();
+    assert.equal(h.count('disconnect'), 1, cause);
+    assert.deepEqual(h.last('disconnect').args, { sessionId: 'session-a' });
+    assert.equal(currentGitHubAuthorization(h.state), null, cause);
+    assert.equal(h.count('authorize'), 1); assert.equal(h.count('browser'), 0);
+    h.last('disconnect').resolve(deviceIdle(3)); await flush();
+    assert.equal(h.count('disconnect'), 1, 'exact original retirement is not replayed');
+  }
+});
+
+test('browser null/error is not status or authentication and never prevents original Cancel', async () => {
+  const h = await waitingDevice(); const originalStatus = clone(h.state.status);
+  assert.equal(h.controller.openDevicePage(), true); assert.equal(h.controller.openDevicePage(), false);
+  assert.deepEqual(h.last('browser').args, { sessionId: 'session-a', expectedRevision: 2 });
+  assert.deepEqual(h.state.status, originalStatus); assert.equal(h.state.busy, 'authorize');
+  h.last('browser').resolve(null); await flush();
+  assert.equal(h.state.browserHandoff, 'accepted'); assert.deepEqual(h.state.status, originalStatus);
+  assert.equal(h.state.busy, 'authorize'); assert.equal(h.count('authorize'), 1);
+  h.controller.openDevicePage(); h.last('browser').resolve({ token: SECRET }); await flush();
+  assert.equal(h.state.browserHandoff, 'unconfirmed'); assert.deepEqual(h.state.status, originalStatus);
+  assert.equal(h.state.error, null); assert.equal(h.count('browser'), 2, 'no automatic reopen');
+  assert.equal(JSON.stringify(h.state).includes(SECRET), false);
+  h.controller.openDevicePage(); const lastOpen = h.last('browser');
+  assert.equal(h.controller.disconnect(), true); assert.equal(h.count('disconnect'), 1);
+  assert.equal(currentGitHubAuthorization(h.state), null);
+  lastOpen.reject(new Error(SECRET)); await flush();
+  assert.equal(h.state.browserHandoff, 'idle'); assert.equal(h.state.retirementPending, true);
+  assert.equal(h.count('authorize'), 1); assert.equal(h.count('browser'), 3);
+  h.last('disconnect').resolve(deviceIdle(3)); await flush();
+  assert.equal(h.controller.canStartDevice(), true);
+});
+
+test('browser late result is discarded after context changes; unsent handoffs never invoke', async () => {
+  const h = await waitingDevice(); h.controller.openDevicePage(); const original = h.last('browser');
+  h.controller.setContext(null); h.controller.setContext(CONTEXT);
+  h.last('disconnect').resolve(deviceIdle(3)); await flush();
+  original.resolve(null); await flush();
+  assert.equal(h.state.browserHandoff, 'idle'); assert.equal(h.controller.canStartDevice(), true);
+  assert.equal(h.count('browser'), 1);
+  const unsent = await attached({ registry: deviceIdle() });
+  const stop = unsent.controller.subscribe(() => {
+    if (unsent.state.busy === 'authorize') unsent.controller.setContext(null);
+  });
+  assert.equal(unsent.controller.startDevice(), false); stop();
+  assert.equal(unsent.count('authorize'), 0); assert.equal(unsent.count('disconnect'), 0);
+  const opening = await waitingDevice();
+  const stopOpening = opening.controller.subscribe(() => {
+    if (opening.state.browserHandoff === 'opening') opening.controller.setContext(null);
+  });
+  assert.equal(opening.controller.openDevicePage(), false); stopOpening();
+  assert.equal(opening.count('browser'), 0); assert.equal(opening.count('disconnect'), 1);
+  opening.last('disconnect').resolve(deviceIdle(3)); await flush();
+});
+
+test('failed pre-token authorize cannot Refresh and Unknown stays absorbing after late success', async () => {
+  for (const reason of ['network-unavailable', 'tls-failed', 'rate-limited', 'forbidden', 'unauthorized', 'publisher-unconfigured']) {
+    const failedStart = authorizationFailed(3, reason);
+    assert.equal(connectionRetryable(failedStart), false);
+    const h = await attached({ registry: failedStart });
+    assert.equal(h.controller.refresh(), false); assert.equal(h.controller.startDevice(), false);
+    assert.equal(h.controller.canDisconnect(), true);
+    h.controller.disconnect(); h.last('disconnect').resolve(deviceIdle(4)); await flush();
+    assert.equal(h.controller.canStartDevice(), true); assert.equal(h.count('authorize'), 0);
+  }
+  const h = await waitingDevice();
+  const cleanup = authorizing(3); cleanup.authorization = null; cleanup.session.state = 'cleanup-unknown';
+  cleanup.operation.phase = 'cleanup-unknown'; cleanup.operation.reason = 'cleanup-unknown';
+  cleanup.capability.readOnlySessionAvailable = false; cleanup.capability.reason = 'cleanup-unknown';
+  h.publish(cleanup); assert.equal(h.state.blocked, true); assert.equal(currentGitHubAuthorization(h.state), null);
+  h.publish(authorized(4)); assert.equal(h.state.blocked, true);
+  assert.equal(h.controller.startDevice(), false); assert.equal(h.controller.openDevicePage(), false);
+  assert.equal(h.count('authorize'), 1);
 });

@@ -1,10 +1,11 @@
 // Closed presentation/wire checks. Core alone judges credential policy. These
 // limits apply to already-materialized JS data, not upstream IPC allocations.
 import type { ApiError } from './types.ts';
-import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
+import type { AssetFileKind, AssetKind, AssetScalarKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
 
-export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile'] as const;
-export const ASSET_KINDS = [...ASSET_FILE_KINDS, 'google-wif', 'project-read-token'] as const;
+export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8'] as const;
+export const ASSET_SCALAR_KINDS = ['google-wif', 'project-read-token', 'apple-review-contact', 'apple-review-demo-account', 'apple-operation-commitment'] as const;
+export const ASSET_KINDS = [...ASSET_FILE_KINDS, ...ASSET_SCALAR_KINDS] as const;
 export const ASSET_REASONS = ['none', 'closed', 'unqualified', 'unsupported-platform', 'unsupported-filesystem', 'unsupported-format', 'invalid-request', 'busy', 'source-refused', 'source-changed', 'material-limit', 'parser-limit', 'project-overlap', 'exclusion-unconfirmed', 'capacity', 'context-stale', 'user-cancelled', 'review-expired', 'deadline', 'document-lost', 'shutdown', 'cleanup-unknown',
   'vault-uninitialized', 'vault-key-missing', 'vault-keyring-locked', 'vault-keyring-denied', 'vault-keyring-unavailable', 'vault-provider-unsupported', 'vault-corrupt', 'vault-interrupted', 'vault-durability-unknown'] as const;
 export const ASSET_PLATFORMS = ['android', 'ios', 'project'] as const;
@@ -16,8 +17,12 @@ export const SESSION_FIELDS = {
   'ios-firebase': [],
   'apple-p12': ['password'],
   'apple-profile': [],
+  'asc-p8': ['keyId', 'issuerId'],
   'google-wif': ['provider', 'serviceAccount'],
   'project-read-token': ['token'],
+  'apple-review-contact': ['firstName', 'lastName', 'email', 'phone'],
+  'apple-review-demo-account': ['username', 'password'],
+  'apple-operation-commitment': ['keyBase64', 'keyVersion'],
 } as const;
 const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'android-keystore': [['file', 'ANDROID_KEYSTORE_BASE64'], ['storePassword', 'ANDROID_KEYSTORE_PASSWORD'], ['keyAlias', 'ANDROID_KEY_ALIAS'], ['keyPassword', 'ANDROID_KEY_PASSWORD']],
@@ -25,8 +30,12 @@ const fieldLayout: Record<AssetKind, readonly (readonly [string, string])[]> = {
   'ios-firebase': [['file', 'IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64']],
   'apple-p12': [['file', 'APPLE_DISTRIBUTION_P12_BASE64'], ['password', 'APPLE_DISTRIBUTION_P12_PASSWORD']],
   'apple-profile': [['file', 'APPLE_PROVISIONING_PROFILE_BASE64']],
+  'asc-p8': [['file', 'ASC_PRIVATE_KEY_P8_BASE64'], ['keyId', 'ASC_KEY_ID'], ['issuerId', 'ASC_ISSUER_ID']],
   'google-wif': [['provider', 'GOOGLE_WIF_PROVIDER'], ['serviceAccount', 'GOOGLE_SERVICE_ACCOUNT']],
   'project-read-token': [['token', 'PROJECT_READ_TOKEN']],
+  'apple-review-contact': [['firstName', 'APPLE_REVIEW_CONTACT_FIRST_NAME'], ['lastName', 'APPLE_REVIEW_CONTACT_LAST_NAME'], ['email', 'APPLE_REVIEW_CONTACT_EMAIL'], ['phone', 'APPLE_REVIEW_CONTACT_PHONE']],
+  'apple-review-demo-account': [['username', 'APPLE_DEMO_ACCOUNT_USERNAME'], ['password', 'APPLE_DEMO_ACCOUNT_PASSWORD']],
+  'apple-operation-commitment': [['keyBase64', 'OPERATION_COMMITMENT_KEY_BASE64'], ['keyVersion', 'OPERATION_COMMITMENT_KEY_VERSION']],
 };
 const states = ['not-applicable', 'missing', 'unknown', 'invalid', 'configured', 'format-valid'];
 const issues = ['not-run', 'incomplete', 'unsupported-format', 'unsupported-variant', 'material-limit', 'parser-limit', 'empty-file', 'suffix-conflict', 'malformed-container', 'required-missing', 'value-nul', 'scalar-format', 'pkcs8-algorithm', 'firebase-shape', 'identity-mismatch'];
@@ -42,6 +51,7 @@ function keys(value: unknown, names: readonly string[]): value is ObjectValue {
 }
 function one(value: unknown, values: readonly string[]): boolean { return typeof value === 'string' && values.includes(value); }
 export function isAssetFileKind(value: unknown): value is AssetFileKind { return one(value, ASSET_FILE_KINDS); }
+export function isAssetScalarKind(value: unknown): value is AssetScalarKind { return one(value, ASSET_SCALAR_KINDS); }
 export function assetCounter(value: unknown): value is number { return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff; }
 function token(value: unknown): value is string { return typeof value === 'string' && value.length === 32 && /^[0-9a-f]{32}$/u.test(value); }
 function projectId(value: unknown): value is string { return typeof value === 'string' && value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9_-]+$/u.test(value); }
@@ -150,7 +160,7 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     const operation = value.operation;
     if (operation !== null) {
       if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview']) ||
-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-project', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock']) ||
+          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'choose-project', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock']) ||
           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
@@ -160,7 +170,8 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
       if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit']) ||
           !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
           !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
-      if (['choose-project-path', 'choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
+      if (operation.operation === 'choose-images' && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown'])) return null;
+      if (['choose-images', 'choose-project-path', 'choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
       if (operation.preview !== null && (!keys(operation.preview, ['token', 'action', 'expiresInMs', 'subject']) || !token(operation.preview.token) ||
           !one(operation.preview.action, ['save', 'bind', 'delete', 'initialize']) || !assetCounter(operation.preview.expiresInMs) || operation.preview.expiresInMs > 300000 ||
@@ -242,9 +253,9 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
       const labelled = keys(value, ['contextRevision', 'source', 'fields', 'label']) && assetLabelFits(value.label);
       if (!keys(value, ['contextRevision', 'source', 'fields']) && !labelled) return false;
       if (source.type === 'selection') return keys(source, ['type', 'selectionToken']) && token(source.selectionToken) &&
-        (fields(value.fields, []) || fields(value.fields, SESSION_FIELDS['android-keystore']) || fields(value.fields, SESSION_FIELDS['apple-p12']));
-      return keys(source, ['type', 'kind', 'replacement']) && source.type === 'scalar' && one(source.kind, ['google-wif', 'project-read-token']) &&
-        (source.replacement === null || recordRef(source.replacement)) && fields(value.fields, SESSION_FIELDS[source.kind as 'google-wif' | 'project-read-token']);
+        (fields(value.fields, []) || fields(value.fields, SESSION_FIELDS['android-keystore']) || fields(value.fields, SESSION_FIELDS['apple-p12']) || fields(value.fields, SESSION_FIELDS['asc-p8']));
+      return keys(source, ['type', 'kind', 'replacement']) && source.type === 'scalar' && isAssetScalarKind(source.kind) &&
+        (source.replacement === null || recordRef(source.replacement)) && fields(value.fields, SESSION_FIELDS[source.kind]);
     }
   }
 }
@@ -279,7 +290,7 @@ export const ASSET_REASON_HELP: Record<AssetReason, string> = {
   unqualified: 'Native session import has not completed its required qualification. You can read the guides, but this build cannot collect private inputs.',
   'unsupported-platform': 'Session import needs its separately admitted native profile: Linux x86_64 or Apple-silicon macOS. Apple P12/profile collection is macOS-only. Windows and browser previews cannot collect these inputs; format support does not enable a native profile.',
   'unsupported-filesystem': 'The native profile requires its admitted local filesystem: ext-family on Linux or APFS on macOS. Network, overlay and FUSE sources are refused. Your original file was not changed.',
-  'unsupported-format': 'Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist and, on admitted macOS, P12 and DER CMS profile envelopes. P12 passwords and Apple authenticity are not tested by format assessment. P8 and binary plist are not enabled.',
+  'unsupported-format': 'Supported observations are JKS headers, Android Firebase JSON, iOS Firebase XML plist, unencrypted P8 PKCS#8 envelopes and, on admitted macOS, P12 and DER CMS profile envelopes. P8 assessment checks envelope/EC-P256 identifiers only, not mathematical key validity or account access. Passwords and Apple authenticity are not tested. Binary plist is not enabled.',
   'invalid-request': 'The submitted input does not fit the supported interface. Review the field guide; no repair or retry was performed.',
   busy: 'The original session operation still owns its slot. Wait for its status or request Cancel; do not start a replacement operation.',
   'source-refused': 'The original file could not be safely captured. It must be a supported private regular file outside registered projects, without symbolic-link traversal. The app will not change its permissions or contents.',

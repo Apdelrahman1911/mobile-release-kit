@@ -1,5 +1,5 @@
-//! Original read-only source custody. Linux credentials and the Mac/Windows
-//! project-only probes are separate; no pathname is renderer authority.
+//! Original read-only source custody. Platform credential/project adapters
+//! are separate; no pathname is renderer authority.
 //! The operation retains SourceBook outside its worker. A panic/uncertain close
 //! therefore cannot erase its original acquisition facts or authorize a retry.
 use std::{path::{Path, PathBuf}, sync::Arc};
@@ -97,11 +97,111 @@ pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[derive(Clone, PartialEq, Eq)]
 struct OriginAlias { name: Vec<u8>, target: Vec<u8>, identity: FileIdentity }
-pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity,
+pub(crate) struct PosixOriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity,
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     alias: Option<OriginAlias>,
 }
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+pub(crate) type OriginWitness = PosixOriginWitness;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub(crate) type OriginWitness = mrk_windows_installed_native::CredentialOrigin;
 pub(crate) struct CapturedSource { pub(crate) bytes: Vec<u8>, pub(crate) origin: Arc<OriginWitness> }
+// A separate public-image purpose, not a credential Kind or vault record. These
+// values are native-only and deliberately have no Clone/Serialize implementation.
+// Every descriptor has already passed its original terminal comparison/close
+// before a batch can leave capture_public_images.
+pub(crate) const PUBLIC_IMAGE_FILES: usize = 10;
+pub(crate) const PUBLIC_IMAGE_FILE_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const PUBLIC_IMAGE_BATCH_BYTES: usize = 24 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageSourceObject {
+    Posix { device: u64, inode: u64 },
+    Windows { volume_serial: u64, file_id: [u8; 16] },
+}
+pub(crate) enum PublicImageOriginWitness {
+    Posix(PosixOriginWitness),
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    Windows(mrk_windows_installed_native::PublicImageOrigin),
+}
+impl PublicImageOriginWitness {
+    fn source_object(&self) -> ImageSourceObject {
+        match self {
+            Self::Posix(origin) => ImageSourceObject::Posix { device: origin.leaf.common.dev, inode: origin.leaf.common.ino },
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            Self::Windows(origin) => {
+                let identity = origin.identity();
+                ImageSourceObject::Windows { volume_serial: identity.volume_serial, file_id: identity.file_id }
+            },
+        }
+    }
+    fn retained_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Posix(origin) => {
+                let bytes = origin.path.capacity()
+                    .checked_add(origin.ancestry.capacity().checked_mul(std::mem::size_of::<DirectoryIdentity>())?)?;
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                let bytes = match &origin.alias {
+                    Some(alias) => bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?,
+                    None => bytes,
+                };
+                Some(bytes)
+            },
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+            Self::Windows(origin) => origin.retained_heap_bytes(),
+        }
+    }
+}
+// Reservation DATA from the existing document owner, not another quota owner.
+// payload_bytes retains the old byte_limit; retained_bytes includes that payload
+// plus only the already charged image-control allowance, never additional credit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PublicImageBudget { pub(crate) payload_bytes: usize, pub(crate) retained_bytes: usize }
+impl PublicImageBudget {
+    fn valid(self) -> bool {
+        (1..=PUBLIC_IMAGE_BATCH_BYTES).contains(&self.payload_bytes) && self.retained_bytes > self.payload_bytes
+    }
+    fn admit(self, retained: Option<usize>) -> Result<usize, Reason> {
+        retained.filter(|bytes| *bytes <= self.retained_bytes).ok_or(Reason::MaterialLimit)
+    }
+}
+fn public_image_token(stop: &mut dyn FnMut() -> bool) -> Result<String, Reason> {
+    if stop() { return Err(Reason::UserCancelled); }
+    let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| Reason::SourceRefused)?;
+    if stop() { return Err(Reason::UserCancelled); }
+    let mut token = String::new(); token.try_reserve_exact(32).map_err(|_| Reason::Capacity)?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes { token.push(char::from(HEX[usize::from(byte >> 4)])); token.push(char::from(HEX[usize::from(byte & 15)])); }
+    Ok(token)
+}
+
+pub(crate) struct CapturedPublicImage {
+    pub(crate) item_id: String, pub(crate) display_name: String, pub(crate) bytes: Vec<u8>, pub(crate) sha256: String,
+    origin: PublicImageOriginWitness,
+}
+impl CapturedPublicImage {
+    // Private native-to-core exclusion DATA only. A target which aliases this
+    // original object must not be replaced even via an alternate mount path.
+    // These identifiers never enter a renderer DTO, log or public evidence.
+    pub(crate) fn source_object(&self) -> ImageSourceObject { self.origin.source_object() }
+}
+pub(crate) struct CapturedPublicImageBatch {
+    pub(crate) images: Vec<CapturedPublicImage>, pub(crate) protected_sources: Vec<String>,
+}
+impl CapturedPublicImageBatch {
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>()
+            .checked_add(self.images.capacity().checked_mul(std::mem::size_of::<CapturedPublicImage>())?)?
+            .checked_add(self.protected_sources.capacity().checked_mul(std::mem::size_of::<String>())?)?;
+        for image in &self.images {
+            bytes = bytes.checked_add(image.item_id.capacity())?.checked_add(image.display_name.capacity())?
+                .checked_add(image.bytes.capacity())?.checked_add(image.sha256.capacity())?
+                .checked_add(image.origin.retained_heap_bytes()?)?;
+        }
+        for path in &self.protected_sources { bytes = bytes.checked_add(path.capacity())?; }
+        Some(bytes)
+    }
+}
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 impl OriginWitness {
     // Pure retained DATA accounting; this neither reopens nor qualifies a path.
@@ -161,7 +261,7 @@ pub(crate) struct InstalledSourceFacts {
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
     match kind { FileKind::AndroidKeystore | FileKind::AppleP12 => 32 * 1024 * 1024,
-        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile => 4 * 1024 * 1024 }
+        FileKind::AndroidFirebase | FileKind::IosFirebase | FileKind::AppleProfile | FileKind::AscP8 => 4 * 1024 * 1024 }
 }
 fn private_file(mode: u32) -> bool { mode & 0o077 == 0 }
 fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<usize, Reason> {
@@ -180,6 +280,23 @@ mod linux {
     enum OriginalState { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Identity { Directory(DirectoryIdentity), File(FileIdentity) }
+    // Private and public leaf permissions are intentionally not interchangeable.
+    // The credential entry always selects Private; only the closed image entry
+    // can select PublicImage, and both still require an actual regular file.
+    #[derive(Clone, Copy)]
+    enum LeafPolicy { Private, PublicImage }
+    impl LeafPolicy {
+        fn permits(self, identity: FileIdentity) -> bool {
+            match self {
+                Self::Private => private_file(identity.common.mode),
+                // Refuse hardlinks. The separately retained original dev/ino
+                // excludes mount aliases from later target replacement too.
+                // Read permission is checked by the original read-only open;
+                // ordinary public 0644/0664 files need not be credential-private.
+                Self::PublicImage => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
+            }
+        }
+    }
     // Observation only. These cells neither own descriptors nor influence the
     // production custody state. Fixed counters are recorded at the real calls.
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
@@ -307,12 +424,15 @@ mod linux {
             fixture_mark!(self, index, 3); Ok(index)
         }
         fn child(&mut self, parent: usize, name: &[u8], file: bool, stop: &mut dyn FnMut() -> bool) -> Result<usize, Reason> {
+            self.child_policy(parent, name, file, LeafPolicy::Private, stop)
+        }
+        fn child_policy(&mut self, parent: usize, name: &[u8], file: bool, policy: LeafPolicy, stop: &mut dyn FnMut() -> bool) -> Result<usize, Reason> {
             checkpoint(stop)?;
             let index = self.reserve(Some(parent), name)?;
             let before = stat::fstatat(self.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_| Reason::SourceRefused)?;
             checkpoint(stop)?;
             let expected = if file { Identity::File(file_identity(&before)?) } else { Identity::Directory(directory_identity(&before)?) };
-            if file && !private_file(before.st_mode) { return Err(Reason::SourceRefused); }
+            if let Identity::File(identity) = expected { if !policy.permits(identity) { return Err(Reason::SourceRefused); } }
             self.slots[index].state = OriginalState::Acquiring;
             fixture_mark!(self, index, 1);
             let flags = if file { OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK } else { directory_flags() };
@@ -359,7 +479,8 @@ mod linux {
             }
             Ok(())
         }
-        fn close_all(&mut self) -> bool {
+        fn close_all(&mut self) -> bool { self.close_all_observing(&mut |_| {}) }
+        fn close_all_observing(&mut self, failed: &mut dyn FnMut(Reason)) -> bool {
             let mut known = true;
             for slot in self.slots.iter_mut().rev() {
                 match slot.state {
@@ -378,12 +499,12 @@ mod linux {
                                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
                                     slot.trace[6].set(self.trace.next());
                                 },
-                                Err(_) => { slot.state = OriginalState::Unknown; known = false; }
+                                Err(_) => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
                             },
-                            None => { slot.state = OriginalState::Unknown; known = false; }
+                            None => { slot.state = OriginalState::Unknown; known = false; failed(Reason::CleanupUnknown); }
                         }
                     }
-                    OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; }
+                    OriginalState::Acquiring | OriginalState::Closing | OriginalState::Unknown => { known = false; failed(Reason::CleanupUnknown); }
                 }
             }
             self.terminal = true;
@@ -399,6 +520,22 @@ mod linux {
             // Independent original closes run despite another close's failure.
             if !self.close_all() { return Err(Reason::CleanupUnknown); }
             checkpoint(stop)?; result
+        }
+        fn finish_public_images<T>(&mut self, result: Result<T, Reason>, stop: &mut dyn FnMut() -> bool,
+            failed: &mut dyn FnMut(Reason)) -> Result<T, Reason> {
+            let result = result.and_then(|value| { self.terminal_check(stop)?; Ok(value) });
+            // The image-only observer latches the original STOP/timestamp
+            // before ANY consuming close. It only writes a small OriginalWork
+            // cell, never re-enters this source or the document mutex. A later
+            // close/join cannot postpone the first observed failure deadline.
+            if let Err(reason) = &result { failed(*reason); }
+            if !self.close_all_observing(failed) { return Err(Reason::CleanupUnknown); }
+            match result {
+                Err(reason) => Err(reason), // Preserve the error which set STOP.
+                Ok(value) => match checkpoint(stop) {
+                    Ok(()) => Ok(value), Err(reason) => { failed(reason); Err(reason) },
+                },
+            }
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
         pub(crate) fn fixture_facts(&self) -> Option<serde_json::Value> {
@@ -468,9 +605,11 @@ mod linux {
         let leaf = names.last().ok_or(Reason::SourceRefused)?;
         let suffix = leaf.rsplit(|byte| *byte == b'.').next().ok_or(Reason::SourceRefused)?;
         let matches = match kind {
-            FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore"),
+            FileKind::AndroidKeystore => suffix.eq_ignore_ascii_case(b"jks") || suffix.eq_ignore_ascii_case(b"keystore")
+            || suffix.eq_ignore_ascii_case(b"p12") || suffix.eq_ignore_ascii_case(b"pfx"),
             FileKind::AndroidFirebase => suffix.eq_ignore_ascii_case(b"json"),
             FileKind::IosFirebase => suffix.eq_ignore_ascii_case(b"plist"),
+            FileKind::AscP8 => suffix.eq_ignore_ascii_case(b"p8"),
             FileKind::AppleP12 | FileKind::AppleProfile => return Err(Reason::UnsupportedPlatform),
         };
         if !matches || !leaf.contains(&b'.') { return Err(Reason::UnsupportedFormat); } Ok(())
@@ -540,6 +679,155 @@ mod linux {
             Ok(CapturedSource { bytes, origin: Arc::new(OriginWitness { path: path.clone(), ancestry, leaf: file }) })
         })();
         book.finish(result, stop)
+    }
+    fn public_image_name(path: &Path, ordinal: usize) -> Result<String, Reason> {
+        let components = parts(path)?;
+        let name = components.last().ok_or(Reason::SourceRefused)?;
+        let extension = name.rsplit(|byte| *byte == b'.').next().ok_or(Reason::UnsupportedFormat)?;
+        let format = if extension.eq_ignore_ascii_case(b"png") { "png" }
+            else if extension.eq_ignore_ascii_case(b"jpg") || extension.eq_ignore_ascii_case(b"jpeg") { "jpg" }
+            else { return Err(Reason::UnsupportedFormat); };
+        if !name.contains(&b'.') { return Err(Reason::UnsupportedFormat); }
+        // Display DATA, not a destination. Core derives portable target names
+        // and shows any rename before Apply. No absolute source spelling leaks.
+        if let Ok(name) = std::str::from_utf8(name) {
+            if !name.is_empty() && name.len() <= 255 && !name.contains(['/', '\\'])
+                && !name.chars().any(|c| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) {
+                return Ok(name.to_owned());
+            }
+        }
+        Ok(format!("selected-image-{:02}.{format}", ordinal + 1))
+    }
+    fn public_image_size(total: usize, size: u64) -> Result<(usize, usize), Reason> {
+        let size = usize::try_from(size).map_err(|_| Reason::MaterialLimit)?;
+        let total = total.checked_add(size).ok_or(Reason::MaterialLimit)?;
+        if size == 0 || size > PUBLIC_IMAGE_FILE_BYTES || total > PUBLIC_IMAGE_BATCH_BYTES { return Err(Reason::MaterialLimit); }
+        Ok((size, total))
+    }
+    fn public_protected_source(path: &Path, root: &RegisteredRoot, root_depth: usize,
+        ancestry: &[DirectoryIdentity], root_id: DirectoryIdentity) -> Result<Option<String>, Reason> {
+        let physical = ancestry.iter().position(|identity| identity.same_object(root_id));
+        let lexical = path.strip_prefix(&root.path).ok();
+        match (physical, lexical) {
+            (None, None) => Ok(None),
+            (Some(depth), Some(relative)) if depth == root_depth => {
+                let relative = relative.to_str().filter(|value| !value.is_empty() && value.len() <= PATH_LIMIT
+                    && !value.contains('\\') && !value.chars().any(char::is_control)
+                    && value.split('/').all(|part| !matches!(part, "" | "." | "..")))
+                    .ok_or(Reason::SourceRefused)?;
+                Ok(Some(relative.to_owned()))
+            },
+            // Bind-mount/ancestry aliases cannot hide an original project file
+            // from the core's preserve-source roster. Refuse rather than guess.
+            _ => Err(Reason::SourceRefused),
+        }
+    }
+    pub(crate) fn capture_public_images(book: &mut SourceBook, paths: Vec<PathBuf>, root: &RegisteredRoot, budget: PublicImageBudget,
+        stop: &mut dyn FnMut() -> bool, failed: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> {
+        use sha2::{Digest, Sha256};
+        if !(1..=PUBLIC_IMAGE_FILES).contains(&paths.len()) || paths.capacity() > PUBLIC_IMAGE_FILES
+            || paths.iter().any(|path| path.capacity() > PATH_LIMIT)
+            || !budget.valid() { return Err(Reason::MaterialLimit); }
+        let expected_root = root.identity.posix()?;
+        let root_parts = parts(&root.path)?;
+        let mut spellings = Vec::new(); spellings.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+        let mut names = Vec::new(); names.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+        for (ordinal, path) in paths.iter().enumerate() {
+            names.push(public_image_name(path, ordinal)?);
+            let spelling = parts(path)?;
+            if spelling.is_empty() { return Err(Reason::SourceRefused); }
+            spellings.push(spelling);
+        }
+        let capacity = roster_limit(std::iter::once(root_parts.len())
+            .chain(spellings.iter().map(|parts| parts.len() - 1)), paths.len())?;
+        // End preflight borrows before the closure takes ownership of paths.
+        drop(spellings);
+        // The complete finite roster is checked before the first syscall. One
+        // book owns all files, so terminal checks cover the complete batch while
+        // all original parents/leaves remain held; capture is never repeated.
+        book.begin(capacity, 0)?;
+        let result = (|| {
+            book.root(stop)?;
+            let root_chain = book.chain(&root_parts, stop)?;
+            let root_id = book.directory(*root_chain.last().ok_or(Reason::SourceRefused)?)?;
+            if root_id != expected_root { return Err(Reason::SourceChanged); }
+            let mut originals = Vec::new(); originals.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+            let mut protected_sources = Vec::new(); protected_sources.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+            let mut total = 0;
+            for path in &paths {
+                let spelling = parts(path)?;
+                let (name, parents) = spelling.split_last().ok_or(Reason::SourceRefused)?;
+                let chain = book.chain(parents, stop)?;
+                let mut ancestry = Vec::new(); ancestry.try_reserve_exact(chain.len()).map_err(|_| Reason::Capacity)?;
+                for index in &chain { ancestry.push(book.directory(*index)?); }
+                let parent = *chain.last().ok_or(Reason::SourceRefused)?;
+                let leaf = book.child_policy(parent, name, true, LeafPolicy::PublicImage, stop)?;
+                let file = match book.slots[leaf].identity { Some(Identity::File(identity)) => identity, _ => return Err(Reason::SourceRefused) };
+                if originals.iter().any(|(_, previous, _): &(usize, FileIdentity, Vec<DirectoryIdentity>)|
+                    previous.common.same_object(file.common)) { return Err(Reason::SourceRefused); }
+                let (_, next) = public_image_size(total, file.size)?; total = next;
+                if total > budget.payload_bytes { return Err(Reason::MaterialLimit); }
+                if let Some(relative) = public_protected_source(path, root, root_parts.len(), &ancestry, root_id)? {
+                    protected_sources.push(relative);
+                }
+                originals.push((leaf, file, ancestry));
+            }
+            let mut images = Vec::new(); images.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+            let mut leaves = Vec::new(); leaves.try_reserve_exact(paths.len()).map_err(|_| Reason::Capacity)?;
+            // All selected identities/sizes were admitted above. Move originals'
+            // restriction DATA, never their descriptors, without a payload copy.
+            for ((path, display_name), (leaf, file, ancestry)) in paths.into_iter().zip(names).zip(originals) {
+                let item_id = public_image_token(stop)?;
+                if images.iter().any(|image: &CapturedPublicImage| image.item_id == item_id) { return Err(Reason::SourceRefused); }
+                let mut sha256 = String::new(); sha256.try_reserve_exact(64).map_err(|_| Reason::Capacity)?;
+                images.push(CapturedPublicImage { item_id, display_name, bytes: Vec::new(), sha256,
+                    origin: PublicImageOriginWitness::Posix(PosixOriginWitness { path, ancestry, leaf: file }) });
+                leaves.push(leaf);
+            }
+            drop(root_parts); drop(root_chain);
+            let mut batch = CapturedPublicImageBatch { images, protected_sources };
+            // Count the same retained source book, return controls, and the
+            // bounded transient name copies used by the original POSIX checks.
+            let controls = std::mem::size_of::<SourceBook>().checked_add(book.retained_bytes().ok_or(Reason::Capacity)?)
+                .and_then(|bytes| leaves.capacity().checked_mul(std::mem::size_of::<usize>()).and_then(|n| bytes.checked_add(n)))
+                .and_then(|bytes| bytes.checked_add(2 * PATH_LIMIT)).ok_or(Reason::Capacity)?;
+            let requested = total.checked_add(batch.images.len()).ok_or(Reason::MaterialLimit)?;
+            budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)).and_then(|n| n.checked_add(requested)))?;
+            // Reserve/check ALL actual capacities before the first original read.
+            let mut actual_payload = 0usize;
+            for image in &mut batch.images {
+                let PublicImageOriginWitness::Posix(origin) = &image.origin;
+                let (size, _) = public_image_size(0, origin.leaf.size)?;
+                let capacity = size.checked_add(1).ok_or(Reason::MaterialLimit)?;
+                image.bytes.try_reserve_exact(capacity).map_err(|_| Reason::Capacity)?;
+                actual_payload = actual_payload.checked_add(image.bytes.capacity()).ok_or(Reason::MaterialLimit)?;
+            }
+            budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)))?;
+            if actual_payload < requested { return Err(Reason::Capacity); }
+            for (image, leaf) in batch.images.iter_mut().zip(leaves) {
+                let PublicImageOriginWitness::Posix(origin) = &image.origin;
+                let (size, _) = public_image_size(0, origin.leaf.size)?;
+                let capacity = size.checked_add(1).ok_or(Reason::MaterialLimit)?;
+                image.bytes.resize(capacity, 0);
+                let mut used = 0usize; let mut hash = Sha256::new();
+                loop {
+                    checkpoint(stop)?;
+                    let end = capacity.min(used.saturating_add(1024 * 1024));
+                    let read = unistd::read(book.fd(leaf)?, &mut image.bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
+                    checkpoint(stop)?;
+                    if read == 0 { if used != size { return Err(Reason::SourceChanged); } break; }
+                    let next = used.checked_add(read).ok_or(Reason::SourceChanged)?;
+                    if next > size { return Err(Reason::SourceChanged); }
+                    hash.update(&image.bytes[used..next]); used = next;
+                }
+                image.bytes.truncate(size);
+                use std::fmt::Write;
+                write!(&mut image.sha256, "{:x}", hash.finalize()).map_err(|_| Reason::Capacity)?;
+            }
+            budget.admit(batch.retained_bytes().and_then(|n| n.checked_add(controls)))?;
+            Ok(batch)
+        })();
+        book.finish_public_images(result, stop, failed)
     }
     pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>], stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
         probe_project_excluding_vault(book, path, origins, None, stop)
@@ -770,6 +1058,62 @@ mod linux {
     mod tests {
         use super::*;
         #[test]
+        fn public_images_do_not_relax_credential_permissions_or_source_alias_exclusion() {
+            let root_id = DirectoryIdentity { dev: 1, ino: 2, mode: 0o40755, uid: 123, gid: 123 };
+            let private = FileIdentity { common: DirectoryIdentity { ino: 3, mode: 0o100600, ..root_id },
+                nlink: 1, size: 12, mtime: (1, 2), ctime: (3, 4) };
+            for mode in [0o100644, 0o100664] {
+                let public = FileIdentity { common: DirectoryIdentity { mode, ..private.common }, ..private };
+                assert!(LeafPolicy::PublicImage.permits(public)); assert!(!LeafPolicy::Private.permits(public));
+            }
+            assert!(LeafPolicy::Private.permits(private));
+            assert!(!LeafPolicy::PublicImage.permits(FileIdentity { nlink: 2, ..private }));
+            assert!(!LeafPolicy::PublicImage.permits(FileIdentity { common: DirectoryIdentity { mode: 0o104644, ..private.common }, ..private }));
+            let system = DirectoryIdentity { ino: 1, ..root_id };
+            let root = RegisteredRoot { path: "/project".into(), identity: ProjectIdentity::Posix(root_id) };
+            assert_eq!(public_protected_source(Path::new("/project/images/a.png"), &root, 1,
+                &[system, root_id, DirectoryIdentity { ino: 4, ..root_id }], root_id).unwrap(), Some("images/a.png".into()));
+            assert_eq!(public_protected_source(Path::new("/elsewhere/a.png"), &root, 1, &[system], root_id).unwrap(), None);
+            assert!(public_protected_source(Path::new("/alias/a.png"), &root, 1, &[system, root_id], root_id).is_err());
+            assert!(public_protected_source(Path::new("/project/a.png"), &root, 1, &[system], root_id).is_err());
+        }
+        #[test]
+        fn public_image_limits_and_lexical_refusals_precede_any_source_open() {
+            assert_eq!(public_image_size(PUBLIC_IMAGE_BATCH_BYTES - PUBLIC_IMAGE_FILE_BYTES,
+                PUBLIC_IMAGE_FILE_BYTES as u64), Ok((PUBLIC_IMAGE_FILE_BYTES, PUBLIC_IMAGE_BATCH_BYTES)));
+            for (sum, size) in [(0, 0), (0, PUBLIC_IMAGE_FILE_BYTES as u64 + 1), (PUBLIC_IMAGE_BATCH_BYTES, 1), (usize::MAX, 1), (0, u64::MAX)] {
+                assert!(public_image_size(sum, size).is_err());
+            }
+            assert_eq!(public_image_name(Path::new("/inert/Screen.PNG"), 0).unwrap(), "Screen.PNG");
+            assert_eq!(public_image_name(Path::new("/inert/a\nb.jpeg"), 1).unwrap(), "selected-image-02.jpg");
+            for path in ["/inert/file.p12", "/inert//a.png", "/inert/../a.png", "relative/a.png", "/inert/png"] {
+                assert!(public_image_name(Path::new(path), 0).is_err());
+            }
+            let root = RegisteredRoot { path: "/inert/project".into(), identity: ProjectIdentity::Posix(DirectoryIdentity::synthetic_evidence_identity()) };
+            let mut overallocated = Vec::with_capacity(PUBLIC_IMAGE_FILES + 1); overallocated.push(PathBuf::from("/inert/a.png"));
+            let mut retained_path = PathBuf::with_capacity(PATH_LIMIT + 1); retained_path.push("/inert/a.png");
+            for paths in [Vec::new(), vec![PathBuf::from("/inert/a.png"); PUBLIC_IMAGE_FILES + 1],
+                vec![PathBuf::from("/inert/file.p12")], overallocated, vec![retained_path]] {
+                let mut book = SourceBook::new();
+                assert!(capture_public_images(&mut book, paths, &root, PublicImageBudget { payload_bytes: PUBLIC_IMAGE_BATCH_BYTES, retained_bytes: PUBLIC_IMAGE_BATCH_BYTES + 512 * 1024 }, &mut || true, &mut |_| {}).is_err());
+                assert!(book.not_started()); assert!(!book.settled());
+            }
+        }
+        #[test]
+        fn image_failure_is_reported_before_independent_cleanup_uncertainty() {
+            // Inert invalid-state DATA, no native fd, source open or invented
+            // successful close. The cleanup uncertainty must be reported too,
+            // after the original source error, while finality stays false.
+            let mut book = SourceBook::new(); book.begin(1, 0).unwrap();
+            let index = book.reserve(None, b"/inert").unwrap();
+            book.slots[index].state = OriginalState::Unknown;
+            let mut failures = Vec::new();
+            let result = book.finish_public_images::<()>(Err(Reason::SourceChanged), &mut || false,
+                &mut |reason| failures.push(reason));
+            assert_eq!(failures, [Reason::SourceChanged, Reason::CleanupUnknown]);
+            assert_eq!(result, Err(Reason::CleanupUnknown)); assert!(!book.settled());
+        }
+        #[test]
         fn lookup_source_charge_includes_refused_and_closed_retained_names() {
             let mut book = SourceBook::unstarted_backing_data();
             assert!(book.not_started() && !book.settled());
@@ -796,13 +1140,23 @@ mod linux {
         fn native_spelling_subset_is_byte_exact_without_resolving_anything() {
             for bad in ["relative/a.jks", "/tmp//a.jks", "/tmp/./a.jks", "/tmp/../a.jks", "/tmp/a.jks/", "/tmp/a\0.jks"] { assert!(parts(Path::new(bad)).is_err()); }
             assert!(parts(Path::new("/")).is_ok());
-            assert!(suffix(FileKind::AndroidKeystore, Path::new("/fictional/STORE.JKS")).is_ok());
-            assert!(suffix(FileKind::AndroidKeystore, Path::new("/fictional/store.p12")).is_err());
+            // Suffix admission chooses a bounded parser; it is not key validity.
+            for path in ["/fictional/STORE.JKS", "/fictional/store.keystore", "/fictional/store.P12", "/fictional/store.pfx"] {
+                assert!(suffix(FileKind::AndroidKeystore, Path::new(path)).is_ok());
+            }
+            for path in ["/fictional/store.p12.bak", "/fictional/store.pfx.jks.bak", "/fictional/store.pem", "/fictional/keystore"] {
+                assert!(suffix(FileKind::AndroidKeystore, Path::new(path)).is_err());
+            }
             assert!(suffix(FileKind::AndroidFirebase, Path::new("/fictional/google-services.JSON")).is_ok());
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/GoogleService-Info.PLIST")).is_ok());
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/google-services.json")).is_err());
             assert!(suffix(FileKind::IosFirebase, Path::new("/fictional/GoogleService-Info.plist.p12")).is_err());
             assert_eq!(material_limit(FileKind::IosFirebase), 4 * 1024 * 1024);
+            assert_eq!(material_limit(FileKind::AscP8), 4 * 1024 * 1024);
+            assert!(suffix(FileKind::AscP8, Path::new("/fictional/AuthKey.P8")).is_ok());
+            for bad in ["/fictional/p8", "/fictional/key.pem", "/fictional/key.p8.p12"] {
+                assert!(suffix(FileKind::AscP8, Path::new(bad)).is_err());
+            }
             assert_eq!(suffix(FileKind::AppleP12, Path::new("/fictional/certificate.p12")), Err(Reason::UnsupportedPlatform));
             assert_eq!(suffix(FileKind::AppleProfile, Path::new("/fictional/app.mobileprovision")), Err(Reason::UnsupportedPlatform));
         }
@@ -823,6 +1177,8 @@ mod linux {
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use linux::capture_public_images;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::{probe_project_excluding_vault, probe_vault_exclusion};
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::assert_project_path_source_contracts;
@@ -837,7 +1193,7 @@ pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, s
 #[path = "asset_source_windows.rs"]
 mod windows;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
-pub(crate) use windows::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+pub(crate) use windows::{SourceBook, capture, capture_public_images, probe_project, probe_project_path, suffix, path_hint};
 
 #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
@@ -854,6 +1210,13 @@ mod unsupported {
 #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
 pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+
+// Purpose-specific source support never opens the capability/qualification gate.
+// macOS public-image acquisition remains unsupported, not borrowed from credentials.
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))))]
+pub(crate) fn capture_public_images(_: &mut SourceBook, _: Vec<PathBuf>, _: &RegisteredRoot, _: PublicImageBudget,
+    _: &mut dyn FnMut() -> bool, _: &mut dyn FnMut(Reason)) -> Result<CapturedPublicImageBatch, Reason> { Err(Reason::UnsupportedPlatform) }
 
 #[cfg(test)]
 mod tests {
@@ -911,5 +1274,26 @@ mod tests {
         assert!(crate::candidate_evidence_protocol::params(&root).is_ok());
         root.identity = original;
         assert!(crate::candidate_evidence_protocol::params(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod public_image_identity_budget_data_tests {
+    use super::*;
+    #[test]
+    fn full_native_image_identity_and_existing_reservation_remain_separate_data() {
+        let a = ImageSourceObject::Windows { volume_serial: u64::MAX, file_id: [1; 16] };
+        for index in 0..16 {
+            let mut id = [1; 16]; id[index] = 2;
+            assert_ne!(a, ImageSourceObject::Windows { volume_serial: u64::MAX, file_id: id });
+        }
+        assert_ne!(a, ImageSourceObject::Windows { volume_serial: 1, file_id: [1; 16] });
+        assert_ne!(a, ImageSourceObject::Posix { device: u64::MAX, inode: 1 });
+        let budget = PublicImageBudget { payload_bytes: 10, retained_bytes: 20 };
+        assert!(budget.valid()); assert_eq!(budget.admit(Some(20)), Ok(20));
+        assert_eq!(budget.admit(Some(21)), Err(Reason::MaterialLimit));
+        assert_eq!(budget.admit(None), Err(Reason::MaterialLimit));
+        assert!(!PublicImageBudget { payload_bytes: 0, retained_bytes: 20 }.valid());
+        assert!(!PublicImageBudget { payload_bytes: 10, retained_bytes: 10 }.valid());
     }
 }

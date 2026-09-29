@@ -21,7 +21,7 @@ impl State {
     } }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct StoredRef {
     identity: format::Identity, record: format::Id, revision: format::Revision, original: store::ReadWitness,
 }
@@ -330,6 +330,22 @@ pub(super) fn usable(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: 
     writable(state) && state.vault.as_ref().and_then(|vault| vault.row(key)).is_some_and(|row| !row.mutation_pending && row.authenticated.descriptor.kind == kind)
         && slot.vault.reference.is_some_and(|reference| reference.matches(key))
         && slot.vault.loaded.as_ref().is_some_and(|payload| payload.kind == kind && payload.usable_source())
+}
+pub(super) fn assignment_reference(state: &DocumentState, slot: &Slot, key: &RecordKey, kind: Kind,
+    payload: &Arc<Payload>) -> Option<StoredRef> {
+    let reference = slot.vault.reference?;let session=state.vault.as_ref()?;
+    if !owns(slot,session) || slot.vault.generation!=Some(session.registry_generation)
+        || !slot.vault.loaded.as_ref().is_some_and(|v| Arc::ptr_eq(v, payload))
+        || !assignment_current(state, key, kind, payload, reference) { return None; }
+    Some(reference)
+}
+pub(super) fn assignment_current(state: &DocumentState, key: &RecordKey, kind: Kind,
+    payload: &Arc<Payload>, reference: StoredRef) -> bool {
+    let Some(session) = &state.vault else { return false; };
+    let Some(row) = session.row(key) else { return false; };
+    session.writable() && session.identity == Some(reference.identity) && reference.matches(key)
+        && !row.mutation_pending && row.authenticated.descriptor.kind == kind && payload.kind == kind && payload.usable_source()
+        && row.authenticated.record == reference.record && row.authenticated.revision == reference.revision && row.original == reference.original
 }
 pub(super) fn revoke(state: &mut DocumentState, key: &RecordKey) {
     if let Some(row) = state.vault.as_mut().and_then(|vault| vault.rows.iter_mut().find(|row| row.matches(key))) { row.mutation_pending = true; }
@@ -877,6 +893,28 @@ mod tests {
     }
 
     #[test]
+    fn input_assignment_retains_only_exact_loaded_payload_and_current_encrypted_reference() {
+        let (mut state,_owner)=model(Operation::Bind,true);
+        let row=descriptor_data(3,1);let reference=row.reference(identity());let key=row.key();
+        state.vault.as_mut().unwrap().rows.push(row);
+        let payload=Arc::new(Payload {kind:Kind::GoogleWif,material:None,fields:None});
+        {let slot=state.slot.as_mut().unwrap();slot.vault.reference=Some(reference);slot.vault.loaded=Some(payload.clone());}
+        assert!(assignment_reference(&state,state.slot.as_ref().unwrap(),&key,Kind::GoogleWif,&payload).is_some());
+        let lookalike=Arc::new(Payload {kind:Kind::GoogleWif,material:None,fields:None});
+        assert!(assignment_reference(&state,state.slot.as_ref().unwrap(),&key,Kind::GoogleWif,&lookalike).is_none());
+        state.slot.as_mut().unwrap().vault.loaded=None; // An authenticated descriptor alone is not private material.
+        assert!(assignment_reference(&state,state.slot.as_ref().unwrap(),&key,Kind::GoogleWif,&payload).is_none());
+        state.slot.as_mut().unwrap().vault.loaded=Some(payload.clone());
+        state.vault.as_mut().unwrap().rows[0].mutation_pending=true;
+        assert!(!assignment_current(&state,&key,Kind::GoogleWif,&payload,reference));
+        state.vault.as_mut().unwrap().rows[0].mutation_pending=false;
+        state.vault.as_mut().unwrap().rows[0].authenticated.revision=format::Revision::new(id(202),1).unwrap();
+        assert!(!assignment_current(&state,&key,Kind::GoogleWif,&payload,reference));
+        state.vault.as_mut().unwrap().rows[0].authenticated.revision=reference.revision;
+        state.slot.as_mut().unwrap().vault.lease=Some(Arc::new(Mutex::new(store::StoreBook::new())));
+        assert!(assignment_reference(&state,state.slot.as_ref().unwrap(),&key,Kind::GoogleWif,&payload).is_none());
+    }
+    #[test]
     fn completed_unlock_context_and_commit_retirement_preserve_the_healthy_lease_not_old_authority() {
         for operation in [Operation::Unlock, Operation::Initialize, Operation::Commit] {
             let (mut state, owner) = completed_model(operation);
@@ -885,7 +923,7 @@ mod tests {
             let context = context_data(); state.context = Some(context.clone());
             let record = RecordKey { id: token('a'), revision: 1 };
             state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: record.id.clone(), record_revision: 1,
-                context_revision: 1, availability: AssignmentAvailability::Available });
+                context_revision: 1, availability: AssignmentAvailability::Available, holding: None });
             let outcome = store::StorageOutcome { effect: store::Effect::KnownApplied, durability: store::Durability::Confirmed, cleanup: store::Cleanup::Known };
             if operation == Operation::Commit {
                 let slot = state.slot.as_mut().unwrap(); slot.context = Some(context.clone());
@@ -1104,26 +1142,70 @@ mod tests {
 
     #[test]
     fn encrypted_save_publishes_descriptor_only_and_requires_separate_assessment_and_bind() {
-        let (mut state, _) = model(Operation::Commit, true);
-        state.context = Some(context_data());
-        let row = descriptor_data(3, 1); let key = row.key();
-        let slot = state.slot.as_mut().unwrap();
-        slot.phase = Phase::Mutating; slot.selection = Some(token('b')); slot.assessment_context_revision = Some(1);
-        slot.review_end = Some(Instant::now() + REVIEW);
-        slot.preview = Some(Preview { token: token('c'), action: Action::Save, bind_token: Some(token('d')), record: None,
-            subject: PreviewSubject::new(Kind::GoogleWif, SubjectChange::New, None) });
-        let session = state.vault.as_mut().unwrap(); session.state = State::Mutating;
-        // Only the shared memory transition is under test. No native effect,
-        // original join or authenticated filesystem receipt is manufactured.
-        publish_saved_revision(session, slot, id(3), Some(row), 7);
-        assert!(slot.phase == Phase::Idle && slot.settlement == Settlement::Known && slot.discard);
-        assert!(slot.preview.is_none() && slot.selection.is_none() && slot.assessment.is_none());
-        assert!(slot.assessment_context_revision.is_none() && slot.review_end.is_none());
-        assert!(slot.result_record.as_ref() == Some(&key));
-        assert!(state.assignments.is_empty() && !record_assessed(&state, &key));
-        let rows = summaries(&state); assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].storage, rows[0].availability, rows[0].payload_state), ("encrypted", "unassigned", "not-checked"));
-        assert!(!usable(&state, state.slot.as_ref().unwrap(), &key, Kind::GoogleWif));
+        for kind in [Kind::GoogleWif, Kind::AscP8] {
+            let (mut state, _) = model(Operation::Commit, true);
+            let mut context = context_data();
+            if kind == Kind::AscP8 {
+                let context = Arc::get_mut(&mut context).unwrap(); context.platform = Platform::Ios; context.purpose = Purpose::Full;
+            }
+            state.context = Some(context);
+            let mut row = descriptor_data(3, 1);
+            row.authenticated.descriptor = format::Descriptor::new(kind, None, vec![false, false], kind.file().is_some()).unwrap();
+            let key = row.key(); let slot = state.slot.as_mut().unwrap();
+            slot.kind = Some(kind);
+            slot.phase = Phase::Mutating; slot.selection = Some(token('b')); slot.assessment_context_revision = Some(1);
+            slot.review_end = Some(Instant::now() + REVIEW);
+            slot.preview = Some(Preview { token: token('c'), action: Action::Save, bind_token: Some(token('d')), record: None,
+                subject: PreviewSubject::new(kind, SubjectChange::New, None) });
+            let session = state.vault.as_mut().unwrap(); session.state = State::Mutating;
+            // Only the shared memory transition is under test. No native effect,
+            // original join or authenticated filesystem receipt is manufactured.
+            publish_saved_revision(session, slot, id(3), Some(row), 7);
+            assert!(slot.phase == Phase::Idle && slot.settlement == Settlement::Known && slot.discard);
+            assert!(slot.preview.is_none() && slot.selection.is_none() && slot.assessment.is_none());
+            assert!(slot.assessment_context_revision.is_none() && slot.review_end.is_none());
+            assert!(slot.result_record.as_ref() == Some(&key));
+            assert!(state.assignments.is_empty() && !record_assessed(&state, &key));
+            let rows = summaries(&state); assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].storage, rows[0].availability, rows[0].payload_state), ("encrypted", "unassigned", "not-checked"));
+            assert!(!usable(&state, state.slot.as_ref().unwrap(), &key, kind));
+        }
+    }
+
+    #[test]
+    fn asc_descriptor_and_reference_never_substitute_for_the_actual_loaded_revision() {
+        let (mut state, _) = model(Operation::Prepare, true);
+        let mut row = descriptor_data(3, 1);
+        row.authenticated.descriptor = format::Descriptor::new(Kind::AscP8, None, vec![false, false], true).unwrap();
+        let reference = row.reference(identity()); let record = row.key();
+        let key = state.vault.as_ref().unwrap().key.as_ref().unwrap();
+        assert!(match_descriptor(&row, reference, key).is_ok());
+        for wrong in [
+            StoredRef { identity: format::Identity::new(id(7), id(8)).unwrap(), ..reference },
+            StoredRef { record: id(4), ..reference },
+            StoredRef { revision: format::Revision::new(id(201), 2).unwrap(), ..reference },
+            StoredRef { revision: format::Revision::new(id(202), 1).unwrap(), ..reference },
+            StoredRef { original: store::ReadWitness::lifecycle_data(id(4), reference.revision), ..reference },
+        ] { assert_eq!(match_descriptor(&row, wrong, key), Err(Reason::SourceChanged)); }
+        state.vault.as_mut().unwrap().rows.push(row);
+        assert!(has_record(&state, &record, Kind::AscP8));
+        assert!(!has_record(&state, &record, Kind::GoogleWif));
+        let stale = RecordKey { revision: 2, ..record.clone() };
+        assert!(!has_record(&state, &stale, Kind::AscP8) && !reference.matches(&stale));
+        state.slot.as_mut().unwrap().vault.reference = Some(reference);
+        assert!(!usable(&state, state.slot.as_ref().unwrap(), &record, Kind::AscP8));
+        // A cached scalar payload is genuinely source-usable, but the wrong
+        // kind. ASC companions alone also cannot replace its missing file.
+        for kind in [Kind::GoogleWif, Kind::AscP8] {
+            let slot = state.slot.as_mut().unwrap();
+            slot.vault.loaded = Some(Arc::new(Payload { kind, material: None, fields: None }));
+            assert_eq!(slot.vault.loaded.as_ref().unwrap().usable_source(), kind == Kind::GoogleWif);
+            assert!(!usable(&state, state.slot.as_ref().unwrap(), &record, Kind::AscP8));
+        }
+        revoke(&mut state, &record);
+        assert!(pending(&state, &record));
+        assert!(!usable(&state, state.slot.as_ref().unwrap(), &record, Kind::AscP8));
+        assert!(state.assignments.is_empty());
     }
 
     #[test]
@@ -1133,7 +1215,7 @@ mod tests {
         let row = descriptor_data(3, 1); let key = row.key();
         state.vault.as_mut().unwrap().rows = vec![row, descriptor_data(4, 1)];
         state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: key.id, record_revision: key.revision,
-            context_revision: 1, availability: AssignmentAvailability::Available });
+            context_revision: 1, availability: AssignmentAvailability::Available, holding: None });
         let unlocked = serde_json::to_value(DocumentBinding::status_data(&state, false)).unwrap();
         assert_eq!(unlocked["records"][0]["availability"], "assigned");
         assert_eq!(unlocked["records"][0]["payloadState"], "assessed");
@@ -1221,7 +1303,7 @@ mod tests {
         state.vault = None; state.session = false;
         let record = RecordKey { id: token('a'), revision: 1 };
         state.records.push(Record { key: record.clone(), payload: Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }), mutation_pending: false });
-        state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: record.id.clone(), record_revision: 1, context_revision: 1, availability: AssignmentAvailability::Available });
+        state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: record.id.clone(), record_revision: 1, context_revision: 1, availability: AssignmentAvailability::Available, holding: None });
         let slot = state.slot.as_mut().unwrap();
         slot.selection = Some(token('b'));
         slot.preview = Some(Preview { token: token('c'), action: Action::Bind, bind_token: None, record: Some(record.clone()),
@@ -1612,7 +1694,7 @@ impl DocumentBinding {
             if state.assignments.len() >= 8 && !state.assignments.iter().any(|assignment| assignment.kind == kind) { return Err(AssetError::new(Reason::Capacity)); }
             let reference = old.vault.reference.ok_or_else(AssetError::invalid)?;
             let loaded = old.vault.loaded.clone(); let assessment = old.assessment.clone(); let review = old.review_end;
-            let assignment = Assignment { kind, record_id: key.id.clone(), record_revision: key.revision, context_revision: context.revision, availability: AssignmentAvailability::Available };
+            let assignment = Assignment { kind, record_id: key.id.clone(), record_revision: key.revision, context_revision: context.revision, availability: AssignmentAvailability::Available, holding: None };
             let context = context.clone(); let key = key.clone();
             let mut slot = self.vault_owner(&mut state, Operation::Bind, Some(context), Some(key), review, true)?;
             slot.kind = Some(kind); slot.phase = Phase::Mutating; slot.assessment = assessment;
@@ -1620,7 +1702,7 @@ impl DocumentBinding {
             Ok((slot, Job::Bind { reference, roster, assignment }))
         })();
         let (slot, job) = match decision { Ok(decision) => decision, Err(error) => return Err(self.refuse_consumed(&mut state, error)) };
-        for assignment in &mut state.assignments { if Some(assignment.kind) == slot.kind { assignment.availability = AssignmentAvailability::Unavailable; } }
+        if let Some(kind) = slot.kind { revoke_kind(&mut state, kind); }
         let start = self.install(&mut state, slot, super::Job::Vault(job))?;
         let status = self.snapshot(&state); drop(state); let _ = start.send(()); Ok(status)
     }

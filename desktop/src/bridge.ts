@@ -1,3 +1,4 @@
+import { parseSavedMetadataReport, savedMetadataError, savedMetadataRequestFits } from './metadataValidation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
@@ -25,6 +26,8 @@ import type { GitHubPreflightCommand } from './githubPreflightProtocol.ts';
 import type { GitHubReleaseCommand } from './githubReleaseProtocol.ts';
 import type { GitHubPreflightStatus } from './githubPreflightTypes.ts';
 import type { GitHubReleaseStatus } from './githubReleaseTypes.ts';
+import { GITHUB_INPUT_GROUP_EVENT, githubInputGroupError, githubInputGroupRequestFits, parseGitHubInputGroupStatus } from './githubInputGroupProtocol.ts';
+import type { GitHubInputGroupCommand, GitHubInputGroupStatus } from './githubInputGroupTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 import { VERSION_EDIT_EVENT, parseVersionEditGuide, parseVersionEditStatus, versionEditError, versionEditRequestFits } from './releaseVersionEdit.ts';
@@ -44,7 +47,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'github-input-group-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -87,6 +90,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'github_preflight_unknown' };
       return status;
     } catch (error) { throw githubPreflightError(error); }
+  };
+  const githubInputGroupCall = async (command: GitHubInputGroupCommand, value: unknown): Promise<GitHubInputGroupStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'github_input_group_refused_runtime_unavailable' };
+      if (!githubInputGroupRequestFits(command, value)) throw { code: 'github_input_group_refused_invalid_input' };
+      const status = parseGitHubInputGroupStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_input_group_unknown' };
+      return status;
+    } catch (error) { throw githubInputGroupError(error); }
   };
   const githubReleaseCall = async (command: GitHubReleaseCommand, value: unknown): Promise<GitHubReleaseStatus> => {
     try {
@@ -207,13 +219,13 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       return status;
     } catch (error) { throw versionEditError(error); }
   };
-  const connectionCall = (command: 'github_connection_status' | 'github_connection_connect_token' | 'github_connection_refresh' | 'github_connection_disconnect', args: Record<string, unknown>): Promise<GitHubConnectionStatus> => {
+  const connectionCall = (command: 'github_connection_status' | 'github_connection_connect_token' | 'github_connection_start_device' | 'github_connection_refresh' | 'github_connection_inspect' | 'github_connection_disconnect', args: unknown): Promise<GitHubConnectionStatus> => {
     // Deliberately not async and not the generic call/apiError route. Start one
     // invoke synchronously; its callbacks do not close over the token arguments.
     // The compiled UI gate is not native capability. The original document
     // checks its sealed runtime/lifecycle gate again BEFORE copying a token.
     if (mode !== 'native') return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
-    if ((command === 'github_connection_connect_token' || command === 'github_connection_refresh') && !GITHUB_CONNECTION_ENTRY_AVAILABLE)
+    if ((command === 'github_connection_connect_token' || command === 'github_connection_start_device' || command === 'github_connection_refresh') && !GITHUB_CONNECTION_ENTRY_AVAILABLE)
       return Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
     if (!githubConnectionRequestFits(command, args)) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_invalid_input' }));
     try { return invoke<unknown>(command, args).then(connectionReply, connectionRejection); }
@@ -374,6 +386,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         return await listen(VERSION_EDIT_EVENT, onStatus);
       } catch (error) { throw versionEditError(error); }
     },
+    validateMetadata: async (request) => {
+      try {
+        if (mode !== 'native') throw { code: 'metadata_validation_unavailable' };
+        if (!savedMetadataRequestFits(request)) throw { code: 'metadata_validation_invalid_params' };
+        const input = { projectId: request.projectId, platform: request.platform };
+        const report = parseSavedMetadataReport(await invoke<unknown>('metadata_validate', input));
+        if (!report || report.platform !== input.platform) throw { code: 'metadata_validation_incomplete' };
+        return report;
+      } catch (error) { throw savedMetadataError(error); }
+    },
     observeMetadataText: (request) => metadataCall('metadata_text_observe', request, parseMetadataTextObservation),
     validateMetadataText: (request) => metadataCall('metadata_text_validate', request, parseMetadataTextValidation),
     openMetadataTextEdit: (request) => metadataCall('metadata_text_edit_open', request, parseMetadataTextEditStatus),
@@ -388,13 +410,40 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       } catch (error) { throw metadataTextError(error); }
     },
     githubConnectionStatus: () => connectionCall('github_connection_status', {}),
+    startGitHubDevice: (args) => connectionCall('github_connection_start_device', args),
+    openGitHubDevicePage: (args) => {
+      if (mode !== 'native') return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
+      if (!GITHUB_CONNECTION_ENTRY_AVAILABLE) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+      if (!githubConnectionRequestFits('github_connection_open_device_page', args))
+        return Promise.reject(githubConnectionError({ code: 'github_connection_refused_invalid_input' }));
+      try {
+        return invoke<unknown>('github_connection_open_device_page', args).then((value): null => {
+          if (value !== null) throw githubConnectionError(null);
+          return null; // Best-effort OS handoff only; never parse as session Status.
+        }, connectionRejection);
+      } catch (error) { return Promise.reject(githubConnectionError(error)); }
+    },
     connectGitHubToken: (args) => connectionCall('github_connection_connect_token', args),
     refreshGitHubConnection: (args) => connectionCall('github_connection_refresh', args),
+    inspectGitHubEnvironmentInput: (args) => connectionCall('github_connection_inspect', args),
     disconnectGitHubConnection: (args) => connectionCall('github_connection_disconnect', args),
     subscribeGitHubConnection: (onStatus) => {
       if (mode !== 'native' || !listen) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
       try { return listen(GITHUB_CONNECTION_EVENT, (value) => onStatus(parseGitHubConnectionStatus(value))).catch(connectionRejection); }
       catch (error) { return Promise.reject(githubConnectionError(error)); }
+    },
+    githubInputGroupStatus: () => githubInputGroupCall('github_input_group_status', {}),
+    checkGitHubInputRunners: (args) => githubInputGroupCall('github_input_runner_check', args),
+    prepareGitHubInputGroup: (args) => githubInputGroupCall('github_input_group_prepare', args),
+    applyGitHubInputGroup: (args) => githubInputGroupCall('github_input_group_apply', args),
+    reconcileGitHubInputGroup: (args) => githubInputGroupCall('github_input_group_reconcile', args),
+    loadGitHubInputGroupPending: (args) => githubInputGroupCall('github_input_group_pending', args),
+    cancelGitHubInputGroup: (args) => githubInputGroupCall('github_input_group_cancel', args),
+    subscribeGitHubInputGroup: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_input_group_refused_runtime_unavailable' };
+        return await listen(GITHUB_INPUT_GROUP_EVENT, (value) => onStatus(parseGitHubInputGroupStatus(value)));
+      } catch (error) { throw githubInputGroupError(error); }
     },
     githubPreflightStatus: () => githubPreflightCall('github_preflight_status', {}),
     prepareGitHubPreflight: (args) => githubPreflightCall('github_preflight_prepare', args),

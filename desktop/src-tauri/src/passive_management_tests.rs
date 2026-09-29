@@ -20,10 +20,11 @@ fn rig_profile(profile: Profile, github_receipt: Option<Arc<Mutex<GitHubReadRece
     let (reply, receiver) = if matches!(profile, Profile::Passive(_)) { (Some(reply), Some(receiver)) }
         else { (None, None) };
     let (stop, _) = watch::channel(false);
+    let device_receipt = matches!(profile, Profile::GitHubDevice(_)).then(|| Arc::new(Mutex::new(GitHubDeviceReceipt::Pending)));
     let owner = Arc::new(Owner {
-        key: 1, id: "inert-only-1".into(), profile, github_receipt,
+        key: 1, id: "inert-only-1".into(), profile, github_receipt, device_receipt,
         preflight_receipt: None, preflight_request: None, preflight_gate: None, preflight_go_claimed: AtomicBool::new(false),
-        release_receipt: None, release_request: None, release_gate: None,
+        release_receipt: None, release_request: None, release_gate: None, input_receipt: None, input_context: None, runner_receipt: None, runner_control: Mutex::new(None),
         state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
         driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -42,6 +43,7 @@ fn github_rig() -> (Rig, GitHubReadTicket) {
 fn inert_github_outcome() -> GitHubReadOutcome {
     use crate::github_connection_protocol::{Fact, FactState, GitHubReadControl, GitHubReadFacts, Reason};
     GitHubReadOutcome {
+        metadata: None,
         facts: GitHubReadFacts { schema_version: 1,
             account: Fact { state: FactState::Unavailable, value: None, observed_at: None, reason: Reason::Cancelled },
             repository: Fact { state: FactState::Unavailable, value: None, observed_at: None, reason: Reason::Cancelled },
@@ -64,7 +66,9 @@ fn staged_tasks(rig: &Rig) -> (oneshot::Sender<()>, oneshot::Sender<()>) {
     let outcome = match rig.owner.profile {
         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
-        Profile::GitHubPreflight | Profile::GitHubRelease => panic!("action profiles are not passive/GitHub-read fixtures"),
+        Profile::GitHubDevice(_) => ReadOutcome::Device(crate::github_device_protocol::Outcome::Token {
+            token: crate::github_device_protocol::Secret::new("ghu_SYNTHETIC_NOT_A_CREDENTIAL".into()), expires_in: None }),
+        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubInputGroup | Profile::GitHubRunnerPrerequisite => panic!("action profiles are not passive/GitHub-read fixtures"),
     };
     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
         driver.await.unwrap();
@@ -179,7 +183,7 @@ fn retirement_unknown_never_borrows_a_later_driver_failure_cause() {
         state.driver_end = Some(DriverEnd::Ready(Err(BridgeError::unavailable("later driver error")
             .with_linux_passive_cause(Some(Cause::Preparation(Failure::Deadline))))));
         state.unknown = true;
-        let error = state.retirement_result(start, false).unwrap().unwrap_err();
+        let error = state.retirement_result(start, false).unwrap().err().unwrap();
         assert_eq!(error.code, "cleanup_unknown"); assert_eq!(error.linux_passive_cause(), cause);
         assert_eq!(state.error.as_ref(), Some(&first));
         assert_eq!(state.error.as_ref().unwrap().linux_passive_cause(), cause);
@@ -402,11 +406,11 @@ fn serialized_retirement_rechecks_same_clock_and_shutdown_with_ready_joins() {
     // These synthetic management receipts test only the actual final locked
     // decision. No child, native lifetime, elapsed timeout or exit is claimed.
     let mut before = ready(endpoint);
-    assert_eq!(before.retirement_result(endpoint - Duration::from_nanos(1), false).unwrap().unwrap(), ReadOutcome::Passive(Value::Null));
+    assert!(matches!(before.retirement_result(endpoint - Duration::from_nanos(1), false), Some(Ok(ReadOutcome::Passive(Value::Null)))));
     assert!(before.cleanup_endpoint.is_none());
 
     let mut at = ready(endpoint);
-    assert_eq!(at.retirement_result(endpoint, false).unwrap().unwrap_err().code, "query_timeout");
+    assert_eq!(at.retirement_result(endpoint, false).unwrap().err().unwrap().code, "query_timeout");
     assert_eq!(at.cleanup_endpoint, Some(endpoint + CLEANUP_TIME));
     assert!(!at.unknown);
 
@@ -414,22 +418,22 @@ fn serialized_retirement_rechecks_same_clock_and_shutdown_with_ready_joins() {
     let cleanup_endpoint = first_failure + CLEANUP_TIME;
     let mut cleanup = ready(endpoint);
     cleanup.fail_at(BridgeError::shutdown(), first_failure);
-    assert_eq!(cleanup.retirement_result(cleanup_endpoint, false).unwrap().unwrap_err().code, "cleanup_unknown");
+    assert_eq!(cleanup.retirement_result(cleanup_endpoint, false).unwrap().err().unwrap().code, "cleanup_unknown");
     assert!(cleanup.unknown);
     assert_eq!(cleanup.cleanup_endpoint, Some(cleanup_endpoint));
     assert_eq!(cleanup.error.as_ref().unwrap().code, "shutting_down");
 
     let mut stopped = ready(endpoint);
-    assert_eq!(stopped.retirement_result(start, true).unwrap().unwrap_err().code, "shutting_down");
+    assert_eq!(stopped.retirement_result(start, true).unwrap().err().unwrap().code, "shutting_down");
     assert_eq!(stopped.cleanup_endpoint, Some(start + CLEANUP_TIME));
 
     let mut both_ready = ready(endpoint);
-    assert_eq!(both_ready.retirement_result(endpoint, true).unwrap().unwrap_err().code, "shutting_down");
+    assert_eq!(both_ready.retirement_result(endpoint, true).unwrap().err().unwrap().code, "shutting_down");
     assert_eq!(both_ready.cleanup_endpoint, Some(endpoint + CLEANUP_TIME));
 
     let mut unknown = ready(endpoint);
     unknown.unknown = true;
-    assert_eq!(unknown.retirement_result(start, false).unwrap().unwrap_err().code, "cleanup_unknown");
+    assert_eq!(unknown.retirement_result(start, false).unwrap().err().unwrap().code, "cleanup_unknown");
     assert!(unknown.unknown);
 }
 
@@ -508,4 +512,53 @@ async fn github_guard_loss_only_reports_retained_unknown_and_never_fabricates_a_
     assert!(matches!(ticket.receipt(), GitHubReadReceipt::RetainedUnknown));
     assert!(rig.supervisor.disabled() && !rig.supervisor.can_exit());
     assert_eq!(rig.supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+}
+
+
+// The existing inert management rig only: no runtime, child, socket or native
+// cleanup proof. Unlike read-only DATA, the device result is consuming/private.
+fn device_rig() -> (Rig, GitHubDeviceTicket) {
+    let step = crate::github_device_protocol::Step::Poll;
+    let rig = rig_profile(Profile::GitHubDevice(step), None);
+    let ticket = GitHubDeviceTicket { owner: rig.owner.clone(),
+        receipt: rig.owner.device_receipt.as_ref().unwrap().clone(), started_at: Instant::now(), step };
+    (rig, ticket)
+}
+#[tokio::test(flavor = "current_thread")]
+async fn device_secret_waits_for_management_and_is_consumed_once() {
+    let (mut rig, ticket) = device_rig();
+    let (driver, watchdog) = staged_tasks(&rig);
+    assert!(ticket.take_settled().is_none());
+    driver.send(()).unwrap();
+    turns_until(|| lock(&rig.owner.state).driver_join == ManagementJoin::Returned).await;
+    assert_retained(&mut rig);
+    assert_eq!(ticket.state(), GitHubDeviceState::Pending);
+    assert!(ticket.take_settled().is_none());
+    watchdog.send(()).unwrap(); join_settled_observer(&rig).await;
+    assert_eq!(ticket.state(), GitHubDeviceState::Settled { was_unknown: false });
+    let original = ticket.take_settled().expect("settled original must have one result");
+    assert!(!original.was_unknown && original.settled_at >= ticket.started_at());
+    assert!(matches!(original.outcome, Ok(crate::github_device_protocol::Outcome::Token { .. })));
+    assert!(ticket.take_settled().is_none());
+    assert_eq!(ticket.state(), GitHubDeviceState::Settled { was_unknown: false });
+}
+#[tokio::test(flavor = "current_thread")]
+async fn device_cancel_or_unknown_disposes_late_positive_without_releasing_early() {
+    for unknown in [false, true] {
+        let (rig, ticket) = device_rig();
+        let (driver, watchdog) = staged_tasks(&rig);
+        if unknown { rig.owner.unknown(&rig.supervisor.inner); } else { ticket.stop(); }
+        let end = lock(&rig.owner.state).cleanup_endpoint;
+        ticket.stop(); assert_eq!(lock(&rig.owner.state).cleanup_endpoint, end);
+        assert!(!rig.supervisor.can_exit() && ticket.take_settled().is_none());
+        assert_eq!(rig.supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+        driver.send(()).unwrap(); watchdog.send(()).unwrap(); join_settled_observer(&rig).await;
+        let result = ticket.take_settled().expect("actual management must settle once");
+        assert_eq!(result.was_unknown, unknown);
+        assert_eq!(result.outcome.err().unwrap().code, if unknown { "cleanup_unknown" } else { "cancelled" });
+        assert!(ticket.take_settled().is_none());
+        rig.owner.unknown(&rig.supervisor.inner);
+        assert_eq!(ticket.state(), GitHubDeviceState::Settled { was_unknown: unknown });
+        assert_eq!(rig.supervisor.disabled(), unknown);
+    }
 }

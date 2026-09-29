@@ -1,8 +1,10 @@
+import type { SavedMetadataApi } from './metadataValidation.ts';
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
 import type { GitHubPreflightApi } from './githubPreflightTypes.ts';
 import type { GitHubReleaseApi } from './githubReleaseTypes.ts';
+import type { GitHubInputGroupApi } from './githubInputGroupTypes.ts';
 import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
 import type { EnvironmentRequest, EnvironmentResult } from './environment.ts';
 import type { EnvironmentDiagnosticsApi } from './environmentDiagnosticsTypes.ts';
@@ -65,7 +67,7 @@ export interface CredentialHelp extends Omit<HelpContent, 'label'> {
   alternatives: string[];
 }
 
-export type CredentialKindId = 'android-keystore' | 'android-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'ios-firebase' | 'google-wif' | 'project-read-token';
+export type CredentialKindId = 'android-keystore' | 'android-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'ios-firebase' | 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo-account' | 'apple-operation-commitment';
 export interface CredentialGuideField extends HelpContent {
   id: string;
   requirement: string;
@@ -341,7 +343,8 @@ export interface CoreEditOutcome {
 }
 export type FixedIgnoreLine = '.mobile-release/' | '.mobile-release-init-prepare/' | '.mobile-release-init/' | '.mobile-release-init-cleanup/' |
   '.mobile-release-metadata-text-prepare/' | '.mobile-release-metadata-text/' | '.mobile-release-metadata-text-cleanup/' |
-  '.mobile-release-version-prepare/' | '.mobile-release-version/' | '.mobile-release-version-cleanup/';
+  '.mobile-release-version-prepare/' | '.mobile-release-version/' | '.mobile-release-version-cleanup/' |
+  '.mobile-release-metadata-images-prepare/' | '.mobile-release-metadata-images/' | '.mobile-release-metadata-images-cleanup/';
 export interface PreparedConfigView {
   schemaVersion: 1;
   files: [
@@ -384,7 +387,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubInputGroupApi, SavedMetadataApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

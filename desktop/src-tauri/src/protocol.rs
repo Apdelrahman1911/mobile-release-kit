@@ -12,7 +12,7 @@ pub const DEPTH_LIMIT: usize = 32;
 pub const NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataTextObserve, MetadataTextValidate, EnvironmentRequirements, ReleaseVersionObserve, CandidateEvidenceObserve, ReleaseEvidenceObserve }
+pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataValidate, MetadataTextObserve, MetadataTextValidate, EnvironmentRequirements, ReleaseVersionObserve, CandidateEvidenceObserve, ReleaseEvidenceObserve }
 impl Method {
     pub fn name(self) -> &'static str {
         match self {
@@ -21,6 +21,7 @@ impl Method {
             Self::SuggestConfig => "config.suggest", Self::PreviewConfig => "config.preview",
             Self::ProposeGithubSetup => "github.setup.propose",
             Self::AssessCredentials => "credentials.assess",
+            Self::MetadataValidate => "metadata.validate",
             Self::MetadataTextObserve => "metadata.text.observe",
             Self::MetadataTextValidate => "metadata.text.validate",
             Self::EnvironmentRequirements => "environment.requirements",
@@ -50,30 +51,44 @@ pub fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-pub fn check_value(value: &Value) -> Result<(), BridgeError> {
+fn check_value_with_limits(value: &Value, node_limit: usize, depth_limit: usize) -> Result<(), BridgeError> {
     let mut stack = vec![(value, 0usize)];
     let mut nodes = 0usize;
     while let Some((item, depth)) = stack.pop() {
         nodes += 1;
-        if nodes > NODE_LIMIT || depth > DEPTH_LIMIT { return Err(BridgeError::invalid()); }
+        if nodes > node_limit || depth > depth_limit { return Err(BridgeError::invalid()); }
         match item {
             Value::Array(items) => {
-                if depth >= DEPTH_LIMIT { return Err(BridgeError::invalid()); }
-                if items.len() > NODE_LIMIT.saturating_sub(nodes + stack.len()) { return Err(BridgeError::invalid()); }
+                if depth >= depth_limit { return Err(BridgeError::invalid()); }
+                if items.len() > node_limit.saturating_sub(nodes + stack.len()) { return Err(BridgeError::invalid()); }
                 stack.extend(items.iter().map(|item| (item, depth + 1)));
             }
             Value::Object(items) => {
-                if depth >= DEPTH_LIMIT { return Err(BridgeError::invalid()); }
+                if depth >= depth_limit { return Err(BridgeError::invalid()); }
                 // Python counts object keys as value nodes at depth + 1 too.
-                if !items.is_empty() && depth + 1 > DEPTH_LIMIT { return Err(BridgeError::invalid()); }
+                if !items.is_empty() && depth + 1 > depth_limit { return Err(BridgeError::invalid()); }
                 nodes = nodes.checked_add(items.len()).ok_or_else(BridgeError::invalid)?;
-                if nodes > NODE_LIMIT { return Err(BridgeError::invalid()); }
-                if items.len() > NODE_LIMIT.saturating_sub(nodes + stack.len()) { return Err(BridgeError::invalid()); }
+                if nodes > node_limit { return Err(BridgeError::invalid()); }
+                if items.len() > node_limit.saturating_sub(nodes + stack.len()) { return Err(BridgeError::invalid()); }
                 stack.extend(items.values().map(|item| (item, depth + 1)));
             }
             _ => {}
         }
     }
+    Ok(())
+}
+
+pub fn check_value(value: &Value) -> Result<(), BridgeError> {
+    check_value_with_limits(value, NODE_LIMIT, DEPTH_LIMIT)
+}
+
+// Only the saved-metadata result uses this closed allowance. Ordinary request,
+// response and workflow helpers retain their existing 20_000/8_000 ceilings.
+pub(crate) fn check_metadata_validation_result(value: &Value) -> Result<(), BridgeError> {
+    use crate::metadata_validation_protocol::{RESULT_DEPTH_LIMIT, RESULT_LIMIT, RESULT_NODE_LIMIT};
+    check_value_with_limits(value, RESULT_NODE_LIMIT, RESULT_DEPTH_LIMIT)?;
+    let mut writer = BoundedWriter { bytes: Vec::new(), limit: RESULT_LIMIT };
+    serde_json::to_writer(&mut writer, value).map_err(|_| BridgeError::invalid())?;
     Ok(())
 }
 
@@ -160,12 +175,12 @@ pub(crate) fn strict_android_tool_manifest_json(bytes: &[u8]) -> Result<Value, B
 #[serde(deny_unknown_fields)]
 struct EngineError { code: String, message: String, retryable: bool }
 
-pub fn decode_response(bytes: &[u8], id: &str) -> Result<Value, BridgeError> {
-    if bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+fn decode_response_with_limits(bytes: &[u8], id: &str, response_limit: usize, node_limit: usize, depth_limit: usize) -> Result<Value, BridgeError> {
+    if bytes.len() > response_limit || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
     let body = &bytes[..bytes.len() - 1];
     if body.first() != Some(&b'{') || body.last() != Some(&b'}')
         || body.iter().any(|b| *b == b'\n' || *b == b'\r') { return Err(BridgeError::protocol()); }
-    let value = strict_json(body)?;
+    let value = strict_json_with_limits(body, node_limit, depth_limit)?;
     let object = value.as_object().ok_or_else(BridgeError::protocol)?;
     if object.get("protocol").and_then(Value::as_u64) != Some(u64::from(PROTOCOL))
         || object.get("id").and_then(Value::as_str) != Some(id) { return Err(BridgeError::protocol()); }
@@ -183,6 +198,17 @@ pub fn decode_response(bytes: &[u8], id: &str) -> Result<Value, BridgeError> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let error = error.with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::EngineResponse));
     Err(error)
+}
+
+pub fn decode_response(bytes: &[u8], id: &str) -> Result<Value, BridgeError> {
+    decode_response_with_limits(bytes, id, RESPONSE_LIMIT, NODE_LIMIT, DEPTH_LIMIT)
+}
+
+// Exact ordinary envelope/error/cause parser, but only this method receives
+// the report allowance plus its fixed eight envelope nodes and one depth.
+pub(crate) fn decode_metadata_validation_response(bytes: &[u8], id: &str) -> Result<Value, BridgeError> {
+    use crate::metadata_validation_protocol::{RESPONSE_LIMIT, RESULT_DEPTH_LIMIT, RESULT_NODE_LIMIT};
+    decode_response_with_limits(bytes, id, RESPONSE_LIMIT, RESULT_NODE_LIMIT + 8, RESULT_DEPTH_LIMIT + 1)
 }
 
 #[cfg(test)]
@@ -225,6 +251,7 @@ mod tests {
         assert_eq!(parsed.ok(), Some(json!({"protocol":1,"id":"query-1","method":"capabilities","params":{}})));
         for (method, name) in [(Method::SuggestConfig, "config.suggest"), (Method::PreviewConfig, "config.preview"),
                                (Method::ProposeGithubSetup, "github.setup.propose"),
+                               (Method::MetadataValidate, "metadata.validate"),
                                (Method::MetadataTextObserve, "metadata.text.observe"), (Method::MetadataTextValidate, "metadata.text.validate"),
                                (Method::EnvironmentRequirements, "environment.requirements")] {
             let bytes = encode_request("query-2", method, &json!({})).unwrap_or_default();

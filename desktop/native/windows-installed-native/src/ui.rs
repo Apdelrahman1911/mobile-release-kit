@@ -277,7 +277,12 @@ impl QuitAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DialogKind { Project, Quit }
+pub enum CredentialKind { AndroidKeystore, AndroidFirebase, IosFirebase }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DialogKind { Project, Credential(CredentialKind), PublicImages, Quit }
+impl DialogKind {
+    fn requires_live_document(self) -> bool { self != Self::Quit }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiError {
@@ -1604,7 +1609,7 @@ impl DocumentWatch {
     fn parent(&self, kind: DialogKind) -> UiResult<DialogParent> {
         sta()?;
         if !self.installed || self.released || self.unknown
-            || kind == DialogKind::Project && (self.close_entered || self.callbacks()?.lost.get()) { return Err(UiError::State); }
+            || kind.requires_live_document() && (self.close_entered || self.callbacks()?.lost.get()) { return Err(UiError::State); }
         let mut process = 0;
         if unsafe { W::GetWindowThreadProcessId(self.parent.0, &mut process) } != self.callbacks()?.thread
             || process != unsafe { T::GetCurrentProcessId() } { return Err(UiError::State); }

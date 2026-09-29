@@ -57,6 +57,20 @@ _KIND_LAYOUT = {
     "project-read-token": ("project", (
         ("token", "PROJECT_READ_TOKEN", "secret", ()),
     )),
+    "apple-review-contact": ("ios", (
+        ("firstName", "APPLE_REVIEW_CONTACT_FIRST_NAME", "secret", ()),
+        ("lastName", "APPLE_REVIEW_CONTACT_LAST_NAME", "secret", ()),
+        ("email", "APPLE_REVIEW_CONTACT_EMAIL", "secret", ()),
+        ("phone", "APPLE_REVIEW_CONTACT_PHONE", "secret", ()),
+    )),
+    "apple-review-demo-account": ("ios", (
+        ("username", "APPLE_DEMO_ACCOUNT_USERNAME", "secret", ()),
+        ("password", "APPLE_DEMO_ACCOUNT_PASSWORD", "secret", ()),
+    )),
+    "apple-operation-commitment": ("ios", (
+        ("keyBase64", "OPERATION_COMMITMENT_KEY_BASE64", "secret", ()),
+        ("keyVersion", "OPERATION_COMMITMENT_KEY_VERSION", "text", ()),
+    )),
 }
 KIND_IDS = tuple(_KIND_LAYOUT)
 CONTROL_IDS = ("project", "platform", "stage", "purpose", "mode", "label", "choose", "prepare",

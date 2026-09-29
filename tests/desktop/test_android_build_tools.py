@@ -1,19 +1,25 @@
 """Inert source contracts, NOT installed-profile or native qualification evidence.
 
-All inventories, owner state, descriptor numbers and observations are fabricated
-DATA. The version spellings intentionally name no supported installed tuple.
-Every selected filesystem/process boundary is replaced before use: no real tool
-directory, file descriptor, process, namespace, credential, installer or network
-fixture is acquired. These tests do not prove a native profile or Gradle parser.
+Owner state, descriptor numbers and OS observations are fabricated DATA. The
+roster-size regression alone uses exact packaged tool-layout source DATA, not
+installed/native observations. Other version spellings name no supported tuple.
+Except for bounded reads of those exact source DATA files, filesystem/process
+boundaries are replaced before use: no real tool directory, native descriptor,
+process, namespace, credential, installer or network fixture is acquired. These
+tests do not prove a native profile or Gradle parser.
 """
 from __future__ import annotations
 
 import errno
+import gzip
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import shlex
 import stat
+import sys
 import threading
 import types
 import unittest
@@ -22,8 +28,10 @@ from pathlib import Path
 from unittest.mock import Mock, PropertyMock, patch
 
 from mobile_release import android_build_tools as subject
-from mobile_release._desktop_android_build_files import AndroidBuildFiles, OriginalAndroidArtifact
+from mobile_release._desktop_android_build_files import AndroidBuildFiles, OriginalAndroidArtifact, OriginalAndroidSigningInput
+from mobile_release._desktop_android_signed_inputs import SignedAndroidInputs
 from mobile_release.android_build_operation import AndroidBuildOperation
+from mobile_release.build_inputs import FiniteScratch, InputSnapshot
 from mobile_release.config import ReleaseVersion
 from mobile_release.owned_process import ProcessCleanupError
 
@@ -81,6 +89,23 @@ def profile_data(document=None):
     return subject._parse_manifest(raw, subject._binding(binding))
 
 
+def qualification_helper():
+    # Ordinary test runners load the same fixed source file. The focused inert
+    # owner preloads this exact alias through its pinned-source closure instead.
+    name = "_mrk_android_signed_qualification"
+    path = Path(__file__).parents[2] / "desktop/tools/android_signed_qualification.py"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        if existing.__file__ != str(path):
+            raise AssertionError("Qualification helper origin differs")
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def selection_data():
     profile = profile_data()
     return {"wrapper_properties": ("# generated wrapper DATA\r\n! comment\r\ndistributionUrl="
@@ -107,6 +132,7 @@ class Ledger:
 class Guard:
     def __init__(self):
         self.pid, self.depth = os.getpid(), 0
+        self._project_recovery_source = None
         self.lifetime_ledger = Ledger()
 
     def _check_owner(self):
@@ -141,6 +167,7 @@ def inert_operation(*, signature=False, document=None):
     operation.files = object.__new__(AndroidBuildFiles)
     operation.files.operation = operation
     operation.tools, operation.close_claimed, operation._artifact = None, False, None
+    operation.signing = None
     operation.counters = {}
     operation.checkpoint, operation.cleanup_checkpoint = Mock(), Mock()
 
@@ -765,14 +792,185 @@ class OwnerAndCommandDataTests(unittest.TestCase):
         read.assert_not_called()
 
 
+def signing_builder_data():
+    """Exact Python types with fabricated bindings, not original native owners."""
+    tools = inert_tools(signature=True)
+    signing = object.__new__(SignedAndroidInputs)
+    signing.operation, signing.config_bound = tools.operation, True
+    signing.values = {"MOBILE_RELEASE_ANDROID_KEY_ALIAS": "upload-key",
+                      "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "PRIVATE store",
+                      "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": "PRIVATE key"}
+    scratch, snapshot = object.__new__(FiniteScratch), object.__new__(InputSnapshot)
+    scratch._desktop_binding = signing
+    scratch.require_input = Mock(return_value=snapshot)
+    scratch.require = Mock(return_value=WORK / "android-keystore")
+    signing.validation_snapshot = snapshot
+    signing.materialization = types.SimpleNamespace(scratch=scratch)
+    signing.require_materialized = Mock()
+    selected = object.__new__(OriginalAndroidSigningInput)
+    selected.files, selected._native = tools.files, True
+    tools.files.signing_input = selected
+    tools.operation.signing = signing
+    return tools, signing, scratch, snapshot
+
+
+class SigningBuilderDataTests(unittest.TestCase):
+    def test_fixed_admitted_jdk_signing_builders_use_private_roles_without_secret_argv(self):
+        tools, signing, scratch, snapshot = signing_builder_data()
+        staging, final = WORK / "signing-input.aab", WORK.parent / "artifacts/app-release.aab"
+        options = tuple("-J" + option for option in subject._jvm_arguments(WORK, bundletool=True))
+        with patch.object(tools, "check"), \
+                patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+                patch.object(OriginalAndroidSigningInput, "path", new_callable=PropertyMock, return_value=staging), \
+                patch.object(tools.files, "signing_output", return_value=final), \
+                patch("mobile_release.android.run_owned") as dispatched, patch.object(subject.os, "open") as opened:
+            validation = tools.signing_validation_command(signing, scratch, snapshot)
+            signer = tools.signing_command(signing, staging, final)
+        self.assertEqual(validation, (ROOT + "/jdk/bin/keytool", *options, "-J-Duser.timezone=UTC", "-list", "-v",
+                         "-keystore", str(WORK / "android-keystore"), "-alias", "upload-key",
+                         "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                         "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD"))
+        self.assertEqual(signer, (ROOT + "/jdk/bin/jarsigner", *options, "-keystore", str(WORK / "android-keystore"),
+                         "-storepass:env", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                         "-keypass:env", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
+                         "-signedjar", str(final), str(staging), "upload-key"))
+        self.assertFalse(any("PRIVATE" in word for word in (*validation, *signer)))
+        self.assertFalse({"-storetype", "-providerClass", "-providerArg", "-tsa"}.intersection((*validation, *signer)))
+        signing.require_materialized.assert_called_once_with(signing.materialization)
+        dispatched.assert_not_called(); opened.assert_not_called()
+
+    def test_validation_requires_exact_signing_scratch_snapshot_and_signature_admission(self):
+        for fault in ("signing", "operation", "scratch", "snapshot", "admission"):
+            with self.subTest(fault=fault):
+                tools, signing, scratch, snapshot = signing_builder_data()
+                if fault == "signing":
+                    tools.operation.signing = object()
+                elif fault == "operation":
+                    signing.operation = object()
+                elif fault == "scratch":
+                    scratch._desktop_binding = object()
+                elif fault == "snapshot":
+                    signing.validation_snapshot = object()
+                else:
+                    tools._signature_ready = False
+                with patch.object(tools, "_work") as work, patch.object(subject.os, "open") as opened:
+                    with self.assertRaises(subject.AndroidToolError):
+                        tools.signing_validation_command(signing, scratch, snapshot)
+                work.assert_not_called(); scratch.require.assert_not_called(); opened.assert_not_called()
+
+    def test_signer_rejects_replaced_borrow_or_alias_without_inventing_failed_validation(self):
+        for fault in ("not-borrowed", "source", "output", "alias", "materialization"):
+            with self.subTest(fault=fault):
+                tools, signing, scratch, _ = signing_builder_data()
+                staging, final = WORK / "signing-input.aab", WORK.parent / "artifacts/app-release.aab"
+                supplied = staging if fault != "source" else WORK / "unselected.aab"
+                output = final if fault != "output" else WORK / "unreserved.aab"
+                if fault == "not-borrowed":
+                    tools.files.signing_input._native = False
+                elif fault == "alias":
+                    signing.values["MOBILE_RELEASE_ANDROID_KEY_ALIAS"] = "-tsa"
+                elif fault == "materialization":
+                    signing.require_materialized.side_effect = subject.AndroidToolError("stale-intent")
+                with patch.object(tools, "check"), \
+                        patch.object(AndroidBuildFiles, "work_path", new_callable=PropertyMock, return_value=WORK), \
+                        patch.object(OriginalAndroidSigningInput, "path", new_callable=PropertyMock, return_value=staging), \
+                        patch.object(tools.files, "signing_output", return_value=final), \
+                        patch("mobile_release.android.run_owned") as dispatched:
+                    with self.assertRaises(subject.AndroidToolError) as raised:
+                        tools.signing_command(signing, supplied, output)
+                if fault == "alias":
+                    self.assertEqual(raised.exception.reason, "stale-intent")
+                dispatched.assert_not_called()
+
+
 class OriginalLifetimeDataTests(unittest.TestCase):
+    def test_signed_actual_material_roster_uses_unique_os_parent_accounting(self):
+        # Real checked-in tool-layout DATA plus explicitly synthetic OS rows.
+        # This does not admit installed material, an OS contract or native work.
+        qualification = qualification_helper()
+        directory = Path(__file__).parents[2] / "desktop/tools/android_material_data"
+
+        def source_bytes(name, size, digest):
+            with (directory / name).open("rb") as stream:
+                raw = stream.read(size + 1)
+            self.assertEqual(len(raw), size)
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
+            return raw
+
+        policy = json.loads(source_bytes("policy.json", 3215,
+            "b785a69a9856d4ab333fed6383921601a85f1d340778e799982d59fea9a2627f"))
+        self.assertIsNone(policy["hostPolicy"])
+        pin = policy["documents"]["layout.json.gz"]
+        compressed = source_bytes("layout.json.gz", pin["size"], pin["sha256"])
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
+            raw = stream.read(pin["decodedSize"] + 1)
+        self.assertEqual(len(raw), pin["decodedSize"])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), pin["decodedSha256"])
+        layout = json.loads(raw)
+        self.assertEqual(len(layout["files"]), 12_371)
+        self.assertEqual(sum(row["size"] for row in layout["files"]), 993_914_038)
+        files = [{key: row[key] for key in ("path", "size", "sha256", "mode")}
+                 for row in layout["files"]]
+        self.assertEqual([row["path"] for row in layout["generated"]], [
+            "jdk/lib/security/cacerts", "sdk/build-tools/35.0.0/package.xml",
+            "sdk/licenses/android-sdk-license", "sdk/platforms/android-35/package.xml"])
+        for row in layout["generated"]:
+            # Actual package XML source commitments; generated CA/license
+            # content is host-dependent and intentionally synthetic here.
+            content = policy["generatedPackages"].get(row["path"], {"size": 7, "sha256": "d" * 64})
+            files.append({**row, **content})
+        files.sort(key=lambda row: row["path"])
+        self.assertEqual(len(files), 12_375)
+        selected = {row["path"] for row in files}
+        self.assertTrue({subject.JARSIGNER_PATH, subject.KEYTOOL_PATH}.issubset(selected))
+        binaries = sorted({"dash", *policy["helpers"]})
+
+        def roster(*, deep):
+            rows = [file_data("/usr/bin/" + name, mode=0o755) for name in binaries]
+            for index in range(subject.MAX_OS_FILES - len(rows)):
+                parent = ("/usr/lib/roster-" + str(index) + "/" + "/".join("level" + str(n) for n in range(12))
+                          if deep else "/usr/lib/mrk-roster-data")
+                rows.append(file_data(parent + "/file-" + str(index)))
+            rows.sort(key=lambda row: row["path"])
+            os_contract = json.dumps({"id": "synthetic-os-roster-data-only", "files": rows},
+                                     separators=(",", ":"), sort_keys=True).encode("ascii")
+            document = manifest_data()
+            document.update(files=files, versions=policy["versions"],
+                            gradleDistribution=policy["gradleDistribution"],
+                            roles=policy["roles"], bundletool=policy["bundletool"])
+            document["osProfile"].update(id="synthetic-os-roster-data-only", helpers=policy["helpers"],
+                files=rows, inventorySha256=hashlib.sha256(os_contract).hexdigest())
+            body, binding = encoded(document)
+            return body, binding, os_contract
+
+        body, binding, os_contract = roster(deep=False)
+        profile, budget = qualification.profile_and_budget(body, binding, os_contract)
+        self.assertEqual(len(profile.directories), 3_471)
+        self.assertEqual((budget["regularRecords"], budget["directoryRecords"]), (12_632, 3_481))
+        self.assertEqual(budget["additionalOsDirectories"], 4)
+        self.assertEqual(budget["checkpointBound"], 3_379_814)
+        self.assertEqual(budget["checkpointCap"], 4_000_000)
+        self.assertEqual(budget["metadataRounds"], 29)
+        self.assertTrue(budget["fits"])
+        self.assertFalse(budget["nativeOperationObserved"])
+        with self.assertRaisesRegex(ValueError, "binding differs"):
+            qualification.profile_and_budget(body, binding, os_contract + b"\n")
+        body, binding, os_contract = roster(deep=True)
+        deep = qualification.signed_checkpoint_budget(subject._parse_manifest(body, subject._binding(binding)))
+        self.assertFalse(deep["fits"])
+        self.assertGreater(deep["checkpointBound"], 4_000_000)
+        self.assertEqual(deep["checkpointCap"], 4_000_000)
+        with self.assertRaisesRegex(ValueError, "existing bound"):
+            qualification.profile_and_budget(body, binding, os_contract)
+
     def test_fourteen_metadata_rounds_fit_the_finite_checkpoint_budget(self):
         # Actual accounting methods, but EVERY native boundary is doubled.
         # No original descriptor, directory, file or process is acquired.
         for rounds, directory, blocks, expected in (
                 (14, False, (b"x" * 7,), 110), (14, True, (), 112),
                 (23, False, (b"x" * 7,), 164), (23, True, (), 175),
-                (23, False, (b"x" * 3, b"x" * 4), 165)):
+                (23, False, (b"x" * 3, b"x" * 4), 165),
+                (29, False, (b"x" * 7,), 200), (29, True, (), 217)):
             tools, slot = inert_tools(), Slot("counter-data", [])
             slot.open = Mock(return_value=17)
             tools._directories[ROOT] = 11
@@ -788,7 +986,7 @@ class OriginalLifetimeDataTests(unittest.TestCase):
                     tools._read(record, 7)
                 for _ in range(rounds):
                     tools._check_record(record)
-            # Actual k read calls: regular 109+k/163+k; directory 112/175.
+            # Actual k read calls: regular 109+k/163+k/199+k; directory112/175/217.
             self.assertEqual(tools.operation.counters["tool-checkpoints"], expected)
             tools.operation.counters["tool-checkpoints"] = subject.MAX_CHECKPOINTS - 1
             tools._point()

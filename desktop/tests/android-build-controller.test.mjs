@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { AndroidBuildController, androidBuildOwnerReason, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp } from '../src/androidBuild.ts';
+import { AndroidBuildController, androidBuildOwnerReason, androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp, androidBuildSigningHelp } from '../src/androidBuild.ts';
 import { ReleaseVersionController } from '../src/releaseVersion.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
@@ -49,19 +49,20 @@ function completed(op, selection = { module: ':app', variant: 'release', applica
   const findings = [{ ordinal: 0, check: 'aab-structure', status: 'FAIL' }];
   const summary = { total: 1, shown: 1, omitted: 0, counts: Object.fromEntries(ANDROID_BUILD_CORE_STATUSES.map((key) => [key, key === 'FAIL' ? 1 : 0])) };
   const command = { outcome: 'exited', exitCode: 0 };
+  const signing = op.context.signing ? { validationCommand: clone(command), validationPassed: true, signingCommand: clone(command), materialization: 'restored' } : null;
   const result = { schemaVersion: 1, scope: ANDROID_BUILD_SCOPE, usedConfig: clone(op.context.savedConfig), usedVersion: clone(op.context.savedVersion), artifactValidation: clone(op.context.artifactValidation),
-    selection: clone(selection), toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE, command: clone(command), findings: clone(findings), summary: clone(summary),
+    selection: clone(selection), toolchainProfile: ANDROID_BUILD_TOOLCHAIN_PROFILE, command: clone(command), signing: clone(signing), findings: clone(findings), summary: clone(summary),
     artifacts: [{ logicalName: 'android-aab', platform: 'android', kind: 'aab', fileName: 'app-release.aab', size: 1024, sha256: '0'.repeat(64),
       architectures: ['arm64-v8a'], unknownAbi: false, freshness: 'not-established' }],
     assurances: { structure: 'failed', nativeManifest: 'not-checked', applicationVersion: 'not-established',
       signature: op.context.artifactValidation.mode === 'upload-signature' ? 'not-checked' : 'not-inspected',
       signer: op.context.artifactValidation.mode === 'upload-signature' ? 'not-checked' : 'not-inspected',
-      toolkitSigning: 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed' }, limitations: ANDROID_BUILD_LIMITATIONS.map((item) => item === 'artifact-signer-not-inspected' && op.context.artifactValidation.mode === 'upload-signature' ? 'upload-signature-check-not-store-enrollment' : item) };
-  return { ...terminal(op, 'complete', 'none'), stage: 'disposing-work', activity: { stage: 'disposing-work', selection, command, findings, summary },
+      toolkitSigning: signing ? 'not-verified' : 'not-requested', storeOperation: 'not-requested', sourceBinding: 'not-established', releaseReadiness: 'not-assessed' }, limitations: ANDROID_BUILD_LIMITATIONS.map((item) => item === 'artifact-signer-not-inspected' && op.context.artifactValidation.mode === 'upload-signature' ? 'upload-signature-check-not-store-enrollment' : item === 'toolkit-signing-not-requested' && signing ? 'toolkit-signing-not-release-readiness' : item) };
+  return { ...terminal(op, 'complete', 'none'), stage: 'disposing-work', activity: { stage: 'disposing-work', selection, command, signing, findings, summary },
     disposition: { work: 'removed', artifacts: 'retained-local-result' }, result };
 }
 function harness(t, { initial = status(), listenGate = null, completeVersion = true } = {}) {
-  let state = workspace(), registry = clone(initial), clock = 10, other = null, versionOverride;
+  let state = workspace(), registry = clone(initial), clock = 10, other = null, versionOverride, assets = null;
   const calls = [], reads = [], subscriptions = [], versionCalls = [], order = [];
   const selected = () => state.selectedId ? state.projects[state.selectedId] : null;
   const version = new ReleaseVersionController(selected);
@@ -79,7 +80,7 @@ function harness(t, { initial = status(), listenGate = null, completeVersion = t
     startAndroidBuild: (input) => { const call = { kind: 'start', input: clone(input), ...deferred() }; calls.push(call); return call.promise; },
     cancelAndroidBuild: (operationId, ownerGeneration) => { const call = { kind: 'cancel', input: { operationId, ownerGeneration }, ...deferred() }; calls.push(call); return call.promise; },
   };
-  const controller = new AndroidBuildController({ selectedProject: selected,
+  const controller = new AndroidBuildController({ selectedProject: selected, assetSession: () => assets,
     releaseVersion: () => versionOverride === undefined ? version.getSnapshot() : versionOverride,
     otherOperationReason: () => typeof other === 'function' ? other() : other, now: () => clock });
   // Same synchronous lifetime wiring required in App; not a late React effect.
@@ -102,6 +103,7 @@ function harness(t, { initial = status(), listenGate = null, completeVersion = t
       const next = workspaceReducer(state, action); if (next === state) return;
       state = next; version.syncProject(); controller.syncProject();
     },
+    assets(value) { assets = value; controller.syncAssetSession(); },
     other(value) { other = value; }, clock(value) { clock = value; },
     emit(value) { registry = clone(value); subscriptions.at(-1)?.callback(clone(value)); },
     reply(call, value) { registry = clone(value); call.resolve(clone(value)); },
@@ -131,7 +133,7 @@ test('current completed snapshot wins over dirty draft and retained old baseline
   const op = await reviewed(h), consent = h.state.consent;
   assert.deepEqual(h.calls[0].input.savedConfig, NEW_CONFIG);
   assert.deepEqual(h.calls[0].input.savedVersion, { ...VERSION, source: 'release/current-version.env', name: '4.5.6-rc+7', build: 84 });
-  assert.deepEqual(Object.keys(h.calls[0].input).sort(), ['artifactValidation', 'baselineGeneration', 'draftRevision', 'projectId', 'savedConfig', 'savedVersion']);
+  assert.deepEqual(Object.keys(h.calls[0].input).sort(), ['artifactValidation', 'baselineGeneration', 'draftRevision', 'projectId', 'savedConfig', 'savedVersion', 'signing']);
   assert.deepEqual(consent.binding.selection, { module: ':current', variant: 'production', applicationId: 'org.current.app' });
   assert.equal(consent.binding.observationGeneration, h.project.observationGeneration);
   assert.equal(consent.binding.versionObservation.readEpoch, h.versionState.readEpoch);
@@ -332,7 +334,7 @@ test('actual native bridge sends four raw copied Android bodies, rejects bad cal
   }, async (name, receive) => { event = name; callback = receive; return () => {}; });
   const input = { projectId: 'p1', draftRevision: 1, baselineGeneration: 1, savedConfig: clone(CONFIG),
     savedVersion: { ...VERSION, source: 'release/version.properties', name: '1.2.3', build: 42 },
-    artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } };
+    artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null }, signing: null };
   const before = clone(input), prepare = api.prepareAndroidBuild(input); input.savedVersion.build++; input.savedConfig.sha256 = '0'.repeat(64);
   gate.resolve(); await prepare;
   await api.startAndroidBuild({ operationId: OP, ownerGeneration: OWNER, consentVersion: ANDROID_BUILD_CONSENT });
@@ -365,7 +367,7 @@ test('component shares native-terminal-only output with Artifacts and provides r
   assert.match(source, /controller\.versionIntent\(\); onReadVersion\(\)/);
   assert.match(source, /post-run bytes may be reused\/stale/); assert.match(source, /signer is not inspected/);
   assert.doesNotMatch(source, /(?:window\.open|href=|download=|controller\.dispose\()/);
-  for (const help of [androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp]) {
+  for (const help of [androidBuildHelp, androidBuildInputHelp, androidBuildOutputHelp, androidBuildCancelHelp, androidBuildSignatureHelp, androidBuildSigningHelp]) {
     for (const key of ['label', 'what', 'why', 'where', 'format', 'failure', 'requiredWhen']) assert.ok(help[key].length > 12, `${help.label}.${key}`);
   }
   assert.match(androidBuildInputHelp.what, /observe-v2/); assert.match(androidBuildOutputHelp.failure, /Complete may contain FAIL/);
@@ -377,7 +379,7 @@ test('upload signature starts off, requires a saved public certificate and binds
   const h = harness(t); await h.ready;
   assert.equal(h.state.verifyUploadSignature, false);
   h.controller.setVerifyUploadSignature(true);
-  assert.match(h.controller.prepareReason(), /uploadCertificateSha256/);
+  assert.match(h.controller.prepareReason(), /upload-certificate/);
   await h.controller.prepare(); assert.equal(h.calls.length, 0);
   h.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 2 });
   h.dispatch({ type: 'snapshot-done', projectId: 'p1', requestId: 2,
@@ -452,4 +454,98 @@ test('prerequisite guidance distinguishes an unqualified gate from a missing SDK
   assert.match(androidBuildHelp.format, /Gradle readiness or authorize a build/);
   for (const state of ['Missing', 'unselected', 'unsupported', 'not inspected', 'unqualified']) assert.ok(androidBuildHelp.failure.includes(state));
   assert.match(androidBuildHelp.failure, /closed native gate does not mean your SDK is missing/);
+});
+
+
+function assignedAssets() {
+  const kinds = ['android-keystore', 'android-firebase', 'project-read-token'];
+  return { mode: 'native', blocked: false, observationFailed: false, originPending: false, busy: false,
+    updatingContext: false, contextCurrent: true, scope: { platform: 'android', stage: 'candidate', purpose: 'signing' },
+    status: { mode: 'session', capability: { available: true }, operation: null,
+      context: { projectId: 'p1', platform: 'android', stage: 'candidate', purpose: 'signing', revision: 1 },
+      records: kinds.map((kind, index) => ({ kind, recordId: String.fromCharCode(97 + index).repeat(32), revision: 1, availability: 'assigned' })),
+      assignments: kinds.map((kind, index) => ({ kind, recordId: String.fromCharCode(97 + index).repeat(32), recordRevision: 1, contextRevision: 1, availability: 'available' })) } };
+}
+async function signedReady(h) {
+  await h.ready;
+  h.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 2 });
+  h.dispatch({ type: 'snapshot-done', projectId: 'p1', requestId: 2,
+    snapshot: snapshot({ config: NEW_CONFIG, uploadCertificateSha256: 'ab'.repeat(32) }), observedAt: 2 });
+  await h.readVersion(); h.assets(assignedAssets()); h.controller.setSignWithAssignedKey(true);
+}
+
+test('toolkit signing is explicit default-off and guides missing saved certificate/current session without CLI or secret copying', async (t) => {
+  const h = harness(t); await h.ready;
+  assert.equal(h.state.signWithAssignedKey, false); assert.equal(h.state.verifyUploadSignature, false);
+  h.controller.setSignWithAssignedKey(true); assert.equal(h.state.verifyUploadSignature, true);
+  h.controller.setVerifyUploadSignature(false); assert.equal(h.state.verifyUploadSignature, true);
+  assert.match(h.controller.prepareReason(), /upload-certificate/); await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  await signedReady(h); const op = await reviewed(h);
+  assert.equal(op.context.signing.assignments.length, 3); assert.equal(op.context.artifactValidation.mode, 'upload-signature');
+  assert.deepEqual(Object.keys(op.context.signing).sort(), ['assignments', 'contextRevision', 'source']);
+  for (const row of op.context.signing.assignments) assert.deepEqual(Object.keys(row).sort(), ['contextRevision', 'kind', 'recordId', 'recordRevision']);
+  assert.doesNotMatch(JSON.stringify(h.calls[0].input), /(?:storePassword|keyPassword|keyAlias|privatePath|contextConfig)/);
+});
+
+test('signed admission rejects dirty draft and unavailable or stale assignment scope before a prepare call', async (t) => {
+  const h = harness(t); await signedReady(h);
+  for (const change of [
+    (a) => { a.contextCurrent = false; }, (a) => { a.status.context.purpose = 'full'; },
+    (a) => { a.status.context.stage = 'production'; }, (a) => { a.status.context.projectId = 'other'; },
+    (a) => { a.status.assignments[0].availability = 'unavailable'; },
+    (a) => { a.status.assignments[1].recordRevision = 2; }, (a) => { a.status.assignments[2].contextRevision = 2; },
+    (a) => { a.status.assignments.shift(); }, (a) => { a.status.mode = 'locked'; },
+  ]) {
+    const assets = assignedAssets(); change(assets); h.assets(assets);
+    assert.ok(h.controller.prepareReason()); await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  }
+  h.assets(assignedAssets()); h.dispatch({ type: 'edit', projectId: 'p1', path: 'android.applicationId', value: 'org.changed.app' });
+  // The edit retires the saved-version observation first; neither refusal may
+  // reach Prepare. Re-reading saved bytes does not save or clear the draft.
+  assert.ok(isDirty(h.project));
+  assert.match(h.controller.prepareReason(), /complete saved-version observation/);
+  await h.controller.prepare(); assert.equal(h.calls.length, 0);
+  await h.readVersion(); assert.ok(isDirty(h.project));
+  assert.match(h.controller.prepareReason(), /unsaved draft/); await h.controller.prepare(); assert.equal(h.calls.length, 0);
+});
+
+test('assignment changes retire unstarted signed consent synchronously and a late reply cannot restore it', async (t) => {
+  const h = harness(t); await signedReady(h); const op = await reviewed(h);
+  h.controller.setAcknowledged(OP, OWNER, true);
+  const changed = assignedAssets(); changed.status.assignments[0].recordRevision = 2; changed.status.records[0].revision = 2;
+  h.assets(changed); assert.equal(h.state.consent, null); assert.equal(h.calls.filter((c) => c.kind === 'cancel').length, 1);
+  h.emit(status(2, op)); await h.controller.start(OP, OWNER); assert.equal(h.calls.filter((c) => c.kind === 'start').length, 0);
+  const late = harness(t); await signedReady(late);
+  const preparing = late.controller.prepare(), call = late.calls.at(-1), original = operation(call.input);
+  late.assets(changed); late.reply(call, status(1, original)); await preparing;
+  assert.equal(late.state.consent, null); assert.equal(late.calls.filter((c) => c.kind === 'cancel').length, 1);
+});
+
+test('a started signed run retains its immutable original across public credential updates and keeps Status/Cancel', async (t) => {
+  const h = harness(t); await signedReady(h); const op = await reviewed(h), sent = start(h, op);
+  h.reply(sent.call, status(2, running(op, 'validating-signing'))); await sent.done;
+  const original = h.state.status.operation.context, originalValues = clone(original); h.assets(null);
+  assert.equal(h.controller.setSignWithAssignedKey(false), false); h.controller.setVerifyUploadSignature(false);
+  assert.equal(h.state.signWithAssignedKey, true); assert.equal(h.state.verifyUploadSignature, true);
+  // Protocol DATA retains null prototypes; structuredClone normalizes them.
+  // Check original identity and detached values, not a prototype mismatch.
+  assert.equal(h.state.status.operation.context, original);
+  assert.deepEqual(clone(h.state.status.operation.context), originalValues);
+  assert.equal(h.calls.filter((c) => c.kind === 'cancel').length, 0);
+  assert.equal(h.controller.canCancel(), true); await h.controller.checkStatus();
+  h.controller.cancel(); assert.equal(h.calls.filter((c) => c.kind === 'cancel').length, 1);
+  h.reply(h.calls.at(-1), status(3, terminal(running(op, 'validating-signing')))); await flush();
+  assert.equal(h.calls.filter((c) => c.kind === 'start').length, 1);
+});
+
+test('signed completion preserves failed inspection as not-verified and links normal guided credential/settings flows', async (t) => {
+  const h = harness(t); await signedReady(h); const op = await reviewed(h), sent = start(h, op);
+  h.reply(sent.call, status(2, running(op))); await sent.done; h.emit(status(3, completed(op)));
+  assert.equal(h.state.status.operation.result.assurances.toolkitSigning, 'not-verified');
+  assert.equal(h.state.status.operation.result.summary.counts.FAIL, 1);
+  const source = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
+  for (const marker of ['setSignWithAssignedKey', 'SigningProgress', 'onCredentials', 'onSettings', 'androidBuildSigningHelp']) assert.ok(source.includes(marker), marker);
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, /assetSession: assetSession\.getSnapshot/);
+  assert.match(app, /assetSession\.subscribe\(\(\) => androidBuild\.syncAssetSession\(\)\)/);
 });

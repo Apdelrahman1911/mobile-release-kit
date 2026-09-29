@@ -67,7 +67,7 @@ pub(crate) enum AdmissionFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, ConfigurationPreparing, ConfigurationPrepared,
-    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, MetadataTextPreparing, MetadataTextPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared,
+    GitHubWorkflowPreparing, GitHubWorkflowPrepared, GitHubReadOnlyPreparing, GitHubReadOnlyPrepared, GitHubDevicePreparing, GitHubDevicePrepared, GitHubPreflightPreparing, GitHubPreflightPrepared, GitHubReleasePreparing, GitHubReleasePrepared, GitHubInputGroupPreparing, GitHubInputGroupPrepared, GitHubRunnerPrerequisitePreparing, GitHubRunnerPrerequisitePrepared, MetadataTextPreparing, MetadataTextPrepared, ReleaseVersionPreparing, ReleaseVersionPrepared, MetadataImagesPreparing, MetadataImagesPrepared,
     EnvironmentDiagnosticsPreparing, EnvironmentDiagnosticsPrepared, OfflinePreflightPreparing, OfflinePreflightPrepared, ProjectRecoveryPreparing, ProjectRecoveryPrepared,
     Retained, Auditing, Refused, Settling, Settled, Unknown }
 
@@ -75,24 +75,32 @@ enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, 
 // renderer argument or extensible runtime interface. Keep the existing edit
 // facades stable; the slot, original ledger and sealed profile must agree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubPreflight, GitHubRelease, MetadataText, ReleaseVersion, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
+enum InstalledEditDomain { Configuration, GitHubWorkflows, GitHubReadOnly, GitHubDevice, GitHubPreflight, GitHubRelease, GitHubInputGroup, GitHubRunnerPrerequisite, MetadataText, ReleaseVersion, MetadataImages, EnvironmentDiagnostics, OfflinePreflight, ProjectRecovery }
 impl InstalledEditDomain {
     fn preparing(self) -> Phase { match self {
         Self::Configuration => Phase::ConfigurationPreparing, Self::GitHubWorkflows => Phase::GitHubWorkflowPreparing,
         Self::GitHubReadOnly => Phase::GitHubReadOnlyPreparing,
+        Self::GitHubDevice => Phase::GitHubDevicePreparing,
         Self::GitHubPreflight => Phase::GitHubPreflightPreparing,
         Self::GitHubRelease => Phase::GitHubReleasePreparing,
+        Self::GitHubInputGroup => Phase::GitHubInputGroupPreparing,
+        Self::GitHubRunnerPrerequisite => Phase::GitHubRunnerPrerequisitePreparing,
         Self::MetadataText => Phase::MetadataTextPreparing,
         Self::ReleaseVersion => Phase::ReleaseVersionPreparing,
+        Self::MetadataImages => Phase::MetadataImagesPreparing,
         Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPreparing, Self::OfflinePreflight => Phase::OfflinePreflightPreparing, Self::ProjectRecovery => Phase::ProjectRecoveryPreparing,
     } }
     fn prepared(self) -> Phase { match self {
         Self::Configuration => Phase::ConfigurationPrepared, Self::GitHubWorkflows => Phase::GitHubWorkflowPrepared,
         Self::GitHubReadOnly => Phase::GitHubReadOnlyPrepared,
+        Self::GitHubDevice => Phase::GitHubDevicePrepared,
         Self::GitHubPreflight => Phase::GitHubPreflightPrepared,
         Self::GitHubRelease => Phase::GitHubReleasePrepared,
+        Self::GitHubInputGroup => Phase::GitHubInputGroupPrepared,
+        Self::GitHubRunnerPrerequisite => Phase::GitHubRunnerPrerequisitePrepared,
         Self::MetadataText => Phase::MetadataTextPrepared,
         Self::ReleaseVersion => Phase::ReleaseVersionPrepared,
+        Self::MetadataImages => Phase::MetadataImagesPrepared,
         Self::EnvironmentDiagnostics => Phase::EnvironmentDiagnosticsPrepared, Self::OfflinePreflight => Phase::OfflinePreflightPrepared, Self::ProjectRecovery => Phase::ProjectRecoveryPrepared,
     } }
 }
@@ -100,10 +108,14 @@ enum InstalledEditProfile {
     Configuration(crate::runtime::ConfigurationInstalledProfile),
     GitHubWorkflows(crate::runtime::GitHubWorkflowInstalledProfile),
     GitHubReadOnly(crate::runtime::GitHubReadOnlyInstalledProfile),
+    GitHubDevice(crate::runtime::GitHubDeviceInstalledProfile),
     GitHubPreflight(crate::runtime::GitHubPreflightInstalledProfile),
     GitHubRelease(crate::runtime::GitHubReleaseInstalledProfile),
+    GitHubInputGroup(crate::runtime::GitHubInputGroupInstalledProfile),
+    GitHubRunnerPrerequisite(crate::runtime::GitHubRunnerPrerequisiteInstalledProfile),
     MetadataText(crate::runtime::MetadataTextInstalledProfile),
     ReleaseVersion(crate::runtime::ReleaseVersionInstalledProfile),
+    MetadataImages(crate::runtime::MetadataImagesInstalledProfile),
     EnvironmentDiagnostics(crate::runtime::EnvironmentDiagnosticsInstalledProfile),
     OfflinePreflight(crate::runtime::OfflinePreflightInstalledProfile),
     ProjectRecovery(crate::runtime::ProjectRecoveryInstalledProfile),
@@ -112,29 +124,41 @@ impl InstalledEditProfile {
     fn domain(&self) -> InstalledEditDomain { match self {
         Self::Configuration(_) => InstalledEditDomain::Configuration, Self::GitHubWorkflows(_) => InstalledEditDomain::GitHubWorkflows,
         Self::GitHubReadOnly(_) => InstalledEditDomain::GitHubReadOnly,
+        Self::GitHubDevice(_) => InstalledEditDomain::GitHubDevice,
         Self::GitHubPreflight(_) => InstalledEditDomain::GitHubPreflight,
         Self::GitHubRelease(_) => InstalledEditDomain::GitHubRelease,
+        Self::GitHubInputGroup(_) => InstalledEditDomain::GitHubInputGroup,
+        Self::GitHubRunnerPrerequisite(_) => InstalledEditDomain::GitHubRunnerPrerequisite,
         Self::MetadataText(_) => InstalledEditDomain::MetadataText,
         Self::ReleaseVersion(_) => InstalledEditDomain::ReleaseVersion,
+        Self::MetadataImages(_) => InstalledEditDomain::MetadataImages,
         Self::EnvironmentDiagnostics(_) => InstalledEditDomain::EnvironmentDiagnostics, Self::OfflinePreflight(_) => InstalledEditDomain::OfflinePreflight, Self::ProjectRecovery(_) => InstalledEditDomain::ProjectRecovery,
     } }
     fn selection(&self) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> { match self {
         Self::Configuration(profile) => profile.selection(), Self::GitHubWorkflows(profile) => profile.selection(),
         Self::GitHubReadOnly(profile) => profile.selection(),
+        Self::GitHubDevice(profile) => profile.selection(),
         Self::GitHubPreflight(profile) => profile.selection(),
         Self::GitHubRelease(profile) => profile.selection(),
+        Self::GitHubInputGroup(profile) => profile.selection(),
+        Self::GitHubRunnerPrerequisite(profile) => profile.selection(),
         Self::MetadataText(profile) => profile.selection(),
         Self::ReleaseVersion(profile) => profile.selection(),
+        Self::MetadataImages(profile) => profile.selection(),
         Self::EnvironmentDiagnostics(profile) => profile.selection(), Self::OfflinePreflight(profile) => profile.selection(), Self::ProjectRecovery(profile) => profile.selection(),
     } }
     fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool { match self {
         Self::Configuration(profile) => profile.accepts_platform(sysname, machine, release),
         Self::GitHubWorkflows(profile) => profile.accepts_platform(sysname, machine, release),
         Self::GitHubReadOnly(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubDevice(profile) => profile.accepts_platform(sysname, machine, release),
         Self::GitHubPreflight(profile) => profile.accepts_platform(sysname, machine, release),
         Self::GitHubRelease(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubInputGroup(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::GitHubRunnerPrerequisite(profile) => profile.accepts_platform(sysname, machine, release),
         Self::MetadataText(profile) => profile.accepts_platform(sysname, machine, release),
         Self::ReleaseVersion(profile) => profile.accepts_platform(sysname, machine, release),
+        Self::MetadataImages(profile) => profile.accepts_platform(sysname, machine, release),
         Self::EnvironmentDiagnostics(profile) => profile.accepts_platform(sysname, machine, release),
         Self::OfflinePreflight(profile) => profile.accepts_platform(sysname, machine, release),
         Self::ProjectRecovery(profile) => profile.accepts_platform(sysname, machine, release),
@@ -173,10 +197,14 @@ impl CustodyObservation {
             Phase::ConfigurationPreparing => "configurationPreparing", Phase::ConfigurationPrepared => "configurationPrepared",
             Phase::GitHubWorkflowPreparing => "githubWorkflowPreparing", Phase::GitHubWorkflowPrepared => "githubWorkflowPrepared",
             Phase::GitHubReadOnlyPreparing => "githubReadOnlyPreparing", Phase::GitHubReadOnlyPrepared => "githubReadOnlyPrepared",
+            Phase::GitHubDevicePreparing => "githubDevicePreparing", Phase::GitHubDevicePrepared => "githubDevicePrepared",
             Phase::GitHubPreflightPreparing => "githubPreflightPreparing", Phase::GitHubPreflightPrepared => "githubPreflightPrepared",
             Phase::GitHubReleasePreparing => "githubReleasePreparing", Phase::GitHubReleasePrepared => "githubReleasePrepared",
+            Phase::GitHubInputGroupPreparing => "githubInputGroupPreparing", Phase::GitHubInputGroupPrepared => "githubInputGroupPrepared",
+            Phase::GitHubRunnerPrerequisitePreparing => "githubRunnerPrerequisitePreparing", Phase::GitHubRunnerPrerequisitePrepared => "githubRunnerPrerequisitePrepared",
             Phase::MetadataTextPreparing => "metadataTextPreparing", Phase::MetadataTextPrepared => "metadataTextPrepared",
             Phase::ReleaseVersionPreparing => "releaseVersionPreparing", Phase::ReleaseVersionPrepared => "releaseVersionPrepared",
+            Phase::MetadataImagesPreparing => "metadataImagesPreparing", Phase::MetadataImagesPrepared => "metadataImagesPrepared",
             Phase::EnvironmentDiagnosticsPreparing => "environmentDiagnosticsPreparing", Phase::EnvironmentDiagnosticsPrepared => "environmentDiagnosticsPrepared",
             Phase::OfflinePreflightPreparing => "offlinePreflightPreparing", Phase::OfflinePreflightPrepared => "offlinePreflightPrepared",
             Phase::ProjectRecoveryPreparing => "projectRecoveryPreparing", Phase::ProjectRecoveryPrepared => "projectRecoveryPrepared",
@@ -556,8 +584,8 @@ impl OriginalDescriptorBook {
     /// EINTR/EBADF and a missing close return are unknown, not retry permission.
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         self.settlement_started = true; // Absorbing: even empty/positive settlement disables transfer.
-        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing
-            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing) { self.mark_interrupted(); }
+        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing | Phase::GitHubDevicePreparing
+            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::GitHubInputGroupPreparing | Phase::GitHubRunnerPrerequisitePreparing) { self.mark_interrupted(); }
         if !self.unknown { self.phase = Phase::Settling; }
         for index in (0..self.records.len()).rev() {
             let _ = self.close_one(SlotId(index)); // Continue every independent known original.
@@ -593,8 +621,8 @@ impl OriginalDescriptorBook {
     }
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing
-            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::Retained | Phase::Auditing)
+        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::GitHubWorkflowPreparing | Phase::GitHubReadOnlyPreparing | Phase::GitHubDevicePreparing
+            | Phase::MetadataTextPreparing | Phase::ReleaseVersionPreparing | Phase::MetadataImagesPreparing | Phase::EnvironmentDiagnosticsPreparing | Phase::OfflinePreflightPreparing | Phase::ProjectRecoveryPreparing | Phase::GitHubPreflightPreparing | Phase::GitHubReleasePreparing | Phase::GitHubInputGroupPreparing | Phase::GitHubRunnerPrerequisitePreparing | Phase::Retained | Phase::Auditing)
             || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
@@ -812,9 +840,31 @@ impl InstalledRuntimeCustody {
                     let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
                     self.inspect_inner_with_manifest(Some(anchor), end, stop)
                 },
+                InstalledEditProfile::GitHubDevice(github) => {
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
                 InstalledEditProfile::GitHubPreflight(github) => {
                     // Independent sealed action selection, never the read-only
                     // book. Inspection and launch must select the SAME original.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
+                InstalledEditProfile::GitHubRelease(github) => {
+                    // R owns this selector/book; inspection and launch consume
+                    // the SAME normal V or private observation D-S original.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
+                InstalledEditProfile::GitHubInputGroup(github) => {
+                    // P2 paths and this SAME original ledger use only P2\'s
+                    // independently qualified manifest, never an old grant.
+                    let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
+                    self.inspect_inner_with_manifest(Some(anchor), end, stop)
+                },
+                InstalledEditProfile::GitHubRunnerPrerequisite(github) => {
+                    // The SAME original ledger checks this role's own qualified
+                    // manifest; a read/device/P2 grant cannot substitute for it.
                     let anchor = github.manifest_anchor().map_err(|_| AdmissionFailure::MissingCompileAnchor)?;
                     self.inspect_inner_with_manifest(Some(anchor), end, stop)
                 },
@@ -1131,10 +1181,14 @@ impl InstalledEditRuntimeSlots {
             InstalledEditDomain::Configuration => "The configuration installed runtime failed original-custody inspection.",
             InstalledEditDomain::GitHubWorkflows => "The GitHub workflow installed runtime failed original-custody inspection.",
             InstalledEditDomain::GitHubReadOnly => "The GitHub read-only installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubDevice => "The GitHub device installed runtime failed original-custody inspection.",
             InstalledEditDomain::GitHubPreflight => "The GitHub preflight installed runtime failed original-custody inspection.",
             InstalledEditDomain::GitHubRelease => "The GitHub release installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubInputGroup => "The GitHub input-group installed runtime failed original-custody inspection.",
+            InstalledEditDomain::GitHubRunnerPrerequisite => "The GitHub runner-prerequisite installed runtime failed original-custody inspection.",
             InstalledEditDomain::MetadataText => "The metadata text installed runtime failed original-custody inspection.",
             InstalledEditDomain::ReleaseVersion => "The saved-version installed runtime failed original-custody inspection.",
+            InstalledEditDomain::MetadataImages => "The public-image installed runtime failed original-custody inspection.",
             InstalledEditDomain::EnvironmentDiagnostics => "The build-tool diagnostics installed runtime failed original-custody inspection.",
             InstalledEditDomain::OfflinePreflight => "The saved offline-preflight installed runtime failed original-custody inspection.",
             InstalledEditDomain::ProjectRecovery => "The project recovery installed runtime failed original-custody inspection.",
@@ -1277,6 +1331,30 @@ impl GitHubReadOnlyRuntimeSlots {
     pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubReadOnly).is_ok() && self.inner.settled() }
 }
 
+/// Original device-step custody; read-only, passive and action books cannot substitute.
+pub(crate) struct GitHubDeviceRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubDeviceRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubDevice) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubDeviceInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubDevice(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubDevice).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubDevice)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubDevice)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubDevice).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubDevice).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubDevice).is_ok() && self.inner.settled() }
+}
+
 /// Original Supervisor action custody; cannot accept the readonly domain book.
 pub(crate) struct GitHubPreflightRuntimeSlots { inner: InstalledEditRuntimeSlots }
 impl GitHubPreflightRuntimeSlots {
@@ -1299,6 +1377,54 @@ impl GitHubPreflightRuntimeSlots {
         self.inner.settle_originals()
     }
     pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubPreflight).is_ok() && self.inner.settled() }
+}
+
+/// P2 storage in the SAME Supervisor; cannot adopt any other domain book.
+pub(crate) struct GitHubInputGroupRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubInputGroupRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubInputGroup) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubInputGroupInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubInputGroup(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubInputGroup).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubInputGroup)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubInputGroup)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubInputGroup).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubInputGroup).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubInputGroup).is_ok() && self.inner.settled() }
+}
+
+/// Runner-prerequisite storage in the SAME Supervisor; cannot adopt any other domain book.
+pub(crate) struct GitHubRunnerPrerequisiteRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl GitHubRunnerPrerequisiteRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRunnerPrerequisite) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::GitHubRunnerPrerequisiteInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::GitHubRunnerPrerequisite(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubRunnerPrerequisite).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::GitHubRunnerPrerequisite)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::GitHubRunnerPrerequisite)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubRunnerPrerequisite).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::GitHubRunnerPrerequisite).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::GitHubRunnerPrerequisite).is_ok() && self.inner.settled() }
 }
 
 /// Original Supervisor action custody; cannot accept the readonly/preflight domain book.
@@ -1369,6 +1495,31 @@ impl ReleaseVersionRuntimeSlots {
         self.inner.settle_originals()
     }
     pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::ReleaseVersion).is_ok() && self.inner.settled() }
+}
+
+/// Domain-fixed storage inside the original diagnostics Session. The owner
+/// must settle its core C/A/W and native consumers BEFORE consuming these closes.
+pub(crate) struct MetadataImagesRuntimeSlots { inner: InstalledEditRuntimeSlots }
+impl MetadataImagesRuntimeSlots {
+    pub(crate) fn new() -> Self { Self { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::MetadataImages) } }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::MetadataImagesInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        self.inner.inspect_once(InstalledEditProfile::MetadataImages(profile), end, stop)
+    }
+    pub(crate) fn never_started(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.never_started() }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        self.inner.require_domain(InstalledEditDomain::MetadataImages)?; self.inner.transfer_once()
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut InstalledEditRuntime> {
+        self.inner.require_domain(InstalledEditDomain::MetadataImages)?; self.inner.capability()
+    }
+    pub(crate) fn no_child_effect(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.no_child_effect() }
+    pub(crate) fn mark_interrupted(&mut self) { self.inner.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.inner.require_domain(InstalledEditDomain::MetadataImages).is_err() { self.inner.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.inner.settle_originals()
+    }
+    pub(crate) fn settled(&self) -> bool { self.inner.require_domain(InstalledEditDomain::MetadataImages).is_ok() && self.inner.settled() }
 }
 
 /// Domain-fixed storage inside the original diagnostics Session. The owner
@@ -3070,7 +3221,7 @@ mod pure_tests {
         // Test the real predicate as DATA, never mint an installed profile,
         // transferred original or capability from synthetic successful facts.
         for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
-            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::Retained, Phase::Auditing,
+            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::GitHubDevicePreparing, Phase::GitHubDevicePrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::MetadataImagesPreparing, Phase::MetadataImagesPrepared, Phase::Retained, Phase::Auditing,
             Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared,
             Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
             for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
@@ -3104,8 +3255,8 @@ mod pure_tests {
         assert_eq!(pending.observation().positive_closes(), 0);
 
         for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows,
-            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
-            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup, InstalledEditDomain::GitHubRunnerPrerequisite] {
             let mut other = GitHubReadOnlyRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
             assert!(!other.never_started() && !other.no_child_effect() && !other.settled());
             assert!(other.transfer_once().is_err() && other.capability().is_err());
@@ -3134,6 +3285,189 @@ mod pure_tests {
         let mut pending = OriginalDescriptorBook::new(); pending.phase = Phase::GitHubPreflightPreparing;
         assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
         assert_eq!(pending.observation().positive_closes(), 0);
+    }
+    #[test]
+    fn github_input_group_slots_keep_original_refusal_and_absorbing_settlement() {
+        let mut slots = GitHubInputGroupRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // Empty DATA, not a native close witness.
+        assert!(slots.settled() && !slots.never_started());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+    }
+    #[test]
+    fn github_input_group_slots_reject_foreign_domains_without_native_custody() {
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows,
+            InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::GitHubDevice,
+            InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease,
+            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery] {
+            let mut foreign = GitHubInputGroupRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
+            let original = foreign.inner.inspection.as_ref().map(std::ptr::from_ref);
+            assert!(!foreign.never_started() && !foreign.no_child_effect() && !foreign.settled());
+            assert!(foreign.transfer_once().is_err() && foreign.capability().is_err());
+            assert_eq!(foreign.settle_originals(), CloseOutcome::Unknown);
+            assert_eq!(foreign.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+            assert_eq!(foreign.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+            // Same P2 facade, but a foreign original identity cannot be adopted.
+            let mut mismatched = GitHubInputGroupRuntimeSlots::new();
+            mismatched.inner.inspection_started = true;
+            mismatched.inner.inspection.as_mut().unwrap().edit_domain = Some(wrong);
+            assert!(!mismatched.no_child_effect() && mismatched.transfer_once().is_err() && mismatched.capability().is_err());
+            assert_eq!(mismatched.settle_originals(), CloseOutcome::Unknown);
+            assert!(!mismatched.settled());
+        }
+        let mut read = GitHubReadOnlyRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubInputGroup) };
+        let mut device = GitHubDeviceRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubInputGroup) };
+        let mut preflight = GitHubPreflightRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubInputGroup) };
+        let mut release = GitHubReleaseRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubInputGroup) };
+        assert!(read.transfer_once().is_err() && read.capability().is_err() && !read.no_child_effect());
+        assert!(device.transfer_once().is_err() && device.capability().is_err() && !device.no_child_effect());
+        assert!(preflight.transfer_once().is_err() && preflight.capability().is_err() && !preflight.no_child_effect());
+        assert!(release.transfer_once().is_err() && release.capability().is_err() && !release.no_child_effect());
+        assert_eq!(read.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(device.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(preflight.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(release.settle_originals(), CloseOutcome::Unknown);
+    }
+    #[test]
+    fn github_input_group_pending_acquisition_and_preparation_keep_unknown() {
+        let mut slots = GitHubInputGroupRuntimeSlots::new();
+        let original = slots.inner.inspection.as_mut().unwrap();
+        let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed, never opened.
+        original.book.refuse(AdmissionFailure::Stopped);
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        let original = slots.inner.inspection.as_ref().unwrap();
+        assert_eq!(original.book.records[pending.0].acquisition, Acquisition::Attempted);
+        assert_eq!(original.observation().pending_acquisitions(), 1);
+        assert_eq!(original.observation().positive_closes(), 0);
+        let mut interrupted = GitHubInputGroupRuntimeSlots::new();
+        interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        let mut preparing = OriginalDescriptorBook::new();
+        preparing.phase = Phase::GitHubInputGroupPreparing;
+        assert_eq!(preparing.observation().phase(), "githubInputGroupPreparing");
+        let (_sender, stop) = watch::channel(false);
+        assert_eq!(preparing.begin(Operation::Idle, Instant::now() + std::time::Duration::from_secs(30), &stop), Ok(()));
+        assert_eq!(preparing.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(preparing.observation().positive_closes(), 0);
+        assert_eq!(preparing.observation().phase(), "unknown");
+    }
+    #[test]
+    fn github_input_group_claim_requires_its_own_prepared_original_once() {
+        let domain = InstalledEditDomain::GitHubInputGroup;
+        assert_eq!(domain.preparing(), Phase::GitHubInputGroupPreparing);
+        assert_eq!(domain.prepared(), Phase::GitHubInputGroupPrepared);
+        assert!(!edit_claim_ready(domain, Phase::GitHubInputGroupPreparing, true, true, false));
+        for foreign in [Phase::GitHubReadOnlyPrepared, Phase::GitHubDevicePrepared,
+            Phase::GitHubPreflightPrepared, Phase::GitHubReleasePrepared] {
+            assert!(!edit_claim_ready(domain, foreign, true, true, false));
+        }
+        assert!(edit_claim_ready(domain, Phase::GitHubInputGroupPrepared, true, true, false));
+        assert!(!edit_claim_ready(domain, Phase::GitHubInputGroupPrepared, false, true, false));
+        assert!(!edit_claim_ready(domain, Phase::GitHubInputGroupPrepared, true, false, false));
+        assert!(!edit_claim_ready(domain, Phase::GitHubInputGroupPrepared, true, true, true));
+        all_edit_claim_domains_require_their_own_preparation_once();
+    }
+    #[test]
+    fn github_runner_prerequisite_slots_keep_original_refusal_and_absorbing_settlement() {
+        let mut slots = GitHubRunnerPrerequisiteRuntimeSlots::new();
+        let original = slots.inner.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // Empty DATA, not a native close witness.
+        assert!(slots.settled() && !slots.never_started());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+    }
+    #[test]
+    fn github_runner_prerequisite_slots_reject_foreign_domains_without_native_custody() {
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows,
+            InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::GitHubDevice,
+            InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup,
+            InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery] {
+            let mut foreign = GitHubRunnerPrerequisiteRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
+            let original = foreign.inner.inspection.as_ref().map(std::ptr::from_ref);
+            assert!(!foreign.never_started() && !foreign.no_child_effect() && !foreign.settled());
+            assert!(foreign.transfer_once().is_err() && foreign.capability().is_err());
+            assert_eq!(foreign.settle_originals(), CloseOutcome::Unknown);
+            assert_eq!(foreign.inner.inspection.as_ref().map(std::ptr::from_ref), original);
+            assert_eq!(foreign.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+            // Same runner facade, but a foreign original identity cannot be adopted.
+            let mut mismatched = GitHubRunnerPrerequisiteRuntimeSlots::new();
+            mismatched.inner.inspection_started = true;
+            mismatched.inner.inspection.as_mut().unwrap().edit_domain = Some(wrong);
+            assert!(!mismatched.no_child_effect() && mismatched.transfer_once().is_err() && mismatched.capability().is_err());
+            assert_eq!(mismatched.settle_originals(), CloseOutcome::Unknown);
+            assert!(!mismatched.settled());
+        }
+        let mut read = GitHubReadOnlyRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRunnerPrerequisite) };
+        let mut device = GitHubDeviceRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRunnerPrerequisite) };
+        let mut preflight = GitHubPreflightRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRunnerPrerequisite) };
+        let mut release = GitHubReleaseRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRunnerPrerequisite) };
+        let mut input = GitHubInputGroupRuntimeSlots { inner: InstalledEditRuntimeSlots::new(InstalledEditDomain::GitHubRunnerPrerequisite) };
+        assert!(input.transfer_once().is_err() && input.capability().is_err() && !input.no_child_effect());
+        assert_eq!(input.settle_originals(), CloseOutcome::Unknown);
+        assert!(read.transfer_once().is_err() && read.capability().is_err() && !read.no_child_effect());
+        assert!(device.transfer_once().is_err() && device.capability().is_err() && !device.no_child_effect());
+        assert!(preflight.transfer_once().is_err() && preflight.capability().is_err() && !preflight.no_child_effect());
+        assert!(release.transfer_once().is_err() && release.capability().is_err() && !release.no_child_effect());
+        assert_eq!(read.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(device.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(preflight.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(release.settle_originals(), CloseOutcome::Unknown);
+    }
+    #[test]
+    fn github_runner_prerequisite_pending_acquisition_and_preparation_keep_unknown() {
+        let mut slots = GitHubRunnerPrerequisiteRuntimeSlots::new();
+        let original = slots.inner.inspection.as_mut().unwrap();
+        let pending = original.book.arm(Purpose::Payload).unwrap(); // Armed, never opened.
+        original.book.refuse(AdmissionFailure::Stopped);
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        let original = slots.inner.inspection.as_ref().unwrap();
+        assert_eq!(original.book.records[pending.0].acquisition, Acquisition::Attempted);
+        assert_eq!(original.observation().pending_acquisitions(), 1);
+        assert_eq!(original.observation().positive_closes(), 0);
+        let mut interrupted = GitHubRunnerPrerequisiteRuntimeSlots::new();
+        interrupted.mark_interrupted();
+        assert!(interrupted.transfer_once().is_err() && interrupted.capability().is_err());
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        let mut preparing = OriginalDescriptorBook::new();
+        preparing.phase = Phase::GitHubRunnerPrerequisitePreparing;
+        assert_eq!(preparing.observation().phase(), "githubRunnerPrerequisitePreparing");
+        let (_sender, stop) = watch::channel(false);
+        assert_eq!(preparing.begin(Operation::Idle, Instant::now() + std::time::Duration::from_secs(30), &stop), Ok(()));
+        assert_eq!(preparing.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(preparing.observation().positive_closes(), 0);
+        assert_eq!(preparing.observation().phase(), "unknown");
+    }
+    #[test]
+    fn github_runner_prerequisite_claim_requires_its_own_prepared_original_once() {
+        let domain = InstalledEditDomain::GitHubRunnerPrerequisite;
+        assert_eq!(domain.preparing(), Phase::GitHubRunnerPrerequisitePreparing);
+        assert_eq!(domain.prepared(), Phase::GitHubRunnerPrerequisitePrepared);
+        assert!(!edit_claim_ready(domain, Phase::GitHubRunnerPrerequisitePreparing, true, true, false));
+        for foreign in [Phase::GitHubReadOnlyPrepared, Phase::GitHubDevicePrepared,
+            Phase::GitHubPreflightPrepared, Phase::GitHubReleasePrepared, Phase::GitHubInputGroupPrepared] {
+            assert!(!edit_claim_ready(domain, foreign, true, true, false));
+        }
+        assert!(edit_claim_ready(domain, Phase::GitHubRunnerPrerequisitePrepared, true, true, false));
+        assert!(!edit_claim_ready(domain, Phase::GitHubRunnerPrerequisitePrepared, false, true, false));
+        assert!(!edit_claim_ready(domain, Phase::GitHubRunnerPrerequisitePrepared, true, false, false));
+        assert!(!edit_claim_ready(domain, Phase::GitHubRunnerPrerequisitePrepared, true, true, true));
+        all_edit_claim_domains_require_their_own_preparation_once();
     }
     #[test]
     fn installed_workflow_slots_contract_is_inert() { assert_installed_workflow_slots_contract(); }
@@ -3220,10 +3554,10 @@ mod pure_tests {
         assert!(workflow.transfer_once().is_err() && workflow.capability().is_err());
         assert_eq!(config.settle_originals(), CloseOutcome::Unknown);
         assert_eq!(workflow.settle_originals(), CloseOutcome::Unknown);
-        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
-            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
-            for other in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
-                InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::GitHubDevice, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup, InstalledEditDomain::GitHubRunnerPrerequisite] {
+            for other in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::GitHubDevice, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+                InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup, InstalledEditDomain::GitHubRunnerPrerequisite] {
                 if domain == other { continue; }
                 let mut slots = InstalledEditRuntimeSlots::new(domain);
                 slots.inspection_started = true;
@@ -3274,7 +3608,7 @@ mod pure_tests {
         assert_eq!(slots.inner.inspection.as_ref().map(std::ptr::from_ref),original);
         assert_eq!(slots.inner.inspection.as_ref().unwrap().observation().positive_closes(),0);
         for wrong in [InstalledEditDomain::Configuration,InstalledEditDomain::GitHubWorkflows,InstalledEditDomain::MetadataText,
-            InstalledEditDomain::EnvironmentDiagnostics,InstalledEditDomain::OfflinePreflight,InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+            InstalledEditDomain::EnvironmentDiagnostics,InstalledEditDomain::OfflinePreflight,InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup, InstalledEditDomain::GitHubRunnerPrerequisite] {
             let mut foreign = ReleaseVersionRuntimeSlots { inner:InstalledEditRuntimeSlots::new(wrong) };
             assert!(!foreign.never_started() && !foreign.no_child_effect() && !foreign.settled());
             assert!(foreign.transfer_once().is_err() && foreign.capability().is_err());
@@ -3307,11 +3641,11 @@ mod pure_tests {
         assert_eq!(pending.observation().positive_closes(),0);
     }
     pub(super) fn all_edit_claim_domains_require_their_own_preparation_once() {
-        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
-            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+        for domain in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::GitHubDevice, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup, InstalledEditDomain::GitHubRunnerPrerequisite] {
             for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
-                Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared,
-                Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared, Phase::GitHubPreflightPreparing, Phase::GitHubPreflightPrepared, Phase::GitHubReleasePreparing, Phase::GitHubReleasePrepared,
+                Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::GitHubWorkflowPreparing, Phase::GitHubWorkflowPrepared, Phase::GitHubReadOnlyPreparing, Phase::GitHubReadOnlyPrepared, Phase::GitHubDevicePreparing, Phase::GitHubDevicePrepared, Phase::MetadataTextPreparing, Phase::MetadataTextPrepared, Phase::ReleaseVersionPreparing, Phase::ReleaseVersionPrepared, Phase::MetadataImagesPreparing, Phase::MetadataImagesPrepared,
+                Phase::EnvironmentDiagnosticsPreparing, Phase::EnvironmentDiagnosticsPrepared, Phase::OfflinePreflightPreparing, Phase::OfflinePreflightPrepared, Phase::ProjectRecoveryPreparing, Phase::ProjectRecoveryPrepared, Phase::GitHubPreflightPreparing, Phase::GitHubPreflightPrepared, Phase::GitHubReleasePreparing, Phase::GitHubReleasePrepared, Phase::GitHubInputGroupPreparing, Phase::GitHubInputGroupPrepared, Phase::GitHubRunnerPrerequisitePreparing, Phase::GitHubRunnerPrerequisitePrepared,
                 Phase::Retained, Phase::Auditing, Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
                 for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
                     assert_eq!(edit_claim_ready(domain, phase, transferred, ready, claimed),
@@ -3337,8 +3671,8 @@ mod pure_tests {
         assert_eq!(offline.inner.inspection.as_ref().map(std::ptr::from_ref), offline_original);
         assert_eq!(tools.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
         assert_eq!(offline.inner.inspection.as_ref().unwrap().observation().positive_closes(), 0);
-        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion,
-            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease] {
+        for wrong in [InstalledEditDomain::Configuration, InstalledEditDomain::GitHubWorkflows, InstalledEditDomain::GitHubReadOnly, InstalledEditDomain::GitHubDevice, InstalledEditDomain::MetadataText, InstalledEditDomain::ReleaseVersion, InstalledEditDomain::MetadataImages,
+            InstalledEditDomain::EnvironmentDiagnostics, InstalledEditDomain::OfflinePreflight, InstalledEditDomain::ProjectRecovery, InstalledEditDomain::GitHubPreflight, InstalledEditDomain::GitHubRelease, InstalledEditDomain::GitHubInputGroup, InstalledEditDomain::GitHubRunnerPrerequisite] {
             if wrong != InstalledEditDomain::EnvironmentDiagnostics {
                 let mut bad = EnvironmentDiagnosticsRuntimeSlots { inner: InstalledEditRuntimeSlots::new(wrong) };
                 assert!(!bad.never_started() && !bad.no_child_effect() && !bad.settled());
