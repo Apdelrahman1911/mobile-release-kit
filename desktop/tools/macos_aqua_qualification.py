@@ -1867,13 +1867,16 @@ def failure_context(stdout, stderr, case=None):
                  and (type(panel["panelVisible"]) is bool if panel["panelPresent"] else panel["panelVisible"] is None),
                  "failure-context")
             if "directoryReadiness" in panel:
+                # Current VersionSource checks actual selection. Retain the old
+                # filename token as historical failure DATA, not qualification.
                 readiness = panel["directoryReadiness"]
                 need(all(type(panel[key]) is bool for key in ("directoryBound", "directoryReturned", "directoryReady"))
                      and type(readiness) is str
-                     and readiness in {"not-ready", "directory-not-matched", "filename-not-matched", "ready"}
+                     and readiness in {"not-ready", "directory-not-matched", "filename-not-matched", "selection-not-matched", "ready"}
                      and panel["directoryReady"] == (readiness == "ready")
                      and (readiness == "not-ready" or panel["directoryBound"] and panel["directoryReturned"] and panel["panelPresent"])
                      and (readiness != "filename-not-matched" or panel["kind"] in ("file", "version-source"))
+                     and (readiness != "selection-not-matched" or panel["kind"] == "version-source")
                      and (panel["kind"] != "quit" or readiness == "not-ready"), "failure-context")
                 wait = panel["waitLocation"]
                 need(wait is None or type(wait) is str and wait == "open-directory-readiness", "failure-context")

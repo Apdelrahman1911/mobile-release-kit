@@ -2339,7 +2339,8 @@ class AquaDataTests(unittest.TestCase):
         scope = observer.split("pub(super) fn open_identity_scope(", 1)[1].split("pub(super) fn completion_returned(", 1)[0]
         self.assertIn("self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
         self.assertIn("PanelKind::Project => self.case != Case::PickerLoss && id == self.case.selected_id()", scope)
-        self.assertIn("PanelKind::File => self.case.file_index(id).is_some_and(|i| i != 6)", scope)
+        self.assertIn("PanelKind::File => self.case.file_index(id).is_some_and(|i| self.case.input_accepted(i))", scope)
+        self.assertIn("fn input_accepted(self, i: u8) -> bool { matches!(self, Self::Ios(case) if session::accepted(case,i)) }", observer)
         self.assertIn("PanelKind::Quit => false", scope)
         self.assertIn("self.project_path.as_path()", scope)
         configured = native.split("static BOOL mrk_panel_configure_open_identity(MRKInstalledPanel *s) {", 1)[1].split("static BOOL mrk_original_eligible(", 1)[0]
@@ -2396,7 +2397,10 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(callback.index("MRK_COMPLETION_RETURNED"), callback.index("s->callbackActive = NO"))
         self.assertIn("@catch (NSException *e) { (void)e; s->unknown = YES; }", callback)
         completed = native.split("static void mrk_panel_completion_selection(MRKInstalledPanel *s) {", 1)[1].split("static BOOL mrk_observation_directory_ready(", 1)[0]
-        self.assertEqual(native.count("[(NSOpenPanel *)s->window URLs]"), 1)
+        # One original completion read is independent of kind4 readiness.
+        self.assertEqual(completed.count("[(NSOpenPanel *)s->window URLs]"), 1)
+        self.assertEqual(ready.count("[(NSOpenPanel *)s->window URLs]"), 1)
+        self.assertEqual(native.count("[(NSOpenPanel *)s->window URLs]"), 2)
         self.assertLess(completed.index("if (d->flags & MRK_COMPLETION_URLS_ENTERED)"), completed.index("d->flags |= MRK_COMPLETION_URLS_ENTERED"))
         self.assertLess(completed.index("d->flags |= MRK_COMPLETION_URLS_ENTERED"), completed.index("[(NSOpenPanel *)s->window URLs]"))
         self.assertLess(completed.index("[(NSOpenPanel *)s->window URLs]"), completed.index("d->flags |= MRK_COMPLETION_URLS_RETURNED"))
@@ -4485,12 +4489,16 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
 
     def test_readiness_failure_retains_same_query_and_exact_returned_wait(self):
         value, marker = self._readiness_failure_data()
-        for classification in ("not-ready", "directory-not-matched", "filename-not-matched"):
+        for classification in ("not-ready", "directory-not-matched", "filename-not-matched", "selection-not-matched"):
             current = deepcopy(value)
             current["lastPanel"]["directoryReadiness"] = classification
+            if classification == "selection-not-matched":
+                current["projectFieldPreparation"].update(facts=6143,
+                    nameFieldPreparation={"returned": True, "result": "ok", "facts": 31})
             returned = M.failure_context(b"", marker + context_row(current), "project-fields")
             self.assertEqual(returned, current)
-            self.assertEqual(returned["projectFieldPreparation"]["facts"], 8191)
+            self.assertEqual(returned["projectFieldPreparation"]["facts"],
+                             6143 if classification == "selection-not-matched" else 8191)
             self.assertIsNone(returned["accessibility"])
             self.assertIsNone(returned["nativeAction"])
             self.assertIsNone(returned["accessibilityBinding"]["binding"])
@@ -4540,12 +4548,29 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                 lambda v: v.update(snapshotSource="prearm-open-progress")):
             bad = deepcopy(value); mutation(bad)
             self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"), bad)
-        # A filename mismatch is impossible for a directory-kind original.
-        bad = deepcopy(value)
-        bad["nativeHandler"]["step"] = "ProjectFields(Native(1))"
-        bad["lastPanel"].update(step="ProjectFields(Native(1))", id=3, kind="ios-project",
-                                directoryReadiness="filename-not-matched")
-        self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
+        # Neither file-readiness predicate belongs to a directory original.
+        for classification in ("filename-not-matched", "selection-not-matched"):
+            bad = deepcopy(value)
+            bad["nativeHandler"]["step"] = "ProjectFields(Native(1))"
+            bad["lastPanel"].update(step="ProjectFields(Native(1))", id=3, kind="ios-project",
+                                    directoryReadiness=classification)
+            self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
+        # Kind3 still uses filename text; the new selected-URL token cannot
+        # be transplanted even into an otherwise valid original File sample.
+        file_value = accessibility_context_data()
+        file_value.update(snapshotSource="record", accessibility=None)
+        file_value["nativeHandler"]["step"] = "Session(Native(0))"
+        file_value["lastPanel"].update(step="Session(Native(0))", id=2, kind="file",
+            directoryBound=True, directoryReturned=True, directoryReady=False,
+            directoryReadiness="filename-not-matched", waitLocation="open-directory-readiness")
+        self.assertEqual(M.failure_context(b"", context_row(file_value), M.ANDROID_INPUT_CASE), file_value)
+        file_value["lastPanel"]["directoryReadiness"] = "selection-not-matched"
+        self.assertIsNone(M.failure_context(b"", context_row(file_value), M.ANDROID_INPUT_CASE))
+        # Selection mismatch cannot be relabelled ready, with or without wait.
+        for wait in (None, "open-directory-readiness"):
+            bad = deepcopy(value)
+            bad["lastPanel"].update(directoryReadiness="selection-not-matched", directoryReady=True, waitLocation=wait)
+            self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
         for step, (identifier, kind) in M.PROJECT_FIELD_PANELS.items():
             if identifier not in (6, 7):
                 continue
@@ -4558,6 +4583,9 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIsNone(M.failure_context(b"", marker + context_row(bad), "project-fields"))
 
     def test_readiness_diagnostic_source_adds_no_query_action_or_wait_owner(self):
+        # Closed diagnostics add no query. The functional kind4 predicate uses
+        # one selected-URLs getter instead of a save-name getter in the SAME
+        # evaluation; these source checks are not simulated AppKit evidence.
         root = PATH.parents[1]
         native = (root / "native/macos-installed-native/src/native.m").read_text()
         rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
@@ -4566,10 +4594,23 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         observe = native.split("int mrk_panel_observe(", 1)[1].split("// Closed DATA from this one original return.", 1)[0]
         self.assertEqual(helper.count("[(NSOpenPanel *)s->window directoryURL]"), 1)
         self.assertEqual(helper.count("[(NSOpenPanel *)s->window nameFieldStringValue]"), 1)
+        self.assertEqual(helper.count("[(NSOpenPanel *)s->window URLs]"), 1)
         self.assertLess(helper.index("strcmp(path, expected) == 0"), helper.index("*versionSourceParentReady = YES"))
         self.assertLess(helper.index("*versionSourceParentReady = YES"), helper.index("s->kind == 4 ?"))
         self.assertIn("s->kind == 4 ? s->observationNamePhase == MRK_NAME_ALL", helper)
         self.assertLess(helper.index("s->kind == 4 ?"), helper.index("nameFieldStringValue]"))
+        self.assertLess(helper.index("s->kind == 4 ?"), helper.index("[(NSOpenPanel *)s->window URLs]"))
+        selection, filename = helper.split("    if (s->kind == 4) {", 1)[1].split("    } else {", 1)
+        self.assertNotIn("nameFieldStringValue", selection)
+        self.assertNotIn(" URLs]", filename)
+        self.assertIn("urls && [urls isKindOfClass:[NSArray class]] && [urls count] == 1", selection)
+        self.assertIn("id selected = [urls objectAtIndex:0];", selection)
+        self.assertIn("[selected isKindOfClass:[NSURL class]] && [selected isFileURL]", selection)
+        self.assertIn("? [selected fileSystemRepresentation] : NULL", selection)
+        self.assertIn("selectedPath && mrk_target_path(selectedPath) && strcmp(selectedPath, s->observationTarget) == 0", selection)
+        self.assertIn("BOOL ready = NO;", helper)
+        self.assertIn("ready ? MRK_DIRECTORY_READY : MRK_FILE_NOT_MATCHED", helper)
+        self.assertIn("ready = [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];", filename)
         self.assertEqual(native.count("mrk_observation_directory_ready("), 4)
         self.assertEqual(native.count("mrk_observation_directory_ready(s, NULL, NULL)"), 2)
         self.assertEqual(native.count("setDirectoryURL:"), 3)
@@ -4581,13 +4622,16 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("s->observationSample == UINT32_MAX", observe)
         self.assertIn("parentReady && *flags == 0x1f00fu", observe)
         self.assertLess(observe.index("*flags |= readiness << 17;"), observe.index("*flags |= MRK_VERSION_SOURCE_PARENT_READY"))
-        for token in ("setDirectoryURL:", "setNameFieldStringValue:", "dispatch_", "sleep(", "performClick", "AXUIElement"):
+        for token in ("setDirectoryURL:", "setNameFieldStringValue:", "dispatch_", "sleep(", "performClick", "AXUIElement",
+                      "s->selected", "s->response =", "s->completion(", "observationCompletion", " retain]", " release]"):
             self.assertNotIn(token, helper)
         self.assertIn("flags & !0xfffff == 0", rust)
         self.assertIn("(flags & 16 != 0) == (readiness == 3)", rust)
         self.assertIn("readiness == 0 || flags & 0x200c == 0x200c", rust)
         self.assertIn("flags & 0x80000 == 0 || flags == 0x9f00f", rust)
         self.assertIn("observation_directory_readiness(kind, 0x4200c)", rust)
+        self.assertIn('2 if kind == PanelKind::File => Some("filename-not-matched")', rust)
+        self.assertIn('2 if kind == PanelKind::VersionSource => Some("selection-not-matched")', rust)
         self.assertIn("observation_name_sample_valid(kind, 0x9f00f, 1)", rust)
         self.assertIn("!observation_name_sample_valid(kind, 0x6201c, 1)", rust)
         self.assertIn("directory_ready: flags & 16 != 0, directory_readiness", rust)
@@ -4952,7 +4996,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         ])
         self.assertIn("if-no-files-found: error", upload)
 
-    def test_two_scoped_jobs_keep_unique_artifacts_and_three_private_variants(self):
+    def test_selected_scope_keeps_unique_artifacts_and_three_private_variants(self):
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
         header = workflow.split("    steps:\n", 1)[0]
         expected_job = (
@@ -4964,7 +5008,6 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      matrix:\n"
             "        scope:\n"
             "          - project-fields-android-inputs\n"
-            "          - wrapping-keychain-private\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
         )

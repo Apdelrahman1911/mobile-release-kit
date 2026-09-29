@@ -579,9 +579,10 @@ static void mrk_panel_completion_selection(MRKInstalledPanel *s) {
     // Known nonmatches are failed selection DATA, not unknown native lifetime.
     // Never clear an existing Unknown, change the response, or insert a path.
 }
-// Closed DATA from the existing readiness query, not a new query or action.
-// "Not matched" includes a missing/non-file/overlong value; no path is exposed.
-enum { MRK_DIRECTORY_NOT_READY, MRK_DIRECTORY_NOT_MATCHED, MRK_FILENAME_NOT_MATCHED, MRK_DIRECTORY_READY };
+// Closed DATA from the original readiness evaluation, never an action receipt.
+// Tag2 is kind-specific: File name text, VersionSource actual selected URLs.
+// Missing/non-file/overlong values never match; no path is exposed.
+enum { MRK_DIRECTORY_NOT_READY, MRK_DIRECTORY_NOT_MATCHED, MRK_FILE_NOT_MATCHED, MRK_DIRECTORY_READY };
 enum { MRK_VERSION_SOURCE_PARENT_READY = 1u << 19 };
 enum { MRK_NAME_PHASE_ENTERED = 1u, MRK_NAME_PARENT_ADMITTED = 2u,
     MRK_NAME_SET_ENTERED = 4u, MRK_NAME_SET_RETURNED = 8u, MRK_NAME_RETIRED = 16u, MRK_NAME_ALL = 31u };
@@ -607,8 +608,8 @@ static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *read
     if (mrk_panel_project_field(s->kind) && !(s->observationProjectField & 1024u)) return NO;
     NSURL *url = [(NSOpenPanel *)s->window directoryURL];
     const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
-    // Preserve the original Project proof. Only File panels need the parent/
-    // filename transformation and its additional Objective-C getters.
+    // Preserve the original Project proof. Only file-like panels need the
+    // parent transformation and their additional readiness getters.
     if (s->kind != 3 && s->kind != 4) {
         BOOL ready = path && strnlen(path, sizeof(s->observationTarget)) < sizeof(s->observationTarget)
             && strcmp(path, s->observationTarget) == 0;
@@ -630,8 +631,23 @@ static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *read
         && !s->observationNamePhase) *versionSourceParentReady = YES;
     if (!(s->kind == 4 ? s->observationNamePhase == MRK_NAME_ALL
         : (s->observationIdentity.flags & (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)) == (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED))) return NO;
-    BOOL ready = [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];
-    if (readiness) *readiness = ready ? MRK_DIRECTORY_READY : MRK_FILENAME_NOT_MATCHED;
+    BOOL ready = NO;
+    if (s->kind == 4) {
+        // The inherited save-name setter is preparation, not selection proof.
+        // Borrow only this original panel's actual selected URLs. No object or
+        // path survives this query; genuine completion still validates anew.
+        id urls = [(NSOpenPanel *)s->window URLs];
+        if (urls && [urls isKindOfClass:[NSArray class]] && [urls count] == 1) {
+            id selected = [urls objectAtIndex:0];
+            const char *selectedPath = [selected isKindOfClass:[NSURL class]] && [selected isFileURL]
+                ? [selected fileSystemRepresentation] : NULL;
+            ready = selectedPath && mrk_target_path(selectedPath) && strcmp(selectedPath, s->observationTarget) == 0;
+        }
+    } else {
+        // The distinct kind3 pre-presentation File contract is unchanged.
+        ready = [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];
+    }
+    if (readiness) *readiness = ready ? MRK_DIRECTORY_READY : MRK_FILE_NOT_MATCHED;
     return ready;
 }
 int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity, uint32_t *nameSample) {

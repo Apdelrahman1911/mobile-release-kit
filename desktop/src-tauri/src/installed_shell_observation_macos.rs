@@ -2335,7 +2335,7 @@ impl Observation {
                 *field_name_preparation = returned.map(|value| (i,value));
                 result.map_err(|error| error.reason())?;
                 // The sole name phase returned, not Open. A later existing
-                // observation must still prove exact directory AND filename.
+                // observation must still prove exact parent AND selected URL.
                 return Ok(false);
             }
         }

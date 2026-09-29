@@ -1301,7 +1301,8 @@ mod observation {
         match (flags >> 17) & 3 {
             0 => Some("not-ready"),
             1 if !matches!(kind, PanelKind::Quit) => Some("directory-not-matched"),
-            2 if matches!(kind, PanelKind::File | PanelKind::VersionSource) => Some("filename-not-matched"),
+            2 if kind == PanelKind::File => Some("filename-not-matched"),
+            2 if kind == PanelKind::VersionSource => Some("selection-not-matched"),
             3 if !matches!(kind, PanelKind::Quit) => Some("ready"),
             _ => None,
         }
@@ -1325,7 +1326,11 @@ mod observation {
                     && observation_directory_readiness(kind, 0x2200c)
                         == (!matches!(kind, PanelKind::Quit)).then_some("directory-not-matched")
                     && observation_directory_readiness(kind, 0x4200c)
-                        == matches!(kind, PanelKind::File | PanelKind::VersionSource).then_some("filename-not-matched")
+                        == match kind {
+                            PanelKind::File => Some("filename-not-matched"),
+                            PanelKind::VersionSource => Some("selection-not-matched"),
+                            _ => None,
+                        }
                     && observation_directory_readiness(kind, 0x6201c)
                         == (!matches!(kind, PanelKind::Quit)).then_some("ready")
                     && observation_directory_readiness(kind, 0x1ffff).is_none()
