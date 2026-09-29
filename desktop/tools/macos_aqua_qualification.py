@@ -57,6 +57,7 @@ WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-aqua.yml@" + REF
 MARKER = b"MRK_MACOS_AQUA_RESULT="
 OUTPUT_LIMIT = 2 * 1024 * 1024
 JSON_LIMIT = 16383
+PROJECT_FIELDS_JSON_LIMIT = 32767  # Four bounded original selection histories; no other case grows.
 FAILURE_CONTEXT_LIMIT = 8192
 TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
@@ -172,8 +173,15 @@ ACCESSIBILITY_SITES = frozenset((
     "entry application windows parent-identifier sheet topology control-projection button control-recheck "
     "initial-original-proof original-proof admission press cleanup"
 ).split()) | ACCESSIBILITY_CONTROL_LIMIT_SITES
+ACCESSIBILITY_SELECTION_SITES = frozenset((
+    "selection-parent-proof selection-projection selection-recheck selection-settable selection-write selection-readback"
+).split())
+ACCESSIBILITY_SITES |= ACCESSIBILITY_SELECTION_SITES
+ACCESSIBILITY_SELECTION_CHECKS = ("completeProjection", "uniqueEntry", "originalLabelChainRechecked",
+                                  "attributeSettable", "singletonOriginalEntryReadback")
 ACCESSIBILITY_CONTROL_ROLES = ("not-read", "Sheet", "Group", "SplitGroup", "Button",
                                "Browser", "Table", "Outline", "ScrollArea", "opaque")
+ACCESSIBILITY_SELECTION_ROLES = ACCESSIBILITY_CONTROL_ROLES + ("Column", "List", "Row", "Cell", "Image", "StaticText", "TextField")
 ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
     "invalid-element cannot-complete ax-other changed objc-exception cleanup-unknown"
@@ -984,6 +992,29 @@ def expected_result(binding, case):
             value["projectFields"] = _expected_project_fields()
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
+        if case == PROJECT_FIELDS_CASE:
+            # Comparison/test DATA only. Actual success parsing below requires
+            # each original returned report; these defaults never fill a gap.
+            for row in value["projectFields"]["acceptedOpenHistories"]:
+                if row["kind"] != "version-source":
+                    continue
+                identifier = row["operationId"]
+                parent = {**_expected_identity_proof(), "purpose": "selection-parent"}
+                row["selectionInput"] = {**value["native"]["projectOpenInput"],
+                    "mechanism": "accessibility-version-source-selection-press-v6",
+                    "id": identifier, "step": _field_open_step(case, identifier),
+                    "initialOriginalProof": _expected_identity_proof(), "originalProof": _expected_identity_proof(),
+                    "promptChecks": {"initial": True, "final": True}, "promptButton": _expected_prompt_button(),
+                    "selectionParentProof": parent, "selectionParentPrompt": True,
+                    "selection": {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True),
+                        "attempted": True, "returned": True, "selected": True, "nodes": 12, "matches": 1,
+                        "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4}}
+                row["selectionInput"]["promptButton"].update(calls=221, cfSlots=120, cfSlotsRetired=120)
+                row["selectionBinding"] = {**value["native"]["projectOpenBinding"],
+                    "mechanism": "selection-parent-original-sheet-v3", "id": identifier, "kind": "version-source",
+                    "configuration": dict(value["native"]["projectOpenBinding"]["configuration"]),
+                    "binding": {**_expected_identity_proof(), "purpose": "selection-parent"}}
+                row["selectionCompletion"] = {**_expected_completion_selection(case), "id": identifier, "kind": "version-source"}
         return value
     first, stale, lost = case == "first-save", case == "noop-stale", case in ("picker-loss", "save-loss")
     initial_ignore, saved_ignore = len(IGNORE_PREFIX), len(IGNORE_PREFIX + IGNORE_RULES)
@@ -1094,7 +1125,10 @@ RESULT_LOCATION_KEYS |= frozenset((
     "projectFields normalProfileAvailable field initialRootAndOptions nameFieldPreparation laterSyntheticNavigation "
     "sourceBookStarted originalSourceChildGuiAndCoordinatorSettled relativePath errorCode draftObserved "
     "completeDraftAndBaselineMatched previewValidation fixtureMutationsRestored shippingProfileEnabledByThisReceipt "
-    "acceptedOpenHistories originalInputSucceeded originalBarrierRetired originalBindingMatched originalCompletionMatched"
+    "acceptedOpenHistories originalInputSucceeded originalBarrierRetired originalBindingMatched originalCompletionMatched "
+    "selectionInput selectionBinding selectionCompletion selectionParentProof selectionParentPrompt purpose "
+    "completeProjection uniqueEntry originalLabelChainRechecked attributeSettable singletonOriginalEntryReadback "
+    "nodes matches attribute depth selected"
 ).split())
 RESULT_LOCATION_KEYS |= frozenset((
     "signingInputs oneUseOriginalDocumentRegistration mode rows role nativeResponse exactNativeSelection "
@@ -1155,13 +1189,16 @@ def parse_result(stdout, stderr, binding, case):
     need(stdout.count(MARKER) == 1 and MARKER not in stderr, "result-marker-count")
     lines = stdout.split(b"\n")
     records = [line[len(MARKER):] for line in lines[:-1] if line.startswith(MARKER)]
-    need(len(records) == 1 and 0 < len(records[0]) <= JSON_LIMIT and b"\r" not in records[0], "result-record")
+    record_limit = PROJECT_FIELDS_JSON_LIMIT if case == PROJECT_FIELDS_CASE else JSON_LIMIT
+    need(len(records) == 1 and 0 < len(records[0]) <= record_limit and b"\r" not in records[0], "result-record")
     try:
         value = json.loads(records[0].decode("utf-8"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("result-constant")))
     except (ValueError, RecursionError, UnicodeError) as error:
         raise Refused("result-json") from error
     expected = expected_result(binding, case)
+    if case == PROJECT_FIELDS_CASE:
+        _project_field_selection_histories(value, expected)
     if case in IOS_OPERATION_CASES:
         need(type(value) is dict and "iosArchive" in value, "ios-report")
         expected["iosArchive"] = _ios_report(value["iosArchive"], case)
@@ -1309,11 +1346,13 @@ def _native_action_context(value, native, panel, *, case=None):
         return None
 
 
-def _accessibility_native_proof(value):
+def _accessibility_native_proof(value, *, selection_parent=False):
     """Validate the closed DATA copied after one actual native body return."""
     label = "accessibility-native-proof"
+    extra = {"purpose"} if selection_parent else set()
     need(type(value) is dict and set(value) == {
-        "returned", "attempted", "checks", "parent", "panel", "children", "originals", "site", "error"}, label)
+        "returned", "attempted", "checks", "parent", "panel", "children", "originals", "site", "error", *extra}, label)
+    need(not selection_parent or value["purpose"] == "selection-parent", label)
     need(value["returned"] is True and type(value["attempted"]) is bool, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_PROOF_CHECKS)
@@ -1378,20 +1417,65 @@ def _accessibility_prompt_button(value):
     return value
 
 
+def _selection_succeeded(value):
+    return (value is not None and all(value["checks"].values()) and value["attempted"] is True
+            and value["returned"] is True and value["selected"] is True and value["matches"] == 1
+            and 1 <= value["nodes"] <= 48 and value["attribute"] in ("SelectedRows", "SelectedChildren")
+            and value["lastRole"] != "not-read" and 1 <= value["depth"] <= min(8, value["nodes"]))
+
+
+def _accessibility_selection(value, button):
+    """Actual selector scalars, never a filename, URL, or substitute Open proof."""
+    label = "accessibility-selection-data"
+    need(type(value) is dict and set(value) == {"checks", "attempted", "returned", "selected",
+                                               "nodes", "matches", "attribute", "lastRole", "depth"}, label)
+    checks = value["checks"]
+    need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
+         and all(type(v) is bool for v in checks.values()), label)
+    ordered = tuple(checks[key] for key in ACCESSIBILITY_SELECTION_CHECKS)
+    need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
+    need(all(type(value[key]) is bool for key in ("attempted", "returned"))
+         and (value["selected"] is None or type(value["selected"]) is bool), label)
+    for key, limit in (("nodes", 48), ("matches", 2), ("depth", 8)):
+        need(type(value[key]) is int and 0 <= value[key] <= limit, label)
+    need(value["depth"] <= value["nodes"] and type(value["lastRole"]) is str
+         and value["lastRole"] in ACCESSIBILITY_SELECTION_ROLES
+         and type(value["attribute"]) is str and value["attribute"] in ("not-read", "SelectedRows", "SelectedChildren"), label)
+    need(value["matches"] <= value["nodes"]
+         and (not checks["completeProjection"] or value["nodes"] > 0 and value["depth"] > 0 and value["lastRole"] != "not-read"), label)
+    need((value["attribute"] != "not-read") == checks["originalLabelChainRechecked"]
+         and (not checks["uniqueEntry"] or value["matches"] == 1 and value["nodes"] > 0), label)
+    need(not value["returned"] or value["attempted"], label)
+    need((value["selected"] is not None) == value["returned"], label)
+    need(not value["attempted"] or checks["attributeSettable"], label)
+    need(not checks["singletonOriginalEntryReadback"] or value["selected"] is True, label)
+    need(value["selected"] is not False or button is not None and button["axError"] != 0, label)
+    return value
+
+
 def _accessibility_succeeded(value):
     # A matching receipt alone never means that its input thread has joined.
-    return (all(value[key] is True for key in ("prepared", "requested", "dispatchAttempted", "bodyEntered", "nativeEntered",
+    field = PROJECT_FIELD_PANELS.get(value["step"])
+    selecting = field is not None and field[1] == "version-source"
+    selected = (value.get("mechanism") == "accessibility-version-source-selection-press-v6"
+        and _selection_succeeded(value.get("selection")) and value.get("selectionParentPrompt") is True
+        and value.get("selectionParentProof") is not None
+        and value["selectionParentProof"].get("purpose") == "selection-parent"
+        and value["selectionParentProof"]["error"] == "none")
+    return ((selected if selecting else value["mechanism"] == "accessibility-preconfigured-original-press-v5")
+            and all(value[key] is True for key in ("prepared", "requested", "dispatchAttempted", "bodyEntered", "nativeEntered",
              "bodyReturned", "receiptJoined", "workerRegistered", "workerJoined", "rechecksSettled", "barrierRetired",
              "timely", "custodyKnown", "attempted", "pressReturned", "triggered"))
             and value["expired"] is False and value["state"] == "retired" and value["site"] == "press" and value["error"] == "none"
-            and all(value[key] is not None and value[key]["error"] == "none" for key in ("initialOriginalProof", "originalProof"))
+            and all(value[key] is not None and "purpose" not in value[key] and value[key]["error"] == "none"
+                    for key in ("initialOriginalProof", "originalProof"))
             and all(value["promptChecks"][key] is True for key in ("initial", "final"))
             and value["promptButton"] is not None and all(value["promptButton"]["checks"].values())
             and value["promptButton"]["cleanupReturned"] is True and value["promptButton"]["axError"] == 0
             and value["promptButton"]["cfSlotsRetired"] == value["promptButton"]["cfSlots"])
 
 
-def _accessibility_context(value, native, panel, *, expected_id=None, case=None):
+def _accessibility_context(value, native, panel, *, expected_id=None, case=None, field_history=False, historical=False):
     if value is None:
         return None
     label = "accessibility-data"
@@ -1399,14 +1483,21 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None)
         flags = ("prepared", "requested", "dispatchAttempted", "bodyReturned", "receiptJoined", "barrierRetired", "expired",
                  "workerRegistered", "workerJoined")
         observed = ("bodyEntered", "nativeEntered", "attempted", "pressReturned", "triggered", "timely", "custodyKnown", "rechecksSettled")
-        need(type(value) is dict and set(value) == {"mechanism", "step", "id", "state", "site", "error",
-             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed}, label)
-        need(value["mechanism"] == "accessibility-preconfigured-original-press-v5" and type(value["id"]) is int, label)
+        need(type(value) is dict and type(value.get("id")) is int, label)
+        field_step = _field_open_step(case, value["id"]) if expected_id is None or field_history else None
+        version_source = field_step is not None and PROJECT_FIELD_PANELS[field_step][1] == "version-source"
+        selecting = version_source and value.get("mechanism") == "accessibility-version-source-selection-press-v6"
+        mechanism = "accessibility-version-source-selection-press-v6" if version_source else "accessibility-preconfigured-original-press-v5"
+        need(value.get("mechanism") == mechanism or historical and version_source
+             and value.get("mechanism") == "accessibility-preconfigured-original-press-v5", label)
+        extra = {"selectionParentProof", "selectionParentPrompt", "selection"} if selecting else set()
+        need(set(value) == {"mechanism", "step", "id", "state", "site", "error",
+             "initialOriginalProof", "originalProof", "promptChecks", "promptButton", *flags, *observed, *extra}, label)
+        need(not field_history or expected_id is not None and selecting, label)
         # The actual File OpenInput projection retains its historical
         # OpenProject label. Only failure DATA with an exact case/ID/native
         # panel binding may describe File; Project success callers stay closed.
         file_step = _file_open_step(case, value["id"]) if expected_id is None else None
-        field_step = _field_open_step(case, value["id"]) if expected_id is None else None
         need(value["step"] == (field_step or "OpenProject")
              and (value["id"] in (1, 2) or file_step is not None or field_step is not None), label)
         if expected_id is not None:
@@ -1428,7 +1519,8 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None)
              and all(value[key] is None or type(value[key]) is bool for key in observed), label)
         state, site, error = value["state"], value["site"], value["error"]
         need(type(state) is str and state in ("prepared", "requested", "queued", "entered", "returned", "joined", "retired", "unknown"), label)
-        need(site is None or type(site) is str and site in ACCESSIBILITY_SITES, label)
+        need(site is None or type(site) is str and site in ACCESSIBILITY_SITES
+             and (selecting or site not in ACCESSIBILITY_SELECTION_SITES), label)
         need(error is None or type(error) is str and error in ACCESSIBILITY_ERRORS, label)
         need((site is None) == (error is None), label)
         need(not value["requested"] or value["prepared"], label)
@@ -1477,17 +1569,63 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None)
                 need(index == 0 or proofs[0] is not None and proofs[0]["error"] == "none" and prompt["initial"] is True, label)
             if prompt[name] is not None:
                 need(proof is not None and proof["error"] == "none", label)
+        parent, parent_prompt, selection = None, None, None
+        if selecting:
+            parent, parent_prompt, selection = (value[key] for key in ("selectionParentProof", "selectionParentPrompt", "selection"))
+            need(parent_prompt is None or type(parent_prompt) is bool, label)
+            if parent is not None:
+                need(value["bodyReturned"] and value["nativeEntered"] is True, label)
+                _accessibility_native_proof(parent, selection_parent=True)
+            need(parent_prompt is None or parent is not None and parent["error"] == "none", label)
+        parent_ready = parent is not None and parent["error"] == "none" and parent_prompt is True
+        full_ready = proofs[0] is not None and proofs[0]["error"] == "none" and prompt["initial"] is True
         button = value["promptButton"]
         if button is not None:
             need(value["bodyReturned"] and value["nativeEntered"] is True, label)
             _accessibility_prompt_button(button)
-            need(button["calls"] == 0 or proofs[0] is not None
-                 and proofs[0]["error"] == "none" and prompt["initial"] is True, label)
+            need(button["calls"] == 0 or (parent_ready if selecting else full_ready), label)
+            need(button["initialNodesExamined"] == 0 and not button["checks"]["completeControlProjection"] or full_ready, label)
             need(button["cleanupReturned"] or value["custodyKnown"] is not True
                  and not value["receiptJoined"] and not value["barrierRetired"], label)
+        selector_ready = False
+        if selecting:
+            need((selection is None) == (button is None), label)
+            if selection is not None:
+                need(value["bodyReturned"] and value["nativeEntered"] is True, label)
+                _accessibility_selection(selection, button)
+                selector_ready = _selection_succeeded(selection)
+                started = (any(selection["checks"].values()) or selection["nodes"] != 0 or selection["matches"] != 0
+                    or selection["lastRole"] != "not-read" or selection["depth"] != 0
+                    or selection["attempted"] or selection["returned"] or selection["selected"] is not None)
+                need(not started or parent_ready and button["calls"] > 0 and button["cfSlots"] > 0
+                     and button["checks"]["parentBound"] and button["checks"]["sheetBound"], label)
+                need(not any(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS[2:]) or selector_ready, label)
+                completed = sum(selection["checks"].values())
+                if site in ACCESSIBILITY_SELECTION_SITES:
+                    need(proofs == (None, None) and prompt == {"initial": None, "final": None}, label)
+                    if site == "selection-parent-proof":
+                        need(not started and button["calls"] == 0 and button["cfSlots"] == 0
+                             and not any(button["checks"].values()), label)
+                    else:
+                        need(tuple(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS)
+                             == (True, True, False, False, False, False, False), label)
+                    if site == "selection-projection":
+                        need(completed in (0, 1, 2) and not selection["attempted"], label)
+                    elif site == "selection-recheck":
+                        need(completed == 2 and not selection["attempted"], label)
+                    elif site == "selection-settable":
+                        need(completed in (3, 4) and not selection["attempted"], label)
+                    elif site == "selection-write":
+                        need(completed == 4 and selection["attempted"], label)
+                    elif site == "selection-readback":
+                        need(completed in (4, 5) and selection["selected"] is True, label)
+            need(proofs[0] is None or parent_ready and selector_ready, label)
+            if value["nativeEntered"] is not True or not value["bodyReturned"]:
+                need(parent is None and parent_prompt is None and selection is None, label)
         need(proofs[1] is None or button is not None and all(button["checks"].values()), label)
         ready = (all(p is not None and p["error"] == "none" for p in proofs)
-                 and prompt == {"initial": True, "final": True} and button is not None and all(button["checks"].values()))
+                 and prompt == {"initial": True, "final": True} and button is not None and all(button["checks"].values())
+                 and (not selecting or parent_ready and selector_ready))
         need(value["attempted"] is not True or ready and site in ("press", "cleanup"), label)
         if value["nativeEntered"] is False:
             need(all(p is None for p in proofs) and all(p is None for p in prompt.values()) and button is None
@@ -1539,7 +1677,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None)
                      and (container or role == "Sheet" and depth == 0 and examined == 0))
                  or (site == "control-node-limit" and container and depth < 8)
                  or (site == "control-depth-limit" and container and depth == 8), label)
-        for name, proof in (("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
+        for name, proof in (("selection-parent-proof", parent), ("initial-original-proof", proofs[0]), ("original-proof", proofs[1])):
             if site == name and proof is not None and proof["error"] != "none":
                 need(proof["error"] == error, label)
         return value
@@ -1547,7 +1685,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None)
         return None
 
 
-def _accessibility_binding_context(value, case, *, allow_files=False):
+def _accessibility_binding_context(value, case, *, allow_files=False, historical=False):
     """Closed original-return DATA; never a permission, action or finality fact."""
     if value is None:
         return None
@@ -1557,7 +1695,10 @@ def _accessibility_binding_context(value, case, *, allow_files=False):
         need(type(value) is dict and set(value) == {
             "mechanism", "case", "id", "kind", "start", "configuration", "binding"}, label)
         kind = _open_sample_kind(case, value["id"], allow_files=allow_files)
-        need(value["mechanism"] == "preconfigured-original-sheet-v2" and value["case"] == case
+        selecting = kind == "version-source" and value["mechanism"] == "selection-parent-original-sheet-v3"
+        mechanism = "selection-parent-original-sheet-v3" if kind == "version-source" else "preconfigured-original-sheet-v2"
+        need((value["mechanism"] == mechanism or historical and kind == "version-source"
+              and value["mechanism"] == "preconfigured-original-sheet-v2") and value["case"] == case
              and kind is not None and value["kind"] == kind, label)
         start, configured, bound = value["start"], value["configuration"], value["binding"]
         need(type(start) is dict and set(start) == {"returned", "result"} and start["returned"] is True
@@ -1619,7 +1760,7 @@ def _accessibility_binding_context(value, case, *, allow_files=False):
                 need(site == "complete" and error == "none", label)
         if bound is not None:
             need(start["result"] == "ok", label)
-            _accessibility_native_proof(bound)
+            _accessibility_native_proof(bound, selection_parent=selecting)
         return value
     except (Refused, KeyError, TypeError, ValueError):
         return None
@@ -1675,6 +1816,31 @@ def _completion_selection_succeeded(value):
                 "callbackEntered", "urlsReadEntered", "urlsReadReturned", "callbackReturned"))
             and facts["duplicate"] is False and facts["nativeUnknown"] is False
             and facts["response"] == "accept" and facts["selection"] == "match")
+
+
+def _project_field_selection_histories(value, expected):
+    label = "project-fields-selection-history"
+    need(type(value) is dict and type(value.get("projectFields")) is dict, label)
+    histories = value["projectFields"].get("acceptedOpenHistories")
+    originals = expected["projectFields"]["acceptedOpenHistories"]
+    need(type(histories) is list and len(histories) == len(originals), label)
+    for actual, original in zip(histories, originals):
+        need(type(actual) is dict and type(actual.get("operationId")) is int
+             and actual["operationId"] == original["operationId"] and actual.get("kind") == original["kind"], label)
+        if original["kind"] != "version-source":
+            continue
+        identifier = original["operationId"]
+        action = _accessibility_context(actual.get("selectionInput"), None, None,
+            expected_id=identifier, case=PROJECT_FIELDS_CASE, field_history=True)
+        need(action is not None and _accessibility_succeeded(action), label)
+        binding = _accessibility_binding_context(actual.get("selectionBinding"), PROJECT_FIELDS_CASE, allow_files=True)
+        need(binding is not None and binding["id"] == identifier and binding["kind"] == "version-source"
+             and binding["start"]["result"] == "ok" and binding["binding"] is not None
+             and binding["binding"]["attempted"] and binding["binding"]["error"] == "none", label)
+        completion = _completion_selection_context(actual.get("selectionCompletion"), PROJECT_FIELDS_CASE, allow_files=True)
+        need(completion is not None and completion["id"] == identifier and completion["kind"] == "version-source"
+             and _completion_selection_succeeded(completion), label)
+        original.update(selectionInput=action, selectionBinding=binding, selectionCompletion=completion)
 
 
 def _original_window_context(value):
@@ -1889,7 +2055,7 @@ def failure_context(stdout, stderr, case=None):
         if "nativeAction" in value:
             value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel, case=case)
         if "accessibility" in value:
-            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel, case=case)
+            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel, case=case, historical=True)
         if value.get("snapshotSource") == "prearm-open-progress":
             sample = value.get("accessibility")
             field_step = _field_open_step(case, sample["id"]) if sample is not None else None
@@ -1907,7 +2073,7 @@ def failure_context(stdout, stderr, case=None):
         if "accessibilityBinding" in value:
             # Early start failure legitimately has no nativeHandler/lastPanel
             # or Press sample. Bind to the known case, not to invented actions.
-            value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case, allow_files=True)
+            value["accessibilityBinding"] = _accessibility_binding_context(value["accessibilityBinding"], case, allow_files=True, historical=True)
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
         return None
@@ -2726,7 +2892,9 @@ def diagnostic(error, owner, fixtures):
 
 def emit_record(value, stream):
     data = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
-    need(len(data.encode("ascii")) <= 24 * 1024, "outer-result-bound")
+    project_fields = (type(value) is dict and type(value.get("type")) is str and value["type"] == "macos-aqua-case"
+                      and type(value.get("case")) is str and value["case"] == PROJECT_FIELDS_CASE)
+    need(len(data.encode("ascii")) <= (40 * 1024 if project_fields else 24 * 1024), "outer-result-bound")
     stream.write(data + "\n")
     stream.flush()
 

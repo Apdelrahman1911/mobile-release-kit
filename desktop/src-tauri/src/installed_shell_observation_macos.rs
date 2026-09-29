@@ -351,11 +351,19 @@ fn retire_returned_open(case: Case, pending: &mut Option<Pending>, current: Step
 }
 fn native_proof_value(p: mrk_macos_installed_native::IdentityBinding) -> Value {
     let c = p.checks;
-    json!({"returned":true,"attempted":p.attempted,"parent":p.parent,"panel":p.panel,
+    let mut value = json!({"returned":true,"attempted":p.attempted,"parent":p.parent,"panel":p.panel,
         "children":p.children,"originals":p.originals,"site":p.site,"error":p.error,
         "checks":{"eligible":c[0],"attached":c[1],"directory":c[2],"parentIdentifier":c[3],
             "panelIdentifier":c[4],"parentSingleton":c[5],"noNestedSheet":c[6],"nativeChild":c[7],
-            "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}})
+            "nativeParent":c[8],"nativeRole":c[9],"stableIdentifier":c[10],"finalEligibility":c[11]}});
+    if p.purpose == "selection-parent" { value["purpose"] = json!(p.purpose); }
+    value
+}
+fn selection_value(p: mrk_macos_installed_native::VersionSourceSelection) -> Value {
+    let c = p.checks;
+    json!({"checks":{"completeProjection":c[0],"uniqueEntry":c[1],"originalLabelChainRechecked":c[2],
+        "attributeSettable":c[3],"singletonOriginalEntryReadback":c[4]},"attempted":p.attempted,"returned":p.returned,
+        "selected":p.selected,"nodes":p.nodes,"matches":p.matches,"attribute":p.attribute,"lastRole":p.last_role,"depth":p.depth})
 }
 fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProof) -> Value {
     let c = p.checks;
@@ -368,12 +376,13 @@ fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProo
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
 struct OpenRecheckReceipt { token: OpenAction, stage: u32, body: OpenRecheckBody, returned_at: Instant }
 struct OpenRecheckSlot {
-    receipt: std::sync::mpsc::Receiver<OpenRecheckReceipt>,
+    receipt: Option<std::sync::mpsc::Receiver<OpenRecheckReceipt>>,
     dispatched: bool, uncertain: bool, returned: Option<OpenRecheckReceipt>,
 }
 impl OpenRecheckSlot {
     fn settled(&self, token: &OpenAction, stage: u32, end: Instant) -> bool {
-        !self.uncertain && if self.dispatched {
+        self.receipt.is_some() && !self.uncertain && (stage != 0 || token.identity().selects_version_source() || !self.dispatched)
+            && if self.dispatched {
             self.returned.as_ref().is_some_and(|r| token.same(&r.token) && r.stage == stage
                 && r.returned_at < end && r.body.custody_known())
         } else { self.returned.is_none() }
@@ -393,12 +402,12 @@ struct OpenFlight {
     worker: Option<std::thread::JoinHandle<OpenWorkerReturn>>, worker_returned: Option<OpenWorkerReturn>,
     // Only the worker acquires this during the armed allowance. Main sends
     // actual-body receipts without its lock; relay inspects only AFTER join.
-    rechecks: Arc<Mutex<[OpenRecheckSlot; 2]>>,
+    rechecks: Arc<Mutex<[OpenRecheckSlot; 3]>>,
     baseline: FailureSnapshot,
 }
 #[derive(Clone, Copy)]
 struct OpenInputSample {
-    id: u32, step: Step, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
+    id: u32, step: Step, selection: bool, prepared: bool, requested: bool, dispatch_attempted: bool, state: &'static str,
     entered: Option<bool>, native_entered: Option<bool>, returned: bool, joined: bool, retired: bool,
     expired: bool, timely: Option<bool>, custody_known: Option<bool>,
     attempted: Option<bool>, press_returned: Option<bool>, triggered: Option<bool>,
@@ -411,7 +420,9 @@ impl OpenInputSample {
         // rows carry their exact closed purpose/ordinal rather than borrowing
         // that historical Project action label.
         let step = if matches!(step, Step::ProjectFields(_)) { step } else { Step::OpenProject };
-        Self { id, step, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
+        let selection = matches!(step, Step::ProjectFields(project_fields::Step::Native(i))
+            if project_fields::accepts(i) && project_fields::kind(i) == Some(mrk_macos_installed_native::PanelKind::VersionSource));
+        Self { id, step, selection, prepared: false, requested: false, dispatch_attempted: false, state: "prepared",
             entered: Some(false), native_entered: Some(false), returned: false, joined: false, retired: false,
             expired: false, timely: None, custody_known: None, attempted: Some(false), press_returned: Some(false),
             triggered: None, worker_registered: false, worker_joined: false, rechecks_settled: None, diagnostic: None, report: None }
@@ -453,10 +464,12 @@ impl OpenInputSample {
             && self.entered == Some(true) && self.native_entered == Some(true) && self.returned && self.joined && self.retired
             && !self.expired && self.timely == Some(true) && self.custody_known == Some(true)
             && self.attempted == Some(true) && self.press_returned == Some(true) && self.triggered == Some(true)
-            && self.report.is_some_and(|r| r.succeeded() && self.diagnostic == Some(r.diagnostic))
+            && self.report.is_some_and(|r| r.selection_mode == self.selection && r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        json!({"mechanism":"accessibility-preconfigured-original-press-v5","step":format!("{:?}",self.step),"id":self.id,
+        let mechanism = if self.selection { "accessibility-version-source-selection-press-v6" }
+            else { "accessibility-preconfigured-original-press-v5" };
+        let mut value = json!({"mechanism":mechanism,"step":format!("{:?}",self.step),"id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,
             "bodyEntered":self.entered,"nativeEntered":self.native_entered,"bodyReturned":self.returned,
             "receiptJoined":self.joined,"workerRegistered":self.worker_registered,"workerJoined":self.worker_joined,
@@ -466,7 +479,13 @@ impl OpenInputSample {
             "initialOriginalProof":self.report.and_then(|r| r.initial_proof).map(native_proof_value),
             "originalProof":self.report.and_then(|r| r.proof).map(native_proof_value),
             "promptChecks":{"initial":self.report.and_then(|r| r.prompt[0]),"final":self.report.and_then(|r| r.prompt[1])},
-            "promptButton":self.report.map(|r| prompt_button_value(r.button))})
+            "promptButton":self.report.map(|r| prompt_button_value(r.button))});
+        if self.selection {
+            value["selectionParentProof"] = self.report.and_then(|r| r.selection_parent).map(native_proof_value).unwrap_or(Value::Null);
+            value["selectionParentPrompt"] = json!(self.report.and_then(|r| r.selection_prompt));
+            value["selection"] = self.report.and_then(|r| r.selection).map(selection_value).unwrap_or(Value::Null);
+        }
+        value
     }
 }
 #[derive(Clone, Copy)]
@@ -477,10 +496,14 @@ struct IdentitySample {
 }
 impl IdentitySample {
     fn configured(self, id: u32) -> bool { self.id == id && self.start_result == "ok" && self.configuration.complete() }
-    fn succeeded(self, id: u32) -> bool { self.configured(id) && self.binding.is_some_and(mrk_macos_installed_native::IdentityBinding::matched) }
+    // Input binding is deliberately weaker than successful Open for kind4.
+    fn input_bound(self, id: u32) -> bool { self.configured(id) && self.binding.is_some_and(|p|
+        if self.case.kind_name(id) == "version-source" { p.selection_parent_matched() } else { p.matched() }) }
     fn value(self) -> Value {
         let c = self.configuration;
-        let mut value = json!({"mechanism":"preconfigured-original-sheet-v2","case":self.case.name(),"id":self.id,"kind":self.case.kind_name(self.id),
+        let mechanism = if self.case.kind_name(self.id) == "version-source" { "selection-parent-original-sheet-v3" }
+            else { "preconfigured-original-sheet-v2" };
+        let mut value = json!({"mechanism":mechanism,"case":self.case.name(),"id":self.id,"kind":self.case.kind_name(self.id),
             "start":{"returned":true,"result":self.start_result},
             "configuration":{"attempted":c.attempted,"parentSetterEntered":c.parent_setter_entered,
                 "parentSetterReturned":c.parent_setter_returned,"parent":c.parent,
@@ -843,7 +866,7 @@ impl Record {
         if self.panel_history.len() >= if self.project_field_record.is_some() { 9 } else { 7 }
             || self.panel_history.iter().any(|p| p.sample.id == id)
             || self.pending.is_some() || self.prepared_open.is_some() || !sample.succeeded() || sample.id != id
-            || !identity.succeeded(id) || !completion.succeeded(id) || progress.snapshot().state != "retired" { return false; }
+            || !identity.input_bound(id) || !completion.succeeded(id) || progress.snapshot().state != "retired" { return false; }
         self.panel_history.push(OpenHistory { sample, identity, completion, progress: progress.clone() });
         self.accessibility = None; self.identity_binding = None; self.completion_selection = None; self.open_progress = None; true
     }
@@ -1813,9 +1836,9 @@ impl Observation {
         r.ax_trusted && self.case.open_id(r.step) == Some(token.id) && open_step_entry(self.case, r.pending, r.step, token.id)
             && r.open_progress.as_ref().is_some_and(|progress| token.same_progress(progress))
             && r.prepared_open.is_none() && r.accessibility.is_some_and(|s|
-                s.id == token.id && s.prepared && s.requested) && r.action_returned(r.step) == Ok(false)
+                s.id == token.id && s.selection == token.identity().selects_version_source() && s.prepared && s.requested) && r.action_returned(r.step) == Ok(false)
             && r.native_dispatch.is_some_and(|n| n.step == r.step && n.entered && n.returned)
-            && r.identity_binding.is_some_and(|s| s.succeeded(token.id))
+            && r.identity_binding.is_some_and(|s| s.input_bound(token.id))
     }
     fn action_admission(&self, token: &OpenAction, after: bool) -> Option<bool> {
         if std::thread::current().id() != self.main { return None; }
@@ -1848,49 +1871,61 @@ impl Observation {
         Some(!self.failed.load(Ordering::SeqCst) && !token.expired() && (after || !token.stopped()))
     }
     fn worker_recheck(self: &Arc<Self>, app: &tauri::AppHandle, token: &OpenAction, stage: u32, end: Instant,
-        rechecks: &Arc<Mutex<[OpenRecheckSlot; 2]>>,
-        senders: &mut [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 2])
+        rechecks: &Arc<Mutex<[OpenRecheckSlot; 3]>>,
+        senders: &mut [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 3])
         -> Result<(mrk_macos_installed_native::OpenRecheckReturn, bool), u32> {
-        if !(1..=2).contains(&stage) { return Err(9); }
-        let Ok(mut ledger) = rechecks.lock() else { return Err(9); };
-        let slot = &mut ledger[stage as usize - 1];
-        if slot.dispatched || slot.returned.is_some() || slot.uncertain { return Err(9); }
-        let Some(done) = senders[stage as usize - 1].take() else { return Err(9); };
+        if stage > 2 || stage == 0 && !token.identity().selects_version_source() { return Err(9); }
         if token.expired() || Instant::now() >= end { return Err(8); }
         match self.worker_admission(token, false) { Some(true) => {}, Some(false) => return Err(3), None => return Err(9) }
-        slot.dispatched = true; // Exact receiver was rooted BEFORE spawn/GO.
+        let (done, receiver) = {
+            let Ok(mut ledger) = rechecks.try_lock() else { return Err(9); };
+            let slot = &mut ledger[stage as usize];
+            if slot.dispatched || slot.returned.is_some() || slot.uncertain { return Err(9); }
+            let Some(done) = senders[stage as usize].take() else { return Err(9); };
+            let Some(receiver) = slot.receipt.take() else { return Err(9); };
+            slot.dispatched = true;
+            // Keep the exact preregistered receiver alive even on unwind or an
+            // impossible restoration conflict. Missing custody cannot settle.
+            (done, std::mem::ManuallyDrop::new(receiver))
+        }; // NO ledger/Record/GuiFacts lock crosses dispatch or the native/main wait.
         let q = self.clone(); let original = token.clone();
-        if app.run_on_main_thread(move || q.action_recheck_main(original, stage, end, done)).is_err() {
-            slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody");
-            return Err(9); // Err does not mean cancellation or definite no entry.
-        }
+        let dispatch_failed = app.run_on_main_thread(move || q.action_recheck_main(original, stage, end, done)).is_err();
         use std::sync::mpsc::RecvTimeoutError;
-        let receipt = match slot.receipt.recv_timeout(end.saturating_duration_since(Instant::now())) {
+        let returned = if dispatch_failed {
+            token.unknown(); self.fail_with("native-default-custody"); None
+        } else { match receiver.recv_timeout(end.saturating_duration_since(Instant::now())) {
             Ok(receipt) => Some(receipt),
             Err(RecvTimeoutError::Disconnected) => None,
             Err(RecvTimeoutError::Timeout) => {
                 token.expire(); self.fail_with("native-default-deadline");
-                // Only this same queued body/receiver, only until original45s.
-                // Late known cleanup is retained DATA, never fresh success.
-                slot.receipt.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok()
+                // Only this original queued body/receiver, only until original45s.
+                receiver.recv_timeout(self.end.saturating_duration_since(Instant::now())).ok()
             },
+        } };
+        let Ok(mut ledger) = rechecks.try_lock() else {
+            token.unknown(); self.fail_with("native-default-custody"); return Err(9);
         };
-        slot.returned = receipt;
+        let slot = &mut ledger[stage as usize];
+        if !slot.dispatched || slot.receipt.is_some() || slot.returned.is_some() || slot.uncertain {
+            slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody"); return Err(9);
+        }
+        slot.receipt = Some(std::mem::ManuallyDrop::into_inner(receiver));
+        slot.returned = returned; slot.uncertain = dispatch_failed;
         if !slot.settled(token, stage, self.end) {
             slot.uncertain = true; token.unknown(); self.fail_with("native-default-custody"); return Err(9);
         }
         let receipt = slot.returned.as_ref().expect("settled matching main receipt");
         if let Some(native) = receipt.body.native {
-            // Preserve the actual original proof even on a late/STOP return.
-            // The FFI callback rechecks the SAME armed endpoint before success.
+            // Preserve the actual proof even on late/STOP; the FFI callback
+            // checks the same armed endpoint and its distinct proof purpose.
             return Ok((native, receipt.body.admitted == Some(true)));
         }
         Err(if token.expired() || Instant::now() >= end { 8 } else { 3 })
     }
     fn action_worker(self: &Arc<Self>, app: tauri::AppHandle, token: OpenAction,
         go: std::sync::mpsc::Receiver<Option<Instant>>, done: std::sync::mpsc::SyncSender<OpenActionReceipt>,
-        rechecks: Arc<Mutex<[OpenRecheckSlot; 2]>>,
-        mut senders: [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 2]) -> OpenWorkerReturn {
+        rechecks: Arc<Mutex<[OpenRecheckSlot; 3]>>,
+        mut senders: [Option<std::sync::mpsc::SyncSender<OpenRecheckReceipt>>; 3]) -> OpenWorkerReturn {
         let end = match go.recv() {
             Ok(Some(end)) => end,
             Ok(None) => return OpenWorkerReturn::NoGo,
@@ -1971,18 +2006,20 @@ impl Observation {
         };
         let (done, receipt) = std::sync::mpsc::sync_channel(1);
         let (go, go_receipt) = std::sync::mpsc::sync_channel(1);
+        let (parent_done, parent_receipt) = std::sync::mpsc::sync_channel(1);
         let (first_done, first_receipt) = std::sync::mpsc::sync_channel(1);
         let (final_done, final_receipt) = std::sync::mpsc::sync_channel(1);
         let rechecks = Arc::new(Mutex::new([
-            OpenRecheckSlot { receipt: first_receipt, dispatched: false, uncertain: false, returned: None },
-            OpenRecheckSlot { receipt: final_receipt, dispatched: false, uncertain: false, returned: None },
+            OpenRecheckSlot { receipt: Some(parent_receipt), dispatched: false, uncertain: false, returned: None },
+            OpenRecheckSlot { receipt: Some(first_receipt), dispatched: false, uncertain: false, returned: None },
+            OpenRecheckSlot { receipt: Some(final_receipt), dispatched: false, uncertain: false, returned: None },
         ]));
         *custody = Some(OpenFlight { input, token: token.clone(), receipt, returned: None, go: Some(go),
             worker: None, worker_returned: None, rechecks: rechecks.clone(), baseline });
         let flight = custody.as_mut().expect("original stored before spawn");
         let q = self.clone(); let worker_token = token.clone(); let application = app.clone();
         let started = std::thread::Builder::new().name("mrk-aqua-open".into()).spawn(move ||
-            q.action_worker(application, worker_token, go_receipt, done, rechecks, [Some(first_done), Some(final_done)]));
+            q.action_worker(application, worker_token, go_receipt, done, rechecks, [Some(parent_done), Some(first_done), Some(final_done)]));
         match started {
             Ok(handle) => { flight.worker = Some(handle); } // Register ACTUAL handle before arming or GO.
             Err(_) => {
@@ -2073,7 +2110,7 @@ impl Observation {
         // Only after actual worker join: no live worker holds the ledger. Main
         // never takes it; retained queued/uncertain stages cannot be lost here.
         let rechecks_settled = flight.rechecks.try_lock().ok().map(|ledger|
-            ledger.iter().enumerate().all(|(index, slot)| slot.settled(&token, index as u32 + 1, self.end)));
+            ledger.iter().enumerate().all(|(index, slot)| slot.settled(&token, index as u32, self.end)));
         if let Ok(mut r) = self.record.try_lock() {
             if let Some(sample) = r.accessibility.as_mut().filter(|s| s.id == token.id) {
                 sample.worker_registered = true; sample.worker_joined = true; sample.rechecks_settled = rechecks_settled;
@@ -2222,7 +2259,7 @@ impl Observation {
         if let Some(input) = prepared_open {
             if self.case.open_id(step) != Some(input.id) || result != Ok(false) || r.prepared_open.is_some()
                 || !r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned)
-                || !r.identity_binding.is_some_and(|sample| sample.succeeded(input.id)) {
+                || !r.identity_binding.is_some_and(|sample| sample.input_bound(input.id)) {
                 self.fail_with("native-default-custody"); return;
             }
             // Publish only the returned preparation, not an action/dispatch
@@ -2284,7 +2321,7 @@ impl Observation {
             let r = self.record().ok_or("observer-record-unavailable")?;
             if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
         }
-        let Some(panel) = observed_panel().map_err(|error| error.reason())? else { return Ok(false); };
+        let Some(mut panel) = observed_panel().map_err(|error| error.reason())? else { return Ok(false); };
         {
             let mut r = self.record().ok_or("observer-record-unavailable")?;
             if r.pending != Some(Pending::Native(step)) || r.step != step { return Err("native-pending-custody"); }
@@ -2334,12 +2371,15 @@ impl Observation {
                 let result = super::owned_macos::observation::prepare_version_source_name(id, panel, &mut returned);
                 *field_name_preparation = returned.map(|value| (i,value));
                 result.map_err(|error| error.reason())?;
-                // The sole name phase returned, not Open. A later existing
-                // observation must still prove exact parent AND selected URL.
+                // The sole name phase returned, not selection or Open. A later
+                // existing observation may emit only the separate parent ticket.
                 return Ok(false);
             }
         }
-        if open && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {
+        let selecting = open && kind == PanelKind::VersionSource;
+        let input_ready = if selecting { panel.native.version_source_selection_ready() }
+            else { panel.native.directory_ready && panel.native.directory_bound && panel.native.directory_returned };
+        if open && !input_ready {
             *readiness_wait = Some(id);
             return Ok(false); // Before any Open action; original deadline remains unchanged.
         }
@@ -2353,7 +2393,8 @@ impl Observation {
             }
             let mut sample = OpenInputSample::preparing(id, step);
             let target = self.open_identity_target(id, kind).ok_or("native-default-binding")?;
-            let prepared = prepare_open_input(id, target, binding_return).map_err(|error| {
+            let selection = if selecting { Some(panel.native.version_source_selection_ready.take().ok_or("native-default-binding")?) } else { None };
+            let prepared = prepare_open_input(id, target, selection, binding_return).map_err(|error| {
                 sample.diagnostic = error.binding_diagnostic(); error.reason()
             });
             sample.prepared = prepared.is_ok(); *open_sample = Some(sample);
@@ -2632,7 +2673,7 @@ impl Observation {
             && r.ax_trusted && r.prepared_open.is_none()
             && (if self.case == Case::PickerLoss { accessibility.is_none() && r.identity_binding.is_none() && r.completion_selection.is_none() }
                 else { accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())
-                    && identity_binding.is_some_and(|sample| sample.succeeded(self.case.selected_id()))
+                    && identity_binding.is_some_and(|sample| sample.input_bound(self.case.selected_id()))
                     && completion_selection.is_some_and(|sample| sample.succeeded(self.case.selected_id())) })
             && r.sessions.len() == self.case.rounds() && r.sessions.iter().all(|s| s.review_visible && s.finality.is_some())
             && (self.case == Case::FirstSave || r.panel_attached == [true,true,false,false])
@@ -2656,7 +2697,7 @@ impl Observation {
                     r.fixture.project_fields.as_ref().is_some_and(|f| f.restored())).is_some())
                 && r.panel_history.len() == 9 && r.panel_history.iter().zip([1,2,3,4,5,8,9,10,11]).all(|(p,id)|
                     p.sample.id == id && p.sample.succeeded() && p.progress.snapshot().state == "retired"
-                        && p.identity.succeeded(id) && p.completion.succeeded(id))
+                        && p.identity.input_bound(id) && p.completion.succeeded(id))
                 && r.open_sample().is_none() && r.identity_binding.is_none() && r.completion_selection.is_none(),
             Case::Ios(case) => r.project_settled && r.snapshots == 1 && r.close_count == 1
                 && r.native_actions_returned == [false,true,false,true]
@@ -2666,7 +2707,7 @@ impl Observation {
                     && r.panel_history.len() == 1 + (0..session::count(case) as u8).filter(|i| session::accepted(case,*i)).count()
                     && r.panel_history.iter().enumerate().all(|(i,p)| p.sample.id == (if i == 0 { self.case.selected_id() }
                         else { session::choose_id(case, i as u8 - 1).unwrap_or(0) }) && p.sample.succeeded()
-                        && p.progress.snapshot().state == "retired" && p.identity.succeeded(p.sample.id) && p.completion.succeeded(p.sample.id))
+                        && p.progress.snapshot().state == "retired" && p.identity.input_bound(p.sample.id) && p.completion.succeeded(p.sample.id))
                     && r.file_attached.iter().enumerate().all(|(i,b)| *b == (i < session::count(case)))
                     && r.file_actions.iter().enumerate().all(|(i,b)| *b == (i < session::count(case)))
                     && r.open_sample().is_none() && r.identity_binding.is_none() && r.completion_selection.is_none()),
@@ -2709,12 +2750,19 @@ impl Observation {
                 r.fixture.project_fields.as_ref().is_some_and(|f| f.restored()))?;
             report["projectFields"]["panelAttachments"] = json!(r.field_attached);
             report["projectFields"]["controlReturns"] = json!(r.field_actions);
-            report["projectFields"]["acceptedOpenHistories"] = json!(r.panel_history.iter().map(|p|
-                json!({"operationId":p.sample.id,"kind":self.case.kind_name(p.sample.id),
+            report["projectFields"]["acceptedOpenHistories"] = json!(r.panel_history.iter().map(|p| {
+                let mut value = json!({"operationId":p.sample.id,"kind":self.case.kind_name(p.sample.id),
                     "originalInputSucceeded":p.sample.reconciled(p.progress.snapshot()).succeeded(),
                     "originalBarrierRetired":p.progress.snapshot().state == "retired",
-                    "originalBindingMatched":p.identity.succeeded(p.sample.id),
-                    "originalCompletionMatched":p.completion.succeeded(p.sample.id)})).collect::<Vec<_>>());
+                    "originalBindingMatched":p.identity.input_bound(p.sample.id),
+                    "originalCompletionMatched":p.completion.succeeded(p.sample.id)});
+                if p.sample.selection {
+                    value["selectionInput"] = p.sample.reconciled(p.progress.snapshot()).value();
+                    value["selectionBinding"] = p.identity.value();
+                    value["selectionCompletion"] = p.completion.value();
+                }
+                value
+            }).collect::<Vec<_>>());
         }
         self.timely().then_some(report)
     }
@@ -3275,15 +3323,15 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
 // These do not call AppKit, acquire files, dispatch actions, or supply receipts.
 fn native_recheck_data_check() -> bool {
     use mrk_macos_installed_native::{ControlContainerButtonProof, IdentityBinding, OpenDiagnostic, OpenReport};
-    let proof = IdentityBinding { attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
+    let proof = IdentityBinding { purpose: "full-open", attempted: true, parent: Some("match"), panel: Some("match"), checks: [Some(true); 12],
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
     let button = ControlContainerButtonProof { checks: [true; 7], calls: 101, initial_nodes_examined: 4, recheck_nodes_examined: 4,
         last_role: "Button", last_depth: 2,
         cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0 };
     let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
         press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
-        prompt: [Some(true); 2], button };
-    let full = OpenInputSample { id: 2, step: Step::OpenProject, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
+        prompt: [Some(true); 2], button, selection_mode: false, selection: None, selection_parent: None, selection_prompt: None };
+    let full = OpenInputSample { id: 2, step: Step::OpenProject, selection: false, prepared: true, requested: true, dispatch_attempted: true, state: "retired",
         entered: Some(true), native_entered: Some(true), returned: true, joined: true, retired: true, expired: false,
         timely: Some(true), custody_known: Some(true), attempted: Some(true), press_returned: Some(true), triggered: Some(true),
         worker_registered: true, worker_joined: true, rechecks_settled: Some(true),
@@ -3518,7 +3566,7 @@ fn observer_data_checks() -> bool {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
         parent_present: true, panel_present: true, parent_references_panel: Some(false),
         panel_references_parent: Some(false), panel_visible: Some(false),
-        directory_returned: false, directory_ready: false, directory_readiness: "not-ready", version_source_parent_ready: None,
+        directory_returned: false, directory_ready: false, directory_readiness: "not-ready", version_source_parent_ready: None, version_source_selection_ready: None,
         action_attempted: false, action_returned: false,
         callback_returned: false, response: None, selected: None, close_attempted: false, dismissed: false, closed: false,
     }};

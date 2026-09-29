@@ -2035,7 +2035,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("uint32_t attachment = mrk_observation_attachment(s);", native)
         self.assertIn("attachment == MRK_ATTACHMENT_ALL ? 2u : 0u", native)
         self.assertIn("if (!mrk_observation_attached(s)) MRK_ACTION_RETURN(EAGAIN);", native)
-        self.assertIn("flags & !0xfffff == 0", rust)
+        self.assertIn("flags & !0x1fffff == 0", rust)
         self.assertIn("(parent_present && panel_present).then_some", rust)
 
     def test_native_action_source_keeps_original_calls_status_and_closed_decoder(self):
@@ -2264,20 +2264,24 @@ class AquaDataTests(unittest.TestCase):
         labels = rust.split("const OPEN_ERRORS:", 1)[1].split("];", 1)[0]
         self.assertEqual(set(M.re.findall(r'"([a-z-]+)"', labels)), M.ACCESSIBILITY_ERRORS)
         preparation = rust.split("pub fn installed_open_identity(", 1)[1].split("pub fn installed_open_recheck(", 1)[0]
-        self.assertEqual(preparation.count('OpenDiagnostic { site: "entry"'), 2)
+        self.assertEqual(preparation.count('OpenDiagnostic { site: "entry"'), 3)
         self.assertNotIn('site: "binding"', preparation)
         wire = rust.split("fn open_return(", 1)[1].split("pub struct OpenInputReturn", 1)[0]
         sites = M.re.findall(r'"([a-z-]+)"', wire.split("site: *[", 1)[1].split("]", 1)[0])
         control_sites = ["control-title-limit", "control-child-count-limit", "control-child-copy-limit", "control-node-limit", "control-depth-limit"]
         self.assertEqual(sites[:14], "entry application windows parent-identifier sheet topology control-projection button "
                          "control-recheck initial-original-proof original-proof admission press cleanup".split())
-        self.assertEqual(sites[14:], control_sites)
+        self.assertEqual(sites[14:19], control_sites)
+        self.assertEqual(set(sites[19:]), M.ACCESSIBILITY_SELECTION_SITES)
         self.assertEqual(set(control_sites), M.ACCESSIBILITY_CONTROL_LIMIT_SITES)
         self.assertEqual(set(sites), M.ACCESSIBILITY_SITES)
         enum = native.split("enum { MRK_OPEN_ENTRY = 1u,", 1)[1].split("};", 1)[0]
-        self.assertEqual(M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)[-6:], ["MRK_OPEN_CLEANUP", "MRK_OPEN_CONTROL_TITLE_LIMIT",
+        native_sites = M.re.findall(r"MRK_OPEN_[A-Z_]+", enum)
+        self.assertEqual(native_sites[12:18], ["MRK_OPEN_CLEANUP", "MRK_OPEN_CONTROL_TITLE_LIMIT",
                           "MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT", "MRK_OPEN_CONTROL_CHILD_COPY_LIMIT",
                           "MRK_OPEN_CONTROL_NODE_LIMIT", "MRK_OPEN_CONTROL_DEPTH_LIMIT"])
+        self.assertEqual(native_sites[18:], ["MRK_OPEN_SELECTION_PARENT", "MRK_OPEN_SELECTION_PROJECTION",
+                          "MRK_OPEN_SELECTION_RECHECK", "MRK_OPEN_SELECTION_SETTABLE", "MRK_OPEN_SELECTION_WRITE", "MRK_OPEN_SELECTION_READBACK"])
         helper = native.split("static BOOL mrk_ax_control_limit(", 1)[1].split("static uint32_t mrk_ax_role(", 1)[0]
         self.assertIn("s->result.site == MRK_OPEN_CONTROL_PROJECTION || s->result.site == MRK_OPEN_CONTROL_RECHECK", helper)
         self.assertIn("&& !s->result.error) s->result.site = site;", helper)
@@ -2298,9 +2302,9 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 48 && sizeof(MRKOpenRecheck) == 48" in native,
-                        "native original Press and recheck wires must each be48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 48" in rust, "Rust original Press wire check must be48B")
+        self.assertTrue("sizeof(MRKOpenResult) == 80 && sizeof(MRKOpenRecheck) == 48" in native,
+                        "native selection/Open wire80B and unchanged recheck48B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 80" in rust, "Rust selection/Open wire must be80B")
         self.assertIn("std::mem::size_of::<RecheckWire>() != 48", rust)
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
         self.assertIn("w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16", wire)
@@ -2366,23 +2370,27 @@ class AquaDataTests(unittest.TestCase):
         action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
         self.assertIn("action != 1 && action != 4 && action != 5 && action != 6", action)
         self.assertNotIn("setDirectoryURL:", action)
-        for retired in ("mrk_ax_row_target(", "mrk_ax_selection_roster(", "mrk_ax_select_row(", "MRKSelectionPass",
-                        "kAXRowsAttribute", "kAXURLAttribute", "AXUIElementIsAttributeSettable(", "AXUIElementSetAttributeValue("):
+        # Do not restore the old mandatory-URL/generic row selector. The new
+        # kind4-only typed selection is not an ordinary picker/Project fallback.
+        for retired in ("mrk_ax_row_target(", "mrk_ax_select_row(", "kAXURLAttribute"):
             self.assertFalse(retired in native, "retired row route: " + retired)
+        ordinary = native.split("static BOOL mrk_ax_control_roster(", 1)[1].split("static BOOL mrk_ax_original(", 1)[0]
+        for selecting in ("kAXRowsAttribute", "AXUIElementIsAttributeSettable(", "AXUIElementSetAttributeValue("):
+            self.assertNotIn(selecting, ordinary)
         for retired in ("Step::SetProject", "PanelAction::ProjectDirectory", "selected_native"):
             self.assertFalse(retired in observer, "retired action bookkeeping: " + retired)
         self.assertIn("native_actions_returned: [bool; 4]", observer)
         self.assertIn("r.native_actions_returned[1] = true; r.step = Step::ProjectSettled;", observer)
         prepared = adapter.split("pub(crate) fn prepare_open_input(", 1)[1].split("pub(crate) fn open_release_data_check(", 1)[0]
         self.assertLess(prepared.index("identity.targets(target)"), prepared.index("OpenRelease::new()"))
-        ready = native.split("static BOOL mrk_observation_directory_ready(", 1)[1].split("int mrk_panel_observe(", 1)[0]
+        ready = native.split("static BOOL mrk_observation_directory_ready(", 1)[1].split("static BOOL mrk_observation_selection_parent(", 1)[0]
         self.assertIn("!s->observationDirectoryReturned", ready)
         self.assertIn("[(NSOpenPanel *)s->window directoryURL]", ready)
         self.assertIn("strcmp(path, s->observationTarget) == 0", ready)
         recheck = native.split("void mrk_panel_observe_open_recheck(", 1)[1].split("enum { MRK_PROMPT_CALLS", 1)[0]
         self.assertIn("memcmp(target, s->observationTarget, target_capacity)", recheck)
         self.assertIn("s->observationRechecks = stage;", recheck)
-        self.assertIn("r.error = mrk_original_proof(s, &r.proof, NO)", recheck)
+        self.assertIn("r.error = mrk_original_proof(s, &r.proof, NO, stage == 0)", recheck)
         for forbidden in (" URLs]", "setDirectoryURL:", "setNameFieldStringValue:", "memcpy(s->selected", "sleep("):
             self.assertNotIn(forbidden, recheck)
         callback = start.split("s->completion = Block_copy", 1)[1].split("beginSheetModalForWindow:", 1)[0]
@@ -2521,10 +2529,10 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("Some((self.open_sample()?, self.identity_binding?, self.completion_selection?))", history)
         for gate in ("self.panel_history.len() >= if self.project_field_record.is_some() { 9 } else { 7 }", "self.panel_history.iter().any(|p| p.sample.id == id)",
                      "self.pending.is_some() || self.prepared_open.is_some()", "!sample.succeeded() || sample.id != id",
-                     '!identity.succeeded(id) || !completion.succeeded(id) || progress.snapshot().state != "retired"'):
+                     '!identity.input_bound(id) || !completion.succeeded(id) || progress.snapshot().state != "retired"'):
             self.assertIn(gate, history)
         self.assertIn("accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded())", finish)
-        self.assertIn("identity_binding.is_some_and(|sample| sample.succeeded(self.case.selected_id()))", finish)
+        self.assertIn("identity_binding.is_some_and(|sample| sample.input_bound(self.case.selected_id()))", finish)
         self.assertIn("!completion_ownership_data_check()", observer)
         for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_CONTROL_NODES = 17", "MRK_CONTROL_DEPTH = 8"):
             self.assertIn(bound, native)
@@ -2533,7 +2541,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("timeout=case_timeout(case), capture=True, text=False, output_limit=OUTPUT_LIMIT", qualification)
         self.assertEqual([M.case_timeout(case) for case in M.CASES], [60] * 4)
         self.assertEqual([M.case_timeout(case) for case in M.IOS_CASES], [325] * 5)
-        self.assertIn('len(data.encode("ascii")) <= 24 * 1024', qualification)
+        self.assertIn('len(data.encode("ascii")) <= (40 * 1024 if project_fields else 24 * 1024)', qualification)
 
     def test_semantic_timeout_uses_independent_relay_and_retains_original_receiver(self):
         desktop = PATH.parents[1]
@@ -2546,7 +2554,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(relay.index('.name("mrk-aqua-open".into()).spawn('), relay.index("flight.worker = Some(handle)"))
         self.assertLess(relay.index("flight.worker = Some(handle)"), relay.index("let end = self.end.min("))
         self.assertLess(relay.index("let end = self.end.min("), relay.index("sender.try_send(Some(end))"))
-        self.assertLess(relay.index("OpenRecheckSlot { receipt: first_receipt"), relay.index('.name("mrk-aqua-open".into()).spawn('))
+        self.assertLess(relay.index("OpenRecheckSlot { receipt: Some(first_receipt)"), relay.index('.name("mrk-aqua-open".into()).spawn('))
         timed = relay.split("let end = self.end.min(", 1)[1]
         for forbidden in ("self.record()", ".admitted(", ".lock()", ".spawn("):
             self.assertNotIn(forbidden, timed)
@@ -2601,7 +2609,17 @@ class AquaDataTests(unittest.TestCase):
         self.assertLess(recheck.index("slot.dispatched = true"), recheck.index("app.run_on_main_thread("))
         self.assertIn("slot.uncertain = true", recheck)
         self.assertIn("slot.settled(token, stage, self.end)", recheck)
-        self.assertIn("slot.receipt.recv_timeout(self.end.saturating_duration_since(Instant::now()))", recheck)
+        self.assertIn("receiver.recv_timeout(self.end.saturating_duration_since(Instant::now()))", recheck)
+        self.assertIn("[OpenRecheckSlot; 3]", recheck)
+        self.assertIn("slot.receipt.take()", recheck)
+        self.assertIn("std::mem::ManuallyDrop::new(receiver)", recheck)
+        self.assertIn("slot.receipt = Some(std::mem::ManuallyDrop::into_inner(receiver))", recheck)
+        self.assertLess(recheck.index("}; // NO ledger/Record/GuiFacts lock"), recheck.index("app.run_on_main_thread("))
+        unlocked = recheck.split("}; // NO ledger/Record/GuiFacts lock", 1)[1].split("let Ok(mut ledger) = rechecks.try_lock()", 1)[0]
+        for retained_lock in (".lock()", ".try_lock()", "self.record()"):
+            self.assertNotIn(retained_lock, unlocked)
+        for name in ("parent_receipt", "first_receipt", "final_receipt"):
+            self.assertLess(relay.index(f"receipt: Some({name})"), relay.index('.name("mrk-aqua-open".into()).spawn('))
         report = observer.split("fn report_failure(", 1)[1].split("pub(super) fn attach(", 1)[0]
         self.assertLess(report.index("drop(r)"), report.index("self.diagnostic.submit(snapshot.frame(reason))"))
         expiry = report.split("fn report_expiry(", 1)[1]
@@ -2612,7 +2630,9 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('self.source = "prearm-open-progress"', snapshot)
         self.assertIn("8192", snapshot)
         self.assertIn("context.is_ascii()", snapshot)
-        writer = observer.split("struct DiagnosticWriter", 1)[1].split("pub(super) struct Observation", 1)[0]
+        writer = observer.split("struct DiagnosticWriter", 1)[1]
+        self.assertIn("pub(crate) struct Observation", writer)
+        writer = writer.split("pub(crate) struct Observation", 1)[0]
         self.assertEqual(writer.count(".spawn(move ||"), 1)
         self.assertEqual(writer.count("stderr().lock()"), 1)
         self.assertIn("sync_channel::<Option<Vec<u8>>>(1)", writer)
@@ -4257,7 +4277,33 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         case = "project-fields"
         good = M.expected_result(BINDING, case)
         self.assertEqual(M.parse_result(captured(good), b"", BINDING, case), good)
-        self.assertLessEqual(len(captured(good)) - len(M.MARKER) - 1, M.JSON_LIMIT)
+        payload = captured(good)[len(M.MARKER):-1]
+        self.assertGreater(len(payload), M.JSON_LIMIT)
+        self.assertLessEqual(len(payload), M.PROJECT_FIELDS_JSON_LIMIT)
+        self.assertEqual((M.JSON_LIMIT, M.PROJECT_FIELDS_JSON_LIMIT, M.FAILURE_CONTEXT_LIMIT, M.OUTPUT_LIMIT),
+                         (16383, 32767, 8192, 2 * 1024 * 1024))
+        padded = M.MARKER + payload + b" " * (32767 - len(payload)) + b"\n"
+        self.assertEqual(M.parse_result(padded, b"", BINDING, case), good)
+        with self.assertRaisesRegex(M.Refused, "^result-record$"):
+            M.parse_result(padded[:-1] + b" \n", b"", BINDING, case)
+        ordinary = captured(M.expected_result(BINDING, "noop-stale"))
+        oversized = ordinary[:-1] + b" " * (16384 - (len(ordinary) - len(M.MARKER) - 1)) + b"\n"
+        with self.assertRaisesRegex(M.Refused, "^result-record$"):
+            M.parse_result(oversized, b"", BINDING, "noop-stale")
+        # The success wrapper has its own fixed cap. No failure/ordinary type
+        # inherits the larger allowance; bytes are rejected, never truncated.
+        for kind, selected_case, limit in (("macos-aqua-case", case, 40960), ("macos-aqua-failure", case, 24576),
+                                           ("macos-aqua-case", "noop-stale", 24576), (True, case, 24576),
+                                           ("macos-aqua-case", True, 24576)):
+            frame = {"type": kind, "case": selected_case, "padding": ""}
+            base = len(json.dumps(frame, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii"))
+            frame["padding"] = "x" * (limit - base)
+            stream = io.StringIO(); M.emit_record(frame, stream)
+            self.assertEqual(len(stream.getvalue().encode("ascii")), limit + 1)
+            frame["padding"] += "x"; rejected = io.StringIO()
+            with self.assertRaisesRegex(M.Refused, "^outer-result-bound$"):
+                M.emit_record(frame, rejected)
+            self.assertEqual(rejected.getvalue(), "")
         fields = good["projectFields"]
         self.assertEqual(fields["schemaVersion"], 2)
         self.assertEqual(fields["previewValidation"], "invalid-retained-ios-fields")
@@ -4291,6 +4337,21 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         histories = fields["acceptedOpenHistories"]
         self.assertEqual([row["operationId"] for row in histories], [1, 2, 3, 4, 5, 8, 9, 10, 11])
         self.assertEqual(len(histories), 9)
+        for index, identifier in ((1, 2), (5, 8), (6, 9), (7, 10)):
+            original = histories[index]
+            action, binding, completion = (original[key] for key in ("selectionInput", "selectionBinding", "selectionCompletion"))
+            self.assertEqual(action["mechanism"], "accessibility-version-source-selection-press-v6")
+            self.assertEqual(binding["mechanism"], "selection-parent-original-sheet-v3")
+            self.assertEqual((action["id"], binding["id"], completion["id"]), (identifier,) * 3)
+            self.assertEqual(action["selectionParentProof"]["purpose"], "selection-parent")
+            self.assertEqual(binding["binding"]["purpose"], "selection-parent")
+            self.assertNotIn("purpose", action["initialOriginalProof"])
+            self.assertNotIn("purpose", action["originalProof"])
+            self.assertTrue(M._accessibility_succeeded(action))
+            # Actual selected-child and selected-row layouts share no fallback.
+            child = deepcopy(good)
+            child["projectFields"]["acceptedOpenHistories"][index]["selectionInput"]["selection"].update(attribute="SelectedChildren")
+            self.assertEqual(M.parse_result(captured(child), b"", BINDING, case), child)
         for mutation in (
             lambda v: v.update(schemaVersion=1),
             lambda v: v.update(normalProfileAvailable=True),
@@ -4328,10 +4389,231 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda v: v["acceptedOpenHistories"][8].update(originalBarrierRetired=False),
             lambda v: v["acceptedOpenHistories"][8].update(originalBindingMatched=False),
             lambda v: v["acceptedOpenHistories"][8].update(originalCompletionMatched=False),
+            lambda v: v["acceptedOpenHistories"][1].pop("selectionInput"),
+            lambda v: v["acceptedOpenHistories"][5].pop("selectionBinding"),
+            lambda v: v["acceptedOpenHistories"][6].pop("selectionCompletion"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(mechanism="accessibility-preconfigured-original-press-v5"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(id=8),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(step="OpenProject"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(selection=None),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(selectionParentProof=None),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(selectionParentPrompt=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selectionParentProof"].pop("purpose"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["initialOriginalProof"].update(purpose="selection-parent"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(originalProof=None),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=49),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(matches=0),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(matches=2),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(attribute="Value"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(depth=0),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(depth=9),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(lastRole="not-read"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(selected=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(returned=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(attempted=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"]["checks"].update(completeProjection=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"]["checks"].update(attributeSettable=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"]["checks"].update(singletonOriginalEntryReadback=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(workerJoined=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(rechecksSettled=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(state="unknown", custodyKnown=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(expired=True, timely=False),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(calls=513),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(cfSlots=257, cfSlotsRetired=257),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(cfSlotsRetired=119),
+            lambda v: v["acceptedOpenHistories"][1]["selectionBinding"].update(id=8),
+            lambda v: v["acceptedOpenHistories"][1]["selectionBinding"].update(mechanism="preconfigured-original-sheet-v2"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionBinding"]["binding"].pop("purpose"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionCompletion"].update(id=8),
+            lambda v: v["acceptedOpenHistories"][1]["selectionCompletion"]["facts"].update(selection="multiple"),
+            lambda v: v["acceptedOpenHistories"][1]["selectionCompletion"]["facts"].update(selection="ordinary-path-disagreement"),
+            lambda v: v["acceptedOpenHistories"][2].update(selectionInput=v["acceptedOpenHistories"][1]["selectionInput"]),
         ):
             bad = deepcopy(good); mutation(bad["projectFields"])
             with self.assertRaises(M.Refused):
                 M.parse_result(captured(bad), b"", BINDING, case)
+
+    def test_typed_selection_failures_retain_actual_stage_data_without_open_authority(self):
+        # Inert decoded scalars only, not AppKit/AX execution or a native receipt.
+        case, step = "project-fields", "ProjectFields(Native(0))"
+        good = M.expected_result(BINDING, case)
+        history = good["projectFields"]["acceptedOpenHistories"][1]
+        frame = accessibility_context_data(); frame.update(snapshotSource="record")
+        frame["nativeHandler"]["step"] = step
+        frame["lastPanel"].update(step=step, id=2, kind="version-source")
+        frame["accessibility"] = deepcopy(history["selectionInput"])
+        frame["accessibilityBinding"] = deepcopy(history["selectionBinding"])
+        frame["projectFieldPreparation"] = {"operationId": 2, "kind": "version-source", "returned": True,
+            "result": "ok", "facts": 6143, "nameFieldPreparation": {"returned": True, "result": "ok", "facts": 31}}
+        action = frame["accessibility"]
+        action.update(attempted=False, pressReturned=False, triggered=None, initialOriginalProof=None, originalProof=None,
+                      promptChecks={"initial": None, "final": None}, site="selection-projection", error="unsupported")
+        action["promptButton"].update(checks={key: index < 2 for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)},
+            calls=100, initialNodesExamined=0, recheckNodesExamined=0, lastRole="Sheet", lastDepth=0, cfSlots=40, cfSlotsRetired=40)
+        action["selection"].update(checks={key: index < 1 for index, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
+            attempted=False, returned=False, selected=None, nodes=8, matches=0, attribute="not-read", lastRole="List", depth=2)
+        marker = f"MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON=native-default-action\n".encode("ascii")
+        failures = []
+        for label, site, error, completed, matches, attribute, selected, ax_error in (
+            ("incomplete-roster", "selection-projection", "limit", 0, 1, "not-read", None, 0),
+            ("no-entry", "selection-projection", "unsupported", 1, 0, "not-read", None, 0),
+            ("distinct-entry-collision", "selection-projection", "ambiguous", 1, 2, "not-read", None, 0),
+            ("changed-original-chain", "selection-recheck", "changed", 2, 1, "not-read", None, 0),
+            ("not-settable", "selection-settable", "unsupported", 3, 1, "SelectedRows", None, 0),
+            ("setter-error", "selection-write", "cannot-complete", 4, 1, "SelectedRows", False, -25204),
+            ("empty-readback", "selection-readback", "unsupported", 4, 1, "SelectedChildren", True, 0),
+            ("wrong-or-multiple-readback", "selection-readback", "changed", 4, 1, "SelectedRows", True, 0),
+        ):
+            failed = deepcopy(frame); sample = failed["accessibility"]
+            sample.update(site=site, error=error)
+            sample["selection"].update(checks={key: index < completed for index, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
+                matches=matches, attribute=attribute, attempted=selected is not None, returned=selected is not None, selected=selected)
+            sample["promptButton"]["axError"] = ax_error
+            failures.append((label, failed))
+        readback_failed = deepcopy(failures[-1][1])
+        parent_refused = deepcopy(frame); sample = parent_refused["accessibility"]
+        sample.update(site="selection-parent-proof", error="ineligible", selectionParentPrompt=None)
+        sample["selectionParentProof"].update(parent=None, panel=None, children=None, originals=None,
+            site="directory", error="ineligible", checks=dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, None))
+        sample["selectionParentProof"]["checks"].update(eligible=True, attached=True, directory=False)
+        sample["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False), nodes=0, matches=0,
+                                   lastRole="not-read", depth=0)
+        sample["promptButton"].update(checks=dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False), calls=0,
+                                      lastRole="not-read", cfSlots=0, cfSlotsRetired=0)
+        failures.append(("selection-parent-refused", parent_refused))
+        no_url = deepcopy(readback_failed); sample = no_url["accessibility"]
+        sample.update(site="initial-original-proof", error="ineligible")
+        sample["selection"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, True)
+        proof = deepcopy(history["selectionInput"]["initialOriginalProof"])
+        proof.update(parent=None, panel=None, children=None, originals=None, site="directory", error="ineligible",
+            checks=dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, None))
+        proof["checks"].update(eligible=True, attached=True, directory=False)
+        sample["initialOriginalProof"] = proof
+        self.assertTrue(M._selection_succeeded(sample["selection"]))
+        failures.append(("real-selection-but-full-URL-refused", no_url))
+        late = deepcopy(no_url); late["accessibility"].update(initialOriginalProof=None, error="deadline", expired=True, timely=False)
+        failures.append(("selection-returned-but-original-deadline", late))
+        unknown = deepcopy(readback_failed); sample = unknown["accessibility"]
+        sample.update(error="custody", state="unknown", custodyKnown=False, receiptJoined=False, barrierRetired=False)
+        sample["promptButton"].update(cleanupReturned=False, cfSlotsRetired=0)
+        failures.append(("readback-custody-unknown", unknown))
+        for label, failed in failures:
+            with self.subTest(stage=label):
+                wire = marker + context_row(failed)
+                self.assertLessEqual(len(context_row(failed).split(b"=", 1)[1].rstrip(b"\n")), M.FAILURE_CONTEXT_LIMIT)
+                self.assertEqual(M.failure_context(b"", wire, case), failed)
+                self.assertFalse(M._accessibility_succeeded(failed["accessibility"]))
+                rejected = deepcopy(good)
+                rejected["projectFields"]["acceptedOpenHistories"][1]["selectionInput"] = failed["accessibility"]
+                with self.assertRaises(M.Refused): M.parse_result(captured(rejected), b"", BINDING, case)
+        for mutation in (
+            lambda s: s.update(attempted=True),
+            lambda s: s.update(selectionParentPrompt=False),
+            lambda s: s["selectionParentProof"].pop("purpose"),
+            lambda s: s["selection"].update(nodes=1, matches=2, depth=1),
+            lambda s: s["selection"].update(lastRole="not-read"),
+            lambda s: s["selection"].update(depth=0),
+            lambda s: s["selection"].update(selected=True, returned=True),
+            lambda s: s["selection"].update(attribute="SelectedRows"),
+        ):
+            bad = deepcopy(frame); mutation(bad["accessibility"])
+            expected = deepcopy(bad); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+        bad = deepcopy(parent_refused); bad["accessibility"]["error"] = "unsupported"
+        expected = deepcopy(bad); expected["accessibility"] = None
+        self.assertEqual(M.failure_context(b"", marker + context_row(bad), case), expected)
+        # Old kind4 inputs remain readable as historical failure DATA only.
+        historical = deepcopy(frame)
+        historical["accessibility"] = deepcopy(good["native"]["projectOpenInput"])
+        historical["accessibility"].update(id=2, step=step)
+        historical["accessibilityBinding"] = deepcopy(good["native"]["projectOpenBinding"])
+        historical["accessibilityBinding"].update(id=2, kind="version-source")
+        self.assertEqual(M.failure_context(b"", marker + context_row(historical), case), historical)
+        self.assertFalse(M._accessibility_succeeded(historical["accessibility"]))
+        self.assertIsNone(M._accessibility_context(historical["accessibility"], None, None,
+            case=case, expected_id=2, field_history=True))
+
+    def test_typed_selection_source_keeps_one_bounded_input_and_both_full_url_proofs(self):
+        root = PATH.parents[1]
+        native = (root / "native/macos-installed-native/src/native.m").read_text()
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        roles = native.split("static unsigned mrk_ax_selection_role(", 1)[1].split("static BOOL mrk_ax_selection_label(", 1)[0]
+        for role, code in (("Column", "COLUMN"), ("List", "LIST"), ("Row", "ROW"), ("Cell", "CELL"),
+                           ("Image", "IMAGE"), ("StaticText", "TEXT"), ("TextField", "FIELD")):
+            self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_SELECT_{code};", roles)
+        label = native.split("static BOOL mrk_ax_selection_label(", 1)[1].split("static BOOL mrk_ax_selection_roster(", 1)[0]
+        self.assertIn("CFEqual(value, expected)", label)
+        self.assertIn("unsigned entry = p->entries[at]", label)
+        self.assertLess(label.index("if (!p->matches[entry])"), label.index("s->result.selection_matches++"))
+        self.assertIn("p->candidate = entry; p->label = at; p->label_attribute = attribute", label)
+        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
+        for condition in ("other != at && p->nodes[other] && CFEqual(node, p->nodes[other])",
+                          "mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]])",
+                          "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE", "kind == MRK_SELECT_LIST",
+                          "rows ? kind != MRK_SELECT_ROW", "kind == MRK_ROLE_SHEET || kind == MRK_ROLE_GROUP",
+                          "kind == MRK_ROLE_SPLIT_GROUP", "kind == MRK_ROLE_SCROLL_AREA", "kind == MRK_ROLE_BROWSER",
+                          "kind == MRK_SELECT_COLUMN", "kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD",
+                          "kAXValueAttribute, NO, expected", "kAXTitleAttribute, YES, expected",
+                          "rows ? kAXRowsAttribute : kAXChildrenAttribute", "rows || list ? MRK_SELECT_ROWS : 16",
+                          "p->depths[at] == MRK_CONTROL_DEPTH", "(unsigned)count > MRK_SELECT_NODES - queued",
+                          "p->entries[queued] = rows || list ? queued : entry", "s->result.selection_matches != 1"):
+            self.assertIn(condition, roster)
+        self.assertLess(roster.index("for (unsigned at = 0; at < queued; ++at)"), roster.index("s->result.selection_checks |= 1u"))
+        self.assertLess(roster.index("s->result.selection_checks |= 1u"), roster.index("s->result.selection_matches != 1"))
+        for effect in ("AXUIElementSetAttributeValue", "AXUIElementPerformAction"):
+            self.assertNotIn(effect, label + roster)
+        write = native.split("static BOOL mrk_ax_select_entry(", 1)[1].split("static void mrk_ax_open(", 1)[0]
+        for original in ("s->result.selection_checks != 3", "for (unsigned at = p->label;; at = p->parents[at])",
+                         "at ? p->nodes[p->parents[at]] : parent", "mrk_ax_selection_role(role) != p->roles[at]",
+                         "p->nodes[p->label], p->label_attribute, expected", "p->entries[p->label] != p->candidate",
+                         "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE ? kAXSelectedRowsAttribute",
+                         "kind == MRK_SELECT_LIST ? kAXSelectedChildrenAttribute : NULL",
+                         "mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO)",
+                         "CFArrayGetCount(actual) != 1", "CFEqual(value, entry)"):
+            self.assertIn(original, write)
+        self.assertLess(write.index("AXUIElementIsAttributeSettable(container, attribute, &settable)"), write.index("if (!settable)"))
+        self.assertLess(write.index("if (!settable)"), write.index("MRKPromptOwned *selected = mrk_ax_slot(s)"))
+        self.assertLess(write.index("mrk_ax_slot(s)"), write.index("CFArrayCreate(NULL, entries, 1, &kCFTypeArrayCallBacks)"))
+        setter = "AXUIElementSetAttributeValue(container, attribute, selected->array)"
+        self.assertEqual(native.count("AXUIElementSetAttributeValue("), 1)
+        self.assertLess(write.index("s->result.selection_flags |= 1u"), write.index(setter))
+        self.assertLess(write.index(setter), write.index("s->result.selection_flags |= 2u"))
+        self.assertLess(write.index("s->result.selection_flags |= 2u"), write.index("mrk_ax_array(s, container, attribute"))
+        self.assertLess(write.index("CFEqual(value, entry)"), write.index("s->result.selection_checks |= 16u"))
+        action = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_prompt_press(", 1)[0]
+        order = ["mrk_ax_original(s, s->result.selection_mode ? 0 : 1)", "mrk_ax_projection(",
+                 "mrk_ax_selection_roster(", "mrk_ax_select_entry(", "mrk_ax_original(s, 1)",
+                 "mrk_ax_control_roster(", "mrk_ax_original(s, 2)", "AXUIElementPerformAction(button, kAXPressAction)"]
+        positions = [action.index(value) for value in order]
+        self.assertEqual(positions, sorted(positions))
+        proof = native.split("static int mrk_original_proof(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
+        self.assertEqual(proof.count("selection_parent ? mrk_observation_selection_parent(s) : mrk_observation_directory_ready(s, NULL, NULL, NULL)"), 2)
+        identity = native.split("int mrk_panel_observe_open_identity(", 1)[1].split("void mrk_panel_observe_open_recheck(", 1)[0]
+        self.assertLess(identity.index("s->observationSelectionSample = 0"), identity.index("original != selectionSample"))
+        self.assertLess(identity.index("s->observationSelectionBound = YES"), identity.index("mrk_original_proof(s, p, YES, selection)"))
+        observe = native.split("int mrk_panel_observe(", 1)[1].split("// Closed DATA from this one original return.", 1)[0]
+        self.assertIn("*flags == 0x5f00fu || *flags == 0x7f01fu", observe)
+        self.assertIn("mrk_version_source_name_state(s, s->observationSample, MRK_NAME_ALL)", observe)
+        self.assertIn("*flags |= MRK_VERSION_SOURCE_SELECTION_READY", observe)
+        self.assertIn("MRK_SELECT_NODES = 49, MRK_SELECT_ROWS = 32", native)
+        self.assertIn("MRKSelectionPass selection;", native)
+        for forbidden in ("kAXURLAttribute", "kAXFilenameAttribute", "kAXPressAction", "setNameFieldStringValue", "setDirectoryURL",
+                          "CGEvent", "NSPasteboard", "sleep(", "dispatch_", "pthread_create", "CFRelease("):
+            self.assertNotIn(forbidden, label + roster + write)
+        self.assertIn('pub fn matched(self) -> bool { self.purpose == "full-open"', rust)
+        self.assertIn('pub fn selection_parent_matched(self) -> bool { self.purpose == "selection-parent"', rust)
+        self.assertIn("stage as usize != context.next_recheck", rust)
+        self.assertIn("next_recheck: if identity.selection { 0 } else { 1 }", rust)
+        self.assertIn("context.rechecks[stage as usize] = Some(returned)", rust)
+        recheck = observer.split("    fn worker_recheck(", 1)[1].split("    fn action_worker(", 1)[0]
+        self.assertNotIn("stage as usize - 1", recheck)
+        self.assertNotIn("sync_channel", recheck)
+        self.assertLess(recheck.index("slot.receipt = Some(std::mem::ManuallyDrop::into_inner(receiver))"),
+                        recheck.index("if !slot.settled(token, stage, self.end)"))
+        self.assertIn('value["selectionInput"] = p.sample.reconciled(p.progress.snapshot()).value()', observer)
+        self.assertIn('value["selectionBinding"] = p.identity.value()', observer)
+        self.assertIn('value["selectionCompletion"] = p.completion.value()', observer)
 
     def test_original_fixture_restoration_has_only_two_ctime_exceptions(self):
         case = "project-fields"
@@ -4590,7 +4872,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         native = (root / "native/macos-installed-native/src/native.m").read_text()
         rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
         observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
-        helper = native.split("static BOOL mrk_observation_directory_ready(", 1)[1].split("int mrk_panel_observe(", 1)[0]
+        helper = native.split("static BOOL mrk_observation_directory_ready(", 1)[1].split("static BOOL mrk_observation_selection_parent(", 1)[0]
         observe = native.split("int mrk_panel_observe(", 1)[1].split("// Closed DATA from this one original return.", 1)[0]
         self.assertEqual(helper.count("[(NSOpenPanel *)s->window directoryURL]"), 1)
         self.assertEqual(helper.count("[(NSOpenPanel *)s->window nameFieldStringValue]"), 1)
@@ -4612,10 +4894,10 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("ready ? MRK_DIRECTORY_READY : MRK_FILE_NOT_MATCHED", helper)
         self.assertIn("ready = [[(NSOpenPanel *)s->window nameFieldStringValue] isEqualToString:[target lastPathComponent]];", filename)
         self.assertEqual(native.count("mrk_observation_directory_ready("), 4)
-        self.assertEqual(native.count("mrk_observation_directory_ready(s, NULL, NULL)"), 2)
+        self.assertEqual(native.count("mrk_observation_directory_ready(s, NULL, NULL, NULL)"), 2)
         self.assertEqual(native.count("setDirectoryURL:"), 3)
         self.assertEqual(native.count("setNameFieldStringValue:"), 2)
-        query = "mrk_observation_directory_ready(s, &readiness, &parentReady)"
+        query = "mrk_observation_directory_ready(s, &readiness, &parentReady, &selectionReady)"
         self.assertEqual(observe.count(query), 1)
         self.assertLess(observe.index(query), observe.index("*flags |= readiness << 17;"))
         self.assertLess(observe.index("s->observationParentSample = 0"), observe.index("++s->observationSample"))
@@ -4625,7 +4907,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for token in ("setDirectoryURL:", "setNameFieldStringValue:", "dispatch_", "sleep(", "performClick", "AXUIElement",
                       "s->selected", "s->response =", "s->completion(", "observationCompletion", " retain]", " release]"):
             self.assertNotIn(token, helper)
-        self.assertIn("flags & !0xfffff == 0", rust)
+        self.assertIn("flags & !0x1fffff == 0", rust)
         self.assertIn("(flags & 16 != 0) == (readiness == 3)", rust)
         self.assertIn("readiness == 0 || flags & 0x200c == 0x200c", rust)
         self.assertIn("flags & 0x80000 == 0 || flags == 0x9f00f", rust)
@@ -4643,7 +4925,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertLess(dispatch.index("r.pending != Some(Pending::Native(step)) || r.step != step"),
                         dispatch.index('panel.wait_location = Some("open-directory-readiness")'))
         self.assertIn("p.step == step && readiness_wait == Some(p.id)", dispatch)
-        gate = "if open && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {"
+        gate = "if open && !input_ready {"
         self.assertEqual(body.count("*readiness_wait = Some(id);"), 1)
         self.assertLess(body.index("record.prepared(i)"), body.index(gate))
         self.assertLess(body.index("panel.native.version_source_name_ready()"), body.index("prepare_version_source_name(id, panel, &mut returned)"))
@@ -4651,7 +4933,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertLess(name_call, body.index("return Ok(false);", name_call))
         self.assertLess(body.index("return Ok(false);", name_call), body.index(gate))
         self.assertLess(body.index(gate), body.index("*readiness_wait = Some(id);"))
-        self.assertLess(body.index("*readiness_wait = Some(id);"), body.index("prepare_open_input(id, target, binding_return)"))
+        self.assertLess(body.index("*readiness_wait = Some(id);"), body.index("prepare_open_input(id, target, selection, binding_return)"))
         wait = body.split(gate, 1)[1].split("        if open {", 1)[0]
         self.assertIn("return Ok(false); // Before any Open action; original deadline remains unchanged.", wait)
         for token in ("observed_panel(", "prepare_open_input(", "prepare_project_field(", "prepare_version_source_name(",
@@ -4716,7 +4998,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertEqual(M._field_preparation_context(value, case, "ProjectFields(Native(0))"), value)
         for entered, returned in ((False, False), (True, False), (True, True)):
             partial = deepcopy(M.expected_result(BINDING, case)["native"]["projectOpenBinding"])
-            partial.update(id=2, kind="version-source", binding=None)
+            partial.update(id=2, kind="version-source", binding=None, mechanism="selection-parent-original-sheet-v3")
             partial["start"]["result"] = "io"
             partial["configuration"].update(site="initial-temporary-close", error="cleanup-unknown",
                 initialDirectorySetterEntered=entered, initialDirectorySetterReturned=returned)
@@ -5009,6 +5291,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "      fail-fast: false\n"
             "      matrix:\n"
             "        scope:\n"
+            "          - project-fields-android-inputs\n"
             "          - wrapping-keychain-private\n"
             "    runs-on: macos-26\n"
             "    timeout-minutes: 75\n"
@@ -5575,11 +5858,71 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
             with self.assertRaises(ValueError): f["distinct_code_identities"](creator, bad)
         display = CompletedProcess(["inert-codesign-data"], 0, b'designated => cdhash H"' + b"a" * 40 + b'"\n',
             ("Identifier=" + f["creator_identifier"] + "\nCDHash=" + "a" * 40 + "\nSignature=adhoc\n").encode())
-        self.assertEqual(f["signature_identity"](display, f["creator_identifier"])["cdhash"], "a" * 40)
+        self.assertEqual(f["signature_identity"](display, f["creator_identifier"], {})["cdhash"], "a" * 40)
         for invalid in (CompletedProcess([], 1, display.stdout, display.stderr),
                         CompletedProcess([], 0, display.stdout * 2, display.stderr),
                         CompletedProcess([], 0, display.stdout, display.stderr.replace(b"Signature=adhoc", b"Signature=unknown"))):
-            with self.assertRaises(ValueError): f["signature_identity"](invalid, f["creator_identifier"])
+            with self.assertRaises(ValueError): f["signature_identity"](invalid, f["creator_identifier"], {})
+
+    def test_codesign_designated_forms_preserve_identity_and_closed_refusal_diagnostics(self):
+        # Synthetic codesign display DATA, not recovered native output or signing.
+        f = self.functions(); identify = f["signature_identity"]; identifier = f["creator_identifier"]
+        requirement = b'cdhash H"' + b"a" * 40 + b'"'
+        explicit = b"designated => " + requirement + b"\n"
+        implicit = b"\n# designated => " + requirement + b"\n\n"
+        details = ("Identifier=" + identifier + "\nCDHash=" + "a" * 40 + "\nSignature=adhoc\n").encode()
+        boolean_fields = {"originalAdmitted", "asciiDecoded", "identifierMatches", "cdhashValid", "requirementSingleton",
+                          "requirementBodyValid", "signatureSingletonAdHoc", "admitted"}
+        count_fields = {"identifierCount", "cdhashCount", "explicitRequirementCount", "implicitRequirementCount",
+                        "requirementCount", "signatureCount", "adHocSignatureCount"}
+
+        def assert_facts(facts, reason):
+            self.assertEqual(set(facts), boolean_fields | count_fields | {"reason"})
+            for key in boolean_fields: self.assertIs(type(facts[key]), bool)
+            for key in count_fields:
+                self.assertIs(type(facts[key]), int); self.assertGreaterEqual(facts[key], 0)
+                self.assertLessEqual(facts[key], 16384)
+            self.assertEqual(facts["reason"], reason)
+            self.assertIs(facts["admitted"], reason == "accepted")
+            self.assertNotIn("INERT_PRIVATE", json.dumps(facts))
+
+        identities = []
+        for body, counts in ((explicit, (1, 0)), (implicit, (0, 1))):
+            facts = {}; display = CompletedProcess([], 0, body, details + b"Executable=/INERT_PRIVATE/path\n")
+            identities.append(identify(display, identifier, facts)); assert_facts(facts, "accepted")
+            self.assertEqual((facts["explicitRequirementCount"], facts["implicitRequirementCount"]), counts)
+            self.assertEqual(facts["requirementCount"], 1)
+        self.assertEqual(identities[0], identities[1])
+        self.assertEqual(identities[0]["requirementSha256"], f["hashlib"].sha256(requirement).hexdigest())
+
+        cases = [
+            (CompletedProcess([], False, explicit, details), "original"),
+            (CompletedProcess([], 0, explicit, details + b"x" * 16384), "original"),
+            (CompletedProcess([], 0, explicit + b"\xff", details), "ascii"),
+            (CompletedProcess([], 0, b"", details), "requirement-count"),
+            (CompletedProcess([], 0, implicit + explicit, details), "requirement-count"),
+            (CompletedProcess([], 0, implicit * 2, details), "requirement-count"),
+            (CompletedProcess([], 0, b"#designated => " + requirement, details), "requirement-count"),
+            (CompletedProcess([], 0, b"# designated => \n", details), "requirement-body"),
+            (CompletedProcess([], 0, b"# designated => " + b"x" * 2049, details), "requirement-body"),
+            (CompletedProcess([], 0, explicit.replace(b' H"', b'\r H"'), details), "requirement-body"),
+            (CompletedProcess([], 0, explicit.replace(b' H"', b'\t H"'), details), "requirement-body"),
+            (CompletedProcess([], 0, explicit, details.replace(identifier.encode(), b"INERT_PRIVATE_WRONG")), "identifier"),
+            (CompletedProcess([], 0, explicit, details + ("Identifier=" + identifier + "\n").encode()), "identifier"),
+            (CompletedProcess([], 0, explicit, details.replace(b"a" * 40, b"A" * 40)), "cdhash"),
+            (CompletedProcess([], 0, explicit, details + b"CDHash=" + b"a" * 40 + b"\n"), "cdhash"),
+            (CompletedProcess([], 0, explicit, details + b"Signature=INERT_PRIVATE_UNKNOWN\n"), "signature"),
+            (CompletedProcess([], 0, explicit, details + b"Signature=adhoc\n"), "signature"),
+        ]
+        for display, reason in cases:
+            with self.subTest(reason=reason, stdout_bytes=len(display.stdout)):
+                facts = {}
+                with self.assertRaises(ValueError): identify(display, identifier, facts)
+                assert_facts(facts, reason)
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        self.assertIn('row["identityAdmission"] = identity_facts', workflow)
+        self.assertLess(workflow.index('row["identityAdmission"] = identity_facts'),
+                        workflow.index('identities.append(signature_identity(result, identifier, identity_facts))'))
 
     def test_source_fixed_profile_barrier_charges_and_no_candidate_reader(self):
         root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"

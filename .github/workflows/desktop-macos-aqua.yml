@@ -23,6 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         scope:
+          - project-fields-android-inputs
           - wrapping-keychain-private
     runs-on: macos-26
     timeout-minutes: 75
@@ -33,7 +34,7 @@ jobs:
       MRK_BUNDLED_RUNTIME_MANIFEST_SHA256: bb4f8aa1b9cf4dd0f3cad56ff37246be7839e41c7d86065c798deb9600aeea37
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f6a35d56777797d3a11032c0e800751f3a5ff9cff49ba62c69df700d82618371
       MRK_BUNDLED_PROTOCOL_SHA256: 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5
-      # Focused codec/STOP/UIFail batch; unrelated GUI routes stay unselected.
+      # Focused typed-picker and codec/STOP/UIFail batch; other GUI routes stay unselected.
       MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
@@ -1179,18 +1180,53 @@ jobs:
                   os.close(descriptor); row["closeReturned"] = True; row["closed"] = True
               return target
 
-          def signature_identity(display, identifier):
-              if (display.returncode != 0 or type(display.stdout) is not bytes or type(display.stderr) is not bytes
+          def signature_identity(display, identifier, facts):
+              # Only closed scalar diagnostics survive refusal; never display text,
+              # arbitrary exception values, paths or requirement contents.
+              facts.update({"reason": "original", "originalAdmitted": False, "asciiDecoded": False,
+                            "identifierCount": 0, "identifierMatches": False,
+                            "cdhashCount": 0, "cdhashValid": False,
+                            "explicitRequirementCount": 0, "implicitRequirementCount": 0,
+                            "requirementCount": 0, "requirementSingleton": False, "requirementBodyValid": False,
+                            "signatureCount": 0, "adHocSignatureCount": 0, "signatureSingletonAdHoc": False,
+                            "admitted": False})
+              if (type(display) is not subprocess.CompletedProcess or type(display.returncode) is not int
+                      or display.returncode != 0 or type(display.stdout) is not bytes or type(display.stderr) is not bytes
                       or len(display.stdout) + len(display.stderr) > 16384): raise ValueError("pair-code-display-original")
-              lines = (display.stdout + b"\n" + display.stderr).decode("ascii", "strict").splitlines()
+              facts["originalAdmitted"] = True
+              facts["reason"] = "ascii"
+              try:
+                  # Split only actual LF delimiters: CR/control bytes inside a
+                  # requirement must not disappear through splitlines normalization.
+                  lines = (display.stdout + b"\n" + display.stderr).decode("ascii", "strict").split("\n")
+              except UnicodeDecodeError:
+                  raise ValueError("pair-code-display-ascii") from None
+              facts["asciiDecoded"] = True
               identifiers = [line[11:] for line in lines if line.startswith("Identifier=")]
               hashes = [line[7:] for line in lines if line.startswith("CDHash=")]
-              requirements = [line[len("designated => "):] for line in lines if line.startswith("designated => ")]
-              if (identifiers != [identifier] or len(hashes) != 1 or re.fullmatch(r"[0-9a-f]{40}", hashes[0]) is None
-                      or len(requirements) != 1 or not 0 < len(requirements[0]) <= 2048
-                      or any(ord(c) < 32 or ord(c) > 126 for c in requirements[0]) or lines.count("Signature=adhoc") != 1):
-                  raise ValueError("pair-actual-ad-hoc-code-identity")
-              return {"identifier": identifier, "cdhash": hashes[0], "requirementSha256": hashlib.sha256(requirements[0].encode("ascii")).hexdigest()}
+              # codesign annotates an implicit default requirement with exactly
+              # '# '. It is the same requirement body, not an arbitrary comment.
+              explicit = [line[len("designated => "):] for line in lines if line.startswith("designated => ")]
+              implicit = [line[len("# designated => "):] for line in lines if line.startswith("# designated => ")]
+              requirements = explicit + implicit
+              signatures = [line[10:] for line in lines if line.startswith("Signature=")]
+              facts.update({"identifierCount": len(identifiers), "identifierMatches": identifiers == [identifier],
+                            "cdhashCount": len(hashes), "cdhashValid": len(hashes) == 1 and re.fullmatch(r"[0-9a-f]{40}", hashes[0]) is not None,
+                            "explicitRequirementCount": len(explicit), "implicitRequirementCount": len(implicit),
+                            "requirementCount": len(requirements), "requirementSingleton": len(requirements) == 1,
+                            "requirementBodyValid": len(requirements) == 1 and 0 < len(requirements[0]) <= 2048
+                                and all(32 <= ord(c) <= 126 for c in requirements[0]),
+                            "signatureCount": len(signatures), "adHocSignatureCount": signatures.count("adhoc"),
+                            "signatureSingletonAdHoc": signatures == ["adhoc"]})
+              for reason, key in (("identifier", "identifierMatches"), ("cdhash", "cdhashValid"),
+                                  ("requirement-count", "requirementSingleton"), ("requirement-body", "requirementBodyValid"),
+                                  ("signature", "signatureSingletonAdHoc")):
+                  facts["reason"] = reason
+                  if facts[key] is not True: raise ValueError("pair-actual-ad-hoc-code-identity")
+              identity = {"identifier": identifier, "cdhash": hashes[0],
+                          "requirementSha256": hashlib.sha256(requirements[0].encode("ascii")).hexdigest()}
+              facts.update(reason="accepted", admitted=True)
+              return identity
 
           def distinct_code_identities(creator, reader):
               for value in (creator, reader):
@@ -1603,7 +1639,9 @@ jobs:
                           if result.returncode != 0: raise ValueError("pair-code-verification-failed")
                           result, row = invoke(code_role + "-signature-display", ["/usr/bin/codesign", "--display", "--verbose=4", "-r-", str(path)],
                               environ=native_env, cwd=work, timeout=30, limit=16384)
-                          identities.append(signature_identity(result, identifier))
+                          identity_facts = {}
+                          row["identityAdmission"] = identity_facts
+                          identities.append(signature_identity(result, identifier, identity_facts))
                       receipt["codeIdentities"] = identities
                   cells = [admit_file(out / "libmrk_macos_installed_native.a", role + "-archive"),
                            admit_file(binary, role + "-binary", executable=True)]

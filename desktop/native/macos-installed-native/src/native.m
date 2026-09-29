@@ -282,7 +282,8 @@ enum { MRK_SELECTION_UNOBSERVED, MRK_SELECTION_EMPTY, MRK_SELECTION_MALFORMED,
     // It is distinct from the later synthetic navigation target.
     char observationInitialRoot[4097];
     uint32_t observationProjectField, observationNamePhase;
-    uint32_t observationSample, observationParentSample;
+    uint32_t observationSample, observationParentSample, observationSelectionSample;
+    BOOL observationSelectionBound, observationSelectionParentChecked;
     NSString *observationFieldName;
     char observationParentTag[64], observationPanelTag[64];
     char observationPrompt[8];
@@ -583,7 +584,7 @@ static void mrk_panel_completion_selection(MRKInstalledPanel *s) {
 // Tag2 is kind-specific: File name text, VersionSource actual selected URLs.
 // Missing/non-file/overlong values never match; no path is exposed.
 enum { MRK_DIRECTORY_NOT_READY, MRK_DIRECTORY_NOT_MATCHED, MRK_FILE_NOT_MATCHED, MRK_DIRECTORY_READY };
-enum { MRK_VERSION_SOURCE_PARENT_READY = 1u << 19 };
+enum { MRK_VERSION_SOURCE_PARENT_READY = 1u << 19, MRK_VERSION_SOURCE_SELECTION_READY = 1u << 20 };
 enum { MRK_NAME_PHASE_ENTERED = 1u, MRK_NAME_PARENT_ADMITTED = 2u,
     MRK_NAME_SET_ENTERED = 4u, MRK_NAME_SET_RETURNED = 8u, MRK_NAME_RETIRED = 16u, MRK_NAME_ALL = 31u };
 // Scalar original-state check only. No additional directory/filename query.
@@ -597,9 +598,10 @@ static BOOL mrk_version_source_name_state(MRKInstalledPanel *s, uint32_t sample,
         && mrk_target_path(s->observationInitialRoot) && mrk_target_path(s->observationTarget)
         && (s->observationIdentity.flags & (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE)) == (MRK_ID_ARMED | MRK_ID_CONFIG_COMPLETE);
 }
-static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *readiness, BOOL *versionSourceParentReady) {
+static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *readiness, BOOL *versionSourceParentReady, BOOL *selectionReady) {
     if (readiness) *readiness = MRK_DIRECTORY_NOT_READY;
     if (versionSourceParentReady) *versionSourceParentReady = NO;
+    if (selectionReady) *selectionReady = NO;
     // Actual pre-presentation setter return + current ROOT browsing, not selection.
     if (!mrk_panel_open_kind(s->kind) || !s->window || !s->observationDirectoryReturned
         || !mrk_target_path(s->observationTarget)) return NO;
@@ -631,6 +633,8 @@ static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *read
         && !s->observationNamePhase) *versionSourceParentReady = YES;
     if (!(s->kind == 4 ? s->observationNamePhase == MRK_NAME_ALL
         : (s->observationIdentity.flags & (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED)) == (MRK_ID_NAME_ENTERED | MRK_ID_NAME_RETURNED))) return NO;
+    if (selectionReady && s->kind == 4 && s->observationProjectField == 6143u
+        && s->observationNamePhase == MRK_NAME_ALL && !s->observationSelectionBound) *selectionReady = YES;
     BOOL ready = NO;
     if (s->kind == 4) {
         // The inherited save-name setter is preparation, not selection proof.
@@ -650,25 +654,37 @@ static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s, uint32_t *read
     if (readiness) *readiness = ready ? MRK_DIRECTORY_READY : MRK_FILE_NOT_MATCHED;
     return ready;
 }
+// Only selection admission uses this predicate. It never claims file-ready or
+// replaces either full Open proof; the original target/31 history remain fixed.
+static BOOL mrk_observation_selection_parent(MRKInstalledPanel *s) {
+    if (s->kind != 4 || !s->observationSelectionBound || !s->observationDirectoryReturned
+        || s->observationProjectField != 6143u || s->observationNamePhase != MRK_NAME_ALL
+        || !mrk_target_path(s->observationTarget)) return NO;
+    NSURL *url = [(NSOpenPanel *)s->window directoryURL];
+    const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
+    NSString *target = [NSString stringWithUTF8String:s->observationTarget];
+    const char *parent = [[target stringByDeletingLastPathComponent] fileSystemRepresentation];
+    return path && parent && mrk_target_path(path) && strcmp(path, parent) == 0;
+}
 int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity, uint32_t *nameSample) {
     if (!pthread_main_np() || !opaque || !kind || !flags || !response || !path || capacity != 4097 || !nameSample) return EINVAL;
     MRKInstalledPanel *s = opaque; *nameSample = 0;
     // Every existing original observation invalidates any older parent sample.
-    s->observationParentSample = 0;
+    s->observationParentSample = 0; s->observationSelectionSample = 0;
     if (s->unknown) return EIO;
     if (s->kind == 4) {
         if (s->observationSample == UINT32_MAX) { s->unknown = YES; return EOVERFLOW; }
         ++s->observationSample; // Bounded comparison DATA, never a new poll/owner.
     }
     @try {
-        // Closed twenty-bit ABI with the Rust PanelObservation decoder. Reads
+        // Closed twenty-one-bit ABI with the Rust PanelObservation decoder. Reads
         // do not set reported, manufacture completion, or authorize retirement.
         uint32_t attachment = mrk_observation_attachment(s);
-        uint32_t readiness = MRK_DIRECTORY_NOT_READY; BOOL parentReady = NO;
+        uint32_t readiness = MRK_DIRECTORY_NOT_READY; BOOL parentReady = NO, selectionReady = NO;
         *kind = s->kind; *response = s->response;
         *flags = attachment | (s->started ? 1u : 0u) | (attachment == MRK_ATTACHMENT_ALL ? 2u : 0u)
             | (s->observationTarget[0] || s->observationInitialRoot[0] ? 4u : 0u) | (s->observationDirectoryReturned ? 8u : 0u)
-            | (mrk_observation_directory_ready(s, &readiness, &parentReady) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
+            | (mrk_observation_directory_ready(s, &readiness, &parentReady, &selectionReady) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
             | (s->observationActionReturned ? 64u : 0u) | (s->responded ? 128u : 0u)
             | (s->responded && !s->callbackActive ? 256u : 0u) | (s->closeAttempted ? 512u : 0u)
             | (s->window && ![s->window isVisible] && ![s->window sheetParent] ? 1024u : 0u)
@@ -681,9 +697,16 @@ int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, u
             s->observationParentSample = s->observationSample;
             *nameSample = s->observationParentSample;
         }
+        if (selectionReady && (*flags == 0x5f00fu || *flags == 0x7f01fu)
+            && !s->observationFieldName && !s->observationSelectionBound
+            && mrk_version_source_name_state(s, s->observationSample, MRK_NAME_ALL)) {
+            *flags |= MRK_VERSION_SOURCE_SELECTION_READY;
+            s->observationSelectionSample = s->observationSample;
+            *nameSample = s->observationSelectionSample;
+        }
         memcpy(path, s->selected, sizeof(s->selected)); return 0;
     } @catch (NSException *e) {
-        (void)e; s->observationParentSample = 0; *nameSample = 0; s->unknown = YES; return EIO;
+        (void)e; s->observationParentSample = 0; s->observationSelectionSample = 0; *nameSample = 0; s->unknown = YES; return EIO;
     }
 }
 // Closed DATA from this one original return. No exception object, subsequent
@@ -855,14 +878,19 @@ enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PAR
     MRK_OPEN_SHEET, MRK_OPEN_TOPOLOGY, MRK_OPEN_CONTROL_PROJECTION, MRK_OPEN_BUTTON, MRK_OPEN_CONTROL_RECHECK,
     MRK_OPEN_INITIAL_PROOF, MRK_OPEN_FINAL_PROOF, MRK_OPEN_ADMISSION, MRK_OPEN_PRESS, MRK_OPEN_CLEANUP,
     MRK_OPEN_CONTROL_TITLE_LIMIT, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT,
-    MRK_OPEN_CONTROL_NODE_LIMIT, MRK_OPEN_CONTROL_DEPTH_LIMIT };
+    MRK_OPEN_CONTROL_NODE_LIMIT, MRK_OPEN_CONTROL_DEPTH_LIMIT,
+    MRK_OPEN_SELECTION_PARENT, MRK_OPEN_SELECTION_PROJECTION, MRK_OPEN_SELECTION_RECHECK,
+    MRK_OPEN_SELECTION_SETTABLE, MRK_OPEN_SELECTION_WRITE, MRK_OPEN_SELECTION_READBACK };
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
 enum { MRK_ROLE_NOT_READ, MRK_ROLE_SHEET, MRK_ROLE_GROUP, MRK_ROLE_SPLIT_GROUP, MRK_ROLE_BUTTON,
     MRK_ROLE_BROWSER, MRK_ROLE_TABLE, MRK_ROLE_OUTLINE, MRK_ROLE_SCROLL_AREA, MRK_ROLE_OPAQUE };
 typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_examined, recheck_nodes_examined, owned, released;
-    int32_t ax_error; uint32_t last_role, last_depth; } MRKOpenResult;
+    int32_t ax_error; uint32_t last_role, last_depth;
+    uint32_t selection_mode, selection_checks, selection_flags, selection_nodes, selection_matches,
+        selection_attribute, selection_last_role, selection_depth;
+} MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 48 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 80 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
 typedef int (*MRKOpenRecheckCall)(void *, int);
@@ -1070,14 +1098,16 @@ static BOOL mrk_original_topology(MRKInstalledPanel *s, MRKIdentityProof *p) {
     if (![role isKindOfClass:[NSString class]]) return mrk_proof_check(p, 9, NO, MRK_OPEN_MALFORMED);
     return mrk_proof_check(p, 9, [role isEqualToString:NSAccessibilitySheetRole], MRK_OPEN_UNSUPPORTED);
 }
-static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL freeze) {
-    p->flags = 1; p->site = MRK_PROOF_OBJECTS; p->error = MRK_OPEN_INELIGIBLE;
-    if (!mrk_proof_check(p, 0, mrk_original_eligible(s), MRK_OPEN_INELIGIBLE)) return p->error;
+static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL freeze, BOOL selection_parent) {
+    // Bit2 is a different authority domain, never a successful full Open proof.
+    p->flags = selection_parent ? 3u : 1u; p->site = MRK_PROOF_OBJECTS; p->error = MRK_OPEN_INELIGIBLE;
+    if (!mrk_proof_check(p, 0, mrk_original_eligible(s)
+        && (!selection_parent || (s->kind == 4 && s->observationSelectionBound)), MRK_OPEN_INELIGIBLE)) return p->error;
     @try {
         p->site = MRK_PROOF_ATTACHMENT;
         if (!mrk_proof_check(p, 1, mrk_observation_attached(s), MRK_OPEN_INELIGIBLE)) return p->error;
         p->site = MRK_PROOF_DIRECTORY;
-        if (!mrk_proof_check(p, 2, mrk_observation_directory_ready(s, NULL, NULL), MRK_OPEN_INELIGIBLE)) return p->error;
+        if (!mrk_proof_check(p, 2, (selection_parent ? mrk_observation_selection_parent(s) : mrk_observation_directory_ready(s, NULL, NULL, NULL)), MRK_OPEN_INELIGIBLE)) return p->error;
         p->site = MRK_PROOF_PARENT_ID;
         if (!mrk_identity_tag(s->observationParentTag, "mrk-parent-")) { p->error = MRK_OPEN_INPUT; return p->error; }
         NSString *parentTag = [NSString stringWithCString:s->observationParentTag encoding:NSASCIIStringEncoding];
@@ -1101,7 +1131,7 @@ static int mrk_original_proof(MRKInstalledPanel *s, MRKIdentityProof *p, BOOL fr
         p->site = MRK_PROOF_ATTACHMENT;
         if (!mrk_proof_check(p, 1, mrk_observation_attached(s), MRK_OPEN_CHANGED)) return p->error;
         p->site = MRK_PROOF_DIRECTORY;
-        if (!mrk_proof_check(p, 2, mrk_observation_directory_ready(s, NULL, NULL), MRK_OPEN_CHANGED)) return p->error;
+        if (!mrk_proof_check(p, 2, (selection_parent ? mrk_observation_selection_parent(s) : mrk_observation_directory_ready(s, NULL, NULL, NULL)), MRK_OPEN_CHANGED)) return p->error;
         if (!mrk_original_topology(s, p)) return p->error;
         p->site = MRK_PROOF_PARENT_ID;
         p->parent = mrk_identity_class([s->parent accessibilityIdentifier], parentTag);
@@ -1129,14 +1159,22 @@ static BOOL mrk_prompt_valid(const uint8_t *parent, const uint8_t *prompt) {
     return YES;
 }
 int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *panel, uint8_t *prompt, size_t capacity,
-    uint8_t *target, size_t target_capacity) {
+    uint8_t *target, size_t target_capacity, uint32_t selectionSample) {
     if (!pthread_main_np()) return MRK_OPEN_THREAD;
     if (!opaque || !parent || !panel || !prompt || capacity != 64 || !target || target_capacity != 4097) return MRK_OPEN_INPUT;
     memset(parent, 0, capacity); memset(panel, 0, capacity); memset(prompt, 0, 8);
     memset(target, 0, target_capacity);
     MRKInstalledPanel *s = opaque; MRKIdentityProof *p = &s->observationIdentity.binding;
     if (p->site) return MRK_OPEN_INELIGIBLE;
-    int status = mrk_original_proof(s, p, YES);
+    BOOL selection = s->kind == 4;
+    if (selection) {
+        uint32_t original = s->observationSelectionSample;
+        s->observationSelectionSample = 0; // Spend this original ticket before any proof.
+        if (!selectionSample || original != selectionSample || s->observationSelectionBound
+            || !mrk_version_source_name_state(s, selectionSample, MRK_NAME_ALL)) return MRK_OPEN_CUSTODY;
+        s->observationSelectionBound = YES;
+    } else if (selectionSample) return MRK_OPEN_INPUT;
+    int status = mrk_original_proof(s, p, YES, selection);
     if (!status) {
         memcpy(parent, s->observationParentTag, capacity); memcpy(panel, s->observationPanelTag, capacity);
         memcpy(prompt, s->observationPrompt, 8);
@@ -1145,20 +1183,23 @@ int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *pane
     return status;
 }
 void mrk_panel_observe_open_recheck(void *opaque, const uint8_t *parent, const uint8_t *panel,
-    const uint8_t *prompt, const uint8_t *target, size_t target_capacity, unsigned stage, MRKOpenRecheck *out) {
+    const uint8_t *prompt, const uint8_t *target, size_t target_capacity, unsigned selection, unsigned stage, MRKOpenRecheck *out) {
     if (!out) return;
     MRKOpenRecheck r = {0}; r.error = MRK_OPEN_CUSTODY;
     MRKInstalledPanel *s = opaque;
     @try {
         if (!pthread_main_np() || !s || !parent || !panel || !prompt || !target || target_capacity != 4097
-            || (stage != 1 && stage != 2)) goto done;
+            || selection > 1 || stage > 2 || (!selection && !stage)) goto done;
         if (s->unknown || memcmp(parent, s->observationParentTag, 64) || memcmp(panel, s->observationPanelTag, 64)
             || memcmp(prompt, s->observationPrompt, 8) || memcmp(target, s->observationTarget, target_capacity)
-            || s->observationRechecks != stage - 1) {
+            || selection != (unsigned)(s->kind == 4) || (selection && !s->observationSelectionBound)
+            || (!stage ? s->observationSelectionParentChecked || s->observationRechecks != 0
+                : s->observationRechecks != stage - 1 || (selection && !s->observationSelectionParentChecked))) {
             s->unknown = YES; goto done;
         }
-        s->observationRechecks = stage; // Original read-only body is one-shot, not an action.
-        r.error = mrk_original_proof(s, &r.proof, NO);
+        if (!stage) s->observationSelectionParentChecked = YES; // Spend0 even on a refused proof.
+        else s->observationRechecks = stage;
+        r.error = mrk_original_proof(s, &r.proof, NO, stage == 0);
         if (!r.error) {
             NSString *expected = [NSString stringWithCString:s->observationPrompt encoding:NSASCIIStringEncoding];
             id actual = [(NSOpenPanel *)s->window prompt];
@@ -1166,8 +1207,8 @@ void mrk_panel_observe_open_recheck(void *opaque, const uint8_t *parent, const u
             if (r.prompt != 1) r.error = MRK_OPEN_CHANGED;
         }
         if (!r.error && stage == 2) {
-            // Prompt/proof reads can reenter. Directory readiness remains a
-            // same-original browsing proof; selected URLs belong to completion.
+            // Prompt/proof reads can reenter. Both full kind4 proofs already
+            // read exact singleton URLs; completion independently validates again.
             if (!mrk_observation_attached(s) || !mrk_original_eligible(s)) r.error = MRK_OPEN_INELIGIBLE;
             if (s->unknown) r.error = MRK_OPEN_CUSTODY;
         }
@@ -1177,7 +1218,16 @@ done:
     *out = r; // The actual main/TLS guard is released by Rust before its receipt.
 }
 
-enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8 };
+enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8,
+    MRK_SELECT_NODES = 49, MRK_SELECT_ROWS = 32 };
+enum { MRK_SELECT_COLUMN = 10, MRK_SELECT_LIST, MRK_SELECT_ROW, MRK_SELECT_CELL,
+    MRK_SELECT_IMAGE, MRK_SELECT_TEXT, MRK_SELECT_FIELD };
+typedef struct {
+    AXUIElementRef nodes[MRK_SELECT_NODES];
+    unsigned parents[MRK_SELECT_NODES], depths[MRK_SELECT_NODES], roles[MRK_SELECT_NODES], entries[MRK_SELECT_NODES];
+    BOOL matches[MRK_SELECT_NODES]; unsigned candidate, label;
+    CFStringRef label_attribute; // Public constant only; all objects are owned by the original CF ledger.
+} MRKSelectionPass;
 typedef union { CFTypeRef value; CFArrayRef array; } MRKPromptOwned;
 typedef struct {
     AXUIElementRef nodes[MRK_CONTROL_NODES];
@@ -1190,6 +1240,7 @@ typedef struct {
     MRKPromptOwned owned[MRK_PROMPT_CF]; unsigned count;
     AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
+    MRKSelectionPass selection; // Original chain retained even on uncertain return.
 } MRKPrompt;
 // At most eight different genuine panels, one registered worker at a time.
 // Every original ledger remains retained for process lifetime, never reused.
@@ -1449,13 +1500,147 @@ static BOOL mrk_ax_button(MRKPrompt *s, AXUIElementRef parent, const MRKControlP
     return YES;
 }
 static BOOL mrk_ax_original(MRKPrompt *s, int stage) {
-    s->result.site = stage == 1 ? MRK_OPEN_INITIAL_PROOF : MRK_OPEN_FINAL_PROOF;
+    s->result.site = stage == 0 ? MRK_OPEN_SELECTION_PARENT : stage == 1 ? MRK_OPEN_INITIAL_PROOF : MRK_OPEN_FINAL_PROOF;
     int code = s->recheck(s->context, stage);
     if (code == MRK_OPEN_CUSTODY) s->cleanupKnown = NO;
     return code ? mrk_ax_fail(s, (uint32_t)code) : YES;
 }
-static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *panel_tag, const uint8_t *prompt) {
-    if (!mrk_ax_admit(s, 0, 0, NULL) || !mrk_ax_original(s, 1)) return;
+static unsigned mrk_ax_selection_role(CFStringRef role) {
+    if (CFEqual(role, kAXColumnRole)) return MRK_SELECT_COLUMN;
+    if (CFEqual(role, kAXListRole)) return MRK_SELECT_LIST;
+    if (CFEqual(role, kAXRowRole)) return MRK_SELECT_ROW;
+    if (CFEqual(role, kAXCellRole)) return MRK_SELECT_CELL;
+    if (CFEqual(role, kAXImageRole)) return MRK_SELECT_IMAGE;
+    if (CFEqual(role, kAXStaticTextRole)) return MRK_SELECT_TEXT;
+    if (CFEqual(role, kAXTextFieldRole)) return MRK_SELECT_FIELD;
+    return mrk_ax_role(role);
+}
+static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned at,
+    CFStringRef attribute, BOOL optional, CFStringRef expected) {
+    CFTypeRef value = mrk_ax_copy(s, p->nodes[at], attribute, optional);
+    if (s->result.error) return NO;
+    if (!value) return optional;
+    if (!mrk_ax_type(s, value, CFStringGetTypeID())) return NO;
+    if (CFStringGetLength(value) > 512) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+    if (CFEqual(value, expected)) {
+        unsigned entry = p->entries[at];
+        if (!entry) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+        if (!p->matches[entry]) {
+            p->matches[entry] = YES;
+            if (s->result.selection_matches < 2) s->result.selection_matches++;
+            if (s->result.selection_matches == 1) { p->candidate = entry; p->label = at; p->label_attribute = attribute; }
+        }
+    }
+    return YES;
+}
+static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef expected) {
+    MRKSelectionPass *p = &s->selection; p->nodes[0] = sheet; unsigned queued = 1;
+    s->result.site = MRK_OPEN_SELECTION_PROJECTION;
+    for (unsigned at = 0; at < queued; ++at) {
+        AXUIElementRef node = p->nodes[at];
+        s->result.selection_depth = p->depths[at]; s->result.selection_last_role = MRK_ROLE_NOT_READ;
+        if (at) s->result.selection_nodes++;
+        if (!mrk_ax_type(s, node, s->elementType)) return NO;
+        for (unsigned other = 0; other < queued; ++other)
+            if (other != at && p->nodes[other] && CFEqual(node, p->nodes[other])) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
+        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]])) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO);
+        if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        // Roles outside the small button grammar keep a separate selector meaning.
+        unsigned kind = p->roles[at] = s->result.selection_last_role = mrk_ax_selection_role(role);
+        if (!at && kind != MRK_ROLE_SHEET) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+        unsigned entry = p->entries[at];
+        if (entry) {
+            if (entry == at) {
+                unsigned container = p->roles[p->parents[at]];
+                BOOL rows = container == MRK_ROLE_TABLE || container == MRK_ROLE_OUTLINE;
+                if (rows ? kind != MRK_SELECT_ROW : container != MRK_SELECT_LIST
+                    || !(kind == MRK_SELECT_ROW || kind == MRK_SELECT_CELL || kind == MRK_ROLE_GROUP
+                        || kind == MRK_SELECT_IMAGE || kind == MRK_SELECT_TEXT)) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+            } else if (!(kind == MRK_ROLE_GROUP || kind == MRK_SELECT_CELL || kind == MRK_SELECT_IMAGE
+                || kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD)) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+            if (kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD) {
+                if (!mrk_ax_selection_label(s, p, at, kAXValueAttribute, NO, expected)) return NO;
+            } else if (!mrk_ax_selection_label(s, p, at, kAXTitleAttribute, YES, expected)) return NO;
+            if (kind == MRK_SELECT_IMAGE || kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD) continue;
+        }
+        BOOL rows = !entry && (kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE);
+        BOOL list = !entry && kind == MRK_SELECT_LIST;
+        BOOL structural = !entry && (kind == MRK_ROLE_SHEET || kind == MRK_ROLE_GROUP || kind == MRK_ROLE_SPLIT_GROUP
+            || kind == MRK_ROLE_SCROLL_AREA || kind == MRK_ROLE_BROWSER || kind == MRK_SELECT_COLUMN);
+        if (!entry && !rows && !list && !structural) {
+            if (kind == MRK_SELECT_ROW || kind == MRK_SELECT_CELL) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+            continue; // Toolbar/nonselectable leaves are outside this fixed projection.
+        }
+        CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute,
+            rows || list ? MRK_SELECT_ROWS : 16, at != 0);
+        if (!children) { if (s->result.error) return NO; continue; }
+        CFIndex count = CFArrayGetCount(children);
+        if (p->depths[at] == MRK_CONTROL_DEPTH || (unsigned)count > MRK_SELECT_NODES - queued)
+            return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+        for (CFIndex child = 0; child < count; ++child) {
+            p->nodes[queued] = (AXUIElementRef)CFArrayGetValueAtIndex(children, child);
+            p->parents[queued] = at; p->depths[queued] = p->depths[at] + 1;
+            p->entries[queued] = rows || list ? queued : entry; queued++;
+        }
+    }
+    s->result.selection_checks |= 1u; // Complete, never truncated or first-match.
+    if (s->result.selection_matches != 1) return mrk_ax_fail(s, s->result.selection_matches ? MRK_OPEN_AMBIGUOUS : MRK_OPEN_UNSUPPORTED);
+    s->result.selection_checks |= 2u; return YES;
+}
+static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef expected) {
+    MRKSelectionPass *p = &s->selection;
+    if (s->result.selection_flags || s->result.selection_checks != 3 || !p->candidate || !p->label || !p->label_attribute) {
+        s->cleanupKnown = NO; return mrk_ax_fail(s, MRK_OPEN_CUSTODY);
+    }
+    s->result.site = MRK_OPEN_SELECTION_RECHECK;
+    for (unsigned at = p->label;; at = p->parents[at]) {
+        if (!mrk_ax_equal_attribute(s, p->nodes[at], kAXParentAttribute, at ? p->nodes[p->parents[at]] : parent)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, p->nodes[at], kAXRoleAttribute, NO);
+        if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
+        if (mrk_ax_selection_role(role) != p->roles[at]) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+        if (!at) break;
+    }
+    if (!mrk_ax_equal_attribute(s, p->nodes[p->label], p->label_attribute, expected)) return NO;
+    unsigned container_at = p->parents[p->candidate];
+    if (p->entries[p->label] != p->candidate || p->entries[p->candidate] != p->candidate)
+        return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    unsigned kind = p->roles[container_at];
+    CFStringRef attribute = kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE ? kAXSelectedRowsAttribute
+        : kind == MRK_SELECT_LIST ? kAXSelectedChildrenAttribute : NULL;
+    if (!attribute) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+    s->result.selection_attribute = kind == MRK_SELECT_LIST ? 2u : 1u;
+    s->result.selection_checks |= 4u;
+    AXUIElementRef container = p->nodes[container_at], entry = p->nodes[p->candidate];
+    s->result.site = MRK_OPEN_SELECTION_SETTABLE;
+    if (!mrk_ax_before(s, container)) return NO;
+    Boolean settable = false; s->result.calls++;
+    AXError status = AXUIElementIsAttributeSettable(container, attribute, &settable);
+    BOOL returned = mrk_ax_status(s, status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!returned || !admitted) return NO;
+    if (!settable) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+    s->result.selection_checks |= 8u;
+    MRKPromptOwned *selected = mrk_ax_slot(s); if (!selected) return NO;
+    const void *entries[] = { entry };
+    selected->array = CFArrayCreate(NULL, entries, 1, &kCFTypeArrayCallBacks);
+    if (!mrk_ax_type(s, selected->value, CFArrayGetTypeID()) || !mrk_ax_before(s, container)) return NO;
+    s->result.site = MRK_OPEN_SELECTION_WRITE; s->result.calls++; s->result.selection_flags |= 1u;
+    status = AXUIElementSetAttributeValue(container, attribute, selected->array); // Exactly one selection, never row Press/value write.
+    s->result.selection_flags |= 2u;
+    if (status == kAXErrorSuccess) s->result.selection_flags |= 4u;
+    returned = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!returned || !admitted) return NO;
+    s->result.site = MRK_OPEN_SELECTION_READBACK;
+    CFArrayRef actual = mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO);
+    if (!actual) return NO;
+    if (CFArrayGetCount(actual) != 1) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    CFTypeRef value = CFArrayGetValueAtIndex(actual, 0);
+    if (!mrk_ax_type(s, value, s->elementType)) return NO;
+    if (!CFEqual(value, entry)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
+    s->result.selection_checks |= 16u; return YES;
+}
+static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *panel_tag, const uint8_t *prompt, const uint8_t *target) {
+    if (!mrk_ax_admit(s, 0, 0, NULL) || !mrk_ax_original(s, s->result.selection_mode ? 0 : 1)) return;
     s->result.calls++; s->elementType = AXUIElementGetTypeID(); // Count and reuse this local AX API too.
     MRKPromptOwned *parent_text = mrk_ax_slot(s), *panel_text = mrk_ax_slot(s), *prompt_text = mrk_ax_slot(s), *application = mrk_ax_slot(s);
     if (!parent_text || !panel_text || !prompt_text || !application) return;
@@ -1468,6 +1653,18 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
         || !mrk_ax_type(s, prompt_text->value, CFStringGetTypeID()) || !mrk_ax_type(s, application->value, s->elementType)) return;
     AXUIElementRef parent = NULL, sheet = NULL;
     if (!mrk_ax_projection(s, (AXUIElementRef)application->value, parent_text->value, panel_text->value, &parent, &sheet)) return;
+    if (s->result.selection_mode) {
+        MRKPromptOwned *filename = mrk_ax_slot(s); if (!filename) return;
+        const char *leaf = strrchr((const char *)target, '/');
+        if (!leaf || !leaf[1]) { mrk_ax_fail(s, MRK_OPEN_INPUT); return; }
+        filename->value = CFStringCreateWithCString(NULL, leaf + 1, kCFStringEncodingUTF8);
+        if (!mrk_ax_type(s, filename->value, CFStringGetTypeID())
+            || !mrk_ax_selection_roster(s, sheet, filename->value)
+            || !mrk_ax_select_entry(s, parent, filename->value)) return;
+        // Selector/readback are NOT URL identity. Original full proof1 and the
+        // second full proof below both still require actual singleton URLs.
+        if (!mrk_ax_original(s, 1)) return;
+    }
     s->result.site = MRK_OPEN_CONTROL_PROJECTION;
     MRKControlPass initial = {0}, rechecked = {0}; // Separate immutable first-chain backing; no scratch reuse.
     if (!mrk_ax_control_roster(s, sheet, prompt_text->value, NO, &initial)) return;
@@ -1498,12 +1695,12 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
     mrk_ax_status(s, status); mrk_ax_admit(s, 0, 1, NULL);
 }
 void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, const uint8_t *prompt, size_t capacity,
-    const uint8_t *target, size_t target_capacity,
+    const uint8_t *target, size_t target_capacity, uint32_t selection,
     MRKOpenAdmission admission, MRKOpenRecheckCall recheck, void *context, MRKOpenResult *out) {
     if (!out) return;
-    MRKOpenResult refused = {0}; refused.site = MRK_OPEN_ENTRY;
+    MRKOpenResult refused = {0}; refused.site = MRK_OPEN_ENTRY; refused.selection_mode = selection;
     if (pthread_main_np()) { refused.error = MRK_OPEN_THREAD; *out = refused; return; }
-    if (!parent || !panel || !prompt || capacity != 64 || !target || target_capacity != 4097 || !admission || !recheck || !context
+    if (!parent || !panel || !prompt || capacity != 64 || !target || target_capacity != 4097 || selection > 1 || !admission || !recheck || !context
         || !mrk_identity_tag((const char *)parent, "mrk-parent-") || !mrk_identity_utf8(panel)
         || !memcmp(parent, panel, capacity) || !mrk_prompt_valid(parent, prompt) || !mrk_target_path((const char *)target)) {
         refused.error = MRK_OPEN_INPUT; *out = refused; return;
@@ -1523,8 +1720,8 @@ void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, c
         atomic_store(&mrk_prompt_unknown, true); refused.error = MRK_OPEN_CUSTODY; *out = refused; return;
     }
     MRKPrompt *s = &mrk_prompt_originals[index]; s->admit = admission; s->recheck = recheck; s->context = context;
-    s->cleanupKnown = YES; s->result.site = MRK_OPEN_ENTRY;
-    @try { mrk_ax_open(s, parent, panel, prompt); }
+    s->cleanupKnown = YES; s->result.site = MRK_OPEN_ENTRY; s->result.selection_mode = selection;
+    @try { mrk_ax_open(s, parent, panel, prompt, target); }
     @catch (NSException *e) { (void)e; mrk_ax_fail(s, MRK_OPEN_EXCEPTION); s->cleanupKnown = NO; }
     s->result.owned = s->count; // Reserved original slots, NOT a fabricated CFRelease count.
     if (s->cleanupKnown) {

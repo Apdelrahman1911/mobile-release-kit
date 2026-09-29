@@ -226,7 +226,7 @@ pub(super) mod observation {
         /// The enclosing dispatcher sends its receipt only AFTER this function
         /// returns and all PANEL/original/main-body guards have been dropped.
         pub(crate) fn recheck(&self, end: Instant, stage: u32, mut admit: impl FnMut(bool) -> Option<bool>) -> OpenRecheckBody {
-            if !native::main_thread() || self.state() != "entered" || !(1..=2).contains(&stage) {
+            if !native::main_thread() || self.state() != "entered" || stage > 2 || stage == 0 && !self.identity.selects_version_source() {
                 return OpenRecheckBody::no_native(None);
             }
             if self.expired() || Instant::now() >= end { return OpenRecheckBody::no_native(Some(false)); }
@@ -258,7 +258,8 @@ pub(super) mod observation {
         }
 
     }
-    pub(crate) fn prepare_open_input(id: u32, target: &std::path::Path, returned: &mut Option<native::IdentityBindingReturn>) -> Result<PreparedOpenInput, ObservationError> {
+    pub(crate) fn prepare_open_input(id: u32, target: &std::path::Path, selection: Option<native::VersionSourceSelectionReady>,
+        returned: &mut Option<native::IdentityBindingReturn>) -> Result<PreparedOpenInput, ObservationError> {
         *returned = None;
         if !native::main_thread() { return Err(ObservationError::WrongThread); }
         PANEL.with(|book| {
@@ -268,7 +269,7 @@ pub(super) mod observation {
             let (call, owner) = original(entry)?;
             if !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
             let identity = entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
-                .installed_open_identity(returned).map_err(ObservationError::OpenBinding)?;
+                .installed_open_identity(selection, returned).map_err(ObservationError::OpenBinding)?;
             // Native browse-parent state cannot replace the immutable fixture
             // ROOT supplied by this same observer. Only copied DATA is compared.
             if !identity.targets(target) { return Err(ObservationError::OpenCustody); }
