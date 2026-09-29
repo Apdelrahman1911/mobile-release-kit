@@ -1058,6 +1058,277 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(M.failure_context(b"", context_row(history), "first-save"), history)
         self.assertFalse(M._accessibility_succeeded(history["accessibility"]))
 
+    def test_ax_failure_diagnostic_schema_is_closed_and_not_action_authority(self):
+        # Inert decoder DATA only. No diagnostic here is a native AX observation.
+        operations = (
+            "set-messaging-timeout", "copy-attribute-value", "get-attribute-value-count", "copy-attribute-values",
+            "copy-action-names", "is-attribute-settable", "set-attribute-value", "perform-action",
+        )
+        attributes = (None, "Parent", "Role", "Identifier", "Title", "Value", "Enabled",
+                      "Windows", "Children", "Rows", "SelectedChildren", "SelectedRows")
+        by_operation = (
+            (operations[0], (None,)), (operations[1], attributes[1:7]),
+            (operations[2], attributes[7:]), (operations[3], attributes[7:]),
+            (operations[4], (None,)), (operations[5], attributes[10:]),
+            (operations[6], attributes[10:]), (operations[7], (None,)),
+        )
+        pairs = frozenset((operation, attribute) for operation, allowed in by_operation for attribute in allowed)
+        self.assertEqual(len(pairs), 23)
+        self.assertEqual(M.ACCESSIBILITY_AX_FAILURE_OPERATIONS, operations)
+        self.assertEqual(M.ACCESSIBILITY_AX_FAILURE_ATTRIBUTES, attributes)
+        self.assertEqual(M.ACCESSIBILITY_AX_FAILURE_PAIRS, pairs)
+        button = M._expected_prompt_button()
+        self.assertIsNone(button["axFailure"])
+        self.assertIs(M._accessibility_prompt_button(button), button)
+        self.assertIsNone(M._accessibility_ax_failure(None, 0))
+        for ax_error in range(-25214, -25199):
+            for operation, allowed in by_operation:
+                for attribute in allowed:
+                    with self.subTest(ax_error=ax_error, operation=operation, attribute=attribute):
+                        diagnostic = {"operation": operation, "attribute": attribute}
+                        self.assertIs(M._accessibility_ax_failure(diagnostic, ax_error), diagnostic)
+                        sample = deepcopy(button); sample.update(axError=ax_error, axFailure=diagnostic)
+                        self.assertIs(M._accessibility_prompt_button(sample), sample)
+                        action = accessibility_context_data()["accessibility"]
+                        action["promptButton"] = sample
+                        self.assertFalse(M._accessibility_succeeded(action))
+        # Every bounded pairing is checked against the independent23-pair table,
+        # including well-typed but forbidden pairs and unknown or non-string tags.
+        for operation in (*operations, "none", "INERT_PRIVATE", None, True, 1, []):
+            for attribute in (*attributes, "INERT_PRIVATE", False, 1, [], {}):
+                diagnostic = {"operation": operation, "attribute": attribute}
+                valid = (type(operation) is str and (attribute is None or type(attribute) is str)
+                         and (operation, attribute) in pairs)
+                if valid:
+                    self.assertIs(M._accessibility_ax_failure(diagnostic, -25204), diagnostic)
+                else:
+                    with self.subTest(operation=operation, attribute=attribute), self.assertRaises(M.Refused):
+                        M._accessibility_ax_failure(diagnostic, -25204)
+        present = {"operation": "perform-action", "attribute": None}
+        for ax_error in (True, False, None, "0", 0.0, -25204.0, 1, -1, -25215, -25199, -(1 << 31), (1 << 31) - 1):
+            for diagnostic in (None, present):
+                with self.subTest(ax_error=ax_error, diagnostic=diagnostic), self.assertRaises(M.Refused):
+                    M._accessibility_ax_failure(diagnostic, ax_error)
+        for malformed in (None, False, 0, "", [], {}, {"operation": "perform-action"}, {"attribute": None},
+                          dict(present, private="INERT_PRIVATE"), dict(present, operation=None),
+                          dict(present, attribute=False)):
+            with self.subTest(malformed=malformed), self.assertRaises(M.Refused):
+                M._accessibility_ax_failure(malformed, -25204)
+        with self.assertRaises(M.Refused):
+            M._accessibility_ax_failure(present, 0)
+        for mutate in (
+            lambda v: v.pop("axFailure"),
+            lambda v: v.update(axFailure=present),  # Present metadata with zero AX error is contradictory.
+            lambda v: v.update(axError=-25204),    # Nonzero AX error cannot have absent metadata.
+        ):
+            sample = deepcopy(button); mutate(sample)
+            with self.assertRaises(M.Refused):
+                M._accessibility_prompt_button(sample)
+            malformed = accessibility_context_data(); malformed["accessibility"]["promptButton"] = sample
+            expected = deepcopy(malformed); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(b"", context_row(malformed), "first-save"), expected)
+        contradictory = accessibility_context_data()["accessibility"]
+        contradictory["promptButton"]["axFailure"] = present
+        self.assertFalse(M._accessibility_succeeded(contradictory))
+        # A genuine-shaped failed Press packet remains failed, including when an
+        # earlier overall deadline is retained beside the actual AX error.
+        for error, expired, timely in (("cannot-complete", False, True), ("deadline", True, False)):
+            failed = accessibility_context_data()
+            failed["accessibility"].update(triggered=False, error=error, expired=expired, timely=timely)
+            failed["accessibility"]["promptButton"].update(axError=-25204, axFailure=deepcopy(present))
+            self.assertEqual(M.failure_context(b"", context_row(failed), "first-save"), failed)
+            self.assertFalse(M._accessibility_succeeded(failed["accessibility"]))
+            result = M.expected_result(BINDING, "first-save")
+            result["native"]["projectOpenInput"] = failed["accessibility"]
+            with self.assertRaises(M.Refused):
+                M.parse_result(captured(result), b"", BINDING, "first-save")
+        for key in ("operation", "attribute"):
+            parts = ("accessibility", "promptButton", "axFailure", key)
+            self.assertEqual(M._result_location(parts), ".".join(parts))
+        self.assertIsNone(M._result_location(("accessibility", "promptButton", "axFailure", "INERT_PRIVATE")))
+
+    def test_ax_failure_source_preserves_original_calls_and_first_status(self):
+        # Source and bounded scalar DATA, not an AX emulator, native CaseReturn,
+        # worker receipt or proof that a platform operation has executed.
+        root = PATH.parents[1]
+        native = (root / "native/macos-installed-native/src/native.m").read_text()
+        rust = (root / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (root / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        operation_names = ("NONE", "SET_MESSAGING_TIMEOUT", "COPY_ATTRIBUTE_VALUE", "GET_ATTRIBUTE_VALUE_COUNT",
+                           "COPY_ATTRIBUTE_VALUES", "COPY_ACTION_NAMES", "IS_ATTRIBUTE_SETTABLE",
+                           "SET_ATTRIBUTE_VALUE", "PERFORM_ACTION")
+        attribute_names = ("NONE", "PARENT", "ROLE", "IDENTIFIER", "TITLE", "VALUE", "ENABLED", "WINDOWS",
+                           "CHILDREN", "ROWS", "SELECTED_CHILDREN", "SELECTED_ROWS")
+        for prefix, names in (("MRK_AX_OP_", operation_names), ("MRK_AX_ATTR_", attribute_names)):
+            actual = M.re.findall(r"\b(" + prefix + r"[A-Z_]+) = ([0-9]+)", native)
+            self.assertEqual(actual, [(prefix + name, str(code)) for code, name in enumerate(names)])
+        operations = rust.split("const AX_FAILURE_OPERATIONS: [&str; 8] = [", 1)[1].split("];", 1)[0]
+        attributes = rust.split("const AX_FAILURE_ATTRIBUTES: [Option<&str>; 12] = [", 1)[1].split("];", 1)[0]
+        self.assertEqual(tuple(M.re.findall(r'"([^"]+)"', operations)), M.ACCESSIBILITY_AX_FAILURE_OPERATIONS)
+        self.assertEqual((None, *M.re.findall(r'Some\("([^"]+)"\)', attributes)), M.ACCESSIBILITY_AX_FAILURE_ATTRIBUTES)
+        self.assertEqual(attributes.count("None"), 1)
+        self.assertIn("uint32_t ax_failure_operation, ax_failure_attribute;", native)
+        self.assertIn("selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32", rust)
+        self.assertIn("sizeof(MRKOpenResult) == 112 && sizeof(MRKOpenRecheck) == 48", native)
+        self.assertIn("std::mem::size_of::<OpenWire>() != 112", rust)
+        for field, offset in (("selection_limit_observed", 96), ("ax_failure_operation", 104), ("ax_failure_attribute", 108)):
+            self.assertIn(f"offsetof(MRKOpenResult, {field}) == {offset}", native)
+            self.assertIn(f"std::mem::offset_of!(OpenWire, {field}) != {offset}", rust)
+        self.assertIn("std::mem::size_of::<RecheckWire>() != 48", rust)
+        status = native.split("static BOOL mrk_ax_status(", 1)[1].split("static MRKPromptOwned *mrk_ax_slot(", 1)[0]
+        self.assertTrue(status.startswith(
+            "MRKPrompt *s, AXError error, uint32_t operation_code, uint32_t attribute_code) {\n"
+            "    if (error == kAXErrorSuccess) return YES;\n"))
+        latch = status.split("    if (!s->result.ax_error) {\n", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(latch, "        s->result.ax_error = error;\n"
+                               "        s->result.ax_failure_operation = operation_code;\n"
+                               "        s->result.ax_failure_attribute = attribute_code;")
+        assignments = M.re.findall(r"s->result\.(\w+) = (\w+);", latch)
+        self.assertEqual(assignments, [("ax_error", "error"), ("ax_failure_operation", "operation_code"),
+                                       ("ax_failure_attribute", "attribute_code")])
+        for field, _ in assignments:
+            self.assertEqual(native.count("s->result." + field + " ="), 1)
+        self.assertLess(status.index("return YES;"), status.index("if (!s->result.ax_error)"))
+        self.assertLess(status.index("s->result.ax_failure_attribute ="), status.index("switch (error)"))
+        failed = native.split("static BOOL mrk_ax_fail(", 1)[1].split("static BOOL mrk_ax_selecting(", 1)[0]
+        self.assertEqual(failed, "MRKPrompt *s, uint32_t error) {\n"
+                                 "    if (!s->result.error) s->result.error = error;\n"
+                                 "    return NO;\n}\n")
+        latch_field = M.re.search(r"if \(!s->result\.(\w+)\) \{", status).group(1)
+        overall_field = M.re.search(r"if \(!s->result\.(\w+)\) s->result\.\1 = error;", failed).group(1)
+
+        def scalar_status(state, code, operation, attribute, mapped_error):
+            # Replay ONLY the exact source-bound guards/three scalar assignments.
+            if code == 0:
+                return True
+            if not state[latch_field]:
+                incoming = {"error": code, "operation_code": operation, "attribute_code": attribute}
+                for field, parameter in assignments:
+                    state[field] = incoming[parameter]
+            if not state[overall_field]:
+                state[overall_field] = mapped_error
+            return False
+
+        empty = dict(error=0, ax_error=0, ax_failure_operation=0, ax_failure_attribute=0)
+        state = deepcopy(empty)
+        self.assertTrue(scalar_status(state, 0, 2, 1, 0))
+        self.assertEqual(state, empty)
+        self.assertFalse(scalar_status(state, -25204, 2, 1, 11))
+        first = dict(error=11, ax_error=-25204, ax_failure_operation=2, ax_failure_attribute=1)
+        self.assertEqual(state, first)
+        self.assertFalse(scalar_status(state, -25202, 3, 9, 10))
+        self.assertEqual(state, first)
+        self.assertFalse(scalar_status(state, -25204, 2, 2, 11))
+        self.assertEqual(state, first)
+        self.assertTrue(scalar_status(state, 0, 8, 0, 0))
+        self.assertEqual(state, first)
+        deadline = dict(empty, error=8)
+        self.assertTrue(scalar_status(deadline, 0, 1, 0, 0))
+        self.assertEqual(deadline, dict(empty, error=8))
+        self.assertFalse(scalar_status(deadline, -25204, 2, 2, 11))
+        self.assertEqual(deadline, dict(error=8, ax_error=-25204, ax_failure_operation=2, ax_failure_attribute=2))
+        copy = native.split("static CFTypeRef mrk_ax_copy(", 1)[1].split("static CFArrayRef mrk_ax_array(", 1)[0]
+        absent_line = "BOOL absent = optional && !slot->value && (status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported);"
+        self.assertIn(absent_line, copy)
+        self.assertIn("BOOL returned = absent || mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUE, attribute_code),", copy)
+        absent_statuses = tuple(M.re.findall(r"status == (kAXError\w+)", absent_line))
+        self.assertEqual(absent_statuses, ("kAXErrorNoValue", "kAXErrorAttributeUnsupported"))
+
+        def copy_status(state, optional, value_present, status_name, code, mapped_error):
+            absent = optional and not value_present and status_name in absent_statuses
+            return absent or scalar_status(state, code, 2, 4, mapped_error)
+
+        for name, code in (("kAXErrorNoValue", -25212), ("kAXErrorAttributeUnsupported", -25205)):
+            state = deepcopy(empty)
+            self.assertTrue(copy_status(state, True, False, name, code, 4))
+            self.assertEqual(state, empty)
+        state = deepcopy(empty)
+        self.assertFalse(copy_status(state, True, False, "kAXErrorCannotComplete", -25204, 11))
+        self.assertEqual(state, dict(error=11, ax_error=-25204, ax_failure_operation=2, ax_failure_attribute=4))
+
+        def expressions(name_pattern):
+            result = []
+            for match in M.re.finditer(r"\b" + name_pattern + r"\(", native):
+                at, depth = match.end(), 1
+                while at < len(native) and depth:
+                    depth += (native[at] == "(") - (native[at] == ")")
+                    at += 1
+                self.assertEqual(depth, 0)
+                result.append(native[match.start():at])
+            return result
+
+        self.assertEqual(expressions(r"AXUIElement[A-Za-z]+"), [
+            "AXUIElementSetMessagingTimeout(element, timeout.seconds)",
+            "AXUIElementCopyAttributeValue(element, attribute, &slot->value)",
+            "AXUIElementGetAttributeValueCount(element, attribute, &expected)",
+            "AXUIElementCopyAttributeValues(element, attribute, 0, limit + 1, &slot->array)",
+            "AXUIElementCopyActionNames(button, &slot->array)",
+            "AXUIElementIsAttributeSettable(container, attribute, &settable)",
+            "AXUIElementSetAttributeValue(container, attribute, selected->array)",
+            "AXUIElementGetTypeID()", "AXUIElementCreateApplication(getpid())",
+            "AXUIElementPerformAction(button, kAXPressAction)",
+        ])
+        self.assertEqual(expressions("mrk_ax_status")[1:], [
+            "mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds), MRK_AX_OP_SET_MESSAGING_TIMEOUT, MRK_AX_ATTR_NONE)",
+            "mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUE, attribute_code)",
+            "mrk_ax_status(s, count_status, MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT, attribute_code)",
+            "mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUES, attribute_code)",
+            "mrk_ax_status(s, status, MRK_AX_OP_COPY_ACTION_NAMES, MRK_AX_ATTR_NONE)",
+            "mrk_ax_status(s, status, MRK_AX_OP_IS_ATTRIBUTE_SETTABLE, attribute_code)",
+            "mrk_ax_status(s, status, MRK_AX_OP_SET_ATTRIBUTE_VALUE, attribute_code)",
+            "mrk_ax_status(s, status, MRK_AX_OP_PERFORM_ACTION, MRK_AX_ATTR_NONE)",
+        ])
+        for helper, count in (("mrk_ax_copy", 11), ("mrk_ax_array", 6), ("mrk_ax_equal_attribute", 9),
+                              ("mrk_ax_selection_label", 3)):
+            self.assertEqual(len(expressions(helper)), count)  # Includes exactly one unchanged-use helper definition.
+        for call, count in (
+            ("mrk_ax_copy(s, element, attribute, NO, attribute_code)", 1),
+            ("mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO, MRK_AX_ATTR_WINDOWS)", 1),
+            ("mrk_ax_copy(s, candidate, kAXIdentifierAttribute, NO, MRK_AX_ATTR_IDENTIFIER)", 1),
+            ("mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO, MRK_AX_ATTR_CHILDREN)", 1),
+            ("mrk_ax_copy(s, candidate, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE)", 1),
+            ("mrk_ax_equal_attribute(s, found_sheet, kAXIdentifierAttribute, panel_text, MRK_AX_ATTR_IDENTIFIER)", 1),
+            ("mrk_ax_equal_attribute(s, found_sheet, kAXParentAttribute, found_parent, MRK_AX_ATTR_PARENT)", 1),
+            ("mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)", 1),
+            ("mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE)", 3),
+            ("mrk_ax_copy(s, node, kAXTitleAttribute, YES, MRK_AX_ATTR_TITLE)", 1),
+            ("mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0, MRK_AX_ATTR_CHILDREN)", 1),
+            ("mrk_ax_equal_attribute(s, node, kAXParentAttribute, at ? original->nodes[original->parents[at]] : parent, MRK_AX_ATTR_PARENT)", 1),
+            ("mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt, MRK_AX_ATTR_TITLE)", 1),
+            ("mrk_ax_copy(s, button, kAXEnabledAttribute, NO, MRK_AX_ATTR_ENABLED)", 1),
+            ("mrk_ax_copy(s, p->nodes[at], attribute, optional, attribute_code)", 1),
+            ("mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]], MRK_AX_ATTR_PARENT)", 1),
+            ("mrk_ax_selection_label(s, p, at, kAXValueAttribute, NO, expected, MRK_AX_ATTR_VALUE)", 1),
+            ("mrk_ax_selection_label(s, p, at, kAXTitleAttribute, YES, expected, MRK_AX_ATTR_TITLE)", 1),
+            ("mrk_ax_equal_attribute(s, p->nodes[at], kAXParentAttribute, at ? p->nodes[p->parents[at]] : parent, MRK_AX_ATTR_PARENT)", 1),
+            ("mrk_ax_copy(s, p->nodes[at], kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE)", 1),
+            ("mrk_ax_equal_attribute(s, p->nodes[p->label], p->label_attribute, expected, p->label_attribute_code)", 1),
+            ("mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO, attribute_code)", 1),
+        ):
+            self.assertEqual(native.count(call), count, call)
+        self.assertIn("rows || list ? MRK_SELECT_ROWS : 16, at != 0, rows ? MRK_AX_ATTR_ROWS : MRK_AX_ATTR_CHILDREN", native)
+        self.assertIn("CFStringRef label_attribute;", native)
+        self.assertIn("uint32_t label_attribute_code;", native)
+        self.assertIn("if (s->result.selection_matches == 1) { p->candidate = entry; p->label = at; "
+                      "p->label_attribute = attribute; p->label_attribute_code = attribute_code; }", native)
+        self.assertIn("if (s->result.selection_flags || s->result.selection_checks != 3 || !p->candidate || !p->label || !p->label_attribute) {", native)
+        self.assertIn("if (!attribute) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);\n"
+                      "    uint32_t attribute_code = kind == MRK_SELECT_LIST ? MRK_AX_ATTR_SELECTED_CHILDREN : MRK_AX_ATTR_SELECTED_ROWS;", native)
+        # The pre-existing selection attribute wire stays1/2, not new AX tag11/10.
+        self.assertIn("s->result.selection_attribute = kind == MRK_SELECT_LIST ? 2u : 1u;", native)
+        decoder = rust.split("fn ax_failure_return(", 1)[1].split("/// Finite actual AX/CF DATA", 1)[0]
+        self.assertIn("if w.ax_error == 0", decoder)
+        self.assertIn("(w.ax_failure_operation == 0 && w.ax_failure_attribute == 0).then_some(None)", decoder)
+        self.assertIn("(1 | 5 | 8, 0) | (2, 1..=6) | (3 | 4, 7..=11) | (6 | 7, 10 | 11)", decoder)
+        self.assertIn("ax_failure: ax_failure_return(w)?", rust)
+        self.assertIn("self.ax_error == 0 && self.ax_failure.is_none()", rust)
+        self.assertIn("|| !ax_failure_data_check()", rust)
+        self.assertIn("r.diagnostic.error == \"deadline\" && r.button.ax_error == -25204", rust)
+        self.assertIn("ax_error: 0, ax_failure_operation: 0, ax_failure_attribute: 0,\n            selection_flags: 7, ..write", rust)
+        serializer = observer.split("fn prompt_button_value(", 1)[1].split("struct OpenActionReceipt", 1)[0]
+        self.assertIn('"axError":p.ax_error', serializer)
+        self.assertIn('"axFailure":p.ax_failure.map(|f| json!({"operation":f.operation,"attribute":f.attribute}))', serializer)
+
     def test_semantic_closed_parser_rejects_fabricated_old_or_conflicting_facts(self):
         good = accessibility_context_data()
         for key, bad in (("mechanism", "accessibility-confirm-original-open-panel-v1"),
@@ -1527,6 +1798,8 @@ class AquaDataTests(unittest.TestCase):
                     bad = deepcopy(value); target = bad["accessibility"]
                     for part in path[:-1]: target = target[part]
                     target[path[-1]] = invalid
+                    if path == ("promptButton", "axError"):
+                        target["axFailure"] = {"operation": "copy-attribute-value", "attribute": "Parent"}
                     expected = deepcopy(bad); expected["accessibility"] = None
                     self.assertEqual(M.failure_context(b"", context_row(bad), "first-save"), expected, (site, completed, path))
         final = accessibility_context_data(); sample = final["accessibility"]
@@ -1569,7 +1842,8 @@ class AquaDataTests(unittest.TestCase):
             expected = deepcopy(changed); expected["accessibility"] = None
             self.assertEqual(M.failure_context(b"", context_row(changed), "first-save"), expected)
         no = accessibility_context_data(); no["accessibility"].update(triggered=False, error="cannot-complete")
-        no["accessibility"]["promptButton"]["axError"] = -25204
+        no["accessibility"]["promptButton"].update(axError=-25204,
+            axFailure={"operation": "perform-action", "attribute": None})
         self.assertEqual(M.failure_context(b"", context_row(no), "first-save"), no)
         self.assertFalse(M._accessibility_succeeded(no["accessibility"]))
         # Even selectedPathMatched/callback-shaped DATA cannot rescue a
@@ -1647,7 +1921,8 @@ class AquaDataTests(unittest.TestCase):
             proof["checks"] = dict.fromkeys(M.ACCESSIBILITY_PROOF_CHECKS, False)
         largest["accessibility"]["promptChecks"] = {"initial": False, "final": False}
         largest["accessibility"]["promptButton"].update(calls=512, initialNodesExamined=16, recheckNodesExamined=16,
-            lastRole="ScrollArea", lastDepth=8, cfSlots=256, cfSlotsRetired=256, cleanupReturned=False, axError=-25214)
+            lastRole="ScrollArea", lastDepth=8, cfSlots=256, cfSlotsRetired=256, cleanupReturned=False, axError=-25214,
+            axFailure={"operation": "get-attribute-value-count", "attribute": "SelectedChildren"})
         largest["accessibility"]["promptButton"]["checks"] = dict.fromkeys(M.ACCESSIBILITY_BUTTON_CHECKS, False)
         largest["completionSelection"] = completion_context_data()["completionSelection"]
         largest["completionSelection"].update(pollResult="invalid-return", timely=False)
@@ -2141,7 +2416,7 @@ class AquaDataTests(unittest.TestCase):
         arrays = native.split("static CFArrayRef mrk_ax_array(", 1)[1].split("static BOOL mrk_ax_equal_attribute(", 1)[0]
         self.assertLess(arrays.index("AXUIElementGetAttributeValueCount"), arrays.index("AXUIElementCopyAttributeValues"))
         self.assertIn("BOOL allow_empty", arrays)
-        self.assertIn("BOOL counted = mrk_ax_status(s, count_status)", arrays)
+        self.assertIn("BOOL counted = mrk_ax_status(s, count_status, MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT, attribute_code)", arrays)
         self.assertIn("if (!expected) { if (!allow_empty) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }", arrays)
         self.assertIn("attribute, 0, limit + 1, &slot->array", arrays)
         self.assertIn("count != expected", arrays)
@@ -2152,7 +2427,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(roster.count("kAXChildrenAttribute"), 1)
         self.assertIn("pass->nodes[0] = sheet;", roster)
         self.assertIn("unsigned queued = 1, matches = 0;", roster)
-        self.assertIn("mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0)", roster)
+        self.assertIn("mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0, MRK_AX_ATTR_CHILDREN)", roster)
         no_descend = "if (at && !CFEqual(role, kAXGroupRole) && !CFEqual(role, kAXSplitGroupRole)) continue;"
         self.assertLess(roster.index(no_descend), roster.index("mrk_ax_array("))
         self.assertNotIn("kAXChildrenAttribute", roster.split(no_descend, 1)[0])
@@ -2161,7 +2436,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn("CFEqual(title, prompt)) { matches++; pass->candidate = at; }", roster)
         self.assertIn("for (unsigned previous = 0; previous < queued; ++previous)", roster)
         self.assertIn("previous != at && pass->nodes[previous] && CFEqual(node, pass->nodes[previous])", roster)
-        self.assertIn("mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]])", roster)
+        self.assertIn("mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)", roster)
         self.assertIn("rechecking ? &s->result.recheck_nodes_examined : &s->result.initial_nodes_examined", roster)
         begun = "s->result.last_depth = pass->depths[at]; s->result.last_role = MRK_ROLE_NOT_READ;"
         self.assertLess(roster.index(begun), roster.index("if (at) (*examined)++"))
@@ -2303,11 +2578,14 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 104 && sizeof(MRKOpenRecheck) == 48" in native,
-                        "native selection/Open wire104B and unchanged recheck48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 104" in rust, "Rust selection/Open wire must be104B")
+        self.assertTrue("sizeof(MRKOpenResult) == 112 && sizeof(MRKOpenRecheck) == 48" in native,
+                        "native selection/Open wire112B and unchanged recheck48B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 112" in rust, "Rust selection/Open wire must be112B")
         self.assertIn("offsetof(MRKOpenResult, selection_limit_observed) == 96", native)
         self.assertIn("std::mem::offset_of!(OpenWire, selection_limit_observed) != 96", rust)
+        for field, offset in (("ax_failure_operation", 104), ("ax_failure_attribute", 108)):
+            self.assertIn(f"offsetof(MRKOpenResult, {field}) == {offset}", native)
+            self.assertIn(f"std::mem::offset_of!(OpenWire, {field}) != {offset}", rust)
         self.assertIn("std::mem::size_of::<RecheckWire>() != 48", rust)
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
         self.assertIn("w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16", wire)
@@ -4472,10 +4750,27 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             sample["selection"].update(checks={key: index < completed for index, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
                 matches=matches, attribute=attribute, attempted=selected is not None, returned=selected is not None, selected=selected)
             sample["promptButton"]["axError"] = ax_error
+            sample["promptButton"]["axFailure"] = ({"operation": "set-attribute-value", "attribute": "SelectedRows"}
+                if ax_error != 0 else None)
             if label == "incomplete-roster":
                 sample["selection"]["limit"] = {"predicate": "child-count", "observed": 33, "cap": 32, "queued": 9, "children": None}
             failures.append((label, failed))
         readback_failed = deepcopy(failures[-1][1])
+        # Two explicitly synthetic alternatives at the old call44/node2 shape.
+        # Neither identifies the historical attribute or invents a readiness cause.
+        for attribute in ("Parent", "Role"):
+            failed = deepcopy(frame); sample = failed["accessibility"]
+            sample.update(site="selection-projection", error="cannot-complete")
+            sample["promptButton"].update(calls=44, cfSlots=22, cfSlotsRetired=22, axError=-25204,
+                axFailure={"operation": "copy-attribute-value", "attribute": attribute})
+            sample["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False),
+                nodes=2, matches=0, lastRole="not-read", depth=2)
+            self.assertIsNone(sample["selection"]["limit"])
+            self.assertIsNone(sample["initialOriginalProof"])
+            self.assertIsNone(sample["originalProof"])
+            self.assertFalse(sample["attempted"])
+            self.assertFalse(sample["selection"]["attempted"])
+            failures.append(("synthetic-first-copy-" + attribute, failed))
         parent_refused = deepcopy(frame); sample = parent_refused["accessibility"]
         sample.update(site="selection-parent-proof", error="ineligible", selectionParentPrompt=None)
         sample["selectionParentProof"].update(parent=None, panel=None, children=None, originals=None,
@@ -4619,7 +4914,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda a: a["selection"].update(limit=None),
             lambda a: a.update(site="selection-write"),
             lambda a: a.update(error="deadline"),
-            lambda a: a["promptButton"].update(axError=-25204),
+            lambda a: a["promptButton"].update(axError=-25204,
+                axFailure={"operation": "copy-attribute-value", "attribute": "Parent"}),
         ):
             bad = deepcopy(action); mutation(bad)
             with self.assertRaises(M.Refused):
@@ -4683,7 +4979,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("p->candidate = entry; p->label = at; p->label_attribute = attribute", label)
         roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
         for condition in ("other != at && p->nodes[other] && CFEqual(node, p->nodes[other])",
-                          "mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]])",
+                          "mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]], MRK_AX_ATTR_PARENT)",
                           "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE", "kind == MRK_SELECT_LIST",
                           "rows ? kind != MRK_SELECT_ROW", "kind == MRK_ROLE_SHEET || kind == MRK_ROLE_GROUP",
                           "kind == MRK_ROLE_SPLIT_GROUP", "kind == MRK_ROLE_SCROLL_AREA", "kind == MRK_ROLE_BROWSER",
@@ -4703,7 +4999,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
                          "p->nodes[p->label], p->label_attribute, expected", "p->entries[p->label] != p->candidate",
                          "kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE ? kAXSelectedRowsAttribute",
                          "kind == MRK_SELECT_LIST ? kAXSelectedChildrenAttribute : NULL",
-                         "mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO)",
+                         "mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO, attribute_code)",
                          "CFArrayGetCount(actual) != 1", "CFEqual(value, entry)"):
             self.assertIn(original, write)
         self.assertLess(write.index("AXUIElementIsAttributeSettable(container, attribute, &settable)"), write.index("if (!settable)"))
@@ -6232,6 +6528,85 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         self.assertIn('row["identityAdmission"] = identity_facts', workflow)
         self.assertLess(workflow.index('row["identityAdmission"] = identity_facts'),
                         workflow.index('identities.append(signature_identity(result, identifier, identity_facts))'))
+
+    def test_peer_settled_requires_verified_zero_helpers_for_both_originals(self):
+        # Source contract plus labelled scalar DATA, never a native CaseReturn,
+        # fixture, Keychain call or success receipt.
+        native = PATH.parents[1] / "native/macos-installed-native/src"
+        pair = (native / "wrapping_keychain_pair.rs").read_text()
+        qualification = (native / "wrapping_keychain_qualification.rs").read_text()
+
+        def definition(source, signature):
+            self.assertEqual(source.count(signature), 1)
+            return source.split(signature, 1)[1].split("\n}", 1)[0]
+
+        peer = definition(pair, "pub(super) fn peer_settled(row: &CaseReturn) -> bool {")
+        declaration, expression = peer.strip().split(";", 1)
+        self.assertEqual(declaration, "let f = row.facts()")
+        clauses = tuple(" ".join(clause.split()) for clause in expression.split("&&"))
+        gates = (
+            "f.native_run_returned()", "f.verified_native_run_receipt()",
+            "f.custody() == Custody::Settled", "!f.callback_panicked()",
+            "!f.native_exception()", "!f.stopped()", "f.ordinary_user_admitted()",
+            "row.selection().verified()", "row.selection().account_selected()",
+            "row.selection().fixture_selected()", "row.selection().root_identity_matched()",
+            "row.selection().callbacks_cleared()", "!row.selection().selector_boundary_returned()",
+        )
+        helper_clause = "row.selection().helper_counts() == Some((0, 0, 0))"
+        self.assertEqual(clauses, (*gates, helper_clause))
+
+        counts_source = qualification.split(
+            "pub fn helper_counts(&self) -> Option<(u32, u32, u32)> {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(" ".join(counts_source.split()),
+                         "self.verified.then_some((self.raw.helpers_entered, self.raw.helpers_returned, "
+                         "self.raw.helper_matches.count_ones()))")
+        valid = qualification.split("impl Observation {", 1)[1].split("fn complete_helpers(", 1)[0]
+        self.assertIn("if mode != HELPERS && (self.helpers_entered != 0 || self.helpers_returned != 0 "
+                      "|| self.helper_matches != 0) { return false; }", " ".join(valid.split()))
+        lookup = qualification.split("impl PeerLookup {", 1)[1]
+        self.assertIn("mrk_wrapping_qualification_run(frame, FIXTURE, &self.fixture, Operation::Lookup.raw(),", lookup)
+        self.assertIn("observation.valid(raw, FIXTURE)", lookup)
+
+        # Interpret only the closed conjunction above over synthetic clause
+        # values. The Option tuple requirement is taken from the source clause.
+        required_counts = tuple(int(value) for value in clauses[-1].split(" == Some((", 1)[1][:-2].split(","))
+
+        def admits(verified, counts, failed_gate=None):
+            values = dict.fromkeys(gates, True)
+            values["row.selection().verified()"] = verified
+            values[helper_clause] = counts == required_counts
+            if failed_gate is not None:
+                values[failed_gate] = False
+            return all(values[clause] for clause in clauses)
+
+        helper_rows = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1),
+                       (1, 1, 0), (1, 1, 1), (2, 2, 3), (0, 0, 1 << 31))
+        for verified in (False, True):
+            for entered, returned, matches in helper_rows:
+                counts = (entered, returned, matches.bit_count()) if verified else None
+                with self.subTest(verified=verified, helpers=(entered, returned, matches)):
+                    self.assertEqual(admits(verified, counts),
+                                     verified and (entered, returned, matches) == (0, 0, 0))
+        # Absence must not become a fallback, even with all other gates true;
+        # a zero tuple must not bypass the independent verification gate.
+        self.assertFalse(admits(True, None))
+        self.assertFalse(admits(False, (0, 0, 0)))
+        for gate in gates:
+            with self.subTest(failed_gate=gate):
+                self.assertFalse(admits(True, (0, 0, 0), gate))
+
+        # The creator candidate and the distinct reader UIFail denial must
+        # both pass this same gate, not separate absent-or-zero substitutes.
+        for signature, case in (
+            ("pub(super) fn creator_lookup_ready(row: &CaseReturn) -> bool {", "CreatorControlLookup"),
+            ("fn reader_denied(row: &CaseReturn) -> bool {", "OtherExecutableLookup"),
+        ):
+            consumer = definition(pair, signature)
+            with self.subTest(consumer=case):
+                self.assertEqual(consumer.count("peer_settled(row)"), 1)
+                self.assertIn("row.case() == Case::" + case + " && peer_settled(row) &&",
+                              " ".join(consumer.split()))
+                self.assertNotIn("||", consumer)
 
     def test_source_fixed_profile_barrier_charges_and_no_candidate_reader(self):
         root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"

@@ -268,7 +268,7 @@ pub(super) fn peer_settled(row: &CaseReturn) -> bool {
         && !f.callback_panicked() && !f.native_exception() && !f.stopped() && f.ordinary_user_admitted()
         && row.selection().verified() && row.selection().account_selected() && row.selection().fixture_selected()
         && row.selection().root_identity_matched() && row.selection().callbacks_cleared()
-        && !row.selection().selector_boundary_returned() && row.selection().helper_counts().is_none()
+        && !row.selection().selector_boundary_returned() && row.selection().helper_counts() == Some((0, 0, 0))
 }
 pub(super) fn creator_lookup_ready(row: &CaseReturn) -> bool {
     let f = row.facts();

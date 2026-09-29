@@ -188,6 +188,23 @@ ACCESSIBILITY_ERRORS = frozenset((
     "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
     "invalid-element cannot-complete ax-other changed objc-exception cleanup-unknown"
 ).split())
+# Closed first actual AX-fault labels. No values, object identities or inferred causes.
+ACCESSIBILITY_AX_FAILURE_OPERATIONS = (
+    "set-messaging-timeout", "copy-attribute-value", "get-attribute-value-count", "copy-attribute-values",
+    "copy-action-names", "is-attribute-settable", "set-attribute-value", "perform-action",
+)
+ACCESSIBILITY_AX_FAILURE_ATTRIBUTES = (
+    None, "Parent", "Role", "Identifier", "Title", "Value", "Enabled",
+    "Windows", "Children", "Rows", "SelectedChildren", "SelectedRows",
+)
+ACCESSIBILITY_AX_FAILURE_PAIRS = frozenset(
+    (ACCESSIBILITY_AX_FAILURE_OPERATIONS[operation - 1], ACCESSIBILITY_AX_FAILURE_ATTRIBUTES[attribute])
+    for operation, attributes in (
+        (1, (0,)), (2, range(1, 7)), (3, range(7, 12)), (4, range(7, 12)),
+        (5, (0,)), (6, (10, 11)), (7, (10, 11)), (8, (0,)),
+    )
+    for attribute in attributes
+)
 ACCESSIBILITY_BINDING_CLASSES = frozenset(("nil", "match", "different", "type-invalid"))
 ACCESSIBILITY_BINDING_SITES = frozenset((
     "objects", "parent-tag", "parent-set", "parent-get", "prompt-set", "prompt-get", "complete",
@@ -581,7 +598,7 @@ def _expected_prompt_button():
     # A literal parser fixture, not observed AX counts or a native receipt.
     return {"checks": dict.fromkeys(ACCESSIBILITY_BUTTON_CHECKS, True), "calls": 48,
             "initialNodesExamined": 2, "recheckNodesExamined": 2, "lastRole": "Button", "lastDepth": 1,
-            "cfSlots": 32, "cfSlotsRetired": 32, "cleanupReturned": True, "axError": 0}
+            "cfSlots": 32, "cfSlotsRetired": 32, "cleanupReturned": True, "axError": 0, "axFailure": None}
 
 
 def _expected_completion_selection(case):
@@ -1090,8 +1107,8 @@ def _pairs(items):
 # Public schema vocabulary only. Unknown future keys lose diagnostic detail,
 # never validation. Neither report values nor unexpected keys enter this set.
 RESULT_LOCATION_KEYS = frozenset((
-    "accessibilityTrustedWithoutPrompt accessorReturned acknowledged action actionsAvailable active actualExit admitted "
-    "afterBytes applicationPresent apply attempted axError barrierRetired baselineGeneration beforeBytes binding "
+    "accessibility accessibilityTrustedWithoutPrompt accessorReturned acknowledged action actionsAvailable active actualExit admitted "
+    "afterBytes applicationPresent apply attempted axError axFailure barrierRetired baselineGeneration beforeBytes binding "
     "bodyEntered bodyReturned callbackEntered callbackReturned calls case cfSlots cfSlotsRetired checks children "
     "cleanupReturned configuration confirmationsOpened controlReturns createReleaseDirectory custodyKnown "
     "dispatchAttempted dispatchReturned distributionQualified draftRevision duplicate effect error expired facts files "
@@ -1391,11 +1408,24 @@ def _accessibility_native_proof(value, *, selection_parent=False):
     return value
 
 
+def _accessibility_ax_failure(value, ax_error):
+    """First actual AX status metadata only; absent iff the original AX error is zero."""
+    label = "accessibility-ax-failure"
+    need(type(ax_error) is int and (ax_error == 0 or -25214 <= ax_error <= -25200), label)
+    if ax_error == 0:
+        need(value is None, label)
+        return None
+    need(type(value) is dict and set(value) == {"operation", "attribute"}, label)
+    need(type(value["operation"]) is str and (value["attribute"] is None or type(value["attribute"]) is str)
+         and (value["operation"], value["attribute"]) in ACCESSIBILITY_AX_FAILURE_PAIRS, label)
+    return value
+
+
 def _accessibility_prompt_button(value):
     """Bounded returned AX/CF DATA, never a title, object or action permit."""
     label = "accessibility-prompt-button"
     need(type(value) is dict and set(value) == {"checks", "calls", "initialNodesExamined", "recheckNodesExamined",
-                                               "lastRole", "lastDepth", "cfSlots", "cfSlotsRetired", "cleanupReturned", "axError"}, label)
+                                               "lastRole", "lastDepth", "cfSlots", "cfSlotsRetired", "cleanupReturned", "axError", "axFailure"}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_BUTTON_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
@@ -1408,6 +1438,7 @@ def _accessibility_prompt_button(value):
          and type(value["cleanupReturned"]) is bool, label)
     need(not value["cleanupReturned"] or value["cfSlotsRetired"] == value["cfSlots"], label)
     need(type(value["axError"]) is int and (value["axError"] == 0 or -25214 <= value["axError"] <= -25200), label)
+    _accessibility_ax_failure(value["axFailure"], value["axError"])
     need(not (any(ordered) or value["lastRole"] != "not-read") or value["calls"] > 0 and value["cfSlots"] > 0, label)
     initial, recheck, depth = value["initialNodesExamined"], value["recheckNodesExamined"], value["lastDepth"]
     need(initial == 0 or checks["parentBound"] and checks["sheetBound"], label)
@@ -1518,6 +1549,7 @@ def _accessibility_succeeded(value):
             and all(value["promptChecks"][key] is True for key in ("initial", "final"))
             and value["promptButton"] is not None and all(value["promptButton"]["checks"].values())
             and value["promptButton"]["cleanupReturned"] is True and value["promptButton"]["axError"] == 0
+            and value["promptButton"]["axFailure"] is None
             and value["promptButton"]["cfSlotsRetired"] == value["promptButton"]["cfSlots"])
 
 

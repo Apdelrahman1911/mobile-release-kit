@@ -250,7 +250,7 @@ impl Panel {
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
 pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, OpenDiagnostic, OpenReport,
-    OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, CompletionSelection, CompletionReturn, installed_prompt_button,
+    OpenInputReturn, OpenRecheckReturn, ControlContainerButtonProof, AxFailure, CompletionSelection, CompletionReturn, installed_prompt_button,
     IdentityConfiguration, IdentityStartReturn, IdentityBinding, IdentityBindingReturn,
     OriginalWindowState, OriginalWindowReturn, ProjectFieldPreparation, VersionSourceNamePreparation, VersionSourceParentReady, VersionSourceSelectionReady, VersionSourceSelection, SelectionLimit, installed_original_window,
     installed_accessibility_trusted, installed_observation_flags_data_check};
@@ -914,7 +914,7 @@ mod observation {
         selection_mode: u32, selection_checks: u32, selection_flags: u32, selection_nodes: u32,
         selection_matches: u32, selection_attribute: u32, selection_last_role: u32, selection_depth: u32,
         selection_limit: u32, selection_limit_cap: u32, selection_limit_queued: u32, selection_limit_children: u32,
-        selection_limit_observed: i64 }
+        selection_limit_observed: i64, ax_failure_operation: u32, ax_failure_attribute: u32 }
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct RecheckWire { known: u32, error: u32, prompt: u32, proof: IdentityProofWire }
@@ -951,6 +951,32 @@ mod observation {
             || proof.is_some_and(|p| p.error != "none") && proof.map(|p| p.error) != Some(r.error) { return None; }
         Some(r)
     }
+    /// Closed tags for the first actual nonzero AX return, never an action permit.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct AxFailure {
+        pub operation: &'static str,
+        pub attribute: Option<&'static str>,
+    }
+    const AX_FAILURE_OPERATIONS: [&str; 8] = [
+        "set-messaging-timeout", "copy-attribute-value", "get-attribute-value-count", "copy-attribute-values",
+        "copy-action-names", "is-attribute-settable", "set-attribute-value", "perform-action",
+    ];
+    const AX_FAILURE_ATTRIBUTES: [Option<&str>; 12] = [
+        None, Some("Parent"), Some("Role"), Some("Identifier"), Some("Title"), Some("Value"), Some("Enabled"),
+        Some("Windows"), Some("Children"), Some("Rows"), Some("SelectedChildren"), Some("SelectedRows"),
+    ];
+    fn ax_failure_return(w: OpenWire) -> Option<Option<AxFailure>> {
+        if w.ax_error == 0 {
+            return (w.ax_failure_operation == 0 && w.ax_failure_attribute == 0).then_some(None);
+        }
+        if !(-25214..=-25200).contains(&w.ax_error)
+            || !matches!((w.ax_failure_operation, w.ax_failure_attribute),
+                (1 | 5 | 8, 0) | (2, 1..=6) | (3 | 4, 7..=11) | (6 | 7, 10 | 11)) { return None; }
+        Some(Some(AxFailure {
+            operation: *AX_FAILURE_OPERATIONS.get(w.ax_failure_operation.checked_sub(1)? as usize)?,
+            attribute: *AX_FAILURE_ATTRIBUTES.get(w.ax_failure_attribute as usize)?,
+        }))
+    }
     /// Finite actual AX/CF DATA from the one original worker. A retired slot is
     /// either a definite empty out-slot or its CFRelease actually returned;
     /// these counters deliberately do not claim that many non-null objects.
@@ -959,6 +985,7 @@ mod observation {
         pub checks: [bool; 7], pub calls: u32, pub initial_nodes_examined: u32, pub recheck_nodes_examined: u32,
         pub last_role: &'static str, pub last_depth: u32,
         pub cf_slots: u32, pub cf_slots_retired: u32, pub cleanup_returned: bool, pub ax_error: i32,
+        pub ax_failure: Option<AxFailure>,
     }
     impl ControlContainerButtonProof {
         pub fn matched(self) -> bool {
@@ -967,7 +994,7 @@ mod observation {
                 && self.last_role == "Button" && (1..=8).contains(&self.last_depth)
                 && self.last_depth <= self.initial_nodes_examined.min(self.recheck_nodes_examined)
                 && (1..=256).contains(&self.cf_slots) && self.cf_slots_retired == self.cf_slots
-                && self.cleanup_returned && self.ax_error == 0
+                && self.cleanup_returned && self.ax_error == 0 && self.ax_failure.is_none()
         }
     }
     /// The first original selection refusal only. No additional AX observation.
@@ -1095,7 +1122,7 @@ mod observation {
             last_role: *["not-read", "Sheet", "Group", "SplitGroup", "Button", "Browser", "Table", "Outline", "ScrollArea", "opaque"]
                 .get(w.last_role as usize)?,
             last_depth: w.last_depth, cf_slots: w.owned, cf_slots_retired: w.released,
-            cleanup_returned: w.flags & 8 != 0, ax_error: w.ax_error };
+            cleanup_returned: w.flags & 8 != 0, ax_error: w.ax_error, ax_failure: ax_failure_return(w)? };
         let r = OpenReport { diagnostic: OpenDiagnostic {
             site: *["entry", "application", "windows", "parent-identifier", "sheet", "topology", "control-projection", "button",
                 "control-recheck", "initial-original-proof", "original-proof", "admission", "press", "cleanup",
@@ -1415,7 +1442,7 @@ mod observation {
             OpenWire { selection_limit_cap: 513, ..limit }, OpenWire { selection_limit_observed: 512, ..limit },
             OpenWire { selection_limit_queued: 0, ..limit }, OpenWire { selection_limit_queued: 24, ..limit },
             OpenWire { selection_limit_queued: 50, ..limit }, OpenWire { selection_limit_children: 1, ..limit },
-            OpenWire { error: 8, ..limit }, OpenWire { ax_error: -25204, ..limit }, OpenWire { site: 24, ..limit },
+            OpenWire { error: 8, ..limit }, OpenWire { ax_error: -25204, ax_failure_operation: 2, ax_failure_attribute: 1, ..limit }, OpenWire { site: 24, ..limit },
             OpenWire { selection_limit: 2, selection_limit_cap: 32, selection_limit_observed: 33, ..limit },
             OpenWire { selection_limit: 3, selection_limit_cap: 16, selection_limit_observed: 0, ..limit },
             OpenWire { selection_limit_observed: 48, selection_limit_queued: 48, selection_limit_children: 1, ..queue },
@@ -1439,10 +1466,12 @@ mod observation {
             if open_return(bad, admitted, true, true).is_some() { return false; }
         }
         let write = OpenWire { site: 24, error: 11, ax_error: -25204, selection_checks: 15, selection_flags: 3,
+            ax_failure_operation: 7, ax_failure_attribute: 11,
             selection_matches: 1, selection_attribute: 1, ..missing };
         if !open_return(write, admitted, true, true).is_some_and(|r| !r.attempted && !r.succeeded()
             && r.selection.is_some_and(|s| s.attempted && s.returned && s.selected == Some(false))) { return false; }
-        let readback = OpenWire { site: 25, error: 13, ax_error: 0, selection_flags: 7, ..write };
+        let readback = OpenWire { site: 25, error: 13, ax_error: 0, ax_failure_operation: 0, ax_failure_attribute: 0,
+            selection_flags: 7, ..write };
         if !open_return(readback, admitted, true, true).is_some_and(|r| !r.attempted && !r.succeeded()
             && r.selection.is_some_and(|s| s.selected == Some(true) && !s.matched())) { return false; }
         // A real selection/readback still cannot replace actual singleton-URL
@@ -1458,14 +1487,62 @@ mod observation {
                 .is_some_and(|r| !r.custody_known && !r.succeeded())
             && open_return(full, rechecks, false, true).is_none()
     }
+    fn ax_failure_data_check() -> bool {
+        // Inert closed-decoder DATA, never a native AX return or action receipt.
+        let pairs: [(u32, u32, &str, Option<&str>); 23] = [
+            (1, 0, "set-messaging-timeout", None),
+            (2, 1, "copy-attribute-value", Some("Parent")),
+            (2, 2, "copy-attribute-value", Some("Role")),
+            (2, 3, "copy-attribute-value", Some("Identifier")),
+            (2, 4, "copy-attribute-value", Some("Title")),
+            (2, 5, "copy-attribute-value", Some("Value")),
+            (2, 6, "copy-attribute-value", Some("Enabled")),
+            (3, 7, "get-attribute-value-count", Some("Windows")),
+            (3, 8, "get-attribute-value-count", Some("Children")),
+            (3, 9, "get-attribute-value-count", Some("Rows")),
+            (3, 10, "get-attribute-value-count", Some("SelectedChildren")),
+            (3, 11, "get-attribute-value-count", Some("SelectedRows")),
+            (4, 7, "copy-attribute-values", Some("Windows")),
+            (4, 8, "copy-attribute-values", Some("Children")),
+            (4, 9, "copy-attribute-values", Some("Rows")),
+            (4, 10, "copy-attribute-values", Some("SelectedChildren")),
+            (4, 11, "copy-attribute-values", Some("SelectedRows")),
+            (5, 0, "copy-action-names", None),
+            (6, 10, "is-attribute-settable", Some("SelectedChildren")),
+            (6, 11, "is-attribute-settable", Some("SelectedRows")),
+            (7, 10, "set-attribute-value", Some("SelectedChildren")),
+            (7, 11, "set-attribute-value", Some("SelectedRows")),
+            (8, 0, "perform-action", None),
+        ];
+        let mut admitted_pairs = 0;
+        for operation in (0u32..=9).chain([u32::MAX]) {
+            for attribute in (0u32..=12).chain([u32::MAX]) {
+                let pair = pairs.iter().find(|p| p.0 == operation && p.1 == attribute);
+                if pair.is_some() { admitted_pairs += 1; }
+                for ax_error in (-25214..=-25200).chain([0, 1, -1, -25215, -25199, i32::MIN, i32::MAX]) {
+                    let expected = if ax_error == 0 {
+                        (operation == 0 && attribute == 0).then_some(None)
+                    } else if (-25214..=-25200).contains(&ax_error) {
+                        pair.map(|p| Some(AxFailure { operation: p.2, attribute: p.3 }))
+                    } else { None };
+                    let wire = OpenWire { ax_error, ax_failure_operation: operation, ax_failure_attribute: attribute,
+                        ..OpenWire::default() };
+                    if ax_failure_return(wire) != expected { return false; }
+                }
+            }
+        }
+        admitted_pairs == 23 && ax_failure_return(OpenWire::default()) == Some(None)
+    }
     fn semantic_data_check() -> bool {
         // Inert decoder/timeout DATA only: never manufacture a native return.
         let ordinary_return = |w, r: [Option<OpenRecheckReturn>; 2], known|
             open_return(w, [None, r[0], r[1]], known, false);
-        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 104
+        if std::mem::size_of::<IdentityWire>() != 56 || std::mem::size_of::<OpenWire>() != 112
             || std::mem::offset_of!(OpenWire, selection_limit_observed) != 96
+            || std::mem::offset_of!(OpenWire, ax_failure_operation) != 104
+            || std::mem::offset_of!(OpenWire, ax_failure_attribute) != 108
             || std::mem::size_of::<RecheckWire>() != 48 || std::mem::size_of::<OpenTimeout>() != 16
-            || !completion_data_check() || !selection_data_check() { return false; }
+            || !completion_data_check() || !selection_data_check() || !ax_failure_data_check() { return false; }
         let p = IdentityProofWire { flags: 1, checked: 0xfff, matched: 0xfff, parent: 2, panel: 8,
             children: 2, originals: 2, site: 14, error: 0 };
         let rw = RecheckWire { known: 1, error: 0, prompt: 1, proof: p };
@@ -1476,7 +1553,13 @@ mod observation {
             initial_nodes_examined: 4, recheck_nodes_examined: 4, owned: 60, released: 60, ax_error: 0,
             last_role: 4, last_depth: 2, ..OpenWire::default() };
         let Some(success) = ordinary_return(full, rechecks, true) else { return false; };
-        if !success.succeeded() { return false; }
+        if !success.succeeded() || success.button.ax_failure.is_some() { return false; }
+        let contradictory = ControlContainerButtonProof {
+            ax_failure: Some(AxFailure { operation: "perform-action", attribute: None }), ..success.button };
+        if contradictory.matched() { return false; }
+        for malformed in [OpenWire { ax_failure_operation: 8, ..full }, OpenWire { ax_failure_attribute: 1, ..full }] {
+            if ordinary_return(malformed, rechecks, true).is_some() { return false; }
+        }
         // Neither incomplete eligible projection, missing unique button, nor
         // unperformed same-original control-path recheck may pass the proof.
         for bit in 0..7 {
@@ -1490,7 +1573,7 @@ mod observation {
             OpenWire { recheck_nodes_examined: 17, ..full }, OpenWire { last_role: 10, ..full },
             OpenWire { last_role: 2, ..full }, OpenWire { last_depth: 0, ..full }, OpenWire { last_depth: 9, ..full },
             OpenWire { owned: 257, released: 257, ..full }, OpenWire { released: 59, ..full },
-            OpenWire { ax_error: 1, ..full }, OpenWire { checks: 255, ..full }, OpenWire { flags: 31, ..full }] {
+            OpenWire { ax_error: 1, ax_failure_operation: 8, ax_failure_attribute: 0, ..full }, OpenWire { checks: 255, ..full }, OpenWire { flags: 31, ..full }] {
             if ordinary_return(bad, rechecks, true).is_some() { return false; }
         }
         for bad in [RecheckWire { prompt: 0, ..rw }, RecheckWire { prompt: 2, ..rw },
@@ -1580,7 +1663,7 @@ mod observation {
                 let failed = frame(limits.0);
                 for bad in [OpenWire { error: 0, ..failed }, OpenWire { error: 5, ..failed },
                     OpenWire { calls: 0, ..failed }, OpenWire { owned: 0, released: 0, ..failed },
-                    OpenWire { checks: 7, ..failed }, OpenWire { ax_error: -25204, ..failed },
+                    OpenWire { checks: 7, ..failed }, OpenWire { ax_error: -25204, ax_failure_operation: 2, ax_failure_attribute: 1, ..failed },
                     OpenWire { flags: 9, ..failed }, OpenWire { site: 20, ..failed }, OpenWire { last_role: 0, ..failed },
                     OpenWire { last_role: 9, ..failed }, OpenWire { last_depth: 9, ..failed }] {
                     if ordinary_return(bad, [Some(recheck), None], true).is_some() { return false; }
@@ -1597,8 +1680,16 @@ mod observation {
                 || t.required_ns != (f64::from(t.seconds) * 1_000_000_000.0).ceil() as u64 { return false; }
         }
         timeout_for(Duration::ZERO).is_none()
-            && ordinary_return(OpenWire { flags: 11, error: 11, ax_error: -25204, ..full }, rechecks, true)
-                .is_some_and(|r| r.press_returned && r.triggered == Some(false) && !r.succeeded())
+            && ordinary_return(OpenWire { flags: 11, error: 11, ax_error: -25204,
+                ax_failure_operation: 8, ax_failure_attribute: 0, ..full }, rechecks, true)
+                .is_some_and(|r| r.press_returned && r.triggered == Some(false) && !r.succeeded()
+                    && r.button.ax_failure == Some(AxFailure { operation: "perform-action", attribute: None }))
+            // Earlier overall deadline and first actual AX fault are independent.
+            && ordinary_return(OpenWire { flags: 11, error: 8, ax_error: -25204,
+                ax_failure_operation: 8, ax_failure_attribute: 0, ..full }, rechecks, true)
+                .is_some_and(|r| r.diagnostic.error == "deadline" && r.button.ax_error == -25204
+                    && r.button.ax_failure == Some(AxFailure { operation: "perform-action", attribute: None })
+                    && r.press_returned && r.triggered == Some(false) && !r.succeeded())
             && ordinary_return(OpenWire { error: 8, ..full }, rechecks, true)
                 .is_some_and(|r| r.press_returned && r.triggered == Some(true) && !r.succeeded())
             && ordinary_return(OpenWire { flags: 7, error: 9, ..full }, rechecks, false)

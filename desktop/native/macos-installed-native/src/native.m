@@ -884,6 +884,13 @@ enum { MRK_OPEN_ENTRY = 1u, MRK_OPEN_APPLICATION, MRK_OPEN_WINDOWS, MRK_OPEN_PAR
 enum { MRK_OPEN_ATTEMPTED = 1u, MRK_OPEN_RETURNED = 2u, MRK_OPEN_TRIGGERED = 4u, MRK_OPEN_KNOWN = 8u };
 enum { MRK_ROLE_NOT_READ, MRK_ROLE_SHEET, MRK_ROLE_GROUP, MRK_ROLE_SPLIT_GROUP, MRK_ROLE_BUTTON,
     MRK_ROLE_BROWSER, MRK_ROLE_TABLE, MRK_ROLE_OUTLINE, MRK_ROLE_SCROLL_AREA, MRK_ROLE_OPAQUE };
+// Closed first-fault diagnostics only; these scalar tags never authorize an AX call.
+enum { MRK_AX_OP_NONE = 0, MRK_AX_OP_SET_MESSAGING_TIMEOUT = 1, MRK_AX_OP_COPY_ATTRIBUTE_VALUE = 2,
+    MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT = 3, MRK_AX_OP_COPY_ATTRIBUTE_VALUES = 4, MRK_AX_OP_COPY_ACTION_NAMES = 5,
+    MRK_AX_OP_IS_ATTRIBUTE_SETTABLE = 6, MRK_AX_OP_SET_ATTRIBUTE_VALUE = 7, MRK_AX_OP_PERFORM_ACTION = 8 };
+enum { MRK_AX_ATTR_NONE = 0, MRK_AX_ATTR_PARENT = 1, MRK_AX_ATTR_ROLE = 2, MRK_AX_ATTR_IDENTIFIER = 3,
+    MRK_AX_ATTR_TITLE = 4, MRK_AX_ATTR_VALUE = 5, MRK_AX_ATTR_ENABLED = 6, MRK_AX_ATTR_WINDOWS = 7,
+    MRK_AX_ATTR_CHILDREN = 8, MRK_AX_ATTR_ROWS = 9, MRK_AX_ATTR_SELECTED_CHILDREN = 10, MRK_AX_ATTR_SELECTED_ROWS = 11 };
 typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_examined, recheck_nodes_examined, owned, released;
     int32_t ax_error; uint32_t last_role, last_depth;
     uint32_t selection_mode, selection_checks, selection_flags, selection_nodes, selection_matches,
@@ -892,11 +899,14 @@ typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_exami
     // unreached (their observed domains start at one), never an observed zero.
     uint32_t selection_limit, selection_limit_cap, selection_limit_queued, selection_limit_children;
     int64_t selection_limit_observed;
+    uint32_t ax_failure_operation, ax_failure_attribute;
 } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 104 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 112 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
 _Static_assert(sizeof(CFIndex) == sizeof(int64_t) && offsetof(MRKOpenResult, selection_limit_observed) == 96,
     "lossless original selection count ABI");
+_Static_assert(offsetof(MRKOpenResult, ax_failure_operation) == 104 && offsetof(MRKOpenResult, ax_failure_attribute) == 108,
+    "fixed first AX-fault diagnostic ABI");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
 typedef int (*MRKOpenRecheckCall)(void *, int);
@@ -1236,6 +1246,7 @@ typedef struct {
     unsigned parents[MRK_SELECT_NODES], depths[MRK_SELECT_NODES], roles[MRK_SELECT_NODES], entries[MRK_SELECT_NODES];
     BOOL matches[MRK_SELECT_NODES]; unsigned candidate, label;
     CFStringRef label_attribute; // Public constant only; all objects are owned by the original CF ledger.
+    uint32_t label_attribute_code; // The same public constant, not another observation.
 } MRKSelectionPass;
 typedef union { CFTypeRef value; CFArrayRef array; } MRKPromptOwned;
 typedef struct {
@@ -1298,9 +1309,14 @@ static uint32_t mrk_ax_role(CFStringRef role) {
     if (CFEqual(role, kAXScrollAreaRole)) return MRK_ROLE_SCROLL_AREA;
     return MRK_ROLE_OPAQUE;
 }
-static BOOL mrk_ax_status(MRKPrompt *s, AXError error) {
+static BOOL mrk_ax_status(MRKPrompt *s, AXError error, uint32_t operation_code, uint32_t attribute_code) {
     if (error == kAXErrorSuccess) return YES;
-    if (!s->result.ax_error) s->result.ax_error = error; // Actual first failing AX return, even after an earlier deadline.
+    // Actual first failing AX return, even after an earlier deadline.
+    if (!s->result.ax_error) {
+        s->result.ax_error = error;
+        s->result.ax_failure_operation = operation_code;
+        s->result.ax_failure_attribute = attribute_code;
+    }
     switch (error) {
         case kAXErrorAttributeUnsupported: case kAXErrorActionUnsupported: case kAXErrorNoValue:
         case kAXErrorNotImplemented: case kAXErrorAPIDisabled: return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
@@ -1335,7 +1351,7 @@ static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
         || timeout.required_ns != (uint64_t)ceil((double)timeout.seconds * 1000000000.0))
         return mrk_ax_fail(s, MRK_OPEN_INPUT);
     s->result.calls++;
-    BOOL installed = mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds));
+    BOOL installed = mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds), MRK_AX_OP_SET_MESSAGING_TIMEOUT, MRK_AX_ATTR_NONE);
     // Same endpoint after the setter; never give the upcoming call more time
     // than remains. The callback is atomic/clock-only, with no owner lock.
     BOOL admitted = mrk_ax_admit(s, timeout.required_ns, 0, NULL);
@@ -1344,26 +1360,26 @@ static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
 static BOOL mrk_ax_type(MRKPrompt *s, CFTypeRef value, CFTypeID type) {
     return value && CFGetTypeID(value) == type ? YES : mrk_ax_fail(s, MRK_OPEN_MALFORMED);
 }
-static CFTypeRef mrk_ax_copy(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, BOOL optional) {
+static CFTypeRef mrk_ax_copy(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, BOOL optional, uint32_t attribute_code) {
     MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
     s->result.calls++;
     AXError status = AXUIElementCopyAttributeValue(element, attribute, &slot->value);
     // Optional Title exists only for labelled objects. An actual absent value
     // with no returned object is a nonmatch; IPC/malformed errors are not absence.
     BOOL absent = optional && !slot->value && (status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported);
-    BOOL returned = absent || mrk_ax_status(s, status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    BOOL returned = absent || mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUE, attribute_code), admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!returned || !admitted || absent) return NULL;
     if (!slot->value) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
     return slot->value;
 }
-static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL allow_empty) {
+static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, BOOL allow_empty, uint32_t attribute_code) {
     // A returned zero count is an ordinary empty array, not an illegal index0
     // Copy converted to absence. Count and bounded Copy both spend the common
     // timeout/call budget; a changed or truncated array cannot prove a search.
     if (!mrk_ax_before(s, element)) return NULL;
     CFIndex expected = -1; s->result.calls++;
     AXError count_status = AXUIElementGetAttributeValueCount(element, attribute, &expected);
-    BOOL counted = mrk_ax_status(s, count_status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    BOOL counted = mrk_ax_status(s, count_status, MRK_AX_OP_GET_ATTRIBUTE_VALUE_COUNT, attribute_code), admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!counted || !admitted) return NULL;
     if (expected < 0) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
     if (expected > limit) {
@@ -1375,7 +1391,7 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     MRKPromptOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
     s->result.calls++;
     AXError status = AXUIElementCopyAttributeValues(element, attribute, 0, limit + 1, &slot->array);
-    BOOL copied = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
+    BOOL copied = mrk_ax_status(s, status, MRK_AX_OP_COPY_ATTRIBUTE_VALUES, attribute_code); admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
     CFIndex count = CFArrayGetCount(slot->array);
     if (count < 0 || count > limit) {
@@ -1389,8 +1405,8 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     // depth and cleared role, never a previous sibling's diagnostic state.
     return slot->array;
 }
-static BOOL mrk_ax_equal_attribute(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFTypeRef expected) {
-    CFTypeRef actual = mrk_ax_copy(s, element, attribute, NO);
+static BOOL mrk_ax_equal_attribute(MRKPrompt *s, AXUIElementRef element, CFStringRef attribute, CFTypeRef expected, uint32_t attribute_code) {
+    CFTypeRef actual = mrk_ax_copy(s, element, attribute, NO, attribute_code);
     if (!actual || !mrk_ax_type(s, actual, CFGetTypeID(expected))) return NO;
     return CFEqual(actual, expected) ? YES : mrk_ax_fail(s, MRK_OPEN_CHANGED);
 }
@@ -1398,14 +1414,14 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     AXUIElementRef *parent, AXUIElementRef *sheet) {
     s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
     s->result.site = MRK_OPEN_WINDOWS;
-    CFArrayRef windows = mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO); if (!windows) return NO;
+    CFArrayRef windows = mrk_ax_array(s, app, kAXWindowsAttribute, 4, NO, MRK_AX_ATTR_WINDOWS); if (!windows) return NO;
     AXUIElementRef found_parent = NULL, found_sheet = NULL;
     s->result.site = MRK_OPEN_PARENT_ID;
     for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
         AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
         s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
         if (!mrk_ax_type(s, candidate, s->elementType)) return NO;
-        CFTypeRef name = mrk_ax_copy(s, candidate, kAXIdentifierAttribute, NO);
+        CFTypeRef name = mrk_ax_copy(s, candidate, kAXIdentifierAttribute, NO, MRK_AX_ATTR_IDENTIFIER);
         if (!name || !mrk_ax_type(s, name, CFStringGetTypeID())) return NO;
         if (CFStringGetLength(name) >= 64) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
         if (CFEqual(name, parent_text)) {
@@ -1416,12 +1432,12 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     if (!found_parent) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
     if (*parent && !CFEqual(*parent, found_parent)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
     s->result.checks |= 1u; s->result.site = MRK_OPEN_SHEET;
-    CFArrayRef children = mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO); if (!children) return NO;
+    CFArrayRef children = mrk_ax_array(s, found_parent, kAXChildrenAttribute, 16, NO, MRK_AX_ATTR_CHILDREN); if (!children) return NO;
     for (CFIndex i = 0; i < CFArrayGetCount(children); ++i) {
         AXUIElementRef candidate = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
         s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
         if (!mrk_ax_type(s, candidate, s->elementType)) return NO;
-        CFTypeRef role = mrk_ax_copy(s, candidate, kAXRoleAttribute, NO);
+        CFTypeRef role = mrk_ax_copy(s, candidate, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         s->result.last_role = mrk_ax_role(role);
         if (CFEqual(role, kAXSheetRole)) {
@@ -1433,8 +1449,8 @@ static BOOL mrk_ax_projection(MRKPrompt *s, AXUIElementRef app, CFStringRef pare
     if (*sheet && !CFEqual(*sheet, found_sheet)) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
     s->result.site = MRK_OPEN_TOPOLOGY;
     s->result.last_depth = 0; s->result.last_role = MRK_ROLE_NOT_READ;
-    if (!mrk_ax_equal_attribute(s, found_sheet, kAXIdentifierAttribute, panel_text)
-        || !mrk_ax_equal_attribute(s, found_sheet, kAXParentAttribute, found_parent)) return NO;
+    if (!mrk_ax_equal_attribute(s, found_sheet, kAXIdentifierAttribute, panel_text, MRK_AX_ATTR_IDENTIFIER)
+        || !mrk_ax_equal_attribute(s, found_sheet, kAXParentAttribute, found_parent, MRK_AX_ATTR_PARENT)) return NO;
     s->result.checks |= 2u; *parent = found_parent; *sheet = found_sheet; return YES;
 }
 static BOOL mrk_ax_control_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRef prompt, BOOL rechecking, MRKControlPass *pass) {
@@ -1451,13 +1467,13 @@ static BOOL mrk_ax_control_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRe
         for (unsigned previous = 0; previous < queued; ++previous)
             if (previous != at && pass->nodes[previous] && CFEqual(node, pass->nodes[previous]))
                 return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
-        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]])) return NO;
-        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO);
+        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, pass->nodes[pass->parents[at]], MRK_AX_ATTR_PARENT)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         pass->roles[at] = s->result.last_role = mrk_ax_role(role);
         if (!at && pass->roles[at] != MRK_ROLE_SHEET) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
         if (CFEqual(role, kAXButtonRole)) {
-            CFTypeRef title = mrk_ax_copy(s, node, kAXTitleAttribute, YES);
+            CFTypeRef title = mrk_ax_copy(s, node, kAXTitleAttribute, YES, MRK_AX_ATTR_TITLE);
             if (s->result.error) return NO;
             if (title) {
                 if (!mrk_ax_type(s, title, CFStringGetTypeID())) return NO;
@@ -1466,7 +1482,7 @@ static BOOL mrk_ax_control_roster(MRKPrompt *s, AXUIElementRef sheet, CFStringRe
             }
         }
         if (at && !CFEqual(role, kAXGroupRole) && !CFEqual(role, kAXSplitGroupRole)) continue;
-        CFArrayRef children = mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0);
+        CFArrayRef children = mrk_ax_array(s, node, kAXChildrenAttribute, 16, at != 0, MRK_AX_ATTR_CHILDREN);
         if (!children) { if (s->result.error) return NO; continue; } // Only actual Count0 may be empty.
         CFIndex count = CFArrayGetCount(children);
         if (pass->depths[at] == MRK_CONTROL_DEPTH) return mrk_ax_control_limit(s, MRK_OPEN_CONTROL_DEPTH_LIMIT);
@@ -1490,8 +1506,8 @@ static BOOL mrk_ax_control_path(MRKPrompt *s, AXUIElementRef parent, const MRKCo
         unsigned at = original->chain[left - 1]; AXUIElementRef node = original->nodes[at];
         s->result.last_depth = original->depths[at]; s->result.last_role = MRK_ROLE_NOT_READ;
         if (!mrk_ax_type(s, node, s->elementType)) return NO;
-        if (!mrk_ax_equal_attribute(s, node, kAXParentAttribute, at ? original->nodes[original->parents[at]] : parent)) return NO;
-        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO);
+        if (!mrk_ax_equal_attribute(s, node, kAXParentAttribute, at ? original->nodes[original->parents[at]] : parent, MRK_AX_ATTR_PARENT)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         s->result.last_role = mrk_ax_role(role);
         if (s->result.last_role != original->roles[at]
@@ -1504,8 +1520,8 @@ static BOOL mrk_ax_control_path(MRKPrompt *s, AXUIElementRef parent, const MRKCo
 static BOOL mrk_ax_button(MRKPrompt *s, AXUIElementRef parent, const MRKControlPass *original, CFStringRef prompt) {
     AXUIElementRef button = s->button;
     if (!CFEqual(button, original->nodes[original->candidate])) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
-    if (!mrk_ax_control_path(s, parent, original) || !mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt)) return NO;
-    CFTypeRef enabled = mrk_ax_copy(s, button, kAXEnabledAttribute, NO);
+    if (!mrk_ax_control_path(s, parent, original) || !mrk_ax_equal_attribute(s, button, kAXTitleAttribute, prompt, MRK_AX_ATTR_TITLE)) return NO;
+    CFTypeRef enabled = mrk_ax_copy(s, button, kAXEnabledAttribute, NO, MRK_AX_ATTR_ENABLED);
     if (!enabled || !mrk_ax_type(s, enabled, CFBooleanGetTypeID())) return NO;
     if (!CFBooleanGetValue(enabled)) return mrk_ax_fail(s, MRK_OPEN_INELIGIBLE);
     s->result.checks |= 16u;
@@ -1514,7 +1530,7 @@ static BOOL mrk_ax_button(MRKPrompt *s, AXUIElementRef parent, const MRKControlP
     AXError status = AXUIElementCopyActionNames(button, &slot->array);
     // This public API has no range-limited variant. Its <=16 bound is expressly
     // post-return, not a preallocation promise; its out-slot is already owned.
-    BOOL copied = mrk_ax_status(s, status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    BOOL copied = mrk_ax_status(s, status, MRK_AX_OP_COPY_ACTION_NAMES, MRK_AX_ATTR_NONE), admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!copied || !admitted
         || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NO;
     CFIndex count = CFArrayGetCount(slot->array); unsigned presses = 0;
@@ -1545,8 +1561,8 @@ static unsigned mrk_ax_selection_role(CFStringRef role) {
     return mrk_ax_role(role);
 }
 static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned at,
-    CFStringRef attribute, BOOL optional, CFStringRef expected) {
-    CFTypeRef value = mrk_ax_copy(s, p->nodes[at], attribute, optional);
+    CFStringRef attribute, BOOL optional, CFStringRef expected, uint32_t attribute_code) {
+    CFTypeRef value = mrk_ax_copy(s, p->nodes[at], attribute, optional, attribute_code);
     if (s->result.error) return NO;
     if (!value) return optional;
     if (!mrk_ax_type(s, value, CFStringGetTypeID())) return NO;
@@ -1558,7 +1574,7 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
         if (!p->matches[entry]) {
             p->matches[entry] = YES;
             if (s->result.selection_matches < 2) s->result.selection_matches++;
-            if (s->result.selection_matches == 1) { p->candidate = entry; p->label = at; p->label_attribute = attribute; }
+            if (s->result.selection_matches == 1) { p->candidate = entry; p->label = at; p->label_attribute = attribute; p->label_attribute_code = attribute_code; }
         }
     }
     return YES;
@@ -1574,8 +1590,8 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
         if (!mrk_ax_type(s, node, s->elementType)) return NO;
         for (unsigned other = 0; other < queued; ++other)
             if (other != at && p->nodes[other] && CFEqual(node, p->nodes[other])) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
-        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]])) return NO;
-        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO);
+        if (at && !mrk_ax_equal_attribute(s, node, kAXParentAttribute, p->nodes[p->parents[at]], MRK_AX_ATTR_PARENT)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, node, kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         // Roles outside the small button grammar keep a separate selector meaning.
         unsigned kind = p->roles[at] = s->result.selection_last_role = mrk_ax_selection_role(role);
@@ -1591,8 +1607,8 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
             } else if (!(kind == MRK_ROLE_GROUP || kind == MRK_SELECT_CELL || kind == MRK_SELECT_IMAGE
                 || kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD)) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
             if (kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD) {
-                if (!mrk_ax_selection_label(s, p, at, kAXValueAttribute, NO, expected)) return NO;
-            } else if (!mrk_ax_selection_label(s, p, at, kAXTitleAttribute, YES, expected)) return NO;
+                if (!mrk_ax_selection_label(s, p, at, kAXValueAttribute, NO, expected, MRK_AX_ATTR_VALUE)) return NO;
+            } else if (!mrk_ax_selection_label(s, p, at, kAXTitleAttribute, YES, expected, MRK_AX_ATTR_TITLE)) return NO;
             if (kind == MRK_SELECT_IMAGE || kind == MRK_SELECT_TEXT || kind == MRK_SELECT_FIELD) continue;
         }
         BOOL rows = !entry && (kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE);
@@ -1604,7 +1620,7 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
             continue; // Toolbar/nonselectable leaves are outside this fixed projection.
         }
         CFArrayRef children = mrk_ax_array(s, node, rows ? kAXRowsAttribute : kAXChildrenAttribute,
-            rows || list ? MRK_SELECT_ROWS : 16, at != 0);
+            rows || list ? MRK_SELECT_ROWS : 16, at != 0, rows ? MRK_AX_ATTR_ROWS : MRK_AX_ATTR_CHILDREN);
         if (!children) { if (s->result.error) return NO; continue; }
         CFIndex count = CFArrayGetCount(children);
         // Preserve the original depth-first short circuit and both unchanged caps.
@@ -1629,13 +1645,13 @@ static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef
     }
     s->result.site = MRK_OPEN_SELECTION_RECHECK;
     for (unsigned at = p->label;; at = p->parents[at]) {
-        if (!mrk_ax_equal_attribute(s, p->nodes[at], kAXParentAttribute, at ? p->nodes[p->parents[at]] : parent)) return NO;
-        CFTypeRef role = mrk_ax_copy(s, p->nodes[at], kAXRoleAttribute, NO);
+        if (!mrk_ax_equal_attribute(s, p->nodes[at], kAXParentAttribute, at ? p->nodes[p->parents[at]] : parent, MRK_AX_ATTR_PARENT)) return NO;
+        CFTypeRef role = mrk_ax_copy(s, p->nodes[at], kAXRoleAttribute, NO, MRK_AX_ATTR_ROLE);
         if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return NO;
         if (mrk_ax_selection_role(role) != p->roles[at]) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
         if (!at) break;
     }
-    if (!mrk_ax_equal_attribute(s, p->nodes[p->label], p->label_attribute, expected)) return NO;
+    if (!mrk_ax_equal_attribute(s, p->nodes[p->label], p->label_attribute, expected, p->label_attribute_code)) return NO;
     unsigned container_at = p->parents[p->candidate];
     if (p->entries[p->label] != p->candidate || p->entries[p->candidate] != p->candidate)
         return mrk_ax_fail(s, MRK_OPEN_CHANGED);
@@ -1643,6 +1659,7 @@ static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef
     CFStringRef attribute = kind == MRK_ROLE_TABLE || kind == MRK_ROLE_OUTLINE ? kAXSelectedRowsAttribute
         : kind == MRK_SELECT_LIST ? kAXSelectedChildrenAttribute : NULL;
     if (!attribute) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
+    uint32_t attribute_code = kind == MRK_SELECT_LIST ? MRK_AX_ATTR_SELECTED_CHILDREN : MRK_AX_ATTR_SELECTED_ROWS;
     s->result.selection_attribute = kind == MRK_SELECT_LIST ? 2u : 1u;
     s->result.selection_checks |= 4u;
     AXUIElementRef container = p->nodes[container_at], entry = p->nodes[p->candidate];
@@ -1650,7 +1667,7 @@ static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef
     if (!mrk_ax_before(s, container)) return NO;
     Boolean settable = false; s->result.calls++;
     AXError status = AXUIElementIsAttributeSettable(container, attribute, &settable);
-    BOOL returned = mrk_ax_status(s, status), admitted = mrk_ax_admit(s, 0, 0, NULL);
+    BOOL returned = mrk_ax_status(s, status, MRK_AX_OP_IS_ATTRIBUTE_SETTABLE, attribute_code), admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!returned || !admitted) return NO;
     if (!settable) return mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED);
     s->result.selection_checks |= 8u;
@@ -1662,10 +1679,10 @@ static BOOL mrk_ax_select_entry(MRKPrompt *s, AXUIElementRef parent, CFStringRef
     status = AXUIElementSetAttributeValue(container, attribute, selected->array); // Exactly one selection, never row Press/value write.
     s->result.selection_flags |= 2u;
     if (status == kAXErrorSuccess) s->result.selection_flags |= 4u;
-    returned = mrk_ax_status(s, status); admitted = mrk_ax_admit(s, 0, 0, NULL);
+    returned = mrk_ax_status(s, status, MRK_AX_OP_SET_ATTRIBUTE_VALUE, attribute_code); admitted = mrk_ax_admit(s, 0, 0, NULL);
     if (!returned || !admitted) return NO;
     s->result.site = MRK_OPEN_SELECTION_READBACK;
-    CFArrayRef actual = mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO);
+    CFArrayRef actual = mrk_ax_array(s, container, attribute, MRK_SELECT_ROWS, NO, attribute_code);
     if (!actual) return NO;
     if (CFArrayGetCount(actual) != 1) return mrk_ax_fail(s, MRK_OPEN_CHANGED);
     CFTypeRef value = CFArrayGetValueAtIndex(actual, 0);
@@ -1726,7 +1743,7 @@ static void mrk_ax_open(MRKPrompt *s, const uint8_t *parent_tag, const uint8_t *
     AXError status = AXUIElementPerformAction(button, kAXPressAction);
     s->result.flags |= MRK_OPEN_RETURNED;
     if (status == kAXErrorSuccess) s->result.flags |= MRK_OPEN_TRIGGERED;
-    mrk_ax_status(s, status); mrk_ax_admit(s, 0, 1, NULL);
+    mrk_ax_status(s, status, MRK_AX_OP_PERFORM_ACTION, MRK_AX_ATTR_NONE); mrk_ax_admit(s, 0, 1, NULL);
 }
 void mrk_observation_prompt_press(const uint8_t *parent, const uint8_t *panel, const uint8_t *prompt, size_t capacity,
     const uint8_t *target, size_t target_capacity, uint32_t selection,

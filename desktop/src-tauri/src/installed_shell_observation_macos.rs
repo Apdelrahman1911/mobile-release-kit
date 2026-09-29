@@ -372,7 +372,8 @@ fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProo
         "enabled":c[4],"pressAdvertised":c[5],"sameOriginalControlPathRechecked":c[6]},"calls":p.calls,
         "initialNodesExamined":p.initial_nodes_examined,"recheckNodesExamined":p.recheck_nodes_examined,
         "lastRole":p.last_role,"lastDepth":p.last_depth,
-        "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error})
+        "cfSlots":p.cf_slots,"cfSlotsRetired":p.cf_slots_retired,"cleanupReturned":p.cleanup_returned,"axError":p.ax_error,
+        "axFailure":p.ax_failure.map(|f| json!({"operation":f.operation,"attribute":f.attribute}))})
 }
 struct OpenActionReceipt { token: OpenAction, body: OpenActionBody, returned_at: Instant }
 struct OpenRecheckReceipt { token: OpenAction, stage: u32, body: OpenRecheckBody, returned_at: Instant }
