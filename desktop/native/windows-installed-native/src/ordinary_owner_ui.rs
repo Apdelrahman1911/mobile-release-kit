@@ -1367,15 +1367,63 @@ impl DashboardPass {
 }
 // Ended scans are not continuous UI state. Masks are observed prefixes;
 // an unset button bit does not distinguish absence from a disabled button.
+// Per-scan diagnostic DATA only. A union can describe different matching
+// elements/times, never one continuous button state or native admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DashboardNames { returned: u16, empty: u16, text_mask: u8 }
+struct DashboardChoice { names: u16, types: u64, enabled: u8, reasons: u16 }
+impl DashboardChoice {
+    const TYPE_OTHER: u64 = 1u64 << 41;
+    fn new() -> Self { Self { names: 0, types: 0, enabled: 0, reasons: 0 } }
+    fn name_returned(&mut self, name: &str) {
+        if name == "Choose a project" { self.names = self.names.saturating_add(1); }
+        // Exact fixed public text already returned by this scan. No DOM
+        // association, arbitrary text, path or owner identity is retained.
+        self.reasons |= match name {
+            "Application capabilities are being loaded." => 1u16 << 0,
+            "Finish the original project selection first." => 1u16 << 1,
+            "Browser preview cannot select a native project folder." => 1u16 << 2,
+            "The native desktop bridge is unavailable." => 1u16 << 3,
+            "Application capabilities have not been loaded." => 1u16 << 4,
+            "Project selection is not available in the current desktop runtime profile." => 1u16 << 5,
+            "The application is shutting down." => 1u16 << 6,
+            "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled." | "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work." | "The original offline-check status is unverified. Check retained status before conflicting work." => 1u16 << 7,
+            "Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled." | "The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work." | "The original Android-build status is unverified. Check retained Status before conflicting work." => 1u16 << 8,
+            "iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled." | "The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work." | "The original iOS-archive status is unverified. Check retained Status before conflicting work." => 1u16 << 9,
+            "Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled." | "Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work." | "The original project-recovery status is unverified. Check retained status before conflicting work." => 1u16 << 10,
+            "The original GitHub preflight action is running or unverified. Read its local Status before starting another operation." => 1u16 << 11,
+            "The original protected release workflow action is running or unverified. Read its local Status before starting another operation." => 1u16 << 12,
+            "The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked." | "Finish the original project-path selection. Changing drafts or projects does not cancel it." => 1u16 << 13,
+            "Saved-version edit ownership is unverified. Keep its original operation and do not retry." | "A saved-version edit is still owned. Close or finish that original session before another operation." | "This project needs separately authorized saved-version recovery. No other edit can clear that journal." => 1u16 << 14,
+            "Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one." | "An original image selection or local-copy review is retained. Finish or stop that operation first." | "This project needs a separate image recovery inspection. Another edit cannot bypass its journal." => 1u16 << 15,
+            _ => 0,
+        };
+    }
+    fn control_returned(&mut self, status: i32, control: i32) {
+        // The original query still applies its unchanged clock/status guards.
+        // This is only the actual S_OK output before those guards can refuse.
+        if status != 0 { return; }
+        self.types |= if (50_000..=50_040).contains(&control) {
+            1u64 << ((control - 50_000) as u32)
+        } else { Self::TYPE_OTHER };
+    }
+    fn enabled_entered(&mut self) { self.enabled |= 1; }
+    fn enabled_returned(&mut self, status: i32, enabled: bool) {
+        // Physical return is not query admission, settlement or finality.
+        self.enabled |= 2;
+        if status == 0 { self.enabled |= if enabled { 8 } else { 4 }; }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DashboardNames { returned: u16, empty: u16, text_mask: u8, choice: DashboardChoice }
 impl DashboardNames {
-    fn new() -> Self { Self { returned: 0, empty: 0, text_mask: 0 } }
+    fn new() -> Self { Self { returned: 0, empty: 0, text_mask: 0, choice: DashboardChoice::new() } }
     fn observe(&mut self, name: &str) {
         // Only the existing fully successful name() return reaches this DATA.
         // No name/URL is retained. These finite text categories are not proof
         // of DOM, navigation, control type, provider readiness or finality.
         self.returned = self.returned.saturating_add(1);
+        self.choice.name_returned(name);
         if name.is_empty() { self.empty = self.empty.saturating_add(1); return; }
         self.text_mask |= match name {
             "Mobile Release Kit" => 1,
@@ -1413,6 +1461,21 @@ impl DashboardProgress {
     fn name_returned(&mut self, name: &str) {
         if self.stage == DashboardStage::Names {
             if let Some(names) = &mut self.current_names { names.observe(name); }
+        }
+    }
+    fn choice_control_returned(&mut self, status: i32, control: i32) {
+        if self.stage == DashboardStage::Names {
+            if let Some(names) = &mut self.current_names { names.choice.control_returned(status, control); }
+        }
+    }
+    fn choice_enabled_entered(&mut self) {
+        if self.stage == DashboardStage::Names {
+            if let Some(names) = &mut self.current_names { names.choice.enabled_entered(); }
+        }
+    }
+    fn choice_enabled_returned(&mut self, status: i32, enabled: bool) {
+        if self.stage == DashboardStage::Names {
+            if let Some(names) = &mut self.current_names { names.choice.enabled_returned(status, enabled); }
         }
     }
     fn matches(&mut self, found: [bool; 5]) {
@@ -1566,7 +1629,8 @@ impl SmokeTrace {
     }
     fn format_names(output: &mut impl Write, names: Option<DashboardNames>) -> std::io::Result<()> {
         match names {
-            Some(names) => write!(output, "{{\"returned\":{},\"empty\":{},\"textMask\":{}}}", names.returned, names.empty, names.text_mask),
+            Some(names) => write!(output, "{{\"returned\":{},\"empty\":{},\"textMask\":{},\"choice\":[{},{},{},{}]}}",
+                names.returned, names.empty, names.text_mask, names.choice.names, names.choice.types, names.choice.enabled, names.choice.reasons),
             None => write!(output, "null"),
         }
     }
@@ -2375,10 +2439,19 @@ impl Smoke {
         let table = unsafe { &**pointer.cast::<*const A::IUIAutomationElement_Vtbl>() };
         self.query.control = A::UIA_CONTROLTYPE_ID(0); self.query.begin(clock, &self.trace)?;
         let status = unsafe { (table.CurrentControlType)(pointer, &mut self.query.control) }.0;
+        // Only exact S_OK admits a diagnostic read of the original out-cell.
+        if status == 0 {
+            let control = self.query.control.0;
+            self.trace.dashboard_update(|progress| progress.choice_control_returned(status, control));
+        }
         self.query.returned(status, clock, &self.trace, SmokeCheck::ControlType)?;
         if self.query.control != A::UIA_ButtonControlTypeId { return Ok(false); }
         self.query.boolean = windows::core::BOOL(0); self.query.begin(clock, &self.trace)?;
+        self.trace.dashboard_update(DashboardProgress::choice_enabled_entered);
         let status = unsafe { (table.CurrentIsEnabled)(pointer, &mut self.query.boolean) }.0;
+        // Short-circuit before reading the original out-cell on non-S_OK.
+        let enabled = status == 0 && self.query.boolean.0 != 0;
+        self.trace.dashboard_update(|progress| progress.choice_enabled_returned(status, enabled));
         self.query.returned(status, clock, &self.trace, SmokeCheck::IsEnabled)?; Ok(self.query.boolean.0 != 0)
     }
     fn bound(&mut self, launch: &Launch, clock: &mut Clock) -> Result<()> {
@@ -5160,19 +5233,19 @@ mod contract_tests {
             ("Fixture owner detail — not for diagnostics", 128),
         ] {
             let mut names = DashboardNames::new(); names.observe(name);
-            assert_eq!(names, DashboardNames { returned: 1, empty: 0, text_mask: mask });
+            assert_eq!(names, DashboardNames { returned: 1, empty: 0, text_mask: mask, choice: DashboardChoice::new() });
             let mut output = Vec::new(); SmokeTrace::format_names(&mut output, Some(names)).unwrap();
             let text = std::str::from_utf8(&output).unwrap();
-            assert_eq!(text, format!("{{\"returned\":1,\"empty\":0,\"textMask\":{mask}}}"));
+            assert_eq!(text, format!("{{\"returned\":1,\"empty\":0,\"textMask\":{mask},\"choice\":[0,0,0,0]}}"));
             assert!(!text.contains(name));
         }
         let mut names = DashboardNames::new(); names.observe(""); names.observe("");
-        assert_eq!(names, DashboardNames { returned: 2, empty: 2, text_mask: 0 });
+        assert_eq!(names, DashboardNames { returned: 2, empty: 2, text_mask: 0, choice: DashboardChoice::new() });
         names.observe("about:blank"); names.observe("WebView2"); names.observe("unclassified fixture");
-        assert_eq!(names, DashboardNames { returned: 5, empty: 2, text_mask: 138 });
-        let mut saturated = DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: 255 };
+        assert_eq!(names, DashboardNames { returned: 5, empty: 2, text_mask: 138, choice: DashboardChoice::new() });
+        let mut saturated = DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: 255, choice: DashboardChoice::new() };
         saturated.observe(""); saturated.observe("unclassified fixture");
-        assert_eq!(saturated, DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: 255 });
+        assert_eq!(saturated, DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: 255, choice: DashboardChoice::new() });
 
         // Diagnostic updates outside the existing successful Names phase do
         // nothing. Current prefixes never replace an earlier ended scan.
@@ -5186,7 +5259,7 @@ mod contract_tests {
         trace.dashboard_update(|progress| { progress.name_returned(""); progress.name_returned("about:blank"); });
         trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Loading));
         let ended = trace.dashboard.get().unwrap();
-        assert_eq!(ended.last_scan.unwrap().names, DashboardNames { returned: 2, empty: 1, text_mask: 2 });
+        assert_eq!(ended.last_scan.unwrap().names, DashboardNames { returned: 2, empty: 1, text_mask: 2, choice: DashboardChoice::new() });
         assert_eq!(ended.last_scan.unwrap().walk_visited, 3);
         trace.dashboard_update(|progress| { progress.name_returned("WebView2"); progress.end_names(DashboardScanEnd::Exhausted); });
         assert_eq!(trace.dashboard.get(), Some(ended));
@@ -5195,7 +5268,7 @@ mod contract_tests {
         trace.dashboard_update(DashboardProgress::walk_completed); trace.dashboard_update(DashboardProgress::begin_names);
         trace.dashboard_update(|progress| progress.name_returned("WebView2"));
         let prefix = trace.dashboard.get().unwrap();
-        assert_eq!(prefix.current_names, Some(DashboardNames { returned: 1, empty: 0, text_mask: 8 }));
+        assert_eq!(prefix.current_names, Some(DashboardNames { returned: 1, empty: 0, text_mask: 8, choice: DashboardChoice::new() }));
         assert_eq!(prefix.last_scan, ended.last_scan);
         trace.main_binding_timeouts.set(7);
         assert_eq!(trace.result::<()>(SmokeCheck::CurrentName, Err(Error::Unsafe), None), Err(Error::Unsafe));
@@ -5206,6 +5279,199 @@ mod contract_tests {
         assert_eq!(trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None), Err(Error::Unknown));
         assert_eq!(trace.first.get(), Some(first));
     }
+
+    fn dashboard_choice_observation_contract() {
+        // Inert scalar observations only. No native query, result, clock,
+        // original ownership, provider readiness or finality is fabricated.
+        for (name, expected) in [("Choose a project", 1u16), ("Choose a project ", 0),
+            ("choose a project", 0), (" Choose a project", 0), ("", 0), ("fixture-private-value", 0)] {
+            let mut names = DashboardNames::new(); names.observe(name);
+            assert_eq!(names.choice.names, expected);
+            assert_eq!((names.choice.types, names.choice.enabled, names.choice.reasons), (0, 0, 0));
+            let mut output = Vec::new(); SmokeTrace::format_names(&mut output, Some(names)).unwrap();
+            if !name.is_empty() { assert!(!std::str::from_utf8(&output).unwrap().contains(name)); }
+        }
+        let mut saturated = DashboardChoice { names: u16::MAX, ..DashboardChoice::new() };
+        saturated.name_returned("Choose a project"); assert_eq!(saturated.names, u16::MAX);
+        let mut types = DashboardChoice::new();
+        for control in 50_000..=50_040 {
+            let mut choice = DashboardChoice::new(); choice.control_returned(0, control);
+            assert_eq!(choice.types, 1u64 << ((control - 50_000) as u32));
+            types.control_returned(0, control);
+        }
+        assert_eq!(types.types, (1u64 << 41) - 1);
+        for control in [i32::MIN, 0, 49_999, 50_041, i32::MAX] {
+            let mut choice = DashboardChoice::new(); choice.control_returned(0, control);
+            assert_eq!(choice.types, DashboardChoice::TYPE_OTHER);
+        }
+        types.control_returned(0, i32::MAX); assert_eq!(types.types, (1u64 << 42) - 1);
+        for status in [1, HRESULT_PENDING, -1, i32::MIN] {
+            let mut choice = DashboardChoice::new(); choice.control_returned(status, 50_000);
+            assert_eq!(choice.types, 0);
+            choice.enabled_entered(); assert_eq!(choice.enabled, 1);
+            choice.enabled_returned(status, false); choice.enabled_returned(status, true);
+            assert_eq!(choice.enabled, 3); // Returned non-S_OK contributes no Boolean.
+        }
+        let mut values = DashboardChoice::new(); values.enabled_entered(); assert_eq!(values.enabled, 1);
+        values.enabled_returned(0, false); assert_eq!(values.enabled, 7);
+        values.enabled_returned(0, true); assert_eq!(values.enabled, 15); // Different observations, not simultaneous state.
+        let mut enabled = DashboardChoice::new(); enabled.enabled_entered(); enabled.enabled_returned(0, true);
+        assert_eq!(enabled.enabled, 11);
+
+        let mut reasons = DashboardChoice::new();
+        for (name, bit) in [
+            ("Application capabilities are being loaded.", 0),
+            ("Finish the original project selection first.", 1),
+            ("Browser preview cannot select a native project folder.", 2),
+            ("The native desktop bridge is unavailable.", 3),
+            ("Application capabilities have not been loaded.", 4),
+            ("Project selection is not available in the current desktop runtime profile.", 5),
+            ("The application is shutting down.", 6),
+            ("Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled.", 7),
+            ("Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work.", 7),
+            ("The original offline-check status is unverified. Check retained status before conflicting work.", 7),
+            ("Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.", 8),
+            ("The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.", 8),
+            ("The original Android-build status is unverified. Check retained Status before conflicting work.", 8),
+            ("iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled.", 9),
+            ("The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work.", 9),
+            ("The original iOS-archive status is unverified. Check retained Status before conflicting work.", 9),
+            ("Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled.", 10),
+            ("Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work.", 10),
+            ("The original project-recovery status is unverified. Check retained status before conflicting work.", 10),
+            ("The original GitHub preflight action is running or unverified. Read its local Status before starting another operation.", 11),
+            ("The original protected release workflow action is running or unverified. Read its local Status before starting another operation.", 12),
+            ("The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked.", 13),
+            ("Finish the original project-path selection. Changing drafts or projects does not cancel it.", 13),
+            ("Saved-version edit ownership is unverified. Keep its original operation and do not retry.", 14),
+            ("A saved-version edit is still owned. Close or finish that original session before another operation.", 14),
+            ("This project needs separately authorized saved-version recovery. No other edit can clear that journal.", 14),
+            ("Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one.", 15),
+            ("An original image selection or local-copy review is retained. Finish or stop that operation first.", 15),
+            ("This project needs a separate image recovery inspection. Another edit cannot bypass its journal.", 15),
+        ] {
+            let mut choice = DashboardChoice::new(); choice.name_returned(name);
+            assert_eq!(choice.reasons, 1u16 << bit); assert_eq!(choice.names, 0);
+            reasons.name_returned(name);
+            for near in [format!(" {name}"), format!("{name} ")] {
+                let mut unclassified = DashboardChoice::new(); unclassified.name_returned(&near);
+                assert_eq!(unclassified, DashboardChoice::new());
+            }
+            let names = DashboardNames { returned: 1, empty: 0, text_mask: 128, choice };
+            let mut output = Vec::new(); SmokeTrace::format_names(&mut output, Some(names)).unwrap();
+            assert!(!std::str::from_utf8(&output).unwrap().contains(name));
+        }
+        assert_eq!(reasons.reasons, u16::MAX);
+        assert_eq!((reasons.names, reasons.types, reasons.enabled), (0, 0, 0));
+
+        let trace = SmokeTrace::new();
+        trace.dashboard_update(|progress| progress.choice_control_returned(0, 50_000));
+        assert_eq!(trace.dashboard.get(), None);
+        trace.phase.set(SmokePhase::Dashboard); trace.dashboard_begin_pass();
+        for stage in [DashboardStage::Bind, DashboardStage::Walk] {
+            trace.dashboard_update(|progress| {
+                progress.stage = stage; progress.choice_control_returned(0, 50_000);
+                progress.choice_enabled_entered(); progress.choice_enabled_returned(0, true);
+            });
+            assert_eq!(trace.dashboard.get().unwrap().current_names, None);
+        }
+        trace.dashboard_update(DashboardProgress::begin_walk);
+        trace.dashboard_update(|progress| progress.walk_visited(3));
+        trace.dashboard_update(DashboardProgress::walk_completed);
+        trace.dashboard_update(DashboardProgress::begin_names);
+        trace.dashboard_update(|progress| {
+            progress.name_returned("Choose a project"); progress.choice_control_returned(0, 50_020);
+            progress.name_returned("Choose a project"); progress.choice_control_returned(0, 50_000);
+            progress.choice_enabled_entered(); progress.choice_enabled_returned(0, false);
+            progress.name_returned("The application is shutting down.");
+        });
+        let observed = DashboardChoice { names: 2, types: 1 | (1u64 << 20), enabled: 7, reasons: 1 << 6 };
+        assert_eq!(trace.dashboard.get().unwrap().current_names.unwrap().choice, observed);
+        trace.dashboard_update(|progress| progress.end_names(DashboardScanEnd::Exhausted));
+        let ended = trace.dashboard.get().unwrap(); assert_eq!(ended.last_scan.unwrap().names.choice, observed);
+        trace.dashboard_update(|progress| {
+            progress.name_returned("Choose a project"); progress.choice_control_returned(0, 50_040);
+            progress.choice_enabled_entered(); progress.choice_enabled_returned(0, true);
+        });
+        assert_eq!(trace.dashboard.get(), Some(ended));
+        trace.dashboard_begin_pass();
+        assert_eq!(trace.dashboard.get().unwrap().current_names, None);
+        assert_eq!(trace.dashboard.get().unwrap().last_scan, ended.last_scan);
+        trace.dashboard_update(DashboardProgress::begin_walk);
+        trace.dashboard_update(|progress| progress.walk_visited(1));
+        trace.dashboard_update(DashboardProgress::walk_completed);
+        trace.dashboard_update(DashboardProgress::begin_names);
+        trace.dashboard_update(|progress| {
+            progress.name_returned("Choose a project"); progress.choice_control_returned(0, 50_000);
+            progress.choice_enabled_entered(); progress.choice_enabled_returned(0, true);
+        });
+        let prefix = trace.dashboard.get().unwrap();
+        assert_eq!(prefix.current_names.unwrap().choice, DashboardChoice { names: 1, types: 1, enabled: 11, reasons: 0 });
+        assert_eq!(prefix.last_scan, ended.last_scan);
+        // Invented post-return Clock refusal only. The source relation below
+        // binds these diagnostic taps before the unchanged original query guard.
+        assert_eq!(trace.result::<()>(SmokeCheck::Clock, Err(Error::Unsafe), None), Err(Error::Unsafe));
+        let first = trace.first.get().unwrap();
+        assert_eq!(first.dashboard, Some(prefix)); assert_eq!(first.status, None);
+        trace.dashboard_update(|progress| {
+            progress.name_returned("fixture-private-value"); progress.choice_control_returned(0, i32::MAX);
+            progress.choice_enabled_returned(0, false); progress.end_names(DashboardScanEnd::Stale);
+        });
+        assert_eq!(trace.result::<()>(SmokeCheck::ComRelease, Err(Error::Unknown), None), Err(Error::Unknown));
+        assert_eq!(trace.first.get(), Some(first));
+        let mut output = Vec::new(); trace.emit_to(&mut output).unwrap();
+        assert!(!std::str::from_utf8(&output).unwrap().contains("fixture-private-value"));
+        assert!(output.len() <= 1024);
+
+        for end in [DashboardScanEnd::Loading, DashboardScanEnd::Stale] {
+            let mut pass = DashboardPass { found: [true; 5], end: None }; pass.finish(end);
+            assert_eq!(pass.found, [false; 5]); assert!(!pass.ready());
+        }
+        let mut incomplete = DashboardPass { found: [true, true, true, true, false], end: None };
+        incomplete.finish(DashboardScanEnd::Exhausted); assert!(!incomplete.ready());
+
+        // Closed source relation: no new native query or clock/result call.
+        let source = include_str!("ordinary_owner_ui.rs");
+        let body = source.split_once("    fn enabled_button(").unwrap().1.split_once("    fn bound(").unwrap().0;
+        for call in ["(table.CurrentControlType)", "(table.CurrentIsEnabled)"] { assert_eq!(body.matches(call).count(), 1); }
+        assert_eq!(body.matches("self.query.begin(clock, &self.trace)?").count(), 2);
+        assert_eq!(body.matches("self.query.returned(status, clock, &self.trace,").count(), 2);
+        assert_eq!(body.matches("clock.").count(), 0);
+        // Gate evaluation itself, not merely the bits stored by the helpers.
+        // Pending/non-S_OK keeps the original out-cell unread and unadmitted.
+        assert_eq!(body.matches("self.query.control.0").count(), 1);
+        assert_eq!(body.matches("self.query.boolean.0").count(), 2);
+        assert_eq!(body.matches("if status == 0 {").count(), 1);
+        assert!(body.contains(concat!(
+            "        if status == 0 {\n",
+            "            let control = self.query.control.0;\n",
+            "            self.trace.dashboard_update(|progress| progress.choice_control_returned(status, control));\n",
+            "        }\n",
+        )));
+        // The short circuit avoids the Boolean read on every nonzero status;
+        // the unconditional return tap still precedes the original query guard.
+        assert!(body.contains(concat!(
+            "        let enabled = status == 0 && self.query.boolean.0 != 0;\n",
+            "        self.trace.dashboard_update(|progress| progress.choice_enabled_returned(status, enabled));\n",
+            "        self.query.returned(status, clock, &self.trace, SmokeCheck::IsEnabled)?; Ok(self.query.boolean.0 != 0)\n",
+        )));
+        let at = |needle: &str| body.find(needle).unwrap();
+        let order = [
+            "(table.CurrentControlType)", "if status == 0 {", "let control = self.query.control.0;",
+            "progress.choice_control_returned(status, control)",
+            "self.query.returned(status, clock, &self.trace, SmokeCheck::ControlType)?",
+            "if self.query.control != A::UIA_ButtonControlTypeId { return Ok(false); }",
+            "DashboardProgress::choice_enabled_entered", "(table.CurrentIsEnabled)",
+            "let enabled = status == 0 && self.query.boolean.0 != 0;", "progress.choice_enabled_returned(status, enabled)",
+            "self.query.returned(status, clock, &self.trace, SmokeCheck::IsEnabled)?", "Ok(self.query.boolean.0 != 0)",
+        ].map(at);
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
+        let observe = source.split_once("    fn observe(&mut self, launch: &Launch, version: &str, clock: &mut Clock)").unwrap().1
+            .split_once("fn smoke_result<T>").unwrap().0;
+        assert!(observe.contains("if name == \"Choose a project\" { pass.found[4] |= self.enabled_button(index, clock)?; }"));
+        assert!(!observe.contains(".choice"));
+    }
+
 
     fn startup_diagnostic_contract() {
         use crate::ui_startup_data::{Event, NativeError, NativeMark, Stage};
@@ -5760,7 +6026,7 @@ mod contract_tests {
     #[test]
     fn native_smoke_never_credits_posting_or_partial_release_as_finality() {
         main_window_selection_contract(); initial_main_readiness_contract(); dashboard_main_handle_readiness_contract();
-        dashboard_name_observation_contract(); dashboard_stale_name_contract(); dashboard_walk_timeout_contract();
+        dashboard_name_observation_contract(); dashboard_choice_observation_contract(); dashboard_stale_name_contract(); dashboard_walk_timeout_contract();
         startup_diagnostic_contract();
         quit_logical_controls_contract();
         for role in [UiRole::NormalSmoke, UiRole::ProjectDraft, UiRole::QuitPassive, UiRole::DocumentLoss, UiRole::CredentialSession] {
@@ -5900,7 +6166,7 @@ mod contract_tests {
         assert_eq!(prefix.dashboard.get().unwrap().current_match_mask, Some(31));
         assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_match_mask, Some(15));
         assert_eq!(prefix.first.get().unwrap().dashboard.unwrap().current_names,
-            Some(DashboardNames { returned: 1, empty: 0, text_mask: 128 }));
+            Some(DashboardNames { returned: 1, empty: 0, text_mask: 128, choice: DashboardChoice::new() }));
         for phase in SmokePhase::ALL.iter().copied().filter(|phase| *phase != SmokePhase::Dashboard) {
             let trace = SmokeTrace::new(); trace.phase.set(SmokePhase::Dashboard); trace.dashboard_begin_pass();
             trace.dashboard_update(|progress| *progress = loading); trace.main_binding_timeouts.set(7); trace.phase.set(phase);
@@ -6020,7 +6286,8 @@ mod contract_tests {
         }
         // Conservative combinations include nullable current fields and false
         // (longer than true), even when not jointly reachable in production.
-        let widest_names = DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: u8::MAX };
+        let widest_names = DashboardNames { returned: u16::MAX, empty: u16::MAX, text_mask: u8::MAX,
+            choice: DashboardChoice { names: u16::MAX, types: (1u64 << 42) - 1, enabled: 15, reasons: u16::MAX } };
         let widest_dashboard = DashboardProgress { stage: DashboardStage::NamesEnded, any_walk_completed: false,
             current_walk_visited: Some(usize::MAX), current_match_mask: Some(u8::MAX), current_names: Some(widest_names),
             last_scan: Some(DashboardScan { match_mask: u8::MAX, end: DashboardScanEnd::Exhausted, walk_visited: usize::MAX, names: widest_names }),
@@ -6052,9 +6319,9 @@ mod contract_tests {
                         assert!(text.contains(&format!("\"currentWalkVisited\":{expected_count}")));
                         assert!(text.contains(if progress.current_match_mask.is_some() { "\"currentMatchMask\":255" } else { "\"currentMatchMask\":null" }));
                         assert!(text.contains(if progress.current_names.is_some() {
-                            "\"currentNames\":{\"returned\":65535,\"empty\":65535,\"textMask\":255}"
+                            "\"currentNames\":{\"returned\":65535,\"empty\":65535,\"textMask\":255,\"choice\":[65535,4398046511103,15,65535]}"
                         } else { "\"currentNames\":null" }));
-                        assert!(text.contains(&format!("\"lastScan\":{{\"matchMask\":255,\"end\":\"exhausted\",\"walkVisited\":{},\"names\":{{\"returned\":65535,\"empty\":65535,\"textMask\":255}}}},\"scanHistory\":\"exhausted-seen\"", usize::MAX)));
+                        assert!(text.contains(&format!("\"lastScan\":{{\"matchMask\":255,\"end\":\"exhausted\",\"walkVisited\":{},\"names\":{{\"returned\":65535,\"empty\":65535,\"textMask\":255,\"choice\":[65535,4398046511103,15,65535]}}}},\"scanHistory\":\"exhausted-seen\"", usize::MAX)));
                     }
                     None => assert!(text.contains("\"dashboard\":null")),
                 }
