@@ -591,6 +591,29 @@ jobs:
                                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite-json")))
           def sig(s):
               return (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          def pair_directory_same(a, b):
+              # A DIRECTORY-only custody key. Preserve sig/full stat snapshots,
+              # including nlink observations; regular files and ACKs still use sig.
+              return (stat.S_ISDIR(a.st_mode) and stat.S_ISDIR(b.st_mode)
+                      and (a.st_dev, a.st_ino, a.st_mode, a.st_uid, a.st_gid)
+                      == (b.st_dev, b.st_ino, b.st_mode, b.st_uid, b.st_gid))
+          def pair_prelaunch_mark(data, predicate, phase=None):
+              phases = ("setup", "sdk-binding", "parent-open", "root-create", "root-open", "root-admission",
+                        "request-encode", "request-write", "request-read", "request-readback", "binary-admission", "worker-prepare", "launch")
+              predicates = ("sdk-load", "sdk-symbol", "sdk-signature", "deadline", "control-registration", "control-open", "control-close",
+                            "root-mkdir", "root-held-stat", "root-named-stat", "root-held-binding", "root-named-binding", "root-mode",
+                            "ordinary-account", "nonce", "request-encoding", "record-format", "file-held-stat", "file-named-stat",
+                            "file-held-binding", "file-named-binding", "file-shape", "file-write", "file-write-length", "file-sync",
+                            "file-read", "file-read-length", "file-eof", "file-eof-length", "readback", "binary-digest", "worker-create", "worker-start")
+              if predicate not in predicates or phase is not None and phase not in phases: raise ValueError("pair-prelaunch-diagnostic-label")
+              if not data["returned"] and data["firstFailure"] is None:
+                  if phase is not None: data["phase"] = phase
+                  data["predicate"] = predicate
+          def pair_prelaunch_failure(data):
+              # Later independent join/close errors remain in their original
+              # ledgers; they can never replace the first prelaunch predicate.
+              if not data["returned"] and data["firstFailure"] is None:
+                  data["firstFailure"] = {"phase": data["phase"], "predicate": data["predicate"]}
           def publish(leaf, data):
               if len(data) > 4 * 1024 * 1024: raise ValueError("wrapping-public-output-bound")
               fd = os.open(work / leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -1281,7 +1304,9 @@ jobs:
                       "startAttempted": False, "startReturned": False, "joinAttempted": False, "joinReturned": False, "joined": False,
                       "readyAdmitted": False, "readerOwnerReturned": False, "readerNativeAdmitted": False, "creatorNativeAdmitted": False,
                       "ackEntered": False, "ackReturned": False, "ackMayHavePublished": False, "ackPublished": False,
-                      "controlRetired": False, "aborted": False, "passed": False, "errors": [], "controlCalls": []}
+                      "controlRetired": False, "aborted": False, "passed": False, "errors": [], "controlCalls": [],
+                      "prelaunch": {"phase": "setup", "predicate": None, "returned": False, "firstFailure": None},
+                      "directoryLinks": {"initial": None, "held": None, "named": None}}
               receipt["pair"] = pair
               holder = {"bodyEntered": False, "bodyReturned": False, "ownerEntered": False, "ownerReturned": False,
                         "guardInstalled": False, "guardActivated": False, "guardRestored": False, "guardChecked": False,
@@ -1302,44 +1327,69 @@ jobs:
               originals.append(pair_original)
               parent_fd, root_fd, root_pin, nonce, root_identity = None, None, None, None, None
               cells = {}
+              def mark(predicate, phase=None):
+                  pair_prelaunch_mark(pair["prelaunch"], predicate, phase)
               def fail(error):
+                  pair_prelaunch_failure(pair["prelaunch"])
                   with lock: abort.set()
                   original_errors.append(error)
               def check_time(endpoint):
+                  mark("deadline")
                   if abort.is_set() or time.monotonic() >= endpoint: raise ValueError("pair-forward-admission-spent")
               def resource(role, acquire):
+                  mark("control-registration")
                   matching = [cell for cell in resources if cell["record"]["role"] == role]
                   if len(matching) != 1 or matching[0]["record"]["openEntered"]: raise ValueError("pair-unregistered-control-open")
                   cell = matching[0]; row = cell["record"]; row["openEntered"] = True
+                  mark("control-open")
                   cell["fd"] = acquire(); row["openReturned"] = True; row["acquired"] = True
                   return cell
               def close(cell):
                   row = cell["record"]
                   if cell["fd"] is None or row["closeEntered"]: return
                   fd, cell["fd"] = cell["fd"], None; cell["consumedFd"] = fd; row["closeEntered"] = True
+                  mark("control-close")
                   try: os.close(fd); row["closeReturned"] = True; row["closed"] = True
                   except BaseException as error:
                       row["closeError"] = type(error).__name__; raise # No invented physical return from a Python exception.
               def root_check():
-                  actual, named = os.fstat(root_fd), os.stat("wrapping-pair-control", dir_fd=parent_fd, follow_symlinks=False)
-                  if (sig(actual)[:6] != sig(root_pin)[:6] or sig(named)[:6] != sig(root_pin)[:6]
-                          or actual.st_mode != 0o040700 or actual.st_nlink != 2): raise ValueError("pair-control-root-changed")
+                  mark("root-held-stat")
+                  actual = os.fstat(root_fd); pair["directoryLinks"]["held"] = actual.st_nlink
+                  mark("root-named-stat")
+                  named = os.stat("wrapping-pair-control", dir_fd=parent_fd, follow_symlinks=False)
+                  pair["directoryLinks"]["named"] = named.st_nlink
+                  mark("root-held-binding")
+                  if not pair_directory_same(actual, root_pin): raise ValueError("pair-control-root-changed")
+                  mark("root-named-binding")
+                  if not pair_directory_same(named, root_pin): raise ValueError("pair-control-root-changed")
+                  mark("root-mode")
+                  if actual.st_mode != 0o040700: raise ValueError("pair-control-root-changed")
               def file_check(cell, leaf):
                   root_check()
-                  held, named = os.fstat(cell["fd"]), os.stat(leaf, dir_fd=root_fd, follow_symlinks=False)
-                  if sig(held) != sig(cell["pin"]) or sig(named) != sig(held): raise ValueError("pair-control-file-changed")
+                  mark("file-held-stat")
+                  held = os.fstat(cell["fd"])
+                  mark("file-named-stat")
+                  named = os.stat(leaf, dir_fd=root_fd, follow_symlinks=False)
+                  mark("file-held-binding")
+                  if sig(held) != sig(cell["pin"]): raise ValueError("pair-control-file-changed")
+                  mark("file-named-binding")
+                  if sig(named) != sig(held): raise ValueError("pair-control-file-changed")
               def read_record(leaf, length):
                   root_check()
                   cell = resource(leaf, lambda: os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root_fd))
-                  cells[leaf] = cell; cell["pin"] = os.fstat(cell["fd"])
+                  cells[leaf] = cell; mark("file-held-stat"); cell["pin"] = os.fstat(cell["fd"])
                   pin = cell["pin"]
+                  mark("file-shape")
                   if (pin.st_mode != 0o100600 or pin.st_nlink != 1 or (pin.st_uid, pin.st_gid) != root_identity[2:]
                           or pin.st_size != length): raise ValueError("pair-control-file-shape")
                   file_check(cell, leaf)
-                  row = cell["record"]; row["readEntered"] = True
+                  row = cell["record"]; row["readEntered"] = True; mark("file-read")
                   data = os.pread(cell["fd"], length, 0); row["readReturned"] = True; row["readBytes"] = len(data)
+                  mark("file-read-length")
                   if len(data) != length: raise ValueError("pair-control-short-read")
-                  row["eofEntered"] = True; extra = os.pread(cell["fd"], 1, length); row["eofReturned"] = True; row["eofBytes"] = len(extra)
+                  row["eofEntered"] = True; mark("file-eof")
+                  extra = os.pread(cell["fd"], 1, length); row["eofReturned"] = True; row["eofBytes"] = len(extra)
+                  mark("file-eof-length")
                   if extra: raise ValueError("pair-control-extra-data")
                   file_check(cell, leaf)
                   return cell, data
@@ -1347,45 +1397,56 @@ jobs:
                   root_check()
                   cell = resource("request-write" if leaf == "request" else leaf, lambda: os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=root_fd))
                   cells[leaf] = cell
-                  row = cell["record"]; row["writeEntered"] = True
+                  row = cell["record"]; row["writeEntered"] = True; mark("file-write")
                   written = os.write(cell["fd"], data); row["writeReturned"] = True; row["writeBytes"] = written
+                  mark("file-write-length")
                   if written != len(data): raise ValueError("pair-control-short-write")
-                  row["syncEntered"] = True; os.fsync(cell["fd"]); row["syncReturned"] = True
-                  cell["pin"] = os.fstat(cell["fd"])
-                  pin = cell["pin"]
+                  row["syncEntered"] = True; mark("file-sync"); os.fsync(cell["fd"]); row["syncReturned"] = True
+                  mark("file-held-stat"); cell["pin"] = os.fstat(cell["fd"])
+                  pin = cell["pin"]; mark("file-shape")
                   if pin.st_mode != 0o100600 or pin.st_nlink != 1 or (pin.st_uid, pin.st_gid) != root_identity[2:] or pin.st_size != len(data):
                       raise ValueError("pair-control-created-shape")
                   file_check(cell, leaf); close(cell)
                   return cell
               try:
                   # Fixed SDK binding; never search/fallback to an overwrite rename.
+                  mark("sdk-load", "sdk-binding")
                   libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-                  exclusive_rename = libc.renameatx_np
+                  mark("sdk-symbol"); exclusive_rename = libc.renameatx_np
+                  mark("sdk-signature")
                   exclusive_rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
                   exclusive_rename.restype = ctypes.c_int
-                  check_time(launch_end)
+                  mark("deadline", "parent-open"); check_time(launch_end)
                   parent = resource("parent", lambda: os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC))
                   parent_fd = parent["fd"]
-                  pair["mkdirEntered"] = True
+                  mark("root-mkdir", "root-create"); pair["mkdirEntered"] = True
                   os.mkdir("wrapping-pair-control", mode=0o700, dir_fd=parent_fd); pair["mkdirReturned"] = True
+                  mark("control-open", "root-open")
                   root = resource("root", lambda: os.open("wrapping-pair-control", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent_fd))
-                  root_fd = root["fd"]; root_pin = os.fstat(root_fd)
+                  root_fd = root["fd"]; mark("root-held-stat"); root_pin = os.fstat(root_fd)
+                  root["pin"] = root_pin; pair["directoryLinks"]["initial"] = root_pin.st_nlink
+                  mark("ordinary-account", "root-admission")
                   if root_pin.st_uid != os.getuid() or root_pin.st_gid != os.getgid() or os.getuid() == 0 or os.getuid() != os.geteuid() or os.getgid() != os.getegid():
                       raise ValueError("pair-control-ordinary-account")
                   root_identity = (root_pin.st_dev & 0xffffffff, root_pin.st_ino, root_pin.st_uid, root_pin.st_gid)
-                  root_check(); nonce = os.urandom(16)
+                  root_check(); mark("nonce", "request-encode"); nonce = os.urandom(16)
+                  mark("request-encoding")
                   request = b"MRKQPR01" + struct.pack("<HHI", 1, 2, 0) + nonce + struct.pack("<QQII", *root_identity) + b"\0" * 8
-                  record_bytes(request, "request", nonce, root_identity)
-                  request_written = write_record("request", request)
-                  request_cell, readback = read_record("request", 64)
+                  mark("record-format"); record_bytes(request, "request", nonce, root_identity)
+                  mark("root-held-stat", "request-write"); request_written = write_record("request", request)
+                  mark("root-held-stat", "request-read"); request_cell, readback = read_record("request", 64)
+                  mark("readback", "request-readback")
                   if sig(request_cell["pin"]) != sig(request_written["pin"]) or readback != request: raise ValueError("pair-request-readback")
+                  mark("binary-digest", "binary-admission")
                   for original in (creator, reader):
                       if file_digest(original) != original["sha256"]: raise ValueError("pair-prelaunch-binary-changed")
+                  mark("worker-create", "worker-prepare")
                   argv = [str(creator["path"]), "--exact", creator_entry, "--test-threads=1", "--color=never", "--format=pretty", "--nocapture"]
                   worker = threading.Thread(target=creator_worker, args=(holder, lock, abort, argv, control, launch_end, drain_end), daemon=False)
                   pair_original["thread"] = worker
-                  pair["startAttempted"] = True; check_time(launch_end)
-                  worker.start(); pair["startReturned"] = True
+                  mark("deadline", "launch"); pair["startAttempted"] = True; check_time(launch_end)
+                  mark("worker-start"); worker.start(); pair["startReturned"] = True
+                  pair["prelaunch"]["returned"] = True
                   for attempt in range(80):
                       check_time(ready_end); root_check()
                       pair["readyPolls"] = attempt + 1
@@ -1704,6 +1765,7 @@ jobs:
                   cohort["reportAdmitted"] = True
               receipt["nativeOriginalReturned"] = all(row["returned"] for row in receipt["nativeCohorts"])
               receipt["nativeReportAdmitted"] = all(row["reportAdmitted"] for row in receipt["nativeCohorts"])
+              stage = "wrapping-creator-reader"
               run_creator_reader(qualification_binary, reader_binary)
               # This is only the reviewed API-level query scope, not global window or
               # production signing/provider qualification. Both originals are now settled.

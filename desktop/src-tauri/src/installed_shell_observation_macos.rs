@@ -363,7 +363,8 @@ fn selection_value(p: mrk_macos_installed_native::VersionSourceSelection) -> Val
     let c = p.checks;
     json!({"checks":{"completeProjection":c[0],"uniqueEntry":c[1],"originalLabelChainRechecked":c[2],
         "attributeSettable":c[3],"singletonOriginalEntryReadback":c[4]},"attempted":p.attempted,"returned":p.returned,
-        "selected":p.selected,"nodes":p.nodes,"matches":p.matches,"attribute":p.attribute,"lastRole":p.last_role,"depth":p.depth})
+        "selected":p.selected,"nodes":p.nodes,"matches":p.matches,"attribute":p.attribute,"lastRole":p.last_role,"depth":p.depth,
+        "limit":p.limit.map(|r| json!({"predicate":r.predicate,"observed":r.observed,"cap":r.cap,"queued":r.queued,"children":r.children}))})
 }
 fn prompt_button_value(p: mrk_macos_installed_native::ControlContainerButtonProof) -> Value {
     let c = p.checks;

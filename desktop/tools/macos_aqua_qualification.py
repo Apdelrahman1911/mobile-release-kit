@@ -177,6 +177,8 @@ ACCESSIBILITY_SELECTION_SITES = frozenset((
     "selection-parent-proof selection-projection selection-recheck selection-settable selection-write selection-readback"
 ).split())
 ACCESSIBILITY_SITES |= ACCESSIBILITY_SELECTION_SITES
+ACCESSIBILITY_SELECTION_LIMITS = ("label-length", "child-count", "child-copy-count", "queue-capacity", "depth",
+                                  "ax-call-budget", "cf-slot-budget")
 ACCESSIBILITY_SELECTION_CHECKS = ("completeProjection", "uniqueEntry", "originalLabelChainRechecked",
                                   "attributeSettable", "singletonOriginalEntryReadback")
 ACCESSIBILITY_CONTROL_ROLES = ("not-read", "Sheet", "Group", "SplitGroup", "Button",
@@ -1008,7 +1010,7 @@ def expected_result(binding, case):
                     "selectionParentProof": parent, "selectionParentPrompt": True,
                     "selection": {"checks": dict.fromkeys(ACCESSIBILITY_SELECTION_CHECKS, True),
                         "attempted": True, "returned": True, "selected": True, "nodes": 12, "matches": 1,
-                        "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4}}
+                        "attribute": "SelectedRows", "lastRole": "StaticText", "depth": 4, "limit": None}}
                 row["selectionInput"]["promptButton"].update(calls=221, cfSlots=120, cfSlotsRetired=120)
                 row["selectionBinding"] = {**value["native"]["projectOpenBinding"],
                     "mechanism": "selection-parent-original-sheet-v3", "id": identifier, "kind": "version-source",
@@ -1418,17 +1420,60 @@ def _accessibility_prompt_button(value):
 
 
 def _selection_succeeded(value):
-    return (value is not None and all(value["checks"].values()) and value["attempted"] is True
+    return (value is not None and value["limit"] is None and all(value["checks"].values()) and value["attempted"] is True
             and value["returned"] is True and value["selected"] is True and value["matches"] == 1
             and 1 <= value["nodes"] <= 48 and value["attribute"] in ("SelectedRows", "SelectedChildren")
             and value["lastRole"] != "not-read" and 1 <= value["depth"] <= min(8, value["nodes"]))
 
 
-def _accessibility_selection(value, button):
+def _accessibility_selection_limit(value, selection, button, site, error):
+    """Closed first-refusal scalars from existing calls; never a new observation."""
+    label = "accessibility-selection-limit"
+    if value is None:
+        need(not (site in ACCESSIBILITY_SELECTION_SITES - {"selection-parent-proof"} and error == "limit"), label)
+        return value
+    need(type(value) is dict and set(value) == {"predicate", "observed", "cap", "queued", "children"}, label)
+    predicate, count, cap, queued, children = (value[key] for key in ("predicate", "observed", "cap", "queued", "children"))
+    need(type(predicate) is str and predicate in ACCESSIBILITY_SELECTION_LIMITS, label)
+    need(type(count) is int and -(1 << 63) <= count < (1 << 63)
+         and type(cap) is int and 1 <= cap <= 512, label)
+    need(error == "limit" and site in ("selection-projection", "selection-recheck", "selection-settable", "selection-readback")
+         and button is not None and button["axError"] == 0, label)
+    projection = site == "selection-projection"
+    if projection:
+        need(type(queued) is int and 1 <= queued <= 49 and queued > selection["nodes"]
+             and not any(selection["checks"].values()), label)
+    else:
+        need(queued is None, label)
+    need(children is None or type(children) is int and 1 <= children <= 32, label)
+    role = selection["lastRole"]
+    child_cap = (32 if role in ("Table", "Outline", "List") else
+                 16 if role in ("Sheet", "Group", "SplitGroup", "Browser", "ScrollArea", "Column", "Row", "Cell") else 0)
+    if predicate == "label-length":
+        valid = (projection and cap == 512 and count > 512 and children is None and selection["nodes"] > 0
+                 and selection["depth"] > 0 and role in ("Group", "Row", "Cell", "Image", "StaticText", "TextField"))
+    elif predicate in ("child-count", "child-copy-count"):
+        valid = ((projection and child_cap != 0 and cap == child_cap or site == "selection-readback" and cap == 32)
+                 and children is None and (count > cap or predicate == "child-copy-count" and count < 0))
+    elif predicate == "queue-capacity":
+        valid = (projection and cap == 49 and count == queued and child_cap != 0 and children is not None
+                 and children <= child_cap and children > 49 - queued and selection["depth"] < 8)
+    elif predicate == "depth":
+        valid = (projection and cap == 8 and count == 8 and selection["depth"] == 8
+                 and child_cap != 0 and children is not None and children <= child_cap)
+    elif predicate == "ax-call-budget":
+        valid = cap == 512 and count == button["calls"] and 511 <= count <= 512 and children is None
+    else:
+        valid = cap == 256 and count == button["cfSlots"] == 256 and children is None
+    need(valid, label)
+    return value
+
+
+def _accessibility_selection(value, button, site, error):
     """Actual selector scalars, never a filename, URL, or substitute Open proof."""
     label = "accessibility-selection-data"
     need(type(value) is dict and set(value) == {"checks", "attempted", "returned", "selected",
-                                               "nodes", "matches", "attribute", "lastRole", "depth"}, label)
+                                               "nodes", "matches", "attribute", "lastRole", "depth", "limit"}, label)
     checks = value["checks"]
     need(type(checks) is dict and set(checks) == set(ACCESSIBILITY_SELECTION_CHECKS)
          and all(type(v) is bool for v in checks.values()), label)
@@ -1450,6 +1495,7 @@ def _accessibility_selection(value, button):
     need(not value["attempted"] or checks["attributeSettable"], label)
     need(not checks["singletonOriginalEntryReadback"] or value["selected"] is True, label)
     need(value["selected"] is not False or button is not None and button["axError"] != 0, label)
+    _accessibility_selection_limit(value["limit"], value, button, site, error)
     return value
 
 
@@ -1592,11 +1638,11 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
             need((selection is None) == (button is None), label)
             if selection is not None:
                 need(value["bodyReturned"] and value["nativeEntered"] is True, label)
-                _accessibility_selection(selection, button)
+                _accessibility_selection(selection, button, site, error)
                 selector_ready = _selection_succeeded(selection)
                 started = (any(selection["checks"].values()) or selection["nodes"] != 0 or selection["matches"] != 0
                     or selection["lastRole"] != "not-read" or selection["depth"] != 0
-                    or selection["attempted"] or selection["returned"] or selection["selected"] is not None)
+                    or selection["attempted"] or selection["returned"] or selection["selected"] is not None or selection["limit"] is not None)
                 need(not started or parent_ready and button["calls"] > 0 and button["cfSlots"] > 0
                      and button["checks"]["parentBound"] and button["checks"]["sheetBound"], label)
                 need(not any(button["checks"][key] for key in ACCESSIBILITY_BUTTON_CHECKS[2:]) or selector_ready, label)

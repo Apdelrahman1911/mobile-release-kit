@@ -888,9 +888,15 @@ typedef struct { uint32_t flags, site, error, checks, calls, initial_nodes_exami
     int32_t ax_error; uint32_t last_role, last_depth;
     uint32_t selection_mode, selection_checks, selection_flags, selection_nodes, selection_matches,
         selection_attribute, selection_last_role, selection_depth;
+    // Zero predicate means no observed refusal; queued/children zero means
+    // unreached (their observed domains start at one), never an observed zero.
+    uint32_t selection_limit, selection_limit_cap, selection_limit_queued, selection_limit_children;
+    int64_t selection_limit_observed;
 } MRKOpenResult;
 typedef struct { uint32_t known, error, prompt; MRKIdentityProof proof; } MRKOpenRecheck;
-_Static_assert(sizeof(MRKOpenResult) == 80 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(MRKOpenResult) == 104 && sizeof(MRKOpenRecheck) == 48, "fixed original Press scalar ABI");
+_Static_assert(sizeof(CFIndex) == sizeof(int64_t) && offsetof(MRKOpenResult, selection_limit_observed) == 96,
+    "lossless original selection count ABI");
 typedef struct { float seconds; uint64_t required_ns; } MRKOpenTimeout;
 typedef int (*MRKOpenAdmission)(void *, uint64_t, int, MRKOpenTimeout *);
 typedef int (*MRKOpenRecheckCall)(void *, int);
@@ -1222,6 +1228,9 @@ enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_
     MRK_SELECT_NODES = 49, MRK_SELECT_ROWS = 32 };
 enum { MRK_SELECT_COLUMN = 10, MRK_SELECT_LIST, MRK_SELECT_ROW, MRK_SELECT_CELL,
     MRK_SELECT_IMAGE, MRK_SELECT_TEXT, MRK_SELECT_FIELD };
+enum { MRK_SELECT_LIMIT_NONE, MRK_SELECT_LIMIT_LABEL, MRK_SELECT_LIMIT_CHILD_COUNT,
+    MRK_SELECT_LIMIT_CHILD_COPY, MRK_SELECT_LIMIT_QUEUE, MRK_SELECT_LIMIT_DEPTH,
+    MRK_SELECT_LIMIT_AX_CALLS, MRK_SELECT_LIMIT_CF_SLOTS };
 typedef struct {
     AXUIElementRef nodes[MRK_SELECT_NODES];
     unsigned parents[MRK_SELECT_NODES], depths[MRK_SELECT_NODES], roles[MRK_SELECT_NODES], entries[MRK_SELECT_NODES];
@@ -1241,6 +1250,7 @@ typedef struct {
     AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
     MRKSelectionPass selection; // Original chain retained even on uncertain return.
+    unsigned selection_queued; // Same original loop's bounded queue, not another AX observation.
 } MRKPrompt;
 // At most eight different genuine panels, one registered worker at a time.
 // Every original ledger remains retained for process lifetime, never reused.
@@ -1255,6 +1265,20 @@ static atomic_bool mrk_prompt_unknown = false;
 static BOOL mrk_ax_fail(MRKPrompt *s, uint32_t error) {
     if (!s->result.error) s->result.error = error;
     return NO;
+}
+static BOOL mrk_ax_selecting(MRKPrompt *s) {
+    return s->result.selection_mode && s->result.site >= MRK_OPEN_SELECTION_PROJECTION
+        && s->result.site <= MRK_OPEN_SELECTION_READBACK;
+}
+static BOOL mrk_ax_selection_limit(MRKPrompt *s, uint32_t predicate, int64_t observed, uint32_t cap, uint32_t children) {
+    // Only the FIRST failed original predicate. No queries, retries, strings,
+    // or fabricated counts: all arguments belong to the already-entered branch.
+    if (!s->result.error && mrk_ax_selecting(s)) {
+        s->result.selection_limit = predicate; s->result.selection_limit_observed = observed;
+        s->result.selection_limit_cap = cap; s->result.selection_limit_children = children;
+        s->result.selection_limit_queued = s->result.site == MRK_OPEN_SELECTION_PROJECTION ? s->selection_queued : 0;
+    }
+    return mrk_ax_fail(s, MRK_OPEN_LIMIT);
 }
 static BOOL mrk_ax_control_limit(MRKPrompt *s, uint32_t site) {
     // Shared array callers outside either control pass and an earlier failure
@@ -1287,7 +1311,9 @@ static BOOL mrk_ax_status(MRKPrompt *s, AXError error) {
     }
 }
 static MRKPromptOwned *mrk_ax_slot(MRKPrompt *s) {
-    if (s->count == MRK_PROMPT_CF) { mrk_ax_fail(s, MRK_OPEN_LIMIT); return NULL; }
+    if (s->count == MRK_PROMPT_CF) {
+        mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CF_SLOTS, s->count, MRK_PROMPT_CF, 0); return NULL;
+    }
     return &s->owned[s->count++]; // Register actual out-slot BEFORE every Create/Copy.
 }
 static BOOL mrk_ax_admit(MRKPrompt *s, uint64_t required_ns, int after, MRKOpenTimeout *timeout) {
@@ -1300,7 +1326,8 @@ static BOOL mrk_ax_admit(MRKPrompt *s, uint64_t required_ns, int after, MRKOpenT
     return mrk_ax_fail(s, (uint32_t)result);
 }
 static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
-    if (s->result.calls > MRK_PROMPT_CALLS - 2) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+    if (s->result.calls > MRK_PROMPT_CALLS - 2)
+        return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_AX_CALLS, s->result.calls, MRK_PROMPT_CALLS, 0);
     MRKOpenTimeout timeout = {0};
     if (!mrk_ax_admit(s, 0, 0, &timeout)) return NO;
     if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.1
@@ -1340,7 +1367,8 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     if (!counted || !admitted) return NULL;
     if (expected < 0) { mrk_ax_fail(s, MRK_OPEN_MALFORMED); return NULL; }
     if (expected > limit) {
-        mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT);
+        if (mrk_ax_selecting(s)) mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CHILD_COUNT, expected, (uint32_t)limit, 0);
+        else mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COUNT_LIMIT);
         return NULL;
     }
     if (!expected) { if (!allow_empty) mrk_ax_fail(s, MRK_OPEN_UNSUPPORTED); return NULL; }
@@ -1351,7 +1379,8 @@ static CFArrayRef mrk_ax_array(MRKPrompt *s, AXUIElementRef element, CFStringRef
     if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
     CFIndex count = CFArrayGetCount(slot->array);
     if (count < 0 || count > limit) {
-        mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT);
+        if (mrk_ax_selecting(s)) mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CHILD_COPY, count, (uint32_t)limit, 0);
+        else mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_COPY_LIMIT);
         return NULL;
     }
     if (count != expected) { mrk_ax_fail(s, MRK_OPEN_CHANGED); return NULL; }
@@ -1521,7 +1550,8 @@ static BOOL mrk_ax_selection_label(MRKPrompt *s, MRKSelectionPass *p, unsigned a
     if (s->result.error) return NO;
     if (!value) return optional;
     if (!mrk_ax_type(s, value, CFStringGetTypeID())) return NO;
-    if (CFStringGetLength(value) > 512) return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+    CFIndex length = CFStringGetLength(value);
+    if (length > 512) return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_LABEL, length, 512, 0);
     if (CFEqual(value, expected)) {
         unsigned entry = p->entries[at];
         if (!entry) return mrk_ax_fail(s, MRK_OPEN_MALFORMED);
@@ -1537,6 +1567,7 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
     MRKSelectionPass *p = &s->selection; p->nodes[0] = sheet; unsigned queued = 1;
     s->result.site = MRK_OPEN_SELECTION_PROJECTION;
     for (unsigned at = 0; at < queued; ++at) {
+        s->selection_queued = queued;
         AXUIElementRef node = p->nodes[at];
         s->result.selection_depth = p->depths[at]; s->result.selection_last_role = MRK_ROLE_NOT_READ;
         if (at) s->result.selection_nodes++;
@@ -1576,8 +1607,11 @@ static BOOL mrk_ax_selection_roster(MRKPrompt *s, AXUIElementRef sheet, CFString
             rows || list ? MRK_SELECT_ROWS : 16, at != 0);
         if (!children) { if (s->result.error) return NO; continue; }
         CFIndex count = CFArrayGetCount(children);
-        if (p->depths[at] == MRK_CONTROL_DEPTH || (unsigned)count > MRK_SELECT_NODES - queued)
-            return mrk_ax_fail(s, MRK_OPEN_LIMIT);
+        // Preserve the original depth-first short circuit and both unchanged caps.
+        if (p->depths[at] == MRK_CONTROL_DEPTH)
+            return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_DEPTH, p->depths[at], MRK_CONTROL_DEPTH, (uint32_t)count);
+        if ((unsigned)count > MRK_SELECT_NODES - queued)
+            return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_QUEUE, queued, MRK_SELECT_NODES, (uint32_t)count);
         for (CFIndex child = 0; child < count; ++child) {
             p->nodes[queued] = (AXUIElementRef)CFArrayGetValueAtIndex(children, child);
             p->parents[queued] = at; p->depths[queued] = p->depths[at] + 1;

@@ -2289,7 +2289,8 @@ class AquaDataTests(unittest.TestCase):
         for condition, site, count in (("expected > limit", "COUNT", "expected"), ("count < 0 || count > limit", "COPY", "count")):
             guard = arrays.split(f"if ({condition}) {{", 1)[1].split("\n    }", 1)[0]
             self.assertEqual(guard.strip(),
-                f"mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_{site}_LIMIT);\n        return NULL;")
+                f"if (mrk_ax_selecting(s)) mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CHILD_{site}, {count}, (uint32_t)limit, 0);\n"
+                f"        else mrk_ax_control_limit(s, MRK_OPEN_CONTROL_CHILD_{site}_LIMIT);\n        return NULL;")
         for condition, site, section in (("CFStringGetLength(title) > 512", "TITLE", roster),
             ("pass->depths[at] == MRK_CONTROL_DEPTH", "DEPTH", roster),
             ("(unsigned)count > MRK_CONTROL_NODES - queued", "NODE", roster)):
@@ -2302,9 +2303,11 @@ class AquaDataTests(unittest.TestCase):
                            ("Browser", "BROWSER"), ("Table", "TABLE"), ("Outline", "OUTLINE"), ("ScrollArea", "SCROLL_AREA")):
             self.assertIn(f"if (CFEqual(role, kAX{role}Role)) return MRK_ROLE_{code};", roles)
         self.assertIn("return MRK_ROLE_OPAQUE;", roles)
-        self.assertTrue("sizeof(MRKOpenResult) == 80 && sizeof(MRKOpenRecheck) == 48" in native,
-                        "native selection/Open wire80B and unchanged recheck48B")
-        self.assertTrue("std::mem::size_of::<OpenWire>() != 80" in rust, "Rust selection/Open wire must be80B")
+        self.assertTrue("sizeof(MRKOpenResult) == 104 && sizeof(MRKOpenRecheck) == 48" in native,
+                        "native selection/Open wire104B and unchanged recheck48B")
+        self.assertTrue("std::mem::size_of::<OpenWire>() != 104" in rust, "Rust selection/Open wire must be104B")
+        self.assertIn("offsetof(MRKOpenResult, selection_limit_observed) == 96", native)
+        self.assertIn("std::mem::offset_of!(OpenWire, selection_limit_observed) != 96", rust)
         self.assertIn("std::mem::size_of::<RecheckWire>() != 48", rust)
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
         self.assertIn("w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16", wire)
@@ -4469,6 +4472,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             sample["selection"].update(checks={key: index < completed for index, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
                 matches=matches, attribute=attribute, attempted=selected is not None, returned=selected is not None, selected=selected)
             sample["promptButton"]["axError"] = ax_error
+            if label == "incomplete-roster":
+                sample["selection"]["limit"] = {"predicate": "child-count", "observed": 33, "cap": 32, "queued": 9, "children": None}
             failures.append((label, failed))
         readback_failed = deepcopy(failures[-1][1])
         parent_refused = deepcopy(frame); sample = parent_refused["accessibility"]
@@ -4532,6 +4537,135 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertFalse(M._accessibility_succeeded(historical["accessibility"]))
         self.assertIsNone(M._accessibility_context(historical["accessibility"], None, None,
             case=case, expected_id=2, field_history=True))
+
+    def test_selection_limit_scalars_are_closed_original_counts_not_success(self):
+        # Synthetic DATA only; never recovered/native branch observations.
+        good = M.expected_result(BINDING, "project-fields")["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
+        action = deepcopy(good)
+        action.update(attempted=False, pressReturned=False, triggered=None, initialOriginalProof=None, originalProof=None,
+                      promptChecks={"initial": None, "final": None}, site="selection-projection", error="limit")
+        action["promptButton"].update(checks={key: index < 2 for index, key in enumerate(M.ACCESSIBILITY_BUTTON_CHECKS)},
+            calls=202, initialNodesExamined=0, recheckNodesExamined=0, lastRole="Sheet", lastDepth=0, cfSlots=88, cfSlotsRetired=88)
+        action["selection"].update(checks=dict.fromkeys(M.ACCESSIBILITY_SELECTION_CHECKS, False),
+            attempted=False, returned=False, selected=None, nodes=24, matches=0, attribute="not-read", lastRole="Row", depth=4,
+            limit={"predicate": "label-length", "observed": 513, "cap": 512, "queued": 25, "children": None})
+
+        def admit(sample):
+            self.assertEqual(M._accessibility_selection(sample["selection"], sample["promptButton"], sample["site"], sample["error"]),
+                             sample["selection"])
+            self.assertFalse(M._selection_succeeded(sample["selection"]))
+            self.assertFalse(M._accessibility_succeeded(sample))
+
+        cases = [
+            ("label-length", 513, 512, 25, None, "Row", 4),
+            ("label-length", (1 << 63) - 1, 512, 25, None, "StaticText", 4),
+            ("child-count", 17, 16, 25, None, "Row", 4),
+            ("child-count", 33, 32, 25, None, "Table", 4),
+            ("child-copy-count", 17, 16, 25, None, "Group", 4),
+            ("child-copy-count", -(1 << 63), 32, 25, None, "List", 4),
+            ("queue-capacity", 49, 49, 49, 1, "Row", 4),
+            ("queue-capacity", 40, 49, 40, 10, "Row", 4),
+            ("depth", 8, 8, 49, 16, "Row", 8),  # Depth is FIRST even if both bounds refuse.
+            ("ax-call-budget", 512, 512, 25, None, "not-read", 4),
+            ("cf-slot-budget", 256, 256, 25, None, "not-read", 4),
+        ]
+        for predicate, observed, cap, queued, children, role, depth in cases:
+            with self.subTest(predicate=predicate, observed=observed):
+                sample = deepcopy(action)
+                sample["selection"].update(lastRole=role, depth=depth,
+                    limit=dict(predicate=predicate, observed=observed, cap=cap, queued=queued, children=children))
+                if predicate == "ax-call-budget": sample["promptButton"]["calls"] = observed
+                if predicate == "cf-slot-budget": sample["promptButton"].update(cfSlots=observed, cfSlotsRetired=observed)
+                admit(sample)
+        # No fake zero queue/children after leaving the projection; the last
+        # completed roster's counters are not new recheck/readback observations.
+        for site, completed, selected, predicate, observed, cap in (
+            ("selection-recheck", 2, None, "ax-call-budget", 511, 512),
+            ("selection-settable", 3, None, "cf-slot-budget", 256, 256),
+            ("selection-readback", 4, True, "child-count", 33, 32),
+            ("selection-readback", 4, True, "child-copy-count", -1, 32),
+        ):
+            sample = deepcopy(action); sample["site"] = site
+            sample["selection"].update(checks={key: index < completed for index, key in enumerate(M.ACCESSIBILITY_SELECTION_CHECKS)},
+                matches=1, attempted=selected is not None, returned=selected is not None, selected=selected,
+                attribute="SelectedRows" if completed >= 3 else "not-read",
+                limit=dict(predicate=predicate, observed=observed, cap=cap, queued=None, children=None))
+            if predicate == "ax-call-budget": sample["promptButton"]["calls"] = observed
+            if predicate == "cf-slot-budget": sample["promptButton"].update(cfSlots=observed, cfSlotsRetired=observed)
+            admit(sample)
+            for key in ("queued", "children"):
+                bad = deepcopy(sample); bad["selection"]["limit"][key] = 0
+                with self.assertRaises(M.Refused):
+                    M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+        for patch_data in (
+            {"predicate": "INERT_PRIVATE"}, {"observed": 512}, {"observed": True}, {"observed": 513.0},
+            {"observed": 1 << 63}, {"observed": -(1 << 63) - 1}, {"cap": True}, {"cap": 0}, {"cap": 513},
+            {"queued": None}, {"queued": 0}, {"queued": 24}, {"queued": 50}, {"queued": True},
+            {"children": 0}, {"children": 1}, {"private": "INERT_PRIVATE"},
+            {"predicate": "child-count", "observed": 16, "cap": 16},
+            {"predicate": "child-count", "observed": 33, "cap": 32},
+            {"predicate": "child-copy-count", "observed": 0, "cap": 16},
+            {"predicate": "queue-capacity", "observed": 48, "cap": 49, "queued": 48, "children": 1},
+            {"predicate": "queue-capacity", "observed": 49, "cap": 49, "queued": 49, "children": 17},
+            {"predicate": "depth", "observed": 8, "cap": 8, "children": 1},
+            {"predicate": "ax-call-budget", "observed": 510, "cap": 512},
+            {"predicate": "cf-slot-budget", "observed": 255, "cap": 256},
+        ):
+            bad = deepcopy(action); bad["selection"]["limit"].update(patch_data)
+            with self.subTest(refused=patch_data), self.assertRaises(M.Refused):
+                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+        for mutation in (
+            lambda a: a["selection"].pop("limit"),
+            lambda a: a["selection"].update(limit=None),
+            lambda a: a.update(site="selection-write"),
+            lambda a: a.update(error="deadline"),
+            lambda a: a["promptButton"].update(axError=-25204),
+        ):
+            bad = deepcopy(action); mutation(bad)
+            with self.assertRaises(M.Refused):
+                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+        self.assertIsNone(good["selection"]["limit"])
+        self.assertTrue(M._selection_succeeded(good["selection"]))
+        forged = deepcopy(good); forged["selection"]["limit"] = deepcopy(action["selection"]["limit"])
+        self.assertFalse(M._selection_succeeded(forged["selection"]))
+        with self.assertRaises(M.Refused):
+            M._accessibility_selection(forged["selection"], forged["promptButton"], forged["site"], forged["error"])
+        for absent in (None, {"predicate": None, "observed": None, "cap": None, "queued": None, "children": None}):
+            bad = deepcopy(action); bad["selection"]["limit"] = absent
+            with self.assertRaises(M.Refused):
+                M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
+
+    def test_selection_limit_source_preserves_first_error_and_query_budgets(self):
+        native = (PATH.parents[1] / "native/macos-installed-native/src/native.m").read_text()
+        rust = (PATH.parents[1] / "native/macos-installed-native/src/lib.rs").read_text()
+        observer = (PATH.parents[1] / "src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        helper = native.split("static BOOL mrk_ax_selection_limit(", 1)[1].split("static BOOL mrk_ax_control_limit(", 1)[0]
+        self.assertIn("if (!s->result.error && mrk_ax_selecting(s))", helper)
+        self.assertIn("return mrk_ax_fail(s, MRK_OPEN_LIMIT);", helper)
+        for forbidden in ("AXUIElement", "CFArrayGet", "CFStringGet", "mrk_ax_copy(", "mrk_ax_array("):
+            self.assertNotIn(forbidden, helper)
+        self.assertIn("if (!s->result.error) s->result.error = error;", native)
+        self.assertIn("s->result.site == MRK_OPEN_SELECTION_PROJECTION ? s->selection_queued : 0", helper)
+        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_SELECT_NODES = 49",
+                      "MRK_CONTROL_DEPTH = 8", "MRK_SELECT_ROWS = 32", "MRK_PROMPT_ORIGINALS = 9"):
+            self.assertIn(bound, native)
+        label = native.split("static BOOL mrk_ax_selection_label(", 1)[1].split("static BOOL mrk_ax_selection_roster(", 1)[0]
+        self.assertEqual(label.count("CFStringGetLength(value)"), 1)
+        self.assertIn("if (length > 512)", label)
+        roster = native.split("static BOOL mrk_ax_selection_roster(", 1)[1].split("static BOOL mrk_ax_select_entry(", 1)[0]
+        self.assertLess(roster.index("s->selection_queued = queued;"), roster.index("mrk_ax_type(s, node"))
+        self.assertLess(roster.index("if (p->depths[at] == MRK_CONTROL_DEPTH)"),
+                        roster.index("if ((unsigned)count > MRK_SELECT_NODES - queued)"))
+        self.assertEqual(roster.count("CFArrayGetCount(children)"), 1)
+        self.assertIn("rows || list ? MRK_SELECT_ROWS : 16", roster)
+        decoder = rust.split("fn selection_limit_return(", 1)[1].split("/// The actual selecting", 1)[0]
+        labels = M.re.findall(r'"([a-z-]+)"', decoder.split("predicate: *[", 1)[1].split("]", 1)[0])
+        self.assertEqual(tuple(labels), M.ACCESSIBILITY_SELECTION_LIMITS)
+        self.assertIn("selection_limit_observed: i64", rust)
+        self.assertIn("sizeof(CFIndex) == sizeof(int64_t)", native)
+        self.assertIn("w.selection_limit_queued <= w.selection_nodes", decoder)
+        self.assertIn("(21..=25).contains(&w.site) && w.error == 7", decoder)
+        self.assertIn('"limit":p.limit.map(|r| json!({"predicate":r.predicate,"observed":r.observed,"cap":r.cap,"queued":r.queued,"children":r.children}))', observer)
 
     def test_typed_selection_source_keeps_one_bounded_input_and_both_full_url_proofs(self):
         root = PATH.parents[1]
@@ -5612,7 +5746,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
     The actual native two-original pair remains a separately owned verification.
     """
     @staticmethod
-    def functions(include_worker=False):
+    def functions(include_worker=False, include_pair=False):
         import ast
         import hashlib
         import math
@@ -5624,11 +5758,13 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         tree = ast.parse(textwrap.dedent(body))
         names = {"pairs", "parse", "exact_keys", "ints", "settled_raw", "record_bytes", "owner_budget", "launch_admitted",
                  "acknowledge_admitted", "pair_finality", "admit_peer_case", "admit_controls", "public_reader_report",
-                 "admit_reader_report", "signature_identity", "distinct_code_identities"}
+                 "admit_reader_report", "signature_identity", "distinct_code_identities", "sig",
+                 "pair_directory_same", "pair_prelaunch_mark", "pair_prelaunch_failure"}
         if include_worker: names.add("creator_worker")
+        if include_pair: names.add("run_creator_reader")
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         if len(nodes) != len(names): raise AssertionError("fixed pair functions missing or duplicated")
-        namespace = {"json": json, "math": math, "hashlib": hashlib, "re": re, "struct": struct,
+        namespace = {"json": json, "math": math, "hashlib": hashlib, "re": re, "struct": struct, "stat": stat,
                      "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess),
                      "creator_identifier": "dev.mobile-release-kit.qualification.wrapping.creator",
                      "reader_identifier": "dev.mobile-release-kit.qualification.wrapping.reader"}
@@ -5646,6 +5782,179 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                  + b"t" * 16 + b"v" * 16 + b"g" * 16 + bytes(8))
         ack = b"MRKQPA01" + struct.pack("<HHI", 1, 2, 0) + nonce + struct.pack("<I", 1) + bytes(12)
         return nonce, root, {"request": request, "ready": ready, "reader-settled": ack}
+
+    def test_directory_custody_changes_links_not_file_identity_or_exact_rosters(self):
+        f = self.functions(); same = f["pair_directory_same"]
+        pin = SimpleNamespace(st_dev=7, st_ino=19, st_mode=0o040700, st_uid=UID, st_gid=GID,
+                              st_nlink=2, st_size=4096, st_mtime_ns=100, st_ctime_ns=100)
+        # Synthetic fixed request/ready/ACK creation, publication and removal,
+        # not filesystem/APFS evidence. All link observations are retained.
+        phases = ((), ("request",), ("request", "ready.next"), ("request", "ready"),
+                  ("request", "ready", "reader-settled.next"), ("request", "ready", "reader-settled"),
+                  ("ready", "reader-settled"), ("reader-settled",), ())
+        for index, roster in enumerate(phases):
+            actual = SimpleNamespace(**{**vars(pin), "st_nlink": 2 + len(roster), "st_size": 4096 + index,
+                                        "st_mtime_ns": 100 + index, "st_ctime_ns": 100 + index})
+            self.assertTrue(same(actual, pin)); self.assertTrue(same(pin, actual))
+            self.assertEqual(f["sig"](actual)[3], actual.st_nlink)
+        for field, value in (("st_dev", 8), ("st_ino", 20), ("st_mode", 0o040755), ("st_mode", 0o120700),
+                             ("st_uid", UID + 1), ("st_gid", GID + 1)):
+            self.assertFalse(same(SimpleNamespace(**{**vars(pin), field: value}), pin))
+        file = SimpleNamespace(**{**vars(pin), "st_mode": 0o100600, "st_nlink": 1, "st_size": 64})
+        self.assertFalse(same(file, file))
+        for field in vars(file):
+            changed = SimpleNamespace(**{**vars(file), field: getattr(file, field) + 1})
+            self.assertNotEqual(f["sig"](changed), f["sig"](file), field)
+        native = (PATH.parents[1] / "native/macos-installed-native/src/wrapping_keychain_fixture.m").read_text()
+        compare = native.split("static int mrk_qp_directory_same(", 1)[1].split("static int mrk_qp_shape(", 1)[0]
+        self.assertIn("S_ISDIR(a->st_mode) && S_ISDIR(b->st_mode)", compare)
+        self.assertEqual(set(M.re.findall(r"a->(st_[a-z_]+)", compare)), {"st_dev", "st_ino", "st_mode", "st_uid", "st_gid"})
+        regular = native.split("static int mrk_qp_same(", 1)[1].split("static int mrk_qp_directory_same(", 1)[0]
+        for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtimespec", "st_ctimespec"):
+            self.assertIn("a->" + field, regular)
+        root = native.split("static int mrk_qp_root(", 1)[1].split("static int mrk_qp_open(", 1)[0]
+        self.assertEqual(root.count("mrk_qp_directory_same("), 3); self.assertNotIn("mrk_qp_same(", root)
+        roster = native.split("static int mrk_qp_roster(", 1)[1].split("static int mrk_qp_", 1)[0]
+        self.assertIn("mrk_qp_directory_same(&held, &p->pins[0])", roster)
+        self.assertNotIn("mrk_qp_same(", roster)
+        self.assertIn("s->st_nlink == 1 && s->st_size == (off_t)length", native)
+        self.assertIn("mrk_qp_same(&p->pins[2], &p->pins[3], 0)", native)
+        self.assertIn("mrk_qp_same(&held, &p->pins[i], 1)", native)
+        self.assertIn("No partial/EINTR retry.", native)
+        self.assertIn("One original close; NEVER retry.", native)
+        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        pair = workflow.split("          def run_creator_reader(", 1)[1].split("          try:\n              # Version queries", 1)[0]
+        self.assertNotIn("sig(root_pin)[:6]", pair)
+        self.assertNotIn("actual.st_nlink != 2", pair)
+        self.assertIn('sig(ack_cell["pin"])[:7] != sig(staging["pin"])[:7]', pair)
+        self.assertIn('sig(request_cell["pin"]) != sig(request_written["pin"])', pair)
+        self.assertIn('if set(os.listdir(root_fd)) != {"request", "ready", "reader-settled"}', pair)
+        self.assertIn('if os.listdir(root_fd): raise ValueError("pair-control-not-empty")', pair)
+        self.assertIn('stage = "wrapping-creator-reader"\n              run_creator_reader(qualification_binary, reader_binary)', workflow)
+
+    def test_prelaunch_first_failure_labels_are_closed_and_later_errors_do_not_replace(self):
+        f = self.functions()
+        data = {"phase": "setup", "predicate": None, "returned": False, "firstFailure": None}
+        f["pair_prelaunch_mark"](data, "file-sync", "request-write")
+        f["pair_prelaunch_failure"](data)
+        first = deepcopy(data)
+        f["pair_prelaunch_mark"](data, "control-close", "launch")
+        f["pair_prelaunch_failure"](data)
+        self.assertEqual(data, first)
+        self.assertEqual(data["firstFailure"], {"phase": "request-write", "predicate": "file-sync"})
+        for predicate, phase in (("INERT_PRIVATE\n", None), ("file-sync", "INERT_PRIVATE"), ("", "setup")):
+            with self.assertRaises(ValueError): f["pair_prelaunch_mark"](data, predicate, phase)
+            self.assertEqual(data, first)
+        done = {"phase": "launch", "predicate": "worker-start", "returned": True, "firstFailure": None}
+        f["pair_prelaunch_failure"](done); f["pair_prelaunch_mark"](done, "control-close")
+        self.assertEqual(done, {"phase": "launch", "predicate": "worker-start", "returned": True, "firstFailure": None})
+        self.assertNotIn("INERT_PRIVATE", json.dumps(data))
+
+    def test_actual_prelaunch_routing_uses_original_facts_without_private_exception_text(self):
+        # Extracted routing only, entirely inert OS/thread/libc doubles. No
+        # native process, real FD, filesystem mutation, sleep or signing.
+        for failure, phase, predicate in (
+            ("links-only", "binary-admission", "binary-digest"),
+            ("root-mode", "root-admission", "root-mode"),
+            ("account", "root-admission", "ordinary-account"),
+            ("root-held", "request-write", "root-held-binding"),
+            ("root-named", "request-write", "root-named-binding"),
+            ("write", "request-write", "file-write"),
+            ("short-write", "request-write", "file-write-length"),
+            ("sync", "request-write", "file-sync"),
+            ("file-shape", "request-write", "file-shape"),
+            ("hardlink", "request-write", "file-shape"),
+            ("symlink", "request-write", "file-shape"),
+            ("file-held", "request-write", "file-held-binding"),
+            ("file-named", "request-write", "file-named-binding"),
+            ("short-read", "request-read", "file-read-length"),
+            ("eof", "request-read", "file-eof-length"),
+            ("readback", "request-readback", "readback"),
+        ):
+            with self.subTest(failure=failure):
+                f = self.functions(include_pair=True)
+                state = {"data": b"", "written": False, "fileStats": 0}
+                closed, published = [], {}
+                class Lock:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): return False
+                class Event:
+                    value = False
+                    def set(self): self.value = True
+                    def is_set(self): return self.value
+                def error(): raise OSError("INERT_PRIVATE/path\nsecret-control-bytes")
+                def directory(named=False):
+                    return SimpleNamespace(st_dev=7, st_ino=19 + int(state["written"] and failure == ("root-named" if named else "root-held")),
+                        st_mode=0o040755 if failure == "root-mode" else 0o040700, st_uid=UID, st_gid=GID,
+                        st_nlink=3 if state["written"] else 2, st_size=4097 if state["written"] else 4096,
+                        st_mtime_ns=101 if state["written"] else 100, st_ctime_ns=101 if state["written"] else 100)
+                def regular(named=False):
+                    return SimpleNamespace(st_dev=7, st_ino=20 + int(failure == "file-held" and state["fileStats"] >= 2 and not named),
+                        st_mode=0o120600 if failure == "symlink" else 0o100644 if failure == "file-shape" else 0o100600,
+                        st_uid=UID, st_gid=GID, st_nlink=2 if failure == "hardlink" else 1,
+                        st_size=len(state["data"]), st_mtime_ns=100, st_ctime_ns=101 if named and failure == "file-named" else 100)
+                def fstat(fd):
+                    if fd == 4: return directory()
+                    self.assertIn(fd, (5, 6)); state["fileStats"] += 1
+                    return regular()
+                def named_stat(leaf, *, dir_fd, follow_symlinks):
+                    self.assertFalse(follow_symlinks)
+                    return directory(True) if leaf == "wrapping-pair-control" else regular(True)
+                def open_file(leaf, flags, mode=None, *, dir_fd=None):
+                    self.assertTrue(flags & 64)  # Source's no-follow bit on every original.
+                    if dir_fd is None: return 3
+                    if leaf == "wrapping-pair-control": return 4
+                    self.assertEqual(leaf, "request")
+                    return 5 if flags & 4 else 6
+                def write(fd, data):
+                    self.assertEqual(fd, 5)
+                    if failure == "write": error()
+                    state.update(data=data, written=True)
+                    return len(data) - int(failure == "short-write")
+                def sync(fd):
+                    if failure == "sync": error()
+                def pread(fd, length, offset):
+                    self.assertEqual(fd, 6)
+                    if offset: return b"x" if failure == "eof" else b""
+                    result = state["data"]
+                    if failure == "short-read": return result[:-1]
+                    if failure == "readback": return b"x" + result[1:]
+                    return result
+                def close(fd):
+                    self.assertNotIn(fd, closed); closed.append(fd)
+                    if failure == "sync" and fd == 3: error()  # Independent later failure, not replacement.
+                os_double = SimpleNamespace(open=open_file, fstat=fstat, stat=named_stat, write=write, fsync=sync, pread=pread, close=close,
+                    mkdir=lambda *a, **k: None, urandom=lambda n: b"n" * n, getuid=lambda: 0 if failure == "account" else UID,
+                    geteuid=lambda: UID, getgid=lambda: GID, getegid=lambda: GID,
+                    O_RDONLY=1, O_WRONLY=2, O_CREAT=4, O_EXCL=8, O_DIRECTORY=16, O_NONBLOCK=32, O_NOFOLLOW=64, O_CLOEXEC=128)
+                f.update(os=os_double, receipt={"calls": []}, originals=[], work=Path("/INERT_PRIVATE/task"),
+                    time=SimpleNamespace(monotonic=lambda: 0.0), threading=SimpleNamespace(Lock=Lock, Event=Event, Thread=lambda **k: error()),
+                    ctypes=SimpleNamespace(CDLL=lambda *a, **k: SimpleNamespace(renameatx_np=SimpleNamespace()),
+                        c_int=int, c_char_p=bytes, c_uint=int), file_digest=lambda original: "changed",
+                    creator_entry="inert-creator", creator_worker=None,
+                    publish=lambda leaf, data: published.__setitem__(leaf, json.loads(data)))
+                creator = {"path": Path("/INERT_PRIVATE/creator"), "sha256": "unchanged"}
+                reader = {"path": Path("/INERT_PRIVATE/reader"), "sha256": "unchanged"}
+                with self.assertRaises(ValueError): f["run_creator_reader"](creator, reader)
+                pair = published["wrapping-pair.receipt.json"]
+                self.assertEqual(pair["prelaunch"]["firstFailure"], {"phase": phase, "predicate": predicate})
+                self.assertFalse(pair["prelaunch"]["returned"]); self.assertFalse(pair["startAttempted"])
+                self.assertFalse(pair["worker"]["bodyEntered"]); self.assertFalse(pair["passed"])
+                self.assertNotIn("INERT_PRIVATE", json.dumps(pair))
+                self.assertEqual(len(closed), len(set(closed)))
+                if failure == "sync":
+                    self.assertEqual(pair["errors"], ["OSError", "OSError"])
+                    self.assertFalse(pair["controlOriginalsClosed"])
+                else:
+                    self.assertTrue(pair["controlOriginalsClosed"])
+                if failure in ("links-only", "short-read", "eof", "readback"):
+                    self.assertEqual(pair["directoryLinks"], {"initial": 2, "held": 3, "named": 3})
+                    request = next(row for row in pair["controlCalls"] if row["role"] == "request")
+                    self.assertTrue(request["openEntered"] and request["openReturned"])
+                    self.assertTrue(request["readEntered"] and request["readReturned"])
+                if phase == "request-write":
+                    request = next(row for row in pair["controlCalls"] if row["role"] == "request")
+                    self.assertFalse(request["openEntered"])
 
     def test_fixed_wire_rejects_partial_stale_replayed_wrong_role_and_reserved(self):
         functions = self.functions(); validate = functions["record_bytes"]

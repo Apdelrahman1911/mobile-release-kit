@@ -997,8 +997,15 @@ static int mrk_qp_same(const struct stat *a, const struct stat *b, int times) {
             && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec
             && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec));
 }
+static int mrk_qp_directory_same(const struct stat *a, const struct stat *b) {
+    // Directory link/size/times are observations, not stable across the fixed
+    // child publications/removals (including APFS). Never use this for files.
+    return S_ISDIR(a->st_mode) && S_ISDIR(b->st_mode)
+        && a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode
+        && a->st_uid == b->st_uid && a->st_gid == b->st_gid;
+}
 static int mrk_qp_shape(MRKQPair *p, const struct stat *s, int directory, size_t length) {
-    return (directory ? S_ISDIR(s->st_mode) && (s->st_mode & 07777) == 0700 && s->st_nlink == 2
+    return (directory ? S_ISDIR(s->st_mode) && (s->st_mode & 07777) == 0700
                       : S_ISREG(s->st_mode) && (s->st_mode & 07777) == 0600 && s->st_nlink == 1 && s->st_size == (off_t)length)
         && s->st_uid == getuid() && s->st_uid == geteuid() && s->st_uid != 0
         && s->st_gid == getgid() && s->st_gid == getegid() ? 1 : mrk_qp_fail(p);
@@ -1017,11 +1024,11 @@ static int mrk_qp_root(MRKQPair *p) {
     if (!mrk_qp_admit(p, MRK_W_BEFORE_CALL) || p->fds[0] < 0) return 0;
     struct stat held, named;
     if (!mrk_qp_stat(p, p->fds[0], NULL, &held, 0) || !mrk_qp_stat(p, p->fds[0], ".", &named, 0)
-        || !mrk_qp_same(&held, &p->pins[0], 0) || !mrk_qp_same(&held, &named, 0)
+        || !mrk_qp_directory_same(&held, &p->pins[0]) || !mrk_qp_directory_same(&held, &named)
         || !mrk_qp_shape(p, &held, 1, 0) || !mrk_qp_acl(p, p->fds[0], 1, &held)) return mrk_qp_fail(p);
-    // Directory size/times legitimately change at the fixed file publications;
-    // its actual device/inode/type/mode/uid/gid/link count never changes.
-    if (!mrk_qp_stat(p, p->fds[0], NULL, &named, 0) || !mrk_qp_same(&held, &named, 0)) return mrk_qp_fail(p);
+    // Preserve the original stat snapshots, including observed nlink. Only
+    // directory device/inode/type/mode/uid/gid are lifetime custody invariants.
+    if (!mrk_qp_stat(p, p->fds[0], NULL, &named, 0) || !mrk_qp_directory_same(&held, &named)) return mrk_qp_fail(p);
     return mrk_qp_admit(p, MRK_W_AFTER_CALL);
 }
 static int mrk_qp_open(MRKQPair *p, uint32_t i, int flags) {
@@ -1079,7 +1086,7 @@ static int mrk_qp_roster(MRKQPair *p, int state) {
     if (!p->roster) {
         struct stat held;
         if (!mrk_qp_open(p, 5, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-            || !mrk_qp_stat(p, p->fds[5], NULL, &held, 0) || !mrk_qp_same(&held, &p->pins[0], 0)
+            || !mrk_qp_stat(p, p->fds[5], NULL, &held, 0) || !mrk_qp_directory_same(&held, &p->pins[0])
             || !mrk_qp_acl(p, p->fds[5], 1, &held) || !mrk_qp_io_enter(p, 3)) return mrk_qp_fail(p);
         r[0] = 1; errno = 0; p->roster = fdopendir(p->fds[5]); int saved = errno;
         r[1] = 1; r[2] = p->roster != NULL; r[3] = saved; r[4] = r[2];
