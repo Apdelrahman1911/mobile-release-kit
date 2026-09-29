@@ -1022,6 +1022,38 @@ jobs:
                   raise ValueError("pair-settled-disposition")
               return data
 
+          def reader_owner_failure_facts(error, owner):
+              # Closed diagnostic DATA only; never dispatch, cleanup, or ACK authority.
+              facts = {"dispatched": None, "contained": None, "cleanupComplete": None,
+                       "ownerFailureCategory": "owner-failure-unknown"}
+              if not isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)): return facts
+              for key, attribute in (("dispatched", "dispatched"), ("contained", "contained")):
+                  value = getattr(error, attribute, None)
+                  if type(value) is bool: facts[key] = value
+              if isinstance(error, owner.ProcessInterrupted):
+                  facts["ownerFailureCategory"] = "interrupted"
+              else:
+                  value = getattr(error, "cleanup_complete", None)
+                  if type(value) is bool: facts["cleanupComplete"] = value
+                  arguments = error.args
+                  if type(arguments) is tuple and len(arguments) == 1 and type(arguments[0]) is str:
+                      facts["ownerFailureCategory"] = {
+                          "owned command executable could not be started": "exec-not-started",
+                          "owned command was stopped before execution": "stopped-before-exec",
+                          "owned command produced incomplete output": "incomplete-output",
+                          "owned command output exceeds its bound": "output-bound",
+                          "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+                          "owned command failed, timed out, or produced incomplete output": "owner-failure-unknown",
+                      }.get(arguments[0], "owner-failure-unknown")
+              return facts
+
+          def reader_owner_elapsed(started, ended):
+              # Reuse the budgeted sample; elapsed does not classify timeout or renew it.
+              if (type(started) is not float or type(ended) is not float
+                      or not math.isfinite(started) or not math.isfinite(ended)): return None
+              elapsed = ended - started
+              return elapsed if math.isfinite(elapsed) and elapsed >= 0 else None
+
           def owner_budget(now, endpoint, maximum):
               if not math.isfinite(now) or not math.isfinite(endpoint): raise ValueError("pair-invalid-clock")
               remaining = min(maximum, math.floor(endpoint - now - 3))
@@ -1320,7 +1352,9 @@ jobs:
                   for role in ("parent", "root", "request-write", "request", "ready", "reader-settled.next", "reader-settled")]
               pair["controlCalls"] = [cell["record"] for cell in resources]
               reader_record = {"role": "wrapping-peer-reader", "argv": [str(reader["path"])], "timeoutSeconds": None,
-                               "outputBound": 256 * 1024, "entered": False, "returned": False}
+                               "outputBound": 256 * 1024, "entered": False, "returned": False, "ownerCallPhase": "registered",
+                               "dispatched": None, "contained": None, "cleanupComplete": None,
+                               "ownerFailureCategory": None, "ownerAttemptElapsedSeconds": None}
               reader_original = {"record": reader_record, "result": None, "error": None}
               receipt["calls"].append(reader_record)
               pair_original = {"pairWorker": holder, "pairReader": reader_original, "pairResources": resources, "pairErrors": original_errors, "thread": None}
@@ -1463,15 +1497,27 @@ jobs:
                   if not pair["readyAdmitted"]: raise ValueError("pair-ready-not-admitted")
                   file_check(ready_cell, "ready"); check_time(forward_end)
                   if holder["ownerReturned"] or holder["bodyReturned"]: raise ValueError("pair-creator-not-live-at-reader-admission")
-                  timeout = owner_budget(time.monotonic(), forward_end, 15)
+                  reader_started = time.monotonic()
+                  timeout = owner_budget(reader_started, forward_end, 15)
                   # Main owns this separate synchronous reader; worker never touches it.
                   reader_record["timeoutSeconds"] = timeout; reader_record["entered"] = True
+                  reader_record["ownerCallPhase"] = "calling"
                   try:
                       reader_original["result"] = owner.run_owned(reader_record["argv"], environ=native_env, cwd=control,
                           timeout=timeout, capture=True, text=False, output_limit=256 * 1024)
                   except BaseException as error:
-                      reader_original["error"] = error; reader_record["errorType"] = type(error).__name__; raise
+                      reader_original["error"] = error; reader_record["errorType"] = type(error).__name__
+                      reader_record["ownerCallPhase"] = "raised"
+                      # Optional diagnostics must not mask the original owner's bare raise.
+                      try: reader_record.update(reader_owner_failure_facts(error, owner))
+                      except BaseException: pass
+                      try: reader_record["ownerAttemptElapsedSeconds"] = reader_owner_elapsed(reader_started, time.monotonic())
+                      except BaseException: pass
+                      raise
                   reader_record["returned"] = True; pair["readerOwnerReturned"] = True
+                  reader_record["ownerCallPhase"] = "returned"
+                  try: reader_record["ownerAttemptElapsedSeconds"] = reader_owner_elapsed(reader_started, time.monotonic())
+                  except BaseException: pass
                   result = reader_original["result"]
                   if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int or type(result.stdout) is not bytes
                           or type(result.stderr) is not bytes or len(result.stdout) + len(result.stderr) > 256 * 1024):

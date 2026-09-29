@@ -6042,7 +6042,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
     The actual native two-original pair remains a separately owned verification.
     """
     @staticmethod
-    def functions(include_worker=False, include_pair=False):
+    def functions(include_worker=False, include_pair=False, include_reader_call=False):
         import ast
         import hashlib
         import math
@@ -6055,7 +6055,8 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         names = {"pairs", "parse", "exact_keys", "ints", "settled_raw", "record_bytes", "owner_budget", "launch_admitted",
                  "acknowledge_admitted", "pair_finality", "admit_peer_case", "admit_controls", "public_reader_report",
                  "admit_reader_report", "signature_identity", "distinct_code_identities", "sig",
-                 "pair_directory_same", "pair_prelaunch_mark", "pair_prelaunch_failure"}
+                 "pair_directory_same", "pair_prelaunch_mark", "pair_prelaunch_failure",
+                 "reader_owner_failure_facts", "reader_owner_elapsed"}
         if include_worker: names.add("creator_worker")
         if include_pair: names.add("run_creator_reader")
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
@@ -6065,6 +6066,19 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                      "creator_identifier": "dev.mobile-release-kit.qualification.wrapping.creator",
                      "reader_identifier": "dev.mobile-release-kit.qualification.wrapping.reader"}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), "<inert-pair-data-functions>", "exec"), namespace)
+        if include_reader_call:
+            # Actual source slices, with only DATA doubles supplied by the tests.
+            # Stop before binary/file checks and ACK; native admission still runs.
+            for label, first, last in (
+                    ("reader_record_code", "              reader_record = {", "              reader_original = "),
+                    ("reader_call_code", "                  reader_started = time.monotonic()\n",
+                     "                  for original in (creator, reader):\n"
+                     '                      if file_digest(original) != original["sha256"]: raise ValueError("pair-prerelease-binary-changed")\n')):
+                if body.count(first) != 1 or body.count(last) != 1:
+                    raise AssertionError("fixed reader call boundaries missing or duplicated")
+                left, right = body.index(first), body.index(last)
+                if left >= right: raise AssertionError("fixed reader call boundaries reordered")
+                namespace[label] = compile(textwrap.dedent(body[left:right]), "<inert-reader-" + label + ">", "exec")
         return namespace
 
     @staticmethod
@@ -6440,6 +6454,187 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         self.assertIn("!self.uncertain && !self.blocked && actual_controls", pair)
         self.assertEqual(pair.count("self.uncertain = true"), 1)
         self.assertNotIn("self.uncertain = false", pair)
+
+    def test_reader_owner_failure_categories_are_closed_without_private_text(self):
+        f = self.functions(); project = f["reader_owner_failure_facts"]
+        class ProcessError(Exception):
+            def __str__(self): raise AssertionError("owner exception must not be formatted")
+            def __repr__(self): raise AssertionError("owner exception must not be formatted")
+        class ProcessInterrupted(KeyboardInterrupt): pass
+        class DerivedError(ProcessError): pass
+        owner = SimpleNamespace(ProcessError=ProcessError, ProcessInterrupted=ProcessInterrupted)
+        categories = {
+            "owned command executable could not be started": "exec-not-started",
+            "owned command was stopped before execution": "stopped-before-exec",
+            "owned command produced incomplete output": "incomplete-output",
+            "owned command output exceeds its bound": "output-bound",
+            "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+            "owned command failed, timed out, or produced incomplete output": "owner-failure-unknown",
+        }
+        unknown = {"dispatched": None, "contained": None, "cleanupComplete": None,
+                   "ownerFailureCategory": "owner-failure-unknown"}
+        for message, category in categories.items():
+            for error_type in (ProcessError, DerivedError):
+                self.assertEqual(project(error_type(message), owner), dict(unknown, ownerFailureCategory=category))
+        known = "owned command executable could not be started"; sentinel = "INERT_PRIVATE_OWNER_DETAIL"
+        class StringChild(str): pass
+        class TupleChild(tuple): pass
+        class ListArguments(ProcessError):
+            @property
+            def args(self): return [known]
+        class TupleChildArguments(ProcessError):
+            @property
+            def args(self): return TupleChild((known,))
+        alien = ValueError(known); alien.dispatched = alien.contained = alien.cleanup_complete = True
+        errors = (ProcessError(sentinel), ProcessError(known + " " + sentinel), ProcessError(sentinel + " " + known),
+                  ProcessError(known, sentinel), ProcessError(), ProcessError(known.encode()),
+                  ProcessError(StringChild(known)), ProcessError(object()), ListArguments(), TupleChildArguments(), alien)
+        for index, error in enumerate(errors):
+            with self.subTest(case=index):
+                actual = project(error, owner)
+                self.assertEqual(actual, unknown)
+                self.assertNotIn(sentinel, json.dumps(actual, allow_nan=False))
+
+    def test_reader_owner_lifetime_facts_require_exact_bools(self):
+        project = self.functions()["reader_owner_failure_facts"]
+        owner = SimpleNamespace(ProcessError=type("ProcessError", (Exception,), {}),
+                                ProcessInterrupted=type("ProcessInterrupted", (KeyboardInterrupt,), {}))
+        class BoolTrap:
+            def __bool__(self): raise AssertionError("no lifetime truthiness coercion")
+        missing = object()
+        for error_type in (owner.ProcessError, owner.ProcessInterrupted):
+            for index, value in enumerate((missing, True, False, None, 0, 1, "true", "false", BoolTrap())):
+                with self.subTest(kind=error_type.__name__, case=index):
+                    error = error_type("INERT_PRIVATE_OWNER_DETAIL")
+                    if value is not missing:
+                        error.dispatched = error.contained = error.cleanup_complete = value
+                    expected = value if type(value) is bool else None
+                    interrupted = error_type is owner.ProcessInterrupted
+                    self.assertEqual(project(error, owner), {
+                        "dispatched": expected, "contained": expected,
+                        "cleanupComplete": None if interrupted else expected,
+                        "ownerFailureCategory": "interrupted" if interrupted else "owner-failure-unknown",
+                    })
+
+    def test_reader_owner_elapsed_is_finite_optional_data_not_a_budget(self):
+        elapsed = self.functions()["reader_owner_elapsed"]
+        self.assertEqual(elapsed(10.0, 13.25), 3.25)
+        self.assertEqual(elapsed(10.0, 10.0), 0.0)
+        self.assertEqual(elapsed(10.0, 35.0), 25.0)  # Not clamped to the 15-second owner budget.
+        class FloatChild(float): pass
+        invalid = ((10, 13.0), (10.0, 13), (True, 2.0), (1.0, False), ("10", 11.0), (10.0, None),
+                   (object(), 10.0), (10.0, object()), (FloatChild(10.0), 11.0), (10.0, FloatChild(11.0)),
+                   (float("nan"), 10.0), (10.0, float("nan")), (float("inf"), 11.0), (10.0, float("inf")),
+                   (-float("inf"), 11.0), (10.0, -float("inf")), (12.0, 11.0), (-1.7e308, 1.7e308))
+        for index, samples in enumerate(invalid):
+            with self.subTest(case=index): self.assertIsNone(elapsed(*samples))
+
+    def test_reader_owner_raise_preserves_original_and_budget_when_diagnostics_fail(self):
+        # Actual call/registration source, not a reconstructed call state machine.
+        # DATA doubles only; outer worker cleanup and native finality are not simulated.
+        for interrupted in (False, True):
+            for fail_projection, fail_clock in ((False, False), (True, False), (False, True), (True, True)):
+                with self.subTest(interrupted=interrupted, projection=fail_projection, clock=fail_clock):
+                    f = self.functions(include_reader_call=True)
+                    owner = SimpleNamespace(ProcessError=type("ProcessError", (Exception,), {}),
+                                            ProcessInterrupted=type("ProcessInterrupted", (KeyboardInterrupt,), {}))
+                    error_type = owner.ProcessInterrupted if interrupted else owner.ProcessError
+                    original = error_type("INERT_PRIVATE_OWNER_DETAIL")
+                    original.dispatched = True; original.contained = original.cleanup_complete = False
+                    calls, clock_phases, published = [], [], []
+                    f.update(owner=owner, reader={"path": "/inert-reader"}, native_env={"INERT": "DATA"}, control=object(),
+                             forward_end=45.0, pair={"aborted": False, "readerOwnerReturned": False,
+                                                   "readerNativeAdmitted": False, "ackEntered": False})
+                    exec(f["reader_record_code"], f)
+                    record = f["reader_record"]
+                    self.assertEqual(record, {"role": "wrapping-peer-reader", "argv": ["/inert-reader"],
+                        "timeoutSeconds": None, "outputBound": 256 * 1024, "entered": False, "returned": False,
+                        "ownerCallPhase": "registered", "dispatched": None, "contained": None,
+                        "cleanupComplete": None, "ownerFailureCategory": None, "ownerAttemptElapsedSeconds": None})
+                    f["reader_original"] = {"record": record, "result": None, "error": None}
+                    def run_owned(argv, **kwargs):
+                        self.assertEqual(record["ownerCallPhase"], "calling")
+                        self.assertIs(record["entered"], True)
+                        calls.append((argv, kwargs)); raise original
+                    def monotonic():
+                        clock_phases.append(record["ownerCallPhase"])
+                        if len(clock_phases) == 1: return 10.0
+                        self.assertEqual(len(clock_phases), 2)
+                        self.assertIs(f["reader_original"]["error"], original)
+                        if fail_clock: raise KeyboardInterrupt("INERT_OPTIONAL_CLOCK_ERROR")
+                        return 13.25
+                    def unavailable_projection(error, selected_owner):
+                        self.assertIs(error, original); self.assertIs(selected_owner, owner)
+                        self.assertIs(f["reader_original"]["error"], original)
+                        raise KeyboardInterrupt("INERT_OPTIONAL_PROJECTION_ERROR")
+                    owner.run_owned = run_owned
+                    f.update(time=SimpleNamespace(monotonic=monotonic), publish=lambda *args: published.append(args))
+                    if fail_projection: f["reader_owner_failure_facts"] = unavailable_projection
+                    with self.assertRaises(error_type) as caught: exec(f["reader_call_code"], f)
+                    self.assertIs(caught.exception, original)
+                    self.assertIs(f["reader_original"]["error"], original); self.assertIsNone(f["reader_original"]["result"])
+                    self.assertEqual(clock_phases, ["registered", "raised"]); self.assertEqual(len(calls), 1)
+                    self.assertIs(calls[0][0], record["argv"])
+                    self.assertEqual(calls[0][1], {"environ": f["native_env"], "cwd": f["control"], "timeout": 15,
+                                                  "capture": True, "text": False, "output_limit": 256 * 1024})
+                    self.assertEqual(record["timeoutSeconds"], 15); self.assertEqual(f["forward_end"], 45.0)
+                    self.assertEqual(record["ownerCallPhase"], "raised"); self.assertEqual(record["errorType"], error_type.__name__)
+                    self.assertIs(record["returned"], False); self.assertIs(f["pair"]["readerOwnerReturned"], False)
+                    expected = {"dispatched": True, "contained": False, "cleanupComplete": None if interrupted else False,
+                                "ownerFailureCategory": "interrupted" if interrupted else "owner-failure-unknown"}
+                    for key, value in expected.items(): self.assertEqual(record[key], None if fail_projection else value)
+                    self.assertEqual(record["ownerAttemptElapsedSeconds"], None if fail_clock else 3.25)
+                    self.assertEqual(published, []); self.assertIs(f["pair"]["readerNativeAdmitted"], False)
+                    with self.assertRaises(ValueError): f["acknowledge_admitted"](f["pair"], 14.0, f["forward_end"])
+                    self.assertIs(f["pair"]["ackEntered"], False)
+                    for sentinel in ("INERT_PRIVATE_OWNER_DETAIL", "INERT_OPTIONAL_CLOCK_ERROR", "INERT_OPTIONAL_PROJECTION_ERROR"):
+                        self.assertNotIn(sentinel, json.dumps(record, allow_nan=False))
+
+    def test_reader_owner_nonzero_return_keeps_public_report_and_native_rejection(self):
+        for fail_clock in (False, True):
+            with self.subTest(clock=fail_clock):
+                f = self.functions(include_reader_call=True)
+                partial = {"schemaVersion": 1, "scope": "wrapping-other-executable-reader", "provisional": True,
+                           "outerFinalityRequired": True, "reportUnavailable": True, "lookup": self.lookup_data(True)}
+                result = CompletedProcess(["inert-data-only"], 101,
+                    b"MRK_WRAPPING_PEER_RESULT=" + json.dumps(partial).encode() + b"\n", b"INERT_PRIVATE_STDERR")
+                calls, clock_phases, projected, published = [], [], [], []
+                f.update(reader={"path": "/inert-reader"}, native_env={"INERT": "DATA"}, control=object(), forward_end=45.0,
+                         pair={"aborted": False, "readerOwnerReturned": False, "readerNativeAdmitted": False, "ackEntered": False})
+                exec(f["reader_record_code"], f); record = f["reader_record"]
+                f["reader_original"] = {"record": record, "result": None, "error": None}
+                def run_owned(argv, **kwargs):
+                    self.assertEqual(record["ownerCallPhase"], "calling"); self.assertIs(record["entered"], True)
+                    calls.append((argv, kwargs)); return result
+                def monotonic():
+                    clock_phases.append(record["ownerCallPhase"])
+                    if len(clock_phases) == 1: return 10.0
+                    self.assertEqual(len(clock_phases), 2); self.assertIs(f["reader_original"]["result"], result)
+                    if fail_clock: raise KeyboardInterrupt("INERT_OPTIONAL_CLOCK_ERROR")
+                    return 13.25
+                def unexpected_projection(*args):
+                    projected.append(args); raise AssertionError("ordinary nonzero result is not an owner failure")
+                f.update(owner=SimpleNamespace(run_owned=run_owned), time=SimpleNamespace(monotonic=monotonic),
+                         reader_owner_failure_facts=unexpected_projection, publish=lambda *args: published.append(args))
+                with self.assertRaises(ValueError): exec(f["reader_call_code"], f)
+                self.assertIs(f["reader_original"]["result"], result); self.assertIsNone(f["reader_original"]["error"])
+                self.assertEqual(clock_phases, ["registered", "returned"]); self.assertEqual(len(calls), 1)
+                self.assertIs(calls[0][0], record["argv"])
+                self.assertEqual(calls[0][1], {"environ": f["native_env"], "cwd": f["control"], "timeout": 15,
+                                              "capture": True, "text": False, "output_limit": 256 * 1024})
+                self.assertEqual(record["timeoutSeconds"], 15); self.assertEqual(f["forward_end"], 45.0)
+                self.assertEqual(record["ownerCallPhase"], "returned"); self.assertIs(record["returned"], True)
+                self.assertIs(f["pair"]["readerOwnerReturned"], True); self.assertIs(f["pair"]["readerNativeAdmitted"], False)
+                self.assertNotIn("errorType", record); self.assertEqual(record["returncode"], 101); self.assertEqual(projected, [])
+                for key in ("dispatched", "contained", "cleanupComplete", "ownerFailureCategory"): self.assertIsNone(record[key])
+                self.assertEqual(record["ownerAttemptElapsedSeconds"], None if fail_clock else 3.25)
+                self.assertEqual(len(published), 1); self.assertEqual(published[0][0], "wrapping-reader.report.json")
+                self.assertEqual(json.loads(published[0][1]), partial)
+                self.assertNotIn("stdout", record); self.assertNotIn("stderr", record)
+                self.assertNotIn("INERT_PRIVATE_STDERR", json.dumps(record, allow_nan=False))
+                self.assertNotIn(b"INERT_PRIVATE_STDERR", published[0][1])
+                with self.assertRaises(ValueError): f["acknowledge_admitted"](f["pair"], 14.0, f["forward_end"])
+                self.assertIs(f["pair"]["ackEntered"], False)
 
     def test_reader_public_failure_preserves_status_without_exporting_private_text(self):
         f = self.functions()

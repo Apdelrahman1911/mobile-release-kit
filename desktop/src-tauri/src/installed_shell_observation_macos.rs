@@ -3329,7 +3329,7 @@ fn native_recheck_data_check() -> bool {
         children: Some(1), originals: Some("one"), site: "complete", error: "none" };
     let button = ControlContainerButtonProof { checks: [true; 7], calls: 101, initial_nodes_examined: 4, recheck_nodes_examined: 4,
         last_role: "Button", last_depth: 2,
-        cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0 };
+        cf_slots: 60, cf_slots_retired: 60, cleanup_returned: true, ax_error: 0, ax_failure: None };
     let report = OpenReport { diagnostic: OpenDiagnostic { site: "press", error: "none" }, attempted: true,
         press_returned: true, triggered: Some(true), custody_known: true, initial_proof: Some(proof), proof: Some(proof),
         prompt: [Some(true); 2], button, selection_mode: false, selection: None, selection_parent: None, selection_prompt: None };
