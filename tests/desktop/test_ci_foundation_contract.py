@@ -17530,16 +17530,35 @@ class WindowsImageWriterB2Native22Tests(unittest.TestCase):
         self.assertEqual(dependency, {"path": "../windows-installed-native", "default-features": False, "features": ["image-writer", "image-stdio"]})
         self.assertEqual(app["features"]["windows-metadata-images-loader"],
                          ["mrk-windows-installed-native/image-writer", "mrk-windows-installed-native/image-stdio"])
-        native_lock = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_text(encoding="utf-8")
-        bridge_lock = (SOURCE / helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.lock").read_text(encoding="utf-8")
-        original = native_lock.split("[[package]]")
-        proposed = bridge_lock.split("[[package]]")
-        added = [block for block in proposed[1:] if '\nname = "mrk-windows-image-writer-bridge"\n' in block]
-        self.assertEqual(len(added), 1)
-        self.assertEqual([proposed[0], *(block for block in proposed[1:] if block not in added)], original)
-        self.assertEqual(helper.tomllib.loads("[[package]]" + added[0])["package"],
-                         [{"name": "mrk-windows-image-writer-bridge", "version": "0.1.0", "dependencies": ["mrk-windows-installed-native"]}])
-        self.assertEqual((len(original) - 1, len(proposed) - 1), (34, 35))
+        native_lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_text(encoding="utf-8"))
+        bridge_lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.lock").read_text(encoding="utf-8"))
+        original = {(package["name"], package["version"]): package for package in native_lock["package"]}
+        self.assertEqual(native_lock["version"], 4)
+        self.assertEqual(len(native_lock["package"]), 34)
+        windows_link = original[("windows-link", "0.2.1")]
+        windows_sys = original[("windows-sys", "0.61.2")]
+        self.assertEqual(windows_link, {
+            "name": "windows-link", "version": "0.2.1",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "checksum": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5",
+        })
+        self.assertEqual(windows_sys, {
+            "name": "windows-sys", "version": "0.61.2",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "checksum": "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc",
+            "dependencies": ["windows-link 0.2.1"],
+        })
+        self.assertEqual(bridge_lock, {
+            "version": 4,
+            "package": [
+                {"name": "mrk-windows-image-writer-bridge", "version": "0.1.0",
+                 "dependencies": ["mrk-windows-installed-native"]},
+                {"name": "mrk-windows-installed-native", "version": "0.1.0",
+                 "dependencies": ["windows-sys"]},
+                windows_link,
+                {**windows_sys, "dependencies": ["windows-link"]},
+            ],
+        })
 
     def test_b2_native_three_and_bridge_four_graphs_have_distinct_original_roots(self):
         for bridge in (False, True):
@@ -18543,10 +18562,10 @@ class WindowsNativeProductRoleIsolationTests(unittest.TestCase):
         self.assertEqual(list(helper.WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES), seeds)
         native_lock = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_bytes()
         bridge_lock = (SOURCE / helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.lock").read_bytes()
-        self.assertEqual((len(native_lock), len(bridge_lock)), (8346, 8470))
-        self.assertEqual(hashlib.sha256(bridge_lock).hexdigest(), "187f214ec4eefa36459bd1ff9e8748aaec2f1c17cfb135606998ac7c0a13656c")
+        self.assertEqual((len(native_lock), len(bridge_lock)), (8346, 829))
+        self.assertEqual(hashlib.sha256(bridge_lock).hexdigest(), "55160e58b1ddccb71eb1698baff44642d07fcdf08cf926dd70d3c2f37debbd42")
         self.assertEqual(len(helper.tomllib.loads(native_lock.decode("utf-8"))["package"]), 34)
-        self.assertEqual(len(helper.tomllib.loads(bridge_lock.decode("utf-8"))["package"]), 35)
+        self.assertEqual(len(helper.tomllib.loads(bridge_lock.decode("utf-8"))["package"]), 4)
 
 
 
