@@ -116,6 +116,8 @@ def diagnostic_reason(error):
         "stock-policy", "stock-policy-unavailable", "stock-pem-framing", "stock-pem-bound",
         "stock-der", "stock-complete-set", "stock-jks-framing", "stock-jks-encoding",
         "stock-jks-alias", "stock-jks-integrity", "stock-config", "stock-custom-inputs",
+        "stock-config-bound", "stock-config-encoding", "stock-config-line",
+        "stock-config-inactive", "stock-config-duplicate", "stock-config-selection",
         "stock-correspondence",
     }
     shared = {

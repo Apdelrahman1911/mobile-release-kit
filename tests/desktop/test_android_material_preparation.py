@@ -725,6 +725,24 @@ class AndroidMaterialDataTests(unittest.TestCase):
             with self.assertRaisesRegex(M.D.Refused, "fixed target"):
                 M._network_configuration(value, host, rule, row, deadline)
 
+    def test_font_configuration_accepts_only_three_literal_declarative_identifiers(self):
+        raw = (SOURCE / "tests/fixtures/fontconfig-dejavu-lgc-sans-mono.conf.data").read_bytes()
+        self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()),
+            (874, "0a6b0f1c1f5d1c06a811b517a3d2690700bba8e961cd55dd2c7648cde3605a21"))
+        declaration = b'<!DOCTYPE fontconfig SYSTEM "../fonts.dtd">'
+        self.assertEqual(raw.count(declaration), 1)
+        for identifier in (b"../fonts.dtd", b"fonts.dtd", b"urn:fontconfig:fonts.dtd"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(M._font_config_io(raw.replace(b"../fonts.dtd", identifier)), [])
+        for identifier in (b"../../fonts.dtd", b"https://example.invalid/fonts.dtd",
+                           b"../fontsXdtd", b"a./fonts.dtd", b"fontsXdtd", b"urn:fontconfig:fontsXdtd"):
+            with self.subTest(identifier=identifier), self.assertRaisesRegex(M.D.Refused, "DTD differs"):
+                M._font_config_io(raw.replace(b"../fonts.dtd", identifier))
+        for changed in (raw.replace(declaration, b'<!DOCTYPE fontconfig SYSTEM "../fonts.dtd" []>'),
+                        raw.replace(declaration, b'<!DOCTYPE fontconfig [<!ENTITY sample "value">]>')):
+            with self.assertRaises(M.D.Refused):
+                M._font_config_io(changed)
+
     def test_font_configuration_closes_system_local_and_private_selectors(self):
         names = ["/etc/fonts/fonts.conf", "/etc/fonts/conf.d/50-user.conf", "/etc/fonts/conf.d/51-local.conf"]
         bodies = {names[0]: b'<fontconfig><dir>/usr/share/fonts</dir><dir>/usr/local/share/fonts</dir>'

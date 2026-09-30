@@ -9,6 +9,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import re
 import struct
 
 
@@ -152,22 +153,37 @@ class Policy:
 
     def config(self, raw, point):
         point()
-        need(type(raw) is bytes and 0 < len(raw) <= CONFIG_LIMIT, "stock-config")
+        need(type(raw) is bytes and 0 < len(raw) <= CONFIG_LIMIT, "stock-config-bound")
         try:
             text = raw.decode("utf-8", errors="strict")
         except UnicodeError:
-            raise Refused("stock-config") from None
-        lines, seen = text.split("\n"), set()
-        need(len(lines) <= 8192, "stock-config")
+            raise Refused("stock-config-encoding") from None
+        lines, seen, enabled = text.split("\n"), set(), set()
+        need(len(lines) <= 8192, "stock-config-bound")
         for line in lines:
             point()
             need(len(line.encode("utf-8")) <= 2048
-                 and all(c.isprintable() or c == "\t" for c in line), "stock-config")
+                 and all(c.isprintable() or c == "\t" for c in line), "stock-config-line")
             if not line or line.lstrip(" \t").startswith("#"):
                 continue
-            need(line in self.names and line not in seen, "stock-config")
-            seen.add(line)
-        need(seen == self.names.keys(), "stock-complete-set")
+            inactive = line.startswith("!")
+            name = line[1:] if inactive else line
+            if inactive:
+                # update-ca-certificates excludes column-zero ! selectors from
+                # additions. Treat only bounded ordinary Mozilla names as inert
+                # deselections; never open or export them or extend CA authority.
+                need(len(name.encode("utf-8")) <= 256 and re.fullmatch(
+                    r"mozilla/[A-Za-z0-9][A-Za-z0-9_().=,+ \-őúíá]*\.crt", name) is not None,
+                    "stock-config-inactive")
+            else:
+                need(name in self.names, "stock-config-selection")
+            need(name not in seen, "stock-config-duplicate")
+            seen.add(name)
+            if inactive:
+                need(name not in self.names, "stock-config-inactive")
+            else:
+                enabled.add(name)
+        need(enabled == self.names.keys(), "stock-complete-set")
         point()
         return self.summary("config")
 

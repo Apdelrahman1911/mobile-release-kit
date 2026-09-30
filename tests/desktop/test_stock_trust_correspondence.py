@@ -141,6 +141,38 @@ class StockTrustContracts(unittest.TestCase):
             with self.subTest(size=len(raw)), self.assertRaises(T.Refused):
                 self.policy.config(raw, lambda: None)
 
+    def test_config_inert_deselections_never_change_the_complete_active_authority(self):
+        # Synthetic public-style negative selectors, NOT observations of a host.
+        inactive = b"!mozilla/Retired_Public_Root.crt\n!mozilla/Old_Public_Root_(Test).crt\n"
+        expected = self.policy.summary("config")
+        for raw in (CONFIG + inactive, inactive + CONFIG):
+            self.assertEqual(self.policy.config(raw, lambda: None), expected)
+            self.assertNotIn("Retired_Public_Root", json.dumps(expected))
+        first = (ROWS[0]["name"] + "\n").encode()
+        for raw in (CONFIG + inactive + inactive, CONFIG + b"!" + first, b"!" + first + CONFIG,
+                    CONFIG.replace(first, b"!" + first, 1), CONFIG.replace(first, b"", 1) + inactive):
+            with self.subTest(size=len(raw)), self.assertRaises(T.Refused):
+                self.policy.config(raw, lambda: None)
+        for path in (b"/etc/unrelated.crt", b"mozilla/../outside.crt", b"mozilla/sub/other.crt",
+                     b"https://example.invalid/root.crt", b"mozilla/.hidden.crt", b"mozilla/R\tT.crt",
+                     b"mozilla/R%2ecrt", b"mozilla/" + b"R" * 246 + b".crt", b"mozilla/Root.crt "):
+            with self.subTest(path=path), self.assertRaises(T.Refused):
+                self.policy.config(CONFIG + b"!" + path + b"\n", lambda: None)
+
+    def test_config_diagnostics_are_finite_classes_not_configuration_text(self):
+        first = (ROWS[0]["name"] + "\n").encode()
+        cases = ((b"", "stock-config-bound"), (b"\xff", "stock-config-encoding"),
+                 (CONFIG + b"# comment\0hidden\n", "stock-config-line"),
+                 (CONFIG + b"!mozilla/../hidden.crt\n", "stock-config-inactive"),
+                 (CONFIG + first, "stock-config-duplicate"),
+                 (CONFIG + b"mozilla/Unknown_Active_Root.crt\n", "stock-config-selection"))
+        for raw, reason in cases:
+            with self.subTest(reason=reason), self.assertRaises(T.Refused) as failure:
+                self.policy.config(raw, lambda: None)
+            self.assertEqual(failure.exception.args, (reason,))
+            self.assertEqual(S.diagnostic_reason(failure.exception), reason)
+        self.assertEqual(S.diagnostic_reason(T.Refused("stock-config-line private-detail")), "invalid-or-changed")
+
     def test_declared_lengths_cannot_read_past_jks_body(self):
         for raw in (checksum(JKS[:12] + struct.pack(">IH", 2, 65535)),
                     checksum(JKS[:12] + struct.pack(">I", 2) + utf(ROWS[0]["jksAlias"]) + b"\0" * 8
@@ -252,7 +284,7 @@ class CollectorStockTrustContracts(unittest.TestCase):
     def test_helper_has_no_command_network_native_or_filesystem_capability(self):
         tree = ast.parse((ROOT / "desktop/tools/stock_trust_correspondence.py").read_bytes())
         imports = {node.names[0].name for node in ast.walk(tree) if isinstance(node, ast.Import)}
-        self.assertEqual(imports, {"base64", "binascii", "hashlib", "hmac", "json", "struct"})
+        self.assertEqual(imports, {"base64", "binascii", "hashlib", "hmac", "json", "re", "struct"})
         self.assertFalse(any(isinstance(node, ast.ImportFrom) for node in ast.walk(tree)))
         calls = {ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
         self.assertNotIn("open", calls)

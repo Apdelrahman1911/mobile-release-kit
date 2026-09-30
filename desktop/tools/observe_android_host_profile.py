@@ -49,7 +49,7 @@ PREPARATION_PACKAGES = {"/usr/bin/bash": "bash", "/usr/bin/dpkg-deb": "dpkg",
     "/usr/bin/python3.12": "python3.12-minimal", "/usr/bin/fc-cat": "fontconfig",
     "/usr/bin/fc-list": "fontconfig", "/usr/bin/curl": "curl"}
 EXTRA_PACKAGES = ("bash", "dpkg", "python3.12-minimal", "curl", "ca-certificates", "ca-certificates-java",
-                  "fontconfig-config", "fonts-dejavu-core",
+                  "fontconfig-config", "fonts-dejavu-core", "fonts-dejavu-mono",
                   "fonts-dejavu-extra", "fonts-lato", "fonts-liberation", "fonts-noto-color-emoji")
 NETWORK_CONFIGURATION = {
     "/etc/gai.conf": {"defaults": True},

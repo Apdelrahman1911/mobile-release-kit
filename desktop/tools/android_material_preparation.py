@@ -1599,9 +1599,10 @@ def _font_config_io(raw):
     """Only the pinned fontconfig I/O selectors, not a second font matcher."""
     D.need(type(raw) is bytes and 0 < len(raw) <= 64 << 10 and b"<!ENTITY" not in raw,
            "Android font configuration bound/entity differs")
-    # ElementTree never loads a DTD. Still accept only the ordinary declarative
-    # fontconfig identifier, not a caller-selected external/internal subset.
-    clean = re.sub(rb'<!DOCTYPE fontconfig SYSTEM "(?:urn:fontconfig:fonts.dtd|fonts.dtd)">', b"", raw)
+    # ElementTree never loads a DTD. Remove only these literal declarative
+    # identifiers, including the source-pinned DejaVu relative spelling. The
+    # dots are literal, not regex wildcards; no identifier is resolved/fetched.
+    clean = re.sub(rb'<!DOCTYPE fontconfig SYSTEM "(?:urn:fontconfig:fonts\.dtd|fonts\.dtd|\.\./fonts\.dtd)">', b"", raw)
     D.need(b"<!DOCTYPE" not in clean, "Android font configuration DTD differs")
     root = ET.fromstring(clean)
     D.need(root.tag == "fontconfig" and not root.attrib, "Android font configuration root differs")

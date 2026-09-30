@@ -451,6 +451,64 @@ class AndroidHostProfileContracts(unittest.TestCase):
             self.assertFalse(result[field])
             self.assertFalse(stopped[field])
 
+    def test_font_membership_requires_the_fixed_mono_package_and_its_original_list(self):
+        member = "/etc/fonts/conf.avail/20-unhint-small-dejavu-lgc-sans-mono.conf"
+        font = {"files": {"/etc/fonts/conf.d/20-unhint-small-dejavu-lgc-sans-mono.conf": {"path": member}}}
+        expected = {"binaryPackage": "fontconfig", "architecture": "amd64", "version": "2.15.0-1.1ubuntu2",
+                    "sourcePackage": "fontconfig", "sourceVersion": "2.15.0-1.1ubuntu2"}
+        providers = {"packages": {"fontconfig": expected}, "osLibraries": {}, "programs": {}}
+
+        def observe(fault=None):
+            # Real status/list parsers and correspondence checks; only acquisition
+            # is a bounded in-memory original. No dpkg command or host input.
+            names = sorted(set(P.EXTRA_PACKAGES) | {"fontconfig"})
+            members = {name: [] for name in names}
+            members.setdefault("fonts-dejavu-mono", []).append(member)
+            for path, package in P.PREPARATION_PACKAGES.items():
+                members[package].append(path)
+            if fault in {"missing-member", "unrelated-owner"}:
+                members["fonts-dejavu-mono"].remove(member)
+            if fault == "unrelated-owner":
+                members["bash"].append(member)
+            paragraphs = []
+            for name in names:
+                if name == "fonts-dejavu-mono" and fault == "absent-mono":
+                    continue
+                version = expected["version"] if name == "fontconfig" else "1.0"
+                paragraphs.append("Package: " + name + "\nStatus: install ok installed\nVersion: " + version
+                                  + "\nArchitecture: amd64\n")
+            bodies = {"/var/lib/dpkg/status": ("\n".join(paragraphs) + "\n").encode()}
+            bodies.update({"/var/lib/dpkg/info/" + name + ".list": ("\n".join(sorted(paths)) + "\n").encode()
+                           for name, paths in members.items()})
+            calls = []
+            def file(path, limit, parse):
+                calls.append(path)
+                raw = bodies[path]
+                self.assertLessEqual(len(raw), limit)
+                return {"file": binding(path, raw), "data": parse(raw)}
+            def bind(path, **options):
+                if path not in bodies:
+                    self.assertTrue(options["absent"])
+                    return {"absent": True}
+                self.assertLessEqual(len(bodies[path]), options["limit"])
+                return binding(path, bodies[path])
+            reader = SimpleNamespace(point=Mock(), file=file, bind=bind,
+                s=SimpleNamespace(D=SimpleNamespace(same=lambda a, b: a == b)))
+            result = P.package_correspondence(reader, providers, font)
+            self.assertIn("/var/lib/dpkg/info/fonts-dejavu-mono.list", calls)
+            self.assertTrue(all(path == "/var/lib/dpkg/status" or path.endswith(".list") for path in calls))
+            return result
+
+        result = observe()
+        self.assertIn(member, result["selectedMembership"]["fonts-dejavu-mono"])
+        self.assertFalse(result["packageAuthenticityEstablished"])
+        self.assertFalse(result["packageCommandExecuted"])
+        for fault, refusal in (("absent-mono", "profile-package-unavailable"),
+                               ("missing-member", "profile-font-package-membership"),
+                               ("unrelated-owner", "profile-font-package-membership")):
+            with self.subTest(fault=fault), self.assertRaisesRegex(P.BASE.Refused, refusal):
+                observe(fault)
+
     def test_package_membership_must_match_the_declared_provider_owner(self):
         name, member = "libexample", "/usr/lib/libexample.so.1"
         expected = {"binaryPackage": name + ":amd64", "architecture": "amd64", "version": "1.0",
