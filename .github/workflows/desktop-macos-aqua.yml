@@ -1080,7 +1080,9 @@ jobs:
                   "syncEntered", "syncReturned", "initialized", "finishEntered", "writerSettled", "readEntered", "readReturned",
                   "removeEntered", "removeReturned", "absenceObserved", "closeEntered", "closeReturned", "closed", "retired")}
               row.update(role="reader-phase", fileBytes=2176, writtenBytes=0,
-                         projection={"state": "unavailable", "events": [], "historyOnly": True, "currentCallKnown": False})
+                         projection={"state": "unavailable", "events": [], "elapsedMilliseconds": [],
+                             "elapsedRounding": "floor", "clockOrigin": "reader-entry",
+                             "clockSample": "pre-diagnostic-write-admission", "historyOnly": True, "currentCallKnown": False})
               return {"fd": None, "pin": None, "parentPin": None, "header": None, "record": row, "errors": []}
 
           def reader_phase_identity(value):
@@ -1094,7 +1096,7 @@ jobs:
                           or not 0 < identity[3] < 1 << 32 or not 0 <= identity[4] < 1 << 32
                           or identity[3:] != identities[0][3:]):
                       raise ValueError("pair-reader-phase-header-binding")
-              return b"MRKQDG01" + b"".join(struct.pack("<5Q", *identity) for identity in identities)
+              return b"MRKQDG02" + b"".join(struct.pack("<5Q", *identity) for identity in identities)
 
           def reader_phase_bound(cell, parent_fd):
               if cell["fd"] is None or cell["pin"] is None or cell["parentPin"] is None:
@@ -1144,7 +1146,7 @@ jobs:
               check_time(); row["initialized"] = True
 
           def reader_phase_projection(data, header):
-              if type(data) is not bytes or len(data) != 2176 or type(header) is not bytes or len(header) != 128 or header[:8] != b"MRKQDG01" or data[:128] != header:
+              if type(data) is not bytes or len(data) != 2176 or type(header) is not bytes or len(header) != 128 or header[:8] != b"MRKQDG02" or data[:128] != header:
                   raise ValueError("pair-reader-phase-snapshot-shape")
               coarse = ("diagnostic-opened", "control-reserve-before", "control-reserve-returned", "control-initialize-before",
                   "control-initialize-returned", "ready-read-before", "ready-read-returned", "peer-construct-before",
@@ -1155,22 +1157,29 @@ jobs:
               phases = ("entry", "account", "path", "open", "get-path", "get-status", "query", "trusted", "access",
                   "add", "lookup", "parent", "validate", "release", "delivery", "return", "namespace", "filesystem", "acl", "uuid", "fd-release")
               checkpoints = ("before-call", "after-call", "before-release", "before-delivery")
-              events, seen = [], set()
+              # Floored original-entry PRE-WRITE admission samples, never API/current-call timestamps.
+              events, elapsed_milliseconds, seen = [], [], set()
               state = "empty"
               for slot in range(128):
                   at = 128 + slot * 16; record = data[at:at + 16]
                   if record == bytes(16):
                       if any(data[at:]): state = "partial"
                       break
-                  magic, sequence, event, guard = struct.unpack("<4I", record)
-                  if (magic != 0x31514744 or sequence != slot + 1 or guard != (0x4d524b31 ^ sequence ^ event)
-                          or event in seen or not (1 <= event <= 24 or 65 <= event <= 148)):
+                  magic, sequence, payload, guard = struct.unpack("<4I", record)
+                  event, elapsed_ms = payload & 0xff, payload >> 8
+                  if (magic != 0x32514744 or sequence != slot + 1 or guard != (0x4d524b32 ^ sequence ^ payload)
+                          or event in seen or not (1 <= event <= 24 or 65 <= event <= 148)
+                          or not 0 <= elapsed_ms < 10000
+                          or (elapsed_milliseconds and elapsed_ms < elapsed_milliseconds[-1])):
                       state = "partial"; break
                   seen.add(event)
+                  elapsed_milliseconds.append(elapsed_ms)
                   events.append(coarse[event - 1] if event <= 24
                                 else "native:" + phases[(event - 65) // 4] + ":" + checkpoints[(event - 65) % 4])
                   state = "prefix"
-              return {"state": state, "events": events, "historyOnly": True, "currentCallKnown": False}
+              return {"state": state, "events": events, "elapsedMilliseconds": elapsed_milliseconds,
+                      "elapsedRounding": "floor", "clockOrigin": "reader-entry",
+                      "clockSample": "pre-diagnostic-write-admission", "historyOnly": True, "currentCallKnown": False}
 
           def reader_phase_writer_settled(original):
               row, result, error = original["record"], original["result"], original["error"]

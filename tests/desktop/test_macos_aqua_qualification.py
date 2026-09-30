@@ -2523,7 +2523,8 @@ class AquaDataTests(unittest.TestCase):
             self.assertNotIn(forbidden, after_permit)
         timeout = native.split("static BOOL mrk_ax_before(", 1)[1].split("static BOOL mrk_ax_type(", 1)[0]
         self.assertIn("AXUIElementSetMessagingTimeout(element, timeout.seconds)", timeout)
-        self.assertIn("s->result.calls > MRK_PROMPT_CALLS - 2", timeout)
+        self.assertIn("const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CALLS : MRK_PROMPT_CALLS;", timeout)
+        self.assertIn("s->result.calls > cap - 2", timeout)
         self.assertIn("timeout.seconds <= 0", timeout)
         self.assertIn("timeout.required_ns > 100000000", timeout)
         self.assertLess(timeout.index("AXUIElementSetMessagingTimeout"), timeout.index("mrk_ax_admit(s, timeout.required_ns"))
@@ -2633,7 +2634,37 @@ class AquaDataTests(unittest.TestCase):
             self.assertIn(f"std::mem::offset_of!(OpenWire, {field}) != {offset}", rust)
         self.assertIn("std::mem::size_of::<RecheckWire>() != 48", rust)
         self.assertIn("w.checks & (w.checks + 1) != 0", wire)
-        self.assertIn("w.calls > 512 || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16", wire)
+        # Whole-call limits come from the validated frozen identity, not the wire.
+        for bound in ("const SELECT_CALLS: u32 = 3072;", "const SELECT_CF: u32 = 1024;"):
+            self.assertIn(bound, rust)
+        limits = rust.split("fn prompt_limits(selecting: bool) -> (u32, u32) {", 1)[1].split("\n    }", 1)[0]
+        self.assertEqual(limits.strip(), "if selecting { (SELECT_CALLS, SELECT_CF) } else { (512, 256) }")
+        invoke = rust.split("pub fn installed_prompt_button<", 1)[1].split("pub fn installed_accessibility_trusted(", 1)[0]
+        valid = "if main_thread() || !identity.valid() { return returned; }"
+        original_return = "returned.report = open_return(wire, context.rechecks, context.custody_known, identity.selection);"
+        self.assertLess(invoke.index(valid), invoke.index("mrk_observation_prompt_press("))
+        self.assertIn("u32::from(identity.selection), open_admission::<F, G>, open_recheck::<F, G>", invoke)
+        self.assertLess(invoke.index("mrk_observation_prompt_press("), invoke.index(original_return))
+        mode_guard = ("if w.selection_mode != u32::from(selecting) || !selecting && (rechecks[0].is_some()\n"
+                      "            || w.selection_checks != 0 || w.selection_flags != 0 || w.selection_nodes != 0 || w.selection_matches != 0\n"
+                      "            || w.selection_attribute != 0 || w.selection_last_role != 0 || w.selection_depth != 0 || w.site > 19\n"
+                      "            || w.selection_limit != 0 || w.selection_limit_cap != 0 || w.selection_limit_queued != 0\n"
+                      "            || w.selection_limit_children != 0 || w.selection_limit_observed != 0) { return None; }")
+        choose_limits = "let (calls, slots) = prompt_limits(selecting);"
+        self.assertEqual(wire.count(choose_limits), 1)
+        self.assertLess(wire.index(mode_guard) + len(mode_guard), wire.index(choose_limits))
+        self.assertIn("selection_mode: selecting, selection,", wire)
+        self.assertIn("w.calls > calls || w.initial_nodes_examined > 16 || w.recheck_nodes_examined > 16", wire)
+        self.assertIn("w.last_depth > 8 || w.owned > slots || w.released > w.owned", wire)
+        proof = rust.split("impl ControlContainerButtonProof {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("pub fn matched(self) -> bool { self.matched_for_mode(false) }", proof)
+        match_mode = proof.split("fn matched_for_mode(self, selecting: bool) -> bool {", 1)[1]
+        self.assertIn(choose_limits, match_mode)
+        self.assertIn("self.checks == [true; 7] && (1..=calls).contains(&self.calls)", match_mode)
+        self.assertIn("&& (1..=slots).contains(&self.cf_slots) && self.cf_slots_retired == self.cf_slots", match_mode)
+        self.assertIn("&& self.cleanup_returned && self.ax_error == 0 && self.ax_failure.is_none()", match_mode)
+        report = rust.split("impl OpenReport {", 1)[1].split("fn open_return(", 1)[0]
+        self.assertIn("self.button.matched_for_mode(self.selection_mode)", report)
         self.assertIn("w.checks < 63 && w.recheck_nodes_examined != 0", wire)
         self.assertIn("w.checks & 4 != 0 && w.initial_nodes_examined == 0", wire)
         self.assertIn("w.checks == 127 && (w.recheck_nodes_examined == 0 || w.last_role != 4 || w.last_depth == 0", wire)
@@ -4666,7 +4697,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for index, identifier in ((1, 2), (5, 8), (6, 9), (7, 10)):
             original = histories[index]
             action, binding, completion = (original[key] for key in ("selectionInput", "selectionBinding", "selectionCompletion"))
-            self.assertEqual(action["mechanism"], "accessibility-version-source-selection-press-v6")
+            self.assertEqual(action["mechanism"], "accessibility-version-source-selection-press-v7")
             self.assertEqual(binding["mechanism"], "selection-parent-original-sheet-v3")
             self.assertEqual((action["id"], binding["id"], completion["id"]), (identifier,) * 3)
             self.assertEqual(action["selectionParentProof"]["purpose"], "selection-parent")
@@ -4679,12 +4710,29 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             child["projectFields"]["acceptedOpenHistories"][index]["selectionInput"]["selection"].update(attribute="SelectedChildren")
             self.assertEqual(M.parse_result(captured(child), b"", BINDING, case), child)
         # Synthetic current-source DATA only; not a native observation or promised pass.
-        for nodes in (49, 50, 64, 127):
+        for nodes in (49, 50, 64, 127, 128, 255):
             widened = deepcopy(good)
             widened["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=nodes)
             with self.subTest(retained_nonroot_nodes=nodes):
                 self.assertEqual(M.parse_result(captured(widened), b"", BINDING, case), widened)
+        # Later control/Press DATA keeps the selecting envelope; the same
+        # standalone button DATA must still fail its ordinary-only decoder.
+        for nodes, calls, slots in ((12, 513, 257), (255, 2616, 1016), (255, 3072, 1024)):
+            widened = deepcopy(good)
+            action = widened["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]
+            action["selection"].update(nodes=nodes)
+            action["promptButton"].update(calls=calls, cfSlots=slots, cfSlotsRetired=slots)
+            with self.subTest(selection_calls=calls, selection_slots=slots):
+                self.assertEqual(M.parse_result(captured(widened), b"", BINDING, case), widened)
+                self.assertTrue(M._accessibility_succeeded(action))
+                with self.assertRaises(M.Refused):
+                    M._accessibility_prompt_button(action["promptButton"])
+                partial = deepcopy(widened)
+                partial["projectFields"]["acceptedOpenHistories"][1]["selectionInput"]["promptButton"]["cfSlotsRetired"] = slots - 1
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(partial), b"", BINDING, case)
         for mutation in (
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(mechanism="accessibility-version-source-selection-press-v6"),
             lambda v: v.update(schemaVersion=1),
             lambda v: v.update(normalProfileAvailable=True),
             lambda v: v.update(shippingProfileEnabledByThisReceipt=True),
@@ -4733,9 +4781,9 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selectionParentProof"].pop("purpose"),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["initialOriginalProof"].update(purpose="selection-parent"),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(originalProof=None),
-            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=128),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=256),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=True),
-            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=127.0),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(nodes=255.0),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(matches=0),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(matches=2),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["selection"].update(attribute="Value"),
@@ -4752,8 +4800,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(rechecksSettled=False),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(state="unknown", custodyKnown=False),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"].update(expired=True, timely=False),
-            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(calls=513),
-            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(cfSlots=257, cfSlotsRetired=257),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(calls=3073),
+            lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(cfSlots=1025, cfSlotsRetired=1025),
             lambda v: v["acceptedOpenHistories"][1]["selectionInput"]["promptButton"].update(cfSlotsRetired=119),
             lambda v: v["acceptedOpenHistories"][1]["selectionBinding"].update(id=8),
             lambda v: v["acceptedOpenHistories"][1]["selectionBinding"].update(mechanism="preconfigured-original-sheet-v2"),
@@ -4911,11 +4959,11 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             ("child-count", 33, 32, 25, None, "Table", 4),
             ("child-copy-count", 17, 16, 25, None, "Group", 4),
             ("child-copy-count", -(1 << 63), 32, 25, None, "List", 4),
-            ("queue-capacity", 128, 128, 128, 1, "Row", 4),
-            ("queue-capacity", 119, 128, 119, 10, "Row", 4),
-            ("depth", 8, 8, 128, 16, "Row", 8),  # Depth is FIRST even if both bounds refuse.
-            ("ax-call-budget", 512, 512, 25, None, "not-read", 4),
-            ("cf-slot-budget", 256, 256, 25, None, "not-read", 4),
+            ("queue-capacity", 256, 256, 256, 1, "Row", 4),
+            ("queue-capacity", 247, 256, 247, 10, "Row", 4),
+            ("depth", 8, 8, 256, 16, "Row", 8),  # Depth is FIRST even if both bounds refuse.
+            ("ax-call-budget", 3072, 3072, 25, None, "not-read", 4),
+            ("cf-slot-budget", 1024, 1024, 25, None, "not-read", 4),
         ]
         for predicate, observed, cap, queued, children, role, depth in cases:
             with self.subTest(predicate=predicate, observed=observed):
@@ -4928,8 +4976,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         # No fake zero queue/children after leaving the projection; the last
         # completed roster's counters are not new recheck/readback observations.
         for site, completed, selected, predicate, observed, cap in (
-            ("selection-recheck", 2, None, "ax-call-budget", 511, 512),
-            ("selection-settable", 3, None, "cf-slot-budget", 256, 256),
+            ("selection-recheck", 2, None, "ax-call-budget", 3071, 3072),
+            ("selection-settable", 3, None, "cf-slot-budget", 1024, 1024),
             ("selection-readback", 4, True, "child-count", 33, 32),
             ("selection-readback", 4, True, "child-copy-count", -1, 32),
         ):
@@ -4948,20 +4996,29 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         for patch_data in (
             {"predicate": "INERT_PRIVATE"}, {"observed": 512}, {"observed": True}, {"observed": 513.0},
             {"observed": 1 << 63}, {"observed": -(1 << 63) - 1}, {"cap": True}, {"cap": 0}, {"cap": 513},
-            {"queued": None}, {"queued": 0}, {"queued": 24}, {"queued": 129}, {"queued": True},
+            {"queued": None}, {"queued": 0}, {"queued": 24}, {"queued": 257}, {"queued": True},
             {"children": 0}, {"children": 1}, {"private": "INERT_PRIVATE"},
             {"predicate": "child-count", "observed": 16, "cap": 16},
             {"predicate": "child-count", "observed": 33, "cap": 32},
             {"predicate": "child-copy-count", "observed": 0, "cap": 16},
-            {"predicate": "queue-capacity", "observed": 127, "cap": 128, "queued": 127, "children": 1},
-            {"predicate": "queue-capacity", "observed": 128, "cap": 128, "queued": 128, "children": 17},
-            # Historical cap-49 refusal DATA is not a current-source wire.
+            {"predicate": "queue-capacity", "observed": 255, "cap": 256, "queued": 255, "children": 1},
+            {"predicate": "queue-capacity", "observed": 256, "cap": 256, "queued": 256, "children": 17},
+            # Historical cap claims are not current-source refusal predicates.
             {"predicate": "queue-capacity", "observed": 49, "cap": 49, "queued": 49, "children": 1},
+            {"predicate": "queue-capacity", "observed": 128, "cap": 128, "queued": 128, "children": 1},
+            {"predicate": "ax-call-budget", "observed": 512, "cap": 512},
+            {"predicate": "cf-slot-budget", "observed": 256, "cap": 256},
             {"predicate": "depth", "observed": 8, "cap": 8, "children": 1},
-            {"predicate": "ax-call-budget", "observed": 510, "cap": 512},
-            {"predicate": "cf-slot-budget", "observed": 255, "cap": 256},
+            {"predicate": "ax-call-budget", "observed": 3070, "cap": 3072},
+            {"predicate": "cf-slot-budget", "observed": 1023, "cap": 1024},
         ):
             bad = deepcopy(action); bad["selection"]["limit"].update(patch_data)
+            # Match counters so exact stale/underfilled caps, not a different
+            # counter mismatch, are what refuse these current-wire claims.
+            if patch_data.get("predicate") == "ax-call-budget":
+                bad["promptButton"]["calls"] = patch_data["observed"]
+            if patch_data.get("predicate") == "cf-slot-budget":
+                bad["promptButton"].update(cfSlots=patch_data["observed"], cfSlotsRetired=patch_data["observed"])
             with self.subTest(refused=patch_data), self.assertRaises(M.Refused):
                 M._accessibility_selection(bad["selection"], bad["promptButton"], bad["site"], bad["error"])
         for mutation in (
@@ -4997,7 +5054,8 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertNotIn(forbidden, helper)
         self.assertIn("if (!s->result.error) s->result.error = error;", native)
         self.assertIn("s->result.site == MRK_OPEN_SELECTION_PROJECTION ? s->selection_queued : 0", helper)
-        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_SELECT_NODES = 128",
+        for bound in ("MRK_PROMPT_CALLS = 512", "MRK_PROMPT_CF = 256", "MRK_SELECT_NODES = 256",
+                      "MRK_SELECT_CALLS = 3072", "MRK_SELECT_CF = 1024",
                       "MRK_CONTROL_DEPTH = 8", "MRK_SELECT_ROWS = 32", "MRK_PROMPT_ORIGINALS = 9"):
             self.assertIn(bound, native)
         arenas = native.split("enum { MRK_PROMPT_CALLS =", 1)[1].split("static atomic_uint mrk_prompt_next", 1)[0]
@@ -5008,7 +5066,10 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             "MRKSelectionPass selection;",
             "CFArrayRef selection_attributes;", "AXUIElementRef timeout_element;", "MRKOpenTimeout installed_timeout;",
             "static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];",
-            "_Static_assert(sizeof(mrk_prompt_originals) <= 64u * 1024u,",
+            "MRKPromptOwned owned[MRK_SELECT_CF]; unsigned count;",
+            "_Static_assert(sizeof(mrk_prompt_originals) <= 144u * 1024u,",
+            "MRK_SELECT_CF >= 3u * MRK_SELECT_NODES + 8u * MRK_CONTROL_NODES + 6u * MRK_CONTROL_DEPTH + 64u",
+            "MRK_SELECT_CALLS >= 8u * MRK_SELECT_NODES + 20u * MRK_CONTROL_NODES + 12u * MRK_CONTROL_DEPTH + 132u",
         ):
             self.assertIn(retained, arenas)
         label = native.split("static BOOL mrk_ax_selection_label(", 1)[1].split("static BOOL mrk_ax_selection_roster(", 1)[0]
@@ -5048,8 +5109,11 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
             self.assertEqual(paired_slots, 1 + labels + copied)
             self.assertEqual(old_calls - 2 * (1 + labels + counted + copied), 2)
         # The fixed request array adds one original slot, not one per node.
-        # Selection plus every later control/proof/Press operation shares512:
-        # nothing may reset the counter to make the unfinished graph/tail fit.
+        # Selection plus every later control/proof/Press operation shares3072;
+        # ordinary originals stay512. Neither mode may reset its counter.
+        slots = native.split("static MRKPromptOwned *mrk_ax_slot(", 1)[1].split("static BOOL mrk_ax_admit(", 1)[0]
+        self.assertIn("const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CF : MRK_PROMPT_CF;", slots)
+        self.assertIn("if (s->count == cap)", slots)
         self.assertNotRegex(native, r"s->result\.calls\s*(?:=(?!=)|-=|--)")
         decoder = rust.split("fn selection_limit_return(", 1)[1].split("/// The actual selecting", 1)[0]
         labels = M.re.findall(r'"([a-z-]+)"', decoder.split("predicate: *[", 1)[1].split("]", 1)[0])
@@ -5149,7 +5213,7 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
         self.assertIn("*flags == 0x5f00fu || *flags == 0x7f01fu", observe)
         self.assertIn("mrk_version_source_name_state(s, s->observationSample, MRK_NAME_ALL)", observe)
         self.assertIn("*flags |= MRK_VERSION_SOURCE_SELECTION_READY", observe)
-        self.assertIn("MRK_SELECT_NODES = 128, MRK_SELECT_ROWS = 32", native)
+        self.assertIn("MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32", native)
         self.assertIn("MRKSelectionPass selection;", native)
         for forbidden in ("kAXURLAttribute", "kAXFilenameAttribute", "kAXPressAction", "setNameFieldStringValue", "setDirectoryURL",
                           "CGEvent", "NSPasteboard", "sleep(", "dispatch_", "pthread_create", "CFRelease("):
@@ -6994,30 +7058,44 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
     def test_reader_phase_codec_keeps_only_valid_unique_history_without_private_bytes(self):
         import struct
         f, cell, root, original, model, calls, check = self.phase_model()
+        def projection(state, events, elapsed):
+            return {"state": state, "events": events, "elapsedMilliseconds": elapsed,
+                    "elapsedRounding": "floor", "clockOrigin": "reader-entry",
+                    "clockSample": "pre-diagnostic-write-admission", "historyOnly": True, "currentCallKnown": False}
+        self.assertEqual(cell["record"]["projection"], projection("unavailable", [], []))
         f["reader_phase_prepare"](cell, 10, root, check)
         header = cell["header"]; decode = f["reader_phase_projection"]
+        self.assertEqual(header[:8], b"MRKQDG02")
         self.assertEqual(len(header), 128); self.assertEqual(len(model["bytes"]), 2176)
-        self.assertEqual(decode(model["bytes"], header), {"state": "empty", "events": [], "historyOnly": True, "currentCallKnown": False})
-        def record(slot, event):
-            return struct.pack("<4I", 0x31514744, slot, event, 0x4d524b31 ^ slot ^ event)
-        first = record(1, 1); second = record(2, 77)  # Exact source code: phase4/open BeforeCall, NOT API entered.
+        self.assertEqual(decode(model["bytes"], header), projection("empty", [], []))
+        def record(slot, event, elapsed=0):
+            payload = (elapsed << 8) | event
+            return struct.pack("<4I", 0x32514744, slot, payload, 0x4d524b32 ^ slot ^ payload)
+        first = record(1, 1); second = record(2, 77, 17)  # phase4/open BeforeCall, NOT API entered.
         valid = header + first + second + bytes(2048 - 32)
-        expected = {"state": "prefix", "events": ["diagnostic-opened", "native:open:before-call"],
-                    "historyOnly": True, "currentCallKnown": False}
+        expected = projection("prefix", ["diagnostic-opened", "native:open:before-call"], [0, 17])
+        prefix = projection("partial", ["diagnostic-opened"], [0])
         self.assertEqual(decode(valid, header), expected)
-        # Truncation anywhere in one final record preserves only the preceding record.
+        # Truncation anywhere in one final record preserves only the preceding record and its time.
         for length in (1, 4, 8, 12, 15):
             raw = header + first + second[:length] + bytes(2048 - 16 - length)
-            self.assertEqual(decode(raw, header), dict(expected, state="partial", events=["diagnostic-opened"]))
-        for tail in (record(2, 1), record(3, 77), record(2, 64), record(2, 149), b"INERT_PRIVATE!!!" + b"X"):
+            self.assertEqual(decode(raw, header), prefix)
+        old = struct.pack("<4I", 0x31514744, 2, 77, 0x4d524b31 ^ 2 ^ 77)
+        corrupt_time = second[:9] + bytes([second[9] ^ 1]) + second[10:]
+        bad_magic = struct.pack("<4I", 0x32514745, 2, (17 << 8) | 77, 0x4d524b32 ^ 2 ^ ((17 << 8) | 77))
+        for tail in (record(2, 1, 19), record(3, 77, 17), record(2, 0), record(2, 25),
+                     record(2, 64), record(2, 149), record(2, 255), old, corrupt_time, bad_magic,
+                     b"INERT_PRIVATE!!!" + b"X"):
             raw = header + first + tail + bytes(2048 - 16 - len(tail))
             actual = decode(raw, header)
-            self.assertEqual(actual, dict(expected, state="partial", events=["diagnostic-opened"]))
+            self.assertEqual(actual, prefix)
             self.assertNotIn("INERT_PRIVATE", json.dumps(actual))
-        gap = header + first + bytes(16) + record(3, 77) + bytes(2048 - 48)
-        self.assertEqual(decode(gap, header)["state"], "partial")
+        gap = header + first + bytes(16) + record(3, 77, 17) + bytes(2048 - 48)
+        self.assertEqual(decode(gap, header), prefix)
+        legacy_header = b"MRKQDG01" + header[8:]
         for data, pin in ((valid[:-1], header), (valid + b"x", header), (bytearray(valid), header),
-                          (valid, b"x" + header[1:]), (b"x" * 2176, b"x" * 128)):
+                          (valid, b"x" + header[1:]), (b"x" * 2176, b"x" * 128),
+                          (legacy_header + valid[128:], legacy_header)):
             with self.assertRaises(ValueError): decode(data, pin)
         # Explicit cleanup of model resources only; this test creates no real output.
         self.assertEqual(f["reader_phase_collect"](cell, 10, original, f["phase_collect_check"]), [])
@@ -7097,7 +7175,8 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                 error = f["owner"].ProcessError("INERT_PRIVATE_TIMEOUT")
                 error.contained = True; error.cleanup_complete = condition != "unknown"
                 original["record"]["entered"] = True; original["error"] = error
-                record = struct.pack("<4I", 0x31514744, 1, 1, 0x4d524b31 ^ 1 ^ 1)
+                payload = (123 << 8) | 1
+                record = struct.pack("<4I", 0x32514744, 1, payload, 0x4d524b32 ^ 1 ^ payload)
                 model["bytes"] = cell["header"] + record + (b"private tail!!!x" if condition == "partial" else bytes(16)) + bytes(2016)
                 model["replacement"] = condition == "replacement"
                 start = len(calls)
@@ -7113,9 +7192,107 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                     self.assertFalse(model["present"]); self.assertTrue(cell["record"]["retired"])
                     self.assertEqual(cell["record"]["projection"]["state"], "partial" if condition == "partial" else "prefix")
                     self.assertEqual(bool(errors), condition == "partial")
+                    self.assertEqual(cell["record"]["projection"]["elapsedMilliseconds"], [123])
+                self.assertEqual(len(cell["record"]["projection"]["events"]), len(cell["record"]["projection"]["elapsedMilliseconds"]))
                 self.assertFalse(cell["record"]["projection"]["currentCallKnown"])
                 self.assertNotIn("private", json.dumps(cell["record"]))
 
+
+    def test_reader_phase_timing_is_original_entry_bounded_historical_data(self):
+        import struct
+        f, cell, root, original, model, calls, check = self.phase_model()
+        f["reader_phase_prepare"](cell, 10, root, check)
+        header = cell["header"]; decode = f["reader_phase_projection"]
+        def record(sequence, event, elapsed):
+            payload = (elapsed << 8) | event
+            return struct.pack("<4I", 0x32514744, sequence, payload, 0x4d524b32 ^ sequence ^ payload)
+        def snapshot(rows):
+            records = b"".join(record(i + 1, event, elapsed) for i, (event, elapsed) in enumerate(rows))
+            return header + records + bytes(2048 - len(records))
+        # Synthetic PRE-WRITE admission samples, not API entry/completion or owner elapsed.
+        rows = [(10, 0), (105, 4), (106, 9000), (11, 9999)]
+        expected_events = ["peer-run-before", "native:lookup:before-call",
+                           "native:lookup:after-call", "peer-run-returned"]
+        actual = decode(snapshot(rows), header)
+        self.assertEqual(actual, {"state": "prefix", "events": expected_events,
+            "elapsedMilliseconds": [0, 4, 9000, 9999], "elapsedRounding": "floor",
+            "clockOrigin": "reader-entry", "clockSample": "pre-diagnostic-write-admission",
+            "historyOnly": True, "currentCallKnown": False})
+        tied = decode(snapshot([(event, 0) for event, _ in rows]), header)
+        self.assertEqual(tied["elapsedMilliseconds"], [0, 0, 0, 0])
+        self.assertEqual(tied["events"], expected_events); self.assertEqual(tied["state"], "prefix")
+        # An absent after-call keeps only history, even though an owner could later time out.
+        only_before = decode(snapshot(rows[:2]), header)
+        self.assertEqual(only_before["events"], expected_events[:2])
+        self.assertEqual(only_before["elapsedMilliseconds"], [0, 4])
+        self.assertIs(only_before["historyOnly"], True); self.assertIs(only_before["currentCallKnown"], False)
+        first = record(1, 10, 100)
+        partial = dict(actual, state="partial", events=["peer-run-before"], elapsedMilliseconds=[100])
+        for tail in (record(2, 105, 99), record(2, 105, 10000), record(2, 105, 0xffffff),
+                     record(2, 10, 101), struct.pack("<4I", 0x32514744, 2, 0xffffffff, 0x4d524b32 ^ 2 ^ 0xffffffff)):
+            self.assertEqual(decode(header + first + tail + bytes(2016), header), partial)
+        # All108 IDs remain available exactly once, within the unchanged128 slots.
+        events = list(range(1, 25)) + list(range(65, 149))
+        full = decode(snapshot([(event, i * 93) for i, event in enumerate(events)]), header)
+        self.assertEqual(full["state"], "prefix"); self.assertEqual(len(full["events"]), 108)
+        self.assertEqual(len(set(full["events"])), 108)
+        self.assertEqual(full["elapsedMilliseconds"], [i * 93 for i in range(108)])
+        self.assertEqual(full["elapsedMilliseconds"][-1], 9951)
+        self.assertIs(full["currentCallKnown"], False)
+        self.assertEqual(f["reader_phase_collect"](cell, 10, original, f["phase_collect_check"]), [])
+        self.assertTrue(cell["record"]["retired"])
+
+    def test_reader_phase_timing_source_uses_only_existing_clock_and_write_admissions(self):
+        root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"
+        pair = (native / "src/wrapping_keychain_pair.rs").read_text()
+        fixture = (native / "src/wrapping_keychain_fixture.m").read_text()
+        native_calls = (native / "src/wrapping_keychain.m").read_text()
+        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        clock = pair.split("struct ReaderClock {", 1)[1].split("// One qualification-only diagnostic original", 1)[0]
+        self.assertIn("entry: Instant", clock)
+        self.assertIn("entry, cutoff: entry.checked_add(Duration::from_secs(READER_SECONDS))", clock)
+        self.assertIn("elapsed_millis: None", clock)
+        self.assertEqual(clock.count("Instant::now()"), 1)
+        self.assertEqual(clock.count("self.checks += 1;"), 1)
+        self.assertLess(clock.index("self.elapsed_millis = None;"), clock.index("self.cutoff.is_none_or("))
+        self.assertLess(clock.index("self.cutoff.is_none_or(|cutoff| {"), clock.index("let now = Instant::now();"))
+        self.assertIn("now.checked_duration_since(self.entry)", clock)
+        self.assertIn("u32::try_from(elapsed.as_millis()).ok()", clock)
+        self.assertIn("now >= cutoff", clock)
+        self.assertIn("if self.poisoned { Admission::Unknown } else if self.late { Admission::Cutoff } else { Admission::Continue }", clock)
+        for forbidden in ("unwrap_or(", "unwrap_or_default(", "Duration::from_millis(", "std::thread", "sleep("):
+            self.assertNotIn(forbidden, clock)
+        self.assertIn("READER_PHASE_MILLIS_LIMIT: u32 = (READER_SECONDS * 1000) as u32", pair)
+        phase = pair.split("impl ReaderPhase {", 1)[1].split("struct Reader {", 1)[0]
+        marker = phase.split("    fn marker(", 1)[1].split("    fn native(", 1)[0]
+        self.assertLess(marker.index("clock.admit() == Admission::Continue"), marker.index("clock.elapsed_millis"))
+        self.assertIn(".filter(|millis| *millis < READER_PHASE_MILLIS_LIMIT && self.writes < 128)", marker)
+        sample = marker.split("let Some(elapsed_millis) = clock.elapsed_millis", 1)[1].split("let slot =", 1)[0]
+        self.assertIn("self.failed = true; return clock.admit();", sample)
+        self.assertIn("let payload = (elapsed_millis << 8) | event;", marker)
+        self.assertIn("READER_PHASE_GUARD ^ (slot + 1) ^ payload", marker)
+        self.assertEqual(marker.count("clock.admit()"), 4)  # Same pre-I/O, two failure exits, final post-I/O.
+        self.assertEqual(marker.count("mrk_wrapping_reader_phase_write("), 1)
+        self.assertTrue(marker.rstrip().endswith("clock.admit()\n    }"))
+        self.assertNotIn("Instant::now", marker)
+        self.assertNotIn("Admission::Continue;", marker)
+        route = phase.split("    fn native(", 1)[1].split("    fn finish(", 1)[0]
+        self.assertEqual(route.count("Checkpoint::"), 4)
+        self.assertEqual(route.count("self.marker("), 1)
+        self.assertNotIn("security_calls(", route)  # No added native status category.
+        entry = pair.split("pub fn reader_entry() {", 1)[1]
+        self.assertTrue(entry.lstrip().startswith("let entry = Instant::now();"))
+        self.assertIn("Reader::empty(entry)", entry)
+        self.assertIn("size_of::<ManuallyDrop<Self>>()", pair)
+        self.assertIn("fds: [PhaseFd; 3]", pair)
+        self.assertIn("READER_PHASE_BYTES: usize = 2176", pair)
+        writer = fixture.split("int64_t mrk_wrapping_reader_phase_write(", 1)[1].split("int32_t mrk_wrapping_reader_phase_close(", 1)[0]
+        self.assertIn("if (fd < 0 || !record || slot >= 128)", writer)
+        self.assertIn("return pwrite(fd, record, 16, 128 + (off_t)slot * 16);", writer)
+        self.assertEqual(writer.count("pwrite("), 1); self.assertNotIn("MRKQDG", writer)
+        self.assertIn("kSecUseAuthenticationUIFail", native_calls)
+        self.assertIn("READER_SECONDS: u64 = 10", pair)
+        self.assertIn("owner_budget(reader_started, forward_end, 15)", workflow)
 
     def test_source_fixed_profile_barrier_charges_and_no_candidate_reader(self):
         root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"
@@ -7172,7 +7349,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         phase = pair.split("impl ReaderPhase {", 1)[1].split("struct Reader {", 1)[0]
         self.assertIn("self.fds.iter_mut().rev()", phase)
         self.assertIn("self.initialized && !self.failed && closed", phase)
-        self.assertIn('b"MRKQDG01"', phase)
+        self.assertIn('b"MRKQDG02"', phase)
         self.assertIn("self.bytes[128..].iter().any", phase)
         self.assertIn("self.fds[role].file = Some(ManuallyDrop::new", phase)
         marker = phase.split("    fn marker(", 1)[1].split("    fn native(", 1)[0]

@@ -1021,7 +1021,7 @@ def expected_result(binding, case):
                 identifier = row["operationId"]
                 parent = {**_expected_identity_proof(), "purpose": "selection-parent"}
                 row["selectionInput"] = {**value["native"]["projectOpenInput"],
-                    "mechanism": "accessibility-version-source-selection-press-v6",
+                    "mechanism": "accessibility-version-source-selection-press-v7",
                     "id": identifier, "step": _field_open_step(case, identifier),
                     "initialOriginalProof": _expected_identity_proof(), "originalProof": _expected_identity_proof(),
                     "promptChecks": {"initial": True, "final": True}, "promptButton": _expected_prompt_button(),
@@ -1422,9 +1422,16 @@ def _accessibility_ax_failure(value, ax_error):
     return value
 
 
-def _accessibility_prompt_button(value):
-    """Bounded returned AX/CF DATA, never a title, object or action permit."""
+ACCESSIBILITY_SELECT_NODES = 256
+ACCESSIBILITY_SELECT_CALLS = 3072
+ACCESSIBILITY_SELECT_CF = 1024
+
+
+def _accessibility_prompt_button(value, *, selecting=False):
+    """Bounded AX/CF DATA; selecting comes from the validated original context."""
     label = "accessibility-prompt-button"
+    need(type(selecting) is bool, label)
+    calls, slots = (ACCESSIBILITY_SELECT_CALLS, ACCESSIBILITY_SELECT_CF) if selecting else (512, 256)
     need(type(value) is dict and set(value) == {"checks", "calls", "initialNodesExamined", "recheckNodesExamined",
                                                "lastRole", "lastDepth", "cfSlots", "cfSlotsRetired", "cleanupReturned", "axError", "axFailure"}, label)
     checks = value["checks"]
@@ -1432,7 +1439,7 @@ def _accessibility_prompt_button(value):
          and all(type(v) is bool for v in checks.values()), label)
     ordered = tuple(checks[key] for key in ACCESSIBILITY_BUTTON_CHECKS)
     need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
-    for key, maximum in (("calls", 512), ("initialNodesExamined", 16), ("recheckNodesExamined", 16), ("lastDepth", 8), ("cfSlots", 256)):
+    for key, maximum in (("calls", calls), ("initialNodesExamined", 16), ("recheckNodesExamined", 16), ("lastDepth", 8), ("cfSlots", slots)):
         need(type(value[key]) is int and 0 <= value[key] <= maximum, label)
     need(type(value["lastRole"]) is str and value["lastRole"] in ACCESSIBILITY_CONTROL_ROLES, label)
     need(type(value["cfSlotsRetired"]) is int and 0 <= value["cfSlotsRetired"] <= value["cfSlots"]
@@ -1454,7 +1461,7 @@ def _accessibility_prompt_button(value):
 def _selection_succeeded(value):
     return (value is not None and value["limit"] is None and all(value["checks"].values()) and value["attempted"] is True
             and value["returned"] is True and value["selected"] is True and value["matches"] == 1
-            and 1 <= value["nodes"] <= 127 and value["attribute"] in ("SelectedRows", "SelectedChildren")
+            and 1 <= value["nodes"] < ACCESSIBILITY_SELECT_NODES and value["attribute"] in ("SelectedRows", "SelectedChildren")
             and value["lastRole"] != "not-read" and 1 <= value["depth"] <= min(8, value["nodes"]))
 
 
@@ -1468,12 +1475,12 @@ def _accessibility_selection_limit(value, selection, button, site, error):
     predicate, count, cap, queued, children = (value[key] for key in ("predicate", "observed", "cap", "queued", "children"))
     need(type(predicate) is str and predicate in ACCESSIBILITY_SELECTION_LIMITS, label)
     need(type(count) is int and -(1 << 63) <= count < (1 << 63)
-         and type(cap) is int and 1 <= cap <= 512, label)
+         and type(cap) is int and 1 <= cap <= ACCESSIBILITY_SELECT_CALLS, label)
     need(error == "limit" and site in ("selection-projection", "selection-recheck", "selection-settable", "selection-readback")
          and button is not None and button["axError"] == 0, label)
     projection = site == "selection-projection"
     if projection:
-        need(type(queued) is int and 1 <= queued <= 128 and queued > selection["nodes"]
+        need(type(queued) is int and 1 <= queued <= ACCESSIBILITY_SELECT_NODES and queued > selection["nodes"]
              and not any(selection["checks"].values()), label)
     else:
         need(queued is None, label)
@@ -1488,15 +1495,16 @@ def _accessibility_selection_limit(value, selection, button, site, error):
         valid = ((projection and child_cap != 0 and cap == child_cap or site == "selection-readback" and cap == 32)
                  and children is None and (count > cap or predicate == "child-copy-count" and count < 0))
     elif predicate == "queue-capacity":
-        valid = (projection and cap == 128 and count == queued and child_cap != 0 and children is not None
-                 and children <= child_cap and children > 128 - queued and selection["depth"] < 8)
+        valid = (projection and cap == ACCESSIBILITY_SELECT_NODES and count == queued and child_cap != 0 and children is not None
+                 and children <= child_cap and children > ACCESSIBILITY_SELECT_NODES - queued and selection["depth"] < 8)
     elif predicate == "depth":
         valid = (projection and cap == 8 and count == 8 and selection["depth"] == 8
                  and child_cap != 0 and children is not None and children <= child_cap)
     elif predicate == "ax-call-budget":
-        valid = cap == 512 and count == button["calls"] and 511 <= count <= 512 and children is None
+        valid = (cap == ACCESSIBILITY_SELECT_CALLS and count == button["calls"]
+                 and ACCESSIBILITY_SELECT_CALLS - 1 <= count <= ACCESSIBILITY_SELECT_CALLS and children is None)
     else:
-        valid = cap == 256 and count == button["cfSlots"] == 256 and children is None
+        valid = cap == ACCESSIBILITY_SELECT_CF and count == button["cfSlots"] == ACCESSIBILITY_SELECT_CF and children is None
     need(valid, label)
     return value
 
@@ -1513,7 +1521,7 @@ def _accessibility_selection(value, button, site, error):
     need(all(not flag or all(ordered[:index]) for index, flag in enumerate(ordered)), label)
     need(all(type(value[key]) is bool for key in ("attempted", "returned"))
          and (value["selected"] is None or type(value["selected"]) is bool), label)
-    for key, limit in (("nodes", 127), ("matches", 2), ("depth", 8)):
+    for key, limit in (("nodes", ACCESSIBILITY_SELECT_NODES - 1), ("matches", 2), ("depth", 8)):
         need(type(value[key]) is int and 0 <= value[key] <= limit, label)
     need(value["depth"] <= value["nodes"] and type(value["lastRole"]) is str
          and value["lastRole"] in ACCESSIBILITY_SELECTION_ROLES
@@ -1535,7 +1543,7 @@ def _accessibility_succeeded(value):
     # A matching receipt alone never means that its input thread has joined.
     field = PROJECT_FIELD_PANELS.get(value["step"])
     selecting = field is not None and field[1] == "version-source"
-    selected = (value.get("mechanism") == "accessibility-version-source-selection-press-v6"
+    selected = (value.get("mechanism") == "accessibility-version-source-selection-press-v7"
         and _selection_succeeded(value.get("selection")) and value.get("selectionParentPrompt") is True
         and value.get("selectionParentProof") is not None
         and value["selectionParentProof"].get("purpose") == "selection-parent"
@@ -1565,8 +1573,8 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
         need(type(value) is dict and type(value.get("id")) is int, label)
         field_step = _field_open_step(case, value["id"]) if expected_id is None or field_history else None
         version_source = field_step is not None and PROJECT_FIELD_PANELS[field_step][1] == "version-source"
-        selecting = version_source and value.get("mechanism") == "accessibility-version-source-selection-press-v6"
-        mechanism = "accessibility-version-source-selection-press-v6" if version_source else "accessibility-preconfigured-original-press-v5"
+        selecting = version_source and value.get("mechanism") == "accessibility-version-source-selection-press-v7"
+        mechanism = "accessibility-version-source-selection-press-v7" if version_source else "accessibility-preconfigured-original-press-v5"
         need(value.get("mechanism") == mechanism or historical and version_source
              and value.get("mechanism") == "accessibility-preconfigured-original-press-v5", label)
         extra = {"selectionParentProof", "selectionParentPrompt", "selection"} if selecting else set()
@@ -1661,7 +1669,7 @@ def _accessibility_context(value, native, panel, *, expected_id=None, case=None,
         button = value["promptButton"]
         if button is not None:
             need(value["bodyReturned"] and value["nativeEntered"] is True, label)
-            _accessibility_prompt_button(button)
+            _accessibility_prompt_button(button, selecting=selecting)
             need(button["calls"] == 0 or (parent_ready if selecting else full_ready), label)
             need(button["initialNodesExamined"] == 0 and not button["checks"]["completeControlProjection"] or full_ready, label)
             need(button["cleanupReturned"] or value["custodyKnown"] is not True

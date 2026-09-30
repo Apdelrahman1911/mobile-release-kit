@@ -305,12 +305,24 @@ pub(super) fn peer_report(out: &mut impl FmtWrite, row: &CaseReturn) -> fmt::Res
     out.write_str(",\"raw\":")?; native_result(out, &f.raw)?; out.write_char('}')
 }
 
-struct ReaderClock { cutoff: Option<Instant>, late: bool, poisoned: bool, checks: u64 }
+struct ReaderClock {
+    entry: Instant, cutoff: Option<Instant>, elapsed_millis: Option<u32>,
+    late: bool, poisoned: bool, checks: u64,
+}
 impl ReaderClock {
-    fn new(entry: Instant) -> Self { Self { cutoff: entry.checked_add(Duration::from_secs(READER_SECONDS)), late: false, poisoned: false, checks: 0 } }
+    fn new(entry: Instant) -> Self { Self { entry, cutoff: entry.checked_add(Duration::from_secs(READER_SECONDS)),
+        elapsed_millis: None, late: false, poisoned: false, checks: 0 } }
     fn admit(&mut self) -> Admission {
         self.checks += 1;
-        if self.cutoff.is_none_or(|cutoff| Instant::now() >= cutoff) { self.late = true; }
+        self.elapsed_millis = None;
+        if self.cutoff.is_none_or(|cutoff| {
+            // The existing admission sample, relative to the original entry.
+            // None cutoff still refuses without reading a new clock.
+            let now = Instant::now();
+            self.elapsed_millis = now.checked_duration_since(self.entry)
+                .and_then(|elapsed| u32::try_from(elapsed.as_millis()).ok());
+            now >= cutoff
+        }) { self.late = true; }
         if self.poisoned { Admission::Unknown } else if self.late { Admission::Cutoff } else { Admission::Continue }
     }
 }
@@ -318,8 +330,9 @@ impl ReaderClock {
 // One qualification-only diagnostic original, outside the exact control namespace.
 // Records are deduplicated observed history, never the currently executing API.
 const READER_PHASE_BYTES: usize = 2176;
-const READER_PHASE_MAGIC: u32 = 0x31514744;
-const READER_PHASE_GUARD: u32 = 0x4d524b31;
+const READER_PHASE_MAGIC: u32 = 0x32514744;
+const READER_PHASE_GUARD: u32 = 0x4d524b32;
+const READER_PHASE_MILLIS_LIMIT: u32 = (READER_SECONDS * 1000) as u32;
 unsafe extern "C" {
     fn mrk_wrapping_reader_phase_account() -> u64;
     fn mrk_wrapping_reader_phase_open(role: u32, parent: i32) -> i32;
@@ -410,7 +423,7 @@ impl ReaderPhase {
         if file.read_at(&mut eof, READER_PHASE_BYTES as u64).ok() != Some(0) { return false; }
         let Ok(after) = file.metadata() else { return false; };
         if !self.pin.as_ref().is_some_and(|pin| Self::same(pin, &after))
-            || &self.bytes[..8] != b"MRKQDG01" || self.bytes[128..].iter().any(|v| *v != 0) { return false; }
+            || &self.bytes[..8] != b"MRKQDG02" || self.bytes[128..].iter().any(|v| *v != 0) { return false; }
         for (i, identity) in identities.iter().enumerate() {
             for (field, value) in identity.iter().enumerate() {
                 if u64_at(&self.bytes, 8 + i * 40 + field * 8) != *value { return false; }
@@ -430,10 +443,14 @@ impl ReaderPhase {
             let bit = 1u128 << index;
             if self.seen & bit == 0 {
                 self.seen |= bit;
-                if self.writes >= 128 { self.failed = true; return clock.admit(); }
+                // Same pre-write admission sample, not IO completion or API entry.
+                let Some(elapsed_millis) = clock.elapsed_millis
+                    .filter(|millis| *millis < READER_PHASE_MILLIS_LIMIT && self.writes < 128)
+                else { self.failed = true; return clock.admit(); };
                 let slot = self.writes; self.writes += 1;
+                let payload = (elapsed_millis << 8) | event;
                 let mut record = [0u8; 16];
-                for (i, value) in [READER_PHASE_MAGIC, slot + 1, event, READER_PHASE_GUARD ^ (slot + 1) ^ event].iter().enumerate() {
+                for (i, value) in [READER_PHASE_MAGIC, slot + 1, payload, READER_PHASE_GUARD ^ (slot + 1) ^ payload].iter().enumerate() {
                     record[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
                 }
                 let result = self.fds[2].fd().map(|fd| unsafe {

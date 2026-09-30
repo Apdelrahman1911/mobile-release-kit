@@ -469,7 +469,7 @@ impl OpenInputSample {
             && self.report.is_some_and(|r| r.selection_mode == self.selection && r.succeeded() && self.diagnostic == Some(r.diagnostic))
     }
     fn value(self) -> Value {
-        let mechanism = if self.selection { "accessibility-version-source-selection-press-v6" }
+        let mechanism = if self.selection { "accessibility-version-source-selection-press-v7" }
             else { "accessibility-preconfigured-original-press-v5" };
         let mut value = json!({"mechanism":mechanism,"step":format!("{:?}",self.step),"id":self.id,
             "prepared":self.prepared,"requested":self.requested,"dispatchAttempted":self.dispatch_attempted,"state":self.state,

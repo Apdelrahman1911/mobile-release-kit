@@ -1236,7 +1236,15 @@ done:
 }
 
 enum { MRK_PROMPT_CALLS = 512, MRK_PROMPT_CF = 256, MRK_CONTROL_NODES = 17, MRK_CONTROL_DEPTH = 8,
-    MRK_SELECT_NODES = 128, MRK_SELECT_ROWS = 32 };
+    MRK_SELECT_NODES = 256, MRK_SELECT_ROWS = 32, MRK_SELECT_CALLS = 3072, MRK_SELECT_CF = 1024 };
+// Complete selecting original: both window/control projections, original
+// chains, one selection/readback and final Press. Charge every AX operation
+// its own timeout setter; successful-path bounds do not depend on reuse.
+_Static_assert(MRK_SELECT_CF >= 3u * MRK_SELECT_NODES + 8u * MRK_CONTROL_NODES + 6u * MRK_CONTROL_DEPTH + 64u,
+    "selection CF envelope covers the complete original");
+_Static_assert(MRK_SELECT_CALLS >= 8u * MRK_SELECT_NODES + 20u * MRK_CONTROL_NODES + 12u * MRK_CONTROL_DEPTH + 132u,
+    "selection AX envelope covers the complete original");
+_Static_assert(MRK_PROMPT_CF <= MRK_SELECT_CF, "ordinary original fits the retained ledger");
 enum { MRK_SELECT_COLUMN = 10, MRK_SELECT_LIST, MRK_SELECT_ROW, MRK_SELECT_CELL,
     MRK_SELECT_IMAGE, MRK_SELECT_TEXT, MRK_SELECT_FIELD };
 enum { MRK_SELECT_LIMIT_NONE, MRK_SELECT_LIMIT_LABEL, MRK_SELECT_LIMIT_CHILD_COUNT,
@@ -1258,7 +1266,7 @@ typedef struct {
 typedef struct {
     MRKOpenAdmission admit; MRKOpenRecheckCall recheck; void *context; MRKOpenResult result;
     CFTypeID elementType;
-    MRKPromptOwned owned[MRK_PROMPT_CF]; unsigned count;
+    MRKPromptOwned owned[MRK_SELECT_CF]; unsigned count;
     AXUIElementRef button; // Borrowed only from the first pass's retained original CFArray.
     BOOL cleanupKnown;
     MRKSelectionPass selection; // Original chain retained even on uncertain return.
@@ -1274,7 +1282,7 @@ typedef struct {
 // recycled; Cancel does not consume a Press original.
 enum { MRK_PROMPT_ORIGINALS = 9 };
 static MRKPrompt mrk_prompt_originals[MRK_PROMPT_ORIGINALS];
-_Static_assert(sizeof(mrk_prompt_originals) <= 64u * 1024u,
+_Static_assert(sizeof(mrk_prompt_originals) <= 144u * 1024u,
     "bounded original prompt arenas");
 static atomic_uint mrk_prompt_next = 0;
 static atomic_flag mrk_prompt_active = ATOMIC_FLAG_INIT;
@@ -1333,8 +1341,10 @@ static BOOL mrk_ax_status(MRKPrompt *s, AXError error, uint32_t operation_code, 
     }
 }
 static MRKPromptOwned *mrk_ax_slot(MRKPrompt *s) {
-    if (s->count == MRK_PROMPT_CF) {
-        mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CF_SLOTS, s->count, MRK_PROMPT_CF, 0); return NULL;
+    // The entry's frozen mode covers this whole original, not its current site.
+    const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CF : MRK_PROMPT_CF;
+    if (s->count == cap) {
+        mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_CF_SLOTS, s->count, cap, 0); return NULL;
     }
     return &s->owned[s->count++]; // Register actual out-slot BEFORE every Create/Copy.
 }
@@ -1348,8 +1358,9 @@ static BOOL mrk_ax_admit(MRKPrompt *s, uint64_t required_ns, int after, MRKOpenT
     return mrk_ax_fail(s, (uint32_t)result);
 }
 static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
-    if (s->result.calls > MRK_PROMPT_CALLS - 2)
-        return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_AX_CALLS, s->result.calls, MRK_PROMPT_CALLS, 0);
+    const unsigned cap = s->result.selection_mode == 1 ? MRK_SELECT_CALLS : MRK_PROMPT_CALLS;
+    if (s->result.calls > cap - 2)
+        return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_AX_CALLS, s->result.calls, cap, 0);
     MRKOpenTimeout timeout = {0};
     if (!mrk_ax_admit(s, 0, 0, &timeout)) return NO;
     if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.1
