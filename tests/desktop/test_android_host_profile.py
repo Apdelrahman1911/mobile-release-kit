@@ -268,8 +268,17 @@ class AndroidHostProfileContracts(unittest.TestCase):
             self.assertTrue(result["freshFontConsumersRequired"])
             self.assertFalse(result["fontConsumersExecuted"])
             detail["directories"]["/var/cache/fontconfig"]["children"].append("unreviewed-cache")
-            with self.assertRaisesRegex(P.BASE.Refused, "profile-font-roster"):
+            with self.assertRaisesRegex(P.BASE.Refused, "profile-font-roster") as failure:
                 P.font_correspondence(reader, snapshot, fonts, M)
+            self.assertEqual(P.failure_detail(reader, failure.exception, "fonts", {}, fonts), {
+                "phase": "font-roster", "refusal": "profile-font-roster", "subject": "/var/cache/fontconfig"})
+            detail["directories"]["/var/cache/fontconfig"]["children"].pop()
+            first = next(iter(fonts["files"]))
+            details[str(Path(first).parent)]["entries"][0]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(P.BASE.Refused, "profile-font-file") as failure:
+                P.font_correspondence(reader, snapshot, fonts, M)
+            self.assertEqual(P.failure_detail(reader, failure.exception, "fonts", {}, fonts), {
+                "phase": "font-file", "refusal": "profile-font-file", "subject": first})
 
     def test_stock_trust_rechecks_custom_ca_and_never_opens_custom_members(self):
         empty = {"status": "empty", "customBodiesRead": False, "customNamesExported": False}
@@ -289,6 +298,16 @@ class AndroidHostProfileContracts(unittest.TestCase):
             with self.assertRaisesRegex(P.BASE.Refused, "profile-custom-ca-not-empty"):
                 P.stock_correspondence(reader, trust)
             observe.assert_not_called()
+            reader.custom_ca.side_effect = [empty]
+            def missing_jks(_reader, name, **_options):
+                if name == "/etc/ssl/certs/java/cacerts":
+                    raise FileNotFoundError("private missing-path detail")
+                return {"data": {}, "file": {}}
+            observe.side_effect = missing_jks
+            with self.assertRaises(FileNotFoundError) as failure:
+                P.stock_correspondence(reader, trust)
+            self.assertEqual(P.failure_detail(reader, failure.exception, "stockTrust", {}, {}), {
+                "phase": "trust-jks", "refusal": "absent", "subject": "/etc/ssl/certs/java/cacerts"})
 
     def test_snapshot_injects_both_internal_body_reads_and_preserves_native_default(self):
         self.assertIs(L.shell_data_snapshot.__kwdefaults__["body_reader"], L.read)
@@ -326,6 +345,18 @@ class AndroidHostProfileContracts(unittest.TestCase):
         self.assertEqual(P.public_preparation_elf(deepcopy(elf)), elf)
         known = {key: value for key, value in elf.items() if key not in {"rpath", "runpath"}}
         self.assertEqual(P.public_preparation_elf(deepcopy(elf), known), elf)
+        providers = json.loads((SOURCE / "desktop/tools/android_material_data/host-profile-providers.json").read_bytes())
+        self.assertEqual(P.PREPARATION_XZ_LABELS,
+            set(providers["osLibraries"]["liblzma.so.5"]["elf"]["versionDefinitions"]) - {"liblzma.so.5"})
+        xz = {**elf, "needed": ["libc.so.6", "liblzma.so.5"],
+              "versionNeeds": {"libc.so.6": ["GLIBC_2.34"], "liblzma.so.5": sorted(P.PREPARATION_XZ_LABELS)}}
+        self.assertEqual(P.public_preparation_elf(deepcopy(xz)), xz)
+        for provider, labels in (("libc.so.6", ["XZ_5.0"]), ("liblzma.so.5", ["XZ_9.0"]),
+                                 ("liblzma.so.5", ["XZ_5.1.2private"]), ("liblzma.so.5", ["XZ_5.0/private"])):
+            with self.assertRaisesRegex(P.BASE.Refused, "profile-preparation-elf-labels"):
+                P.public_preparation_elf({**xz, "versionNeeds": {provider: labels}})
+        with self.assertRaisesRegex(P.BASE.Refused, "profile-preparation-elf-source"):
+            P.public_preparation_elf(xz, known)
         for key, value in (("rpath", "/private/location"), ("interpreter", "/private/loader"),
                            ("soname", "private.so"), ("versionDefinitions", ["private-label"]),
                            ("versionNeeds", {"libc.so.6": ["PRIVATE_VALUE"]}),
@@ -363,29 +394,62 @@ class AndroidHostProfileContracts(unittest.TestCase):
     def test_partial_failures_keep_independent_facts_without_private_errors_or_admission(self):
         reader = SimpleNamespace(point=Mock(), remaining=P.READ_LIMIT, deadline=100, s=SimpleNamespace(D=SimpleNamespace(canonical=canonical)))
         files = {name: {"file": {"selectedPath": "/usr/lib/" + name}} for name in ("bad", "good")}
-        providers = {"osLibraries": files, "programs": {}, "loader": {"selectedPath": "/loader"}, "ldconfig": {"selectedPath": "/ldconfig"}}
+        providers = {"osLibraries": files, "programs": {}, "packages": {},
+                     "loader": {"selectedPath": "/loader"}, "ldconfig": {"selectedPath": "/ldconfig"}}
+        fonts = json.loads((SOURCE / "desktop/tools/android_material_data/fonts.json").read_bytes())
         material = SimpleNamespace(SDK_IMAGE={"image": "fixed"}, CONFIGURATION_LIMIT=128 << 10)
         lifecycle = SimpleNamespace(shell_data_snapshot=Mock(return_value={}))
+        stop = False
         def observe(_reader, name, *_args, **_kwargs):
             if name == "/usr/lib/bad":
                 raise ValueError("private-path private-data")
+            if stop and name == "/usr/lib/good":
+                raise P.BASE.Stopped("read-budget")
             data = {"identity": material.SDK_IMAGE} if name == P.BASE.IMAGE_DATA else P.NETWORK_CONFIGURATION.get(name)
             return {"status": "observed", "data": data}
+        def failed_font(*_args):
+            reader.phase, reader.profile_subject = "font-roster", "/etc/fonts"
+            raise P.BASE.Refused("profile-font-roster")
         reader.bind, reader.body = Mock(), Mock()
         with patch.object(P, "prospective_rules", return_value={"observedOrConsumed": False}), \
              patch.object(P, "observed_file", side_effect=observe), \
              patch.object(P, "snapshot_projection", return_value={"status": "observed"}), \
              patch.object(P, "loader_correspondence", return_value={"status": "observed"}), \
-             patch.object(P, "font_correspondence", return_value={"status": "observed"}), \
-             patch.object(P, "stock_correspondence", return_value={"status": "observed"}), \
-             patch.object(P, "package_correspondence", return_value={"status": "observed"}):
-            result = P.collect(reader, {}, providers, {"consumers": {}}, {}, lifecycle=lifecycle, material=material, hosted=None, trust=None)
+             patch.object(P, "font_correspondence", side_effect=failed_font) as font, \
+             patch.object(P, "stock_correspondence", side_effect=FileNotFoundError("private detail")) as stock, \
+             patch.object(P, "package_correspondence", return_value={"status": "observed"}) as packages:
+            result = P.collect(reader, {}, providers, fonts, {}, lifecycle=lifecycle, material=material, hosted=None, trust=None)
+            for action in (font, stock, packages):
+                action.reset_mock()
+            stop = True
+            stopped = P.collect(reader, {}, providers, fonts, {}, lifecycle=lifecycle, material=material, hosted=None, trust=None)
+            self.assertEqual(stopped["stopped"], "read-budget")
+            self.assertEqual(stopped["observations"]["provider:good"], {
+                "status": "unavailable", "reason": "read-budget", "phase": "observation", "refusal": "read-budget"})
+            self.assertEqual(stopped["firstFailure"], {"role": "provider:bad", "reason": "invalid-or-changed"})
+            for action in (font, stock, packages):
+                action.assert_not_called()
         self.assertEqual(result["firstFailure"]["role"], "provider:bad")
         self.assertEqual(result["observations"]["provider:good"]["status"], "observed")
         self.assertEqual(result["observations"]["packages"]["status"], "observed")
+        self.assertEqual(result["observations"]["fonts"], {"status": "unavailable", "reason": "invalid-or-changed",
+            "phase": "font-roster", "refusal": "profile-font-roster", "subject": "/etc/fonts"})
+        self.assertEqual(result["observations"]["stockTrust"], {"status": "unavailable", "reason": "absent",
+            "phase": "observation", "refusal": "absent"})  # No leaked font phase/subject.
         self.assertNotIn("private-", canonical(result).decode())
+        reader.phase, reader.profile_subject = "private-phase", "/private/input"
+        hidden = P.failure_detail(reader, ValueError("private body"), "stockTrust", providers, fonts)
+        self.assertEqual(hidden, {"phase": "observation", "refusal": "invalid-or-changed"})
+        reader.phase, reader.profile_subject = "font-configuration", fonts["configurationFiles"][0]
+        mapped = P.failure_detail(reader, ValueError("Android font configuration selector differs"), "fonts", providers, fonts)
+        self.assertEqual(mapped["refusal"], "font-configuration-selector")
+        self.assertEqual(mapped["subject"], fonts["configurationFiles"][0])
+        self.assertLessEqual(len(canonical(mapped)), 512)
+        reader.profile_subject = "/usr/bin/dpkg-deb"
+        self.assertNotIn("subject", P.failure_detail(reader, ValueError("private body"), "fonts", providers, fonts))
         for field in ("observationComplete", "collectionComplete", "profileActivated", "runtimeAdmission", "nativeQualification", "newConsent"):
             self.assertFalse(result[field])
+            self.assertFalse(stopped[field])
 
     def test_package_membership_must_match_the_declared_provider_owner(self):
         name, member = "libexample", "/usr/lib/libexample.so.1"
@@ -405,9 +469,17 @@ class AndroidHostProfileContracts(unittest.TestCase):
         with patch.object(P, "EXTRA_PACKAGES", ()), patch.object(P, "PREPARATION_PACKAGES", {}):
             result = P.package_correspondence(reader, providers, {"files": {}})
             self.assertNotIn("private-unrelated-value", canonical(result).decode())
-            selected.clear()
-            with self.assertRaisesRegex(P.BASE.Refused, "profile-provider-package-membership"):
+            expected["version"] = "2.0"
+            with self.assertRaisesRegex(P.BASE.Refused, "profile-package-correspondence") as failure:
                 P.package_correspondence(reader, providers, {"files": {}})
+            self.assertEqual(P.failure_detail(reader, failure.exception, "packages", providers, {"files": {}}), {
+                "phase": "package-source", "refusal": "profile-package-correspondence", "subject": name})
+            expected["version"] = "1.0"
+            selected.clear()
+            with self.assertRaisesRegex(P.BASE.Refused, "profile-provider-package-membership") as failure:
+                P.package_correspondence(reader, providers, {"files": {}})
+            self.assertEqual(P.failure_detail(reader, failure.exception, "packages", providers, {"files": {}}), {
+                "phase": "package-provider", "refusal": "profile-provider-package-membership", "subject": member})
 
     def test_new_observer_cannot_invoke_native_or_broad_collection_and_pins_exact_data(self):
         source = (SOURCE / "desktop/tools/observe_android_host_profile.py").read_text()
@@ -444,6 +516,15 @@ class AndroidHostProfileContracts(unittest.TestCase):
         observe = next(s for s in steps if s.startswith("Observe only fixed Android host-profile DATA\n"))
         self.assertIn("ulimit -v 524288; ulimit -t 130; ulimit -n 64; ulimit -c 0; ulimit -f 2048", observe)
         self.assertIn("--signal=TERM --kill-after=2s 133s", observe)
+        shared = next(s for s in steps if s.startswith("Prepare shared Ubuntu shell inputs only on this disposable runner\n"))
+        self.assertIn('if [[ "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 || "$MRK_INSTALLED_SHELL_CASE" == host-metadata-only ]]; then\n'
+                      '            packages+=(libgif7 libpcsclite1:amd64=2.0.3-1build1 ca-certificates-java)\n          fi', shared)
+        self.assertEqual(shared.count("libpcsclite1"), 1)
+        self.assertEqual(shared.count("ca-certificates-java"), 1)
+        self.assertIn('sudo apt-get install -y --no-install-recommends "${packages[@]}"', shared)
+        self.assertIn('dpkg-query -W -f=\'${Package} ${Version}\\n\' "${packages[@]%%=*}"', shared)
+        providers = json.loads((SOURCE / "desktop/tools/android_material_data/host-profile-providers.json").read_bytes())
+        self.assertIn("libpcsclite1:amd64=" + providers["packages"]["libpcsclite1:amd64"]["version"], shared)
         for s in steps:
             if "android_hosted_data.py prepare" in s or "installed-shell-compile" in s or "Select the fixed frontend compiler\n" in s:
                 condition = next(line.strip() for line in s.splitlines() if line.strip().startswith("if:"))

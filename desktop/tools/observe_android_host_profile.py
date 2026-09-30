@@ -60,6 +60,42 @@ NETWORK_CONFIGURATION = {
         "rpc": ["db", "files"], "services": ["db", "files"], "shadow": ["files", "systemd"],
     }},
 }
+# These are the version definitions of the independently pinned liblzma.so.5,
+# not an arbitrary XZ label family or permission to select another provider.
+PREPARATION_XZ_LABELS = {"XZ_5.0", "XZ_5.2", "XZ_5.1.2alpha", "XZ_5.2.2", "XZ_5.4"}
+DIAGNOSTIC_PHASES = {
+    "observation", "preparation-file", "preparation-elf", "font-snapshot", "font-suppliers",
+    "font-roster", "font-file", "font-configuration", "font-local-configuration",
+    "font-cache", "font-cache-marker", "trust-policy", "trust-custom", "trust-pem",
+    "trust-jks", "trust-config", "trust-complete", "trust-custom-post", "package-status",
+    "package-source", "package-available", "package-members", "package-provider",
+    "package-preparation", "package-font", "package-identity",
+}
+PROFILE_REFUSALS = {
+    "profile-file-bound", "profile-file-open-changed", "profile-file-read-type", "profile-file-grew",
+    "profile-file-read-changed", "profile-file-post-changed", "profile-file-original",
+    "profile-parsed-body-correspondence", "profile-parsed-original-changed",
+    "profile-file-correspondence", "profile-public-alias", "profile-snapshot-unavailable",
+    "profile-font-suppliers", "profile-font-roster", "profile-font-file",
+    "profile-font-local-configuration", "profile-font-cache-version", "profile-font-cache-marker",
+    "profile-custom-ca-not-empty", "profile-custom-ca-changed", "profile-package-correspondence",
+    "profile-package-unavailable", "profile-package-member-changed", "profile-package-member-roster",
+    "profile-provider-package-membership", "profile-preparation-package-membership",
+    "profile-font-package-membership", "profile-package-public-identity",
+    "profile-preparation-elf-role", "profile-preparation-elf-source", "profile-preparation-elf-names",
+    "profile-preparation-elf-labels", "directory-open-changed", "directory-read-changed",
+    "package-selection", "package-duplicate", "package-field", "package-not-installed",
+    "package-member-duplicate",
+}
+FONT_REFUSALS = {
+    "Android font configuration bound/entity differs": "font-configuration-bound-or-entity",
+    "Android font configuration DTD differs": "font-configuration-dtd",
+    "Android font configuration root differs": "font-configuration-root",
+    "Android font configuration element bound": "font-configuration-element-bound",
+    "Android font configuration namespace/remapping differs": "font-configuration-namespace-or-remapping",
+    "Android font configuration selector attributes differ": "font-configuration-selector-attributes",
+    "Android font configuration selector differs": "font-configuration-selector",
+}
 
 
 def local(name):
@@ -74,6 +110,43 @@ BASE = local("observe_hosted_android")  # Resource-free definitions only; never 
 
 def need(value, label):
     BASE.need(value, label)
+
+
+def failure_detail(reader, error, role, providers, fonts):
+    """Finite source labels only; no exception text, private name or host body.
+
+    The old reason/firstFailure contract remains unchanged. At most three short
+    strings fit well inside the existing64KiB failure/output slack for77 roles.
+    """
+    phase = getattr(reader, "phase", "observation")
+    label = error.args[0] if len(error.args) == 1 and type(error.args[0]) is str else None
+    refusal = BASE.diagnostic_reason(error)
+    if isinstance(error, BASE.Stopped):
+        refusal = label if label in {"read-budget", "deadline", "action-deadline"} else "resource-limit"
+    elif isinstance(error, ValueError):
+        if label in PROFILE_REFUSALS:
+            refusal = label
+        elif label in FONT_REFUSALS:
+            refusal = FONT_REFUSALS[label]
+    detail = {"phase": phase if type(phase) is str and phase in DIAGNOSTIC_PHASES else "observation",
+              "refusal": refusal}
+    allowed = set()
+    if role == "fonts":
+        allowed = set(fonts["supplierRoots"]) | set(fonts["directories"]) | set(fonts["files"]) | set(fonts["absences"])
+        allowed.update("/var/cache/fontconfig/" + name for name in fonts["directories"]["/var/cache/fontconfig"])
+    elif role == "stockTrust":
+        allowed = {BASE.CUSTOM_CA_ROOT, *(name for name, _, _ in BASE.TRUST_INPUTS)}
+    elif role == "packages":
+        allowed = {name.split(":", 1)[0] for name in providers["packages"]} | set(EXTRA_PACKAGES)
+        allowed.update(row["file"]["path"] for row in [*providers["osLibraries"].values(), *providers["programs"].values()])
+        allowed.update(PREPARATION_PROGRAMS)
+        allowed.update(row["path"] for row in fonts["files"].values())
+    elif role.startswith("preparation:"):
+        allowed = set(PREPARATION_PROGRAMS)
+    subject = getattr(reader, "profile_subject", None)
+    if type(subject) is str and len(subject) <= 192 and subject in allowed:
+        detail["subject"] = subject
+    return detail
 
 
 def full_state(info):
@@ -394,19 +467,24 @@ def snapshot_projection(snapshot):
 
 
 def font_correspondence(reader, snapshot, fonts, material):
+    reader.phase, reader.profile_subject = "font-snapshot", None
     need(snapshot is not None, "profile-snapshot-unavailable")
-    need(all(snapshot["suppliers"]["roots"][name] == row for name, row in fonts["supplierRoots"].items()),
-         "profile-font-suppliers")
+    for name, row in fonts["supplierRoots"].items():
+        reader.phase, reader.profile_subject = "font-suppliers", name
+        need(snapshot["suppliers"]["roots"][name] == row, "profile-font-suppliers")
+    reader.phase, reader.profile_subject = "font-snapshot", None
     directories, entries = {}, {}
     for root, detail in snapshot["details"].items():
         directories.update(detail["directories"])
         for row in detail["entries"]:
             name = root if row["path"] == "." else root + "/" + row["path"]
             entries[name] = row
-    need(all(name in directories and directories[name]["children"] == children
-             for name, children in fonts["directories"].items()), "profile-font-roster")
+    for name, children in fonts["directories"].items():
+        reader.phase, reader.profile_subject = "font-roster", name
+        need(name in directories and directories[name]["children"] == children, "profile-font-roster")
     files = {}
     for name, expected in fonts["files"].items():
+        reader.phase, reader.profile_subject = "font-file", name
         reader.point()
         row = entries.get(name, {})
         need(row.get("present") is True and row.get("kind") == "file"
@@ -417,14 +495,17 @@ def font_correspondence(reader, snapshot, fonts, material):
     public_aliases = {directory + "/" + child for directory, children in fonts["directories"].items() for child in children}
     public_aliases.update(row["path"] for row in fonts["files"].values())
     for name in fonts["configurationFiles"]:
+        reader.phase, reader.profile_subject = "font-configuration", name
         row = observed_file(reader, name, fonts["files"][name], limit=64 << 10,
                             parse=material._font_config_io, public_aliases=public_aliases)
         configurations[name] = row["data"]
+    reader.phase, reader.profile_subject = "font-local-configuration", "/etc/fonts/local.conf"
     absent = reader.bind("/etc/fonts/local.conf", absent=True, limit=64 << 10)
     need(absent.get("absent") is True, "profile-font-local-configuration")
     caches = {}
     for directory in material.FONT_DIRECTORIES:
         name = "/var/cache/fontconfig/" + hashlib.md5(directory.encode("ascii")).hexdigest() + "-le64.cache-9"
+        reader.phase, reader.profile_subject = "font-cache", name
         row = entries.get(name, {})
         need(row.get("present") is True and row.get("kind") == "file" and row.get("canonical") == name,
              "profile-font-cache-version")
@@ -434,6 +515,7 @@ def font_correspondence(reader, snapshot, fonts, material):
              and all(not line or line.startswith(b"#") for line in raw.splitlines()[1:]), "profile-font-cache-marker")
         return {"standardCacheDirectory": True}
     name = "/var/cache/fontconfig/CACHEDIR.TAG"
+    reader.phase, reader.profile_subject = "font-cache-marker", name
     row = entries[name]
     observed_file(reader, name, {"path": name, **{k: row[k] for k in ("size", "sha256", "mode")}}, limit=4096, parse=marker)
     return {"status": "observed", "files": files, "directories": fonts["directories"],
@@ -494,38 +576,48 @@ def loader_correspondence(reader, providers, lifecycle):
 
 
 def stock_correspondence(reader, trust_module):
+    reader.phase, reader.profile_subject = "trust-policy", None
     policy = trust_module.Policy(reader.body(TOOLS / trust_module.POLICY_FILE, trust_module.POLICY_LIMIT))
+    reader.phase, reader.profile_subject = "trust-custom", BASE.CUSTOM_CA_ROOT
     custom = reader.custom_ca()
     need(custom.get("status") == "empty", "profile-custom-ca-not-empty")
     components, files = {}, {}
     for name, limit, kind in BASE.TRUST_INPUTS:
+        reader.phase, reader.profile_subject = "trust-" + kind, name
         row = observed_file(reader, name, limit=limit, parse=lambda raw, k=kind: getattr(policy, k)(raw, reader.point))
         components[kind], files[kind] = row["data"], row["file"]
+    reader.phase, reader.profile_subject = "trust-complete", None
     complete = policy.complete(components, custom)
+    reader.phase, reader.profile_subject = "trust-custom-post", BASE.CUSTOM_CA_ROOT
     need(reader.custom_ca() == custom, "profile-custom-ca-changed")
     return {"status": "observed", "policySha256": trust_module.POLICY_SHA256, "files": files,
             "correspondence": complete, "customCa": custom, "producerExecutionProven": False}
 
 
 def package_correspondence(reader, providers, fonts):
+    reader.phase, reader.profile_subject = "package-status", None
     package_names = sorted({name.split(":", 1)[0] for name in providers["packages"]} | set(EXTRA_PACKAGES))
     row = reader.file("/var/lib/dpkg/status", 24 << 20,
                       lambda raw: BASE.package_status(raw, packages=package_names))
     packages = row["data"]
     for expected in providers["packages"].values():
         name = expected["binaryPackage"].split(":", 1)[0]
+        reader.phase, reader.profile_subject = "package-source", name
         fields = packages[name].get("fields", {})
         source = fields.get("Source", name)
         match = re.fullmatch(r"([a-z0-9][a-z0-9+.-]*)(?: \(([^()\s]+)\))?", source)
         need(match is not None and fields.get("Architecture") == expected["architecture"]
              and fields.get("Version") == expected["version"] and match[1] == expected["sourcePackage"]
              and (match[2] or fields["Version"]) == expected["sourceVersion"], "profile-package-correspondence")
-    need(all(row.get("status") == "observed" for row in packages.values()), "profile-package-unavailable")
+    for name, row in packages.items():
+        reader.phase, reader.profile_subject = "package-available", name
+        need(row.get("status") == "observed", "profile-package-unavailable")
     wanted = {item["file"]["path"] for item in [*providers["osLibraries"].values(), *providers["programs"].values()]}
     wanted |= set(PREPARATION_PROGRAMS) | {row["path"] for row in fonts["files"].values()}
     wanted |= {"/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/java/cacerts", "/etc/ca-certificates.conf"}
     membership = {}
     for package in package_names:
+        reader.phase, reader.profile_subject = "package-members", package
         reader.point()
         candidates = ["/var/lib/dpkg/info/" + package + suffix for suffix in (".list", ":amd64.list")]
         present = []
@@ -539,16 +631,19 @@ def package_correspondence(reader, providers, fonts):
         need(len(present) == 1, "profile-package-member-roster")
         membership[package] = sorted(present[0])
     # Membership is a separate witness, never a claim that dpkg/installer ran.
-    need(all(row["file"]["path"] in membership[row["package"].split(":", 1)[0]]
-             for row in [*providers["osLibraries"].values(), *providers["programs"].values()]),
-         "profile-provider-package-membership")
-    need(all(name in membership[package] for name, package in PREPARATION_PACKAGES.items()),
-         "profile-preparation-package-membership")
+    for row in [*providers["osLibraries"].values(), *providers["programs"].values()]:
+        reader.phase, reader.profile_subject = "package-provider", row["file"]["path"]
+        need(row["file"]["path"] in membership[row["package"].split(":", 1)[0]], "profile-provider-package-membership")
+    for name, package in PREPARATION_PACKAGES.items():
+        reader.phase, reader.profile_subject = "package-preparation", name
+        need(name in membership[package], "profile-preparation-package-membership")
     font_packages = {name for name in package_names if name.startswith("fonts-") or name == "fontconfig-config"}
-    need(all(row["path"] in {path for package in font_packages for path in membership[package]}
-             for row in fonts["files"].values()), "profile-font-package-membership")
+    for row in fonts["files"].values():
+        reader.phase, reader.profile_subject = "package-font", row["path"]
+        need(row["path"] in {path for package in font_packages for path in membership[package]}, "profile-font-package-membership")
     public_packages = {}
     for name, row in packages.items():
+        reader.phase, reader.profile_subject = "package-identity", name
         fields = row["fields"]
         source = re.fullmatch(r"([a-z0-9][a-z0-9+.-]{0,127})(?: \(([^()\s]{1,128})\))?", fields.get("Source", name))
         version = fields.get("Version", "")
@@ -577,21 +672,26 @@ def public_preparation_elf(value, expected=None):
                      and ".so" in name for name in names)
              and type(versions) is dict and set(versions) <= set(names), "profile-preparation-elf-names")
         labels = []
-        for values in versions.values():
+        for provider, values in versions.items():
             need(type(values) is list and 1 <= len(values) <= 64, "profile-preparation-elf-labels")
-            labels.extend(values)
+            labels.extend((provider, label) for label in values)
         need(len(labels) <= 128 and all(type(label) is str and len(label) <= 96
-             and re.fullmatch(r"(?:GLIBC|GLIBCXX|CXXABI|CURL_OPENSSL|LIBCURL_OPENSSL|LIBLZMA|LIBMD|"
-                              r"NCURSES6_TINFO|ZLIB|OPENSSL|LIBXML2)_[0-9]{1,8}(?:\.[0-9]{1,8}){0,5}", label)
-             for label in labels), "profile-preparation-elf-labels")
+             and (re.fullmatch(r"(?:GLIBC|GLIBCXX|CXXABI|CURL_OPENSSL|LIBCURL_OPENSSL|LIBLZMA|LIBMD|"
+                               r"NCURSES6_TINFO|ZLIB|OPENSSL|LIBXML2)_[0-9]{1,8}(?:\.[0-9]{1,8}){0,5}", label)
+                  or provider == "liblzma.so.5" and label in PREPARATION_XZ_LABELS)
+             for provider, label in labels), "profile-preparation-elf-labels")
     return value
 
 
 def preparation_file(reader, name, fonts):
+    reader.phase, reader.profile_subject = "preparation-file", name
     known = fonts["consumers"].get(name)
     def parse(raw):
-        return public_preparation_elf(reader.s.elf_dependencies(raw, android_data=True),
-                                      None if known is None else known["elf"])
+        reader.phase = "preparation-elf"
+        result = public_preparation_elf(reader.s.elf_dependencies(raw, android_data=True),
+                                        None if known is None else known["elf"])
+        reader.phase = "preparation-file"
+        return result
     row = observed_file(reader, name, None if known is None else known["file"], parse=parse)
     row["elfSourceCorrespondence"] = known is not None
     row["freshNativeConsumerRequired"] = True
@@ -622,6 +722,7 @@ def collect(reader, run, providers, fonts, policy, *, lifecycle, material, hoste
               "readLimitBytes": READ_LIMIT, "snapshotCanonicalLimitBytes": 512 << 20}
 
     def attempt(name, action):
+        reader.phase, reader.profile_subject = "observation", None
         try:
             reader.point()
             value = action()
@@ -631,13 +732,15 @@ def collect(reader, run, providers, fonts, policy, *, lifecycle, material, hoste
             return value
         except BASE.Stopped as error:
             label = error.args[0] if error.args and error.args[0] in {"read-budget", "deadline", "action-deadline"} else "resource-limit"
-            observations[name] = {"status": "unavailable", "reason": label}
+            observations[name] = {"status": "unavailable", "reason": label,
+                                  **failure_detail(reader, error, name, providers, fonts)}
             record["stopped"] = label
             record["firstFailure"] = record["firstFailure"] or {"role": name, "reason": label}
             raise
         except (OSError, ValueError, UnicodeError, KeyError, RecursionError) as error:
             label = BASE.reason(error)
-            observations[name] = {"status": "unavailable", "reason": label}
+            observations[name] = {"status": "unavailable", "reason": label,
+                                  **failure_detail(reader, error, name, providers, fonts)}
             record["firstFailure"] = record["firstFailure"] or {"role": name, "reason": label}
             return None
 

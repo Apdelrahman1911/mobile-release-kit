@@ -88,11 +88,11 @@ jobs:
           set -euo pipefail
           packages=(libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy)
           if [[ "${MRK_INSTALLED_SHELL_TRANSPORT:-}" == android-same-job-local-v1 || "$MRK_INSTALLED_SHELL_CASE" == host-metadata-only ]]; then
-            packages+=(libgif7)
+            packages+=(libgif7 libpcsclite1:amd64=2.0.3-1build1 ca-certificates-java)
           fi
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends "${packages[@]}"
-          dpkg-query -W -f='${Package} ${Version}\n' "${packages[@]}"
+          dpkg-query -W -f='${Package} ${Version}\n' "${packages[@]%%=*}"
       - name: Prepare the fixed JDK17 pair only on this disposable shell runner
         id: tools_inputs
         if: steps.route.outputs.native == 'true' && github.ref == 'refs/heads/verify/desktop-installed-shell' && env.MRK_INSTALLED_SHELL_SCOPE != 'session-apple-review1-v1' && env.MRK_INSTALLED_SHELL_SCOPE != 'android-saved-signing3-v1'
