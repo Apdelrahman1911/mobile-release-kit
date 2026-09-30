@@ -68,7 +68,7 @@ def _admit_image_backend(root: object, value: object) -> ImageRootIdentity:
 
 
 class _Engine:
-    def __init__(self, started: float, *, workflows: bool = False, domain: str | None = None) -> None:
+    def __init__(self, started: float, *, workflows: bool = False, domain: str | None = None, _image_stdio: Any = None) -> None:
         if type(workflows) is not bool or domain is not None and workflows:
             raise ProtocolError("Invalid fixed edit domain")
         selected = ("github_workflows" if workflows else "configuration") if domain is None else domain
@@ -80,7 +80,16 @@ class _Engine:
         protocol = {"configuration": PROTOCOL, "github_workflows": WORKFLOW_PROTOCOL,
                     "metadata_text": METADATA_PROTOCOL, "release_version": VERSION_PROTOCOL,
                     "metadata_images": IMAGES_PROTOCOL}[selected]
-        self.input = EditInput(started, protocol=protocol)
+        self.image_stdio = None
+        self.image_writer = None
+        if sys.platform == "win32" and selected == "metadata_images":
+            from ._desktop_image_writer_windows import _original_image_stdio
+            self.image_stdio = _original_image_stdio(_image_stdio, started)
+        elif _image_stdio is not None:
+            raise ProtocolError("No image stdio handoff belongs to this edit domain")
+        self.input = EditInput(started, protocol=protocol, _windows_stdio=self.image_stdio)
+        if self.image_stdio is not None:
+            self.input._prepare_windows_owner(self.guard)
         self.lease: InitRootLease | None = None
         self.authority: Any = None
         self.last_request: EditRequest | None = None
@@ -91,9 +100,9 @@ class _Engine:
         self.first: BaseException | None = None
         self.frames = 0
         self.stdout_bytes = 0
-        self.output_owned = False
+        self.output_owned = self.image_stdio is not None and self.image_stdio._claims[1]
         self.output_closed = False
-        self.error_owned = False
+        self.error_owned = self.image_stdio is not None and self.image_stdio._claims[2]
         self.error_closed = False
 
     def _remember(self, error: BaseException) -> None:
@@ -126,6 +135,8 @@ class _Engine:
         self.outcome = CoreEditOutcome(effect, journal, resources, reason)
 
     def cleanup(self) -> None:
+        if self.image_stdio is not None:
+            self.input._image_cleanup_started()
         def retire() -> None:
             if self.authority is not None:
                 if self.domain == "github_workflows":
@@ -147,7 +158,21 @@ class _Engine:
         actions = [retire]
         if self.lease is not None:
             actions.append(self.lease.close)
-        actions.append(self.input.close)
+        def close_input() -> None:
+            try:
+                self.input.close()
+            except BaseException:
+                if self.image_stdio is not None:
+                    # _attempt_all/CleanupScope will monotonically abort the
+                    # guard when this returns an error. Before that transition,
+                    # give each SAME independent stdio original its once-close.
+                    # Lost/malformed/identity custody still vetoes those entries.
+                    try:
+                        self.close_output()
+                    except BaseException:
+                        pass  # Each native result stays rooted; first input failure prevails.
+                raise
+        actions.append(close_input)
         _attempt_all(self.guard, actions)
 
     def write(self, raw: bytes, *, terminal: bool = False) -> None:
@@ -155,6 +180,9 @@ class _Engine:
             raise ProtocolError("Edit output exceeded its bound")
         self.frames += 1
         self.stdout_bytes += len(raw)
+        if self.image_stdio is not None:
+            self.image_stdio.write_frame(raw, terminal=terminal)
+            return
         remaining = memoryview(raw)
         # Terminal output follows root/handler settlement and has only a small
         # local bounded delivery allowance. It cannot restart native cleanup.
@@ -178,9 +206,15 @@ class _Engine:
         self.guard._install_edit_source(self.input)
         # Fixed inherited standard descriptors, never renderer-controlled paths.
         self.output_owned = True
-        os.set_blocking(1, False)
+        if self.image_stdio is None:
+            os.set_blocking(1, False)
         self.error_owned = True
         self.guard.activate()
+        if self.image_stdio is not None:
+            from ._desktop_image_writer_windows import _open_for_original_image_child
+            self.image_writer = _open_for_original_image_child(domain=self.domain, installed_python=sys.executable,
+                before_entry=self.input.before_image_entry, before_settlement=self.input.before_image_settlement,
+                _stdio_context=self.image_stdio)
         request = self.input.request(0, None)
         self.last_request = request
         self.guard.check()
@@ -334,7 +368,8 @@ class _Engine:
             outcome = CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
         outcome = outcome or CoreEditOutcome("not_started", "not_created", "settled", "none")
         if (not self.input.closed or self.lease is not None and not self.lease.closed
-                or self.guard.handler_state != "RESTORED" or self.guard.lifetime_ledger.fatal):
+                or self.guard.handler_state != "RESTORED" or self.guard.lifetime_ledger.fatal
+                or self.image_stdio is not None and self.image_stdio._unknown):
             outcome = CoreEditOutcome(outcome.effect, outcome.journal, "unknown",
                                       outcome.reason if outcome.reason != "none" else "custody_unknown")
         self.outcome = outcome
@@ -355,7 +390,10 @@ class _Engine:
             if getattr(self, name + "_owned") and not getattr(self, name + "_closed"):
                 setattr(self, name + "_owned", False)  # Retire BEFORE sole close.
                 try:
-                    os.close(number)
+                    if self.image_stdio is not None:
+                        self.image_stdio.close_role(number)
+                    else:
+                        os.close(number)
                     setattr(self, name + "_closed", True)
                 except BaseException as error:
                     if first is None:
@@ -364,8 +402,8 @@ class _Engine:
             raise first
 
 
-def main(*, started: float | None = None, workflows: bool = False, domain: str | None = None) -> int:
-    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows, domain=domain)
+def main(*, started: float | None = None, workflows: bool = False, domain: str | None = None, _image_stdio: Any = None) -> int:
+    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows, domain=domain, _image_stdio=_image_stdio)
     scope = CleanupScope(engine.guard, engine.cleanup, owns_cancellation=True, first_primary=True)
     try:
         try:

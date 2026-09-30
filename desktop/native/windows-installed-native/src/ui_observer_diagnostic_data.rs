@@ -267,10 +267,29 @@ impl Snapshot {
     }
 }
 
+/// Lexical DATA only: no filesystem identity, alias resolution or creator claim.
+/// An absent event is distinct from an observed unavailable parent (code0).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Event { MainAdmitted, Step(Step), Startup(StartupEvent), StartupRefusal, ObserverRefusal, BuilderReturned, DirectoryFence }
+#[repr(u8)]
+pub enum UserDataParent { Unavailable = 0, Equal = 1, Descendant = 2, Other = 3 }
+impl UserDataParent {
+    pub fn from_code(code: u8) -> Option<Self> { Some(match code {
+        0 => Self::Unavailable, 1 => Self::Equal, 2 => Self::Descendant, 3 => Self::Other, _ => return None,
+    }) }
+    pub fn from_parents(selected_parent: Option<&std::path::Path>, output: Option<&std::path::Path>) -> Self {
+        match (selected_parent, output) {
+            (Some(parent), Some(output)) if parent == output => Self::Equal,
+            (Some(parent), Some(output)) if parent.starts_with(output) => Self::Descendant,
+            (Some(_), Some(_)) => Self::Other,
+            _ => Self::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Event { MainAdmitted, Step(Step), Startup(StartupEvent), StartupRefusal, ObserverRefusal, BuilderReturned, DirectoryFence, SelectedUserDataParent }
 impl Event {
-    // Historical keys0..55 stay stable; one A0 observation uses56. No heartbeat.
+    // Historical keys0..56 stay stable; one selected-parent observation uses57.
     fn key(self) -> Option<u8> { Some(match self {
         Self::MainAdmitted => 0, Self::Step(Step::Credential) => 55, Self::Step(step) => step as u8,
         Self::Startup(event) => 44 + match event {
@@ -280,10 +299,11 @@ impl Event {
         },
         Self::StartupRefusal => 52, Self::ObserverRefusal => 53, Self::BuilderReturned => 54,
         Self::DirectoryFence => 56,
+        Self::SelectedUserDataParent => 57,
     }) }
     fn code(self) -> u8 { match self { Self::MainAdmitted => 1, Self::Step(_) => 2,
         Self::Startup(_) => 3, Self::StartupRefusal => 4, Self::ObserverRefusal => 5, Self::BuilderReturned => 6,
-        Self::DirectoryFence => 7 } }
+        Self::DirectoryFence => 7, Self::SelectedUserDataParent => 8 } }
 }
 
 /// Scalar first refusal and last copied observation, independent of Record's
@@ -334,6 +354,11 @@ impl Permit<'_> {
     }
     pub fn record_with_fence(&self, output: &mut impl Write, snapshot: Snapshot,
         startup: Option<u64>, refusal: Option<Refusal>, directory_fence: Option<DirectoryFence>) -> io::Result<()> {
+        self.record_with_observation(output, snapshot, startup, refusal, directory_fence, None)
+    }
+    pub fn record_with_observation(&self, output: &mut impl Write, snapshot: Snapshot,
+        startup: Option<u64>, refusal: Option<Refusal>, directory_fence: Option<DirectoryFence>,
+        user_data_parent: Option<UserDataParent>) -> io::Result<()> {
         let event = self.event;
         let invalid = || io::Error::from(io::ErrorKind::InvalidData);
         if snapshot.encode().is_none() || event.key().is_none()
@@ -342,6 +367,7 @@ impl Permit<'_> {
             || matches!(event, Event::Startup(_) | Event::StartupRefusal) && startup.is_none()
             || matches!(event, Event::ObserverRefusal) && refusal.is_none()
             || matches!(event, Event::DirectoryFence) != directory_fence.is_some()
+            || matches!(event, Event::SelectedUserDataParent) != user_data_parent.is_some()
             || directory_fence.is_some_and(|value| !value.publishable() || snapshot.step != Step::Bootstrap
                 || snapshot.pending != PendingKind::Native || snapshot.pending_step != Some(Step::Bootstrap)) { return Err(invalid()); }
         if let Some(word) = startup.and_then(Word::decode) {
@@ -355,6 +381,7 @@ impl Permit<'_> {
         write!(output, ",\"refusal\":{},\"coverageIncomplete\":{}", refusal.map_or(0, |reason| reason as u8),
             self.owner.incomplete.load(Ordering::SeqCst))?;
         if let Some(value) = directory_fence { output.write_all(b",\"directoryFence\":")?; value.write_json(output)?; }
+        if let Some(value) = user_data_parent { write!(output, ",\"userDataParent\":{}", value as u8)?; }
         output.write_all(b"}\n")
     }
 }
@@ -379,6 +406,7 @@ impl Write for Frame {
 pub struct Row {
     pub sequence: u8, pub event: Event, pub snapshot: Snapshot, pub startup: Option<u64>,
     pub refusal: Option<Refusal>, pub coverage_incomplete: bool, pub directory_fence: Option<DirectoryFence>,
+    pub user_data_parent: Option<UserDataParent>,
 }
 struct Fields<'a>(&'a [u8]);
 impl Fields<'_> {
@@ -424,18 +452,23 @@ impl Row {
         let directory_fence = if input.0.starts_with(b",\"directoryFence\":") {
             input.take(b",\"directoryFence\":")?; Some(DirectoryFence::decode(&mut input)?)
         } else { None };
+        let user_data_parent = if input.0.starts_with(b",\"userDataParent\":") {
+            input.take(b",\"userDataParent\":")?; Some(UserDataParent::from_code(input.byte()?)?)
+        } else { None };
         input.take(b"}\n")?; if !input.0.is_empty() { return None; }
         let event = match code {
             1 => Event::MainAdmitted, 2 => Event::Step(step),
             3 => { let word = word?; if word.first_refusal { return None; } Event::Startup(word.event) },
             4 => { if !word?.first_refusal { return None; } Event::StartupRefusal },
-            5 => { refusal?; Event::ObserverRefusal }, 6 => Event::BuilderReturned, 7 => Event::DirectoryFence, _ => return None,
+            5 => { refusal?; Event::ObserverRefusal }, 6 => Event::BuilderReturned, 7 => Event::DirectoryFence,
+            8 => Event::SelectedUserDataParent, _ => return None,
         };
         event.key()?;
         if (event == Event::DirectoryFence) != directory_fence.is_some()
+            || (event == Event::SelectedUserDataParent) != user_data_parent.is_some()
             || directory_fence.is_some() && (snapshot.step != Step::Bootstrap || snapshot.pending != PendingKind::Native
                 || snapshot.pending_step != Some(Step::Bootstrap)) { return None; }
-        Some(Self { sequence, event, snapshot, startup, refusal, coverage_incomplete, directory_fence })
+        Some(Self { sequence, event, snapshot, startup, refusal, coverage_incomplete, directory_fence, user_data_parent })
     }
     pub fn write_json(self, output: &mut impl Write) -> io::Result<()> {
         let snapshot = self.snapshot;
@@ -445,6 +478,7 @@ impl Row {
         match self.startup { Some(word) => write!(output, "{word}")?, None => output.write_all(b"null")? }
         write!(output, ",\"refusal\":{},\"coverageIncomplete\":{}", self.refusal.map_or(0, |value| value as u8), self.coverage_incomplete)?;
         if let Some(value) = self.directory_fence { output.write_all(b",\"directoryFence\":")?; value.write_json(output)?; }
+        if let Some(value) = self.user_data_parent { write!(output, ",\"userDataParent\":{}", value as u8)?; }
         output.write_all(b"}")
     }
 }
@@ -456,9 +490,10 @@ pub struct Projection {
     pub bytes: u32, pub records: u8, pub reason: u8,
     pub last: Option<Row>, pub observer_refusal: Option<Row>, pub startup_refusal: Option<Row>,
     pub directory_fence: Option<Row>,
+    pub user_data_parent: Option<Row>,
 }
 impl Default for Projection {
-    fn default() -> Self { Self { bytes: 0, records: 0, reason: 1, last: None, observer_refusal: None, startup_refusal: None, directory_fence: None } }
+    fn default() -> Self { Self { bytes: 0, records: 0, reason: 1, last: None, observer_refusal: None, startup_refusal: None, directory_fence: None, user_data_parent: None } }
 }
 impl Projection {
     pub fn decode(raw: &[u8]) -> Self {
@@ -484,6 +519,7 @@ impl Projection {
             }
             seen |= mask; value.records += 1; value.last = Some(row);
             if row.directory_fence.is_some() { value.directory_fence = Some(row); }
+            if row.user_data_parent.is_some() { value.user_data_parent = Some(row); }
             if row.refusal.is_some() && value.observer_refusal.is_none() { value.observer_refusal = Some(row); }
             if row.startup.and_then(Word::decode).is_some_and(|word| word.first_refusal) && value.startup_refusal.is_none() {
                 value.startup_refusal = Some(row);
@@ -503,6 +539,8 @@ impl Projection {
         match self.startup_refusal { Some(row) => row.write_json(output)?, None => output.write_all(b"null")? }
         output.write_all(b",\"directoryFence\":")?;
         match self.directory_fence { Some(row) => row.write_json(output)?, None => output.write_all(b"null")? }
+        // Omit an unobserved field entirely, preserving the historical shape.
+        if let Some(row) = self.user_data_parent { output.write_all(b",\"userDataParent\":")?; row.write_json(output)?; }
         output.write_all(b"}")
     }
 }
@@ -550,6 +588,86 @@ impl OutputDirectoryRelation {
 mod tests {
     use super::*;
     const ROW: &str = "{\"schema\":1,\"sequence\":1,\"event\":1,\"step\":1,\"pending\":0,\"pendingStep\":0,\"dispatch\":0,\"flags\":0,\"startup\":null,\"refusal\":0,\"coverageIncomplete\":false}\n";
+    #[test]
+    fn selected_user_data_parent_lexical_outcomes_make_no_filesystem_claim() {
+        use std::path::Path;
+        let output = Some(Path::new("task/output"));
+        for (parent, expected) in [
+            (None, UserDataParent::Unavailable),
+            (Some(Path::new("task/output")), UserDataParent::Equal),
+            (Some(Path::new("task/output/nested")), UserDataParent::Descendant),
+            (Some(Path::new("task/output-other")), UserDataParent::Other),
+            (Some(Path::new("task/elsewhere")), UserDataParent::Other),
+            // Aliases are deliberately not resolved: neither is disk identity.
+            (Some(Path::new("task/OUTPUT")), UserDataParent::Other),
+            (Some(Path::new("task/output/../elsewhere")), UserDataParent::Descendant),
+        ] { assert_eq!(UserDataParent::from_parents(parent, output), expected); }
+        assert_eq!(UserDataParent::from_parents(output, None), UserDataParent::Unavailable);
+        assert_eq!(UserDataParent::from_parents(None, None), UserDataParent::Unavailable);
+    }
+    #[test]
+    fn selected_user_data_parent_codec_is_first_only_and_legacy_stable() {
+        for code in 0..=3 {
+            let relation = UserDataParent::from_code(code).unwrap();
+            let order = JournalOrder::default(); let mut frame = Frame::default();
+            order.begin(Event::SelectedUserDataParent).unwrap().record_with_observation(
+                &mut frame, Snapshot::default(), None, None, None, Some(relation)).unwrap();
+            assert!(order.begin(Event::SelectedUserDataParent).is_none());
+            let expected = ROW.replace("\"event\":1", "\"event\":8")
+                .replace("}\n", &format!(",\"userDataParent\":{code}}}\n"));
+            assert_eq!(frame.bytes(), expected.as_bytes());
+            let row = Row::decode(frame.bytes()).unwrap();
+            assert_eq!(row.user_data_parent, Some(relation));
+            let mut projected = Vec::new(); Projection::decode(frame.bytes()).write_json(&mut projected).unwrap();
+            assert!(std::str::from_utf8(&projected).unwrap().contains("\"userDataParent\":{\"sequence\":1,\"event\":8"));
+        }
+        assert!(UserDataParent::from_code(4).is_none());
+        let order = JournalOrder::default(); let first = order.begin(Event::MainAdmitted).unwrap();
+        // A busy first observation, including unavailable, is consumed forever.
+        assert!(order.begin(Event::SelectedUserDataParent).is_none()); drop(first);
+        assert!(order.begin(Event::SelectedUserDataParent).is_none());
+        let mut legacy = Frame::default();
+        JournalOrder::default().begin(Event::MainAdmitted).unwrap().record(&mut legacy, Snapshot::default(), None, None).unwrap();
+        assert_eq!(legacy.bytes(), ROW.as_bytes());
+        let mut projected = Vec::new(); Projection::decode(legacy.bytes()).write_json(&mut projected).unwrap();
+        assert!(!std::str::from_utf8(&projected).unwrap().contains("userDataParent"));
+    }
+    #[test]
+    fn selected_user_data_parent_rejects_malformed_and_retains_first_through_failure() {
+        let first = ROW.replace("\"event\":1", "\"event\":8").replace("}\n", ",\"userDataParent\":0}\n");
+        for bad in [first.replace(",\"userDataParent\":0", ""),
+            first.replace("\"event\":8", "\"event\":1"), first.replace("\"event\":8", "\"event\":9"),
+            first.replace("\"userDataParent\":0", "\"userDataParent\":4"),
+            first.replace("\"userDataParent\":0", "\"userDataParent\":null"),
+            first.replace("\"userDataParent\":0", "\"userDataParent\":true"),
+            first.replace("\"userDataParent\":0", "\"userDataParent\":-1"),
+            first.replace("\"userDataParent\":0", "\"userDataParent\":00"),
+            first.replace("\"userDataParent\":0", "\"userDataParent\":0,\"userDataParent\":0"),
+            first.replace("}\n", ",\"foreign\":0}\n")] {
+            assert!(Row::decode(bad.as_bytes()).is_none(), "{bad}");
+        }
+        for length in 0..first.len() { assert!(Row::decode(&first.as_bytes()[..length]).is_none()); }
+        for event in [Event::MainAdmitted, Event::SelectedUserDataParent] {
+            let order = JournalOrder::default(); let mut frame = Frame::default();
+            let value = (event == Event::MainAdmitted).then_some(UserDataParent::Equal);
+            assert!(order.begin(event).unwrap().record_with_observation(
+                &mut frame, Snapshot::default(), None, None, None, value).is_err());
+            assert!(frame.bytes().is_empty());
+        }
+        let later = ROW.replace("\"sequence\":1", "\"sequence\":2")
+            .replace("\"event\":1", "\"event\":5").replace("\"refusal\":0", "\"refusal\":2");
+        let third = later.replace("\"sequence\":2", "\"sequence\":3").replace("\"event\":5", "\"event\":6");
+        let raw = format!("{first}{later}{third}"); let projection = Projection::decode(raw.as_bytes());
+        assert_eq!((projection.records, projection.reason), (3, 0));
+        assert_eq!(projection.user_data_parent, Row::decode(first.as_bytes()));
+        assert_eq!(projection.observer_refusal, Row::decode(later.as_bytes()));
+        assert_eq!(projection.last, Row::decode(third.as_bytes()));
+        let duplicate = first.replace("\"sequence\":1", "\"sequence\":4");
+        let invalid = Projection::decode(format!("{raw}{duplicate}").as_bytes());
+        assert_eq!((invalid.records, invalid.reason, invalid.user_data_parent), (3, 4, projection.user_data_parent));
+        let partial = Projection::decode(format!("{raw}{{").as_bytes());
+        assert_eq!((partial.reason, partial.user_data_parent), (3, projection.user_data_parent));
+    }
     #[test]
     fn independent_rows_are_strict_and_partial_tails_remain_incomplete() {
         let row = Row::decode(ROW.as_bytes()).unwrap();
@@ -654,7 +772,7 @@ mod tests {
             latch.observe(snapshot); latch.refuse(reason); latch.refuse(Refusal::NativeStep); latch.refuse(Refusal::Deadline);
             assert_eq!(latch.first(), Some(reason)); assert_eq!(latch.snapshot(), snapshot);
             let row = Row { sequence: 1, event: Event::ObserverRefusal, snapshot, startup: None,
-                refusal: latch.first(), coverage_incomplete: false, directory_fence: None };
+                refusal: latch.first(), coverage_incomplete: false, directory_fence: None, user_data_parent: None };
             let order = JournalOrder::default(); let permit = order.begin(Event::ObserverRefusal).unwrap();
             let mut frame = Frame::default(); permit.record(&mut frame, snapshot, None, latch.first()).unwrap();
             assert!(frame.bytes().len() <= RECORD_LIMIT);
@@ -683,8 +801,8 @@ mod tests {
         events.extend([StartupEvent::Context, StartupEvent::Window, StartupEvent::Registered,
             StartupEvent::HookAccepted, StartupEvent::ReplyReturn, StartupEvent::NavigateReturn,
             StartupEvent::Finished, StartupEvent::Stop].map(Event::Startup));
-        events.extend([Event::StartupRefusal, Event::ObserverRefusal, Event::BuilderReturned, Event::DirectoryFence]);
-        assert_eq!(events.len(), 57); let mut total = 0;
+        events.extend([Event::StartupRefusal, Event::ObserverRefusal, Event::BuilderReturned, Event::DirectoryFence, Event::SelectedUserDataParent]);
+        assert_eq!(events.len(), 58); let mut total = 0;
         for event in events {
             let mut word = Word::default();
             if let Event::Startup(event) = event { word.event = event; if event == StartupEvent::Finished { word.detail = 2; } }
@@ -693,10 +811,11 @@ mod tests {
                 pending: PendingKind::Dom, pending_step: Some(Step::Exit), dispatch: 200, flags: u16::MAX };
             let fence = if event == Event::DirectoryFence { snapshot = fence_snapshot(); Some(fence_supported()) } else { None };
             let permit = order.begin(event).unwrap(); let mut raw = Frame::default();
-            permit.record_with_fence(&mut raw, snapshot, Some(word.encode().unwrap()), Some(Refusal::MainReturn), fence).unwrap();
+            let parent = (event == Event::SelectedUserDataParent).then_some(UserDataParent::Other);
+            permit.record_with_observation(&mut raw, snapshot, Some(word.encode().unwrap()), Some(Refusal::MainReturn), fence, parent).unwrap();
             assert!(raw.bytes().len() <= RECORD_LIMIT); total += raw.bytes().len();
         }
-        assert!(total <= BYTE_LIMIT); assert_eq!(order.count.load(Ordering::SeqCst), 57);
+        assert!(total <= BYTE_LIMIT); assert_eq!(order.count.load(Ordering::SeqCst), 58);
     }
     fn fence_snapshot() -> Snapshot {
         Snapshot { step: Step::Bootstrap, pending: PendingKind::Native, pending_step: Some(Step::Bootstrap), dispatch: 0, flags: u16::MAX }

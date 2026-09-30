@@ -102,6 +102,37 @@ impl PassiveInstalledProfile {
     fn permits(&self, method: &str) -> bool { self.selection.permits(method) }
 }
 
+// Separate Windows image-domain DATA. No RuntimeConfig gate selects it here;
+// the future original EditOwner must register the typed slots before borrowing.
+// This does NOT reuse a PassiveInstalledProfile or a Linux image permit.
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+    feature = "windows-metadata-images-loader"))]
+pub(crate) struct WindowsMetadataImagesProfile {
+    selection: mrk_windows_installed_native::image_loader_budget::ImageLoaderSelection,
+}
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+    feature = "windows-metadata-images-loader"))]
+impl WindowsMetadataImagesProfile {
+    pub(crate) fn compiled() -> Result<Self, BridgeError> {
+        use mrk_windows_installed_native::image_loader_budget::ImageLoaderSelection;
+        if cfg!(any(feature = "development-runtime", feature = "ubuntu-runtime-publisher",
+            feature = "windows-runtime-publisher", feature = "macos-installed-installer")) {
+            return Err(unavailable());
+        }
+        // No bridge/complete PE+Python closure exists yet: compiled() genuinely
+        // refuses. The implementation below is not claimed as delivered import.
+        let selection = ImageLoaderSelection::compiled().map_err(|_| unavailable())?;
+        let spec = windows_version::VersionSpec::compiled()?;
+        if !selection.matches_version(COMPILED_TARGET, spec.manifest_sha256(), spec.protocol_sha256()) {
+            return Err(unavailable());
+        }
+        Ok(Self { selection })
+    }
+    pub(crate) fn into_selection(self) -> mrk_windows_installed_native::image_loader_budget::ImageLoaderSelection {
+        self.selection
+    }
+}
+
 // Explicit compile inputs bind the successor staged payload. Neither a nearby
 // manifest nor environment data at app launch can select or qualify a release.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1435,6 +1466,15 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.metadata_images_installed_profile()?, end, stop)
     }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    pub(crate) fn resolve_windows_metadata_images_installed(&self,
+        originals: &mut crate::installed_runtime_windows::WindowsMetadataImagesRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        // Borrow only the registered image-purpose originals. Public Windows
+        // availability deliberately remains false until separate native acceptance.
+        if !self.metadata_images_edit_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(end, stop)
+    }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
     pub fn resolve_edit(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
@@ -2730,6 +2770,8 @@ pub(crate) mod windows_version {
             ["Mobile Release Kit", "versions", TARGET, &self.manifest_sha256]
         }
         pub(crate) fn manifest_sha256(&self) -> &str { &self.manifest_sha256 }
+        #[cfg(feature = "windows-metadata-images-loader")]
+        pub(crate) fn protocol_sha256(&self) -> &str { &self.protocol_sha256 }
         pub(crate) fn decode(&self, bytes: &[u8]) -> Result<Inventory, BridgeError> {
             // No JSON is interpreted until its exact compile-bound bytes match.
             if bytes.is_empty() || bytes.len() as u64 > MANIFEST_LIMIT
@@ -2818,6 +2860,41 @@ pub(crate) mod windows_version {
                 }) { return Err(unavailable()); }
             Ok(())
         }
+        // Image-only successor inventory: add exactly the separately pinned
+        // local bridge without changing historical supplier/publication DATA.
+        #[cfg(feature = "windows-metadata-images-loader")]
+        fn metadata_images_roster(&self) -> Result<(), BridgeError> {
+            let root = ["android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py",
+                "environment_bootstrap.py", "github-ca.pem", "github_connection_bootstrap.py", "offline_preflight_bootstrap.py"];
+            if self.directories != BTreeSet::from(["python".to_owned()])
+                || self.manifest.files.len() != root.len() + SUPPLIER.len() + 2
+                || self.manifest.files.iter().any(|file| {
+                    if let Some(name) = file.path.strip_prefix("python/") {
+                        name != "MRK-EMBEDDED-NOTICES.txt" && name != "mrk_image_writer_native.dll"
+                            && !SUPPLIER.iter().any(|(allowed, _, _)| name == *allowed)
+                    } else { !root.contains(&file.path.as_str()) }
+                }) { return Err(unavailable()); }
+            Ok(())
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc",
+            feature = "windows-metadata-images-loader"))]
+        pub(crate) fn metadata_images_loader_inventory(
+            &self, selection: &mrk_windows_installed_native::image_loader_budget::ImageLoaderSelection,
+        ) -> Result<(), BridgeError> {
+            self.metadata_images_roster()?;
+            if !selection.matches_version(&self.manifest.target,
+                MANIFEST_ANCHOR.ok_or_else(unavailable)?, &self.manifest.protocol_sha256) {
+                return Err(unavailable());
+            }
+            // All37 supplier pins remain exactly as before. The three local
+            // image inputs also bind bytes/hash before any OS-loader retention.
+            for payload in mrk_windows_installed_native::image_loader_budget::Payload::ALL {
+                let file = self.file(payload.name()).ok_or_else(unavailable)?;
+                selection.verify_inventory_file(&file.path, file.size, &file.sha256)
+                    .map_err(|_| unavailable())?;
+            }
+            Ok(())
+        }
         pub(crate) fn progress(&self) -> InventoryProgress {
             let mut remaining = BTreeMap::new();
             remaining.insert("manifest.json".to_owned(), InventoryKind::File);
@@ -2898,6 +2975,28 @@ pub(crate) mod windows_version {
                 assert!(parse(&mut changed).unwrap().passive_loader_inventory().is_err());
             }
         }
+        #[cfg(feature = "windows-metadata-images-loader")]
+        #[test]
+        fn windows_image_roster_adds_only_pinned_bridge_and_keeps_passive_receipt_closed() {
+            let mut value = fixture();
+            value["files"].as_array_mut().unwrap().push(row("python/MRK-EMBEDDED-NOTICES.txt", 1));
+            let legacy = parse(&mut value).unwrap();
+            assert!(legacy.passive_loader_inventory().is_ok());
+            assert!(legacy.metadata_images_roster().is_err());
+            value["files"].as_array_mut().unwrap().push(row("python/mrk_image_writer_native.dll", 1));
+            let image = parse(&mut value).unwrap();
+            assert!(image.metadata_images_roster().is_ok());
+            assert!(image.passive_loader_inventory().is_err());
+            assert_eq!(SELECTED.len(), 3); // No historic FullwalkFacts widening.
+            for path in ["python/MRK_IMAGE_WRITER_NATIVE.dll", "python/extra.dll",
+                "python/pyvenv.cfg", "python/DLLs/python3.dll", "python/sitecustomize.py"] {
+                let mut changed = value.clone();
+                changed["files"].as_array_mut().unwrap().push(row(path, 1));
+                assert!(parse(&mut changed).and_then(|inventory| inventory.metadata_images_roster()).is_err());
+            }
+            // Structural fixture DATA above cannot provide native compiled pins.
+        }
+
         #[test]
         fn windows_manifest_anchors_schema_and_inventory_are_bound_before_use() {
             let valid = encode(&mut fixture());

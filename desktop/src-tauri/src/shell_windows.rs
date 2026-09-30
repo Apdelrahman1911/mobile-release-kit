@@ -183,6 +183,13 @@ impl Startup {
         let path = match path { Ok(path) => path, Err(error) => { self.unknown(); return Err(error); } };
         if self.user_data.set(path).is_err() { self.refuse(Event::ContextRefused, 2, true); return Err(native::UiError::State); }
         if !self.with_order(|book| book.bind_context()) { self.unknown(); return Err(native::UiError::State); }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+        if let Some(diagnostic) = self.observer_diagnostic.get() {
+            // SESSION and the startup book are released; use the original
+            // saved path, not another preparation or a filesystem query.
+            diagnostic.selected_user_data_parent(self.user_data.get().map(PathBuf::as_path),
+                &|| self.diagnostic_end().is_some());
+        }
         Ok(())
     }
     pub(super) fn user_data(&self) -> Result<&std::path::Path, native::UiError> {

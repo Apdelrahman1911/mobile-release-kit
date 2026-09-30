@@ -25,6 +25,9 @@ pub enum PublicationError {
     Profile,
     AlreadyStarted,
     OwnerUnavailable,
+    /// Installer guard refusal asserts no new native exposure/finality facts.
+    #[cfg(feature = "windows-installer-profile")]
+    InstallerGuard,
     /// The original fixed target-D creation returned ERROR_ALREADY_EXISTS;
     /// no output was created/exposed and the original owner actually settled.
     OccupiedTargetSettled,
@@ -35,6 +38,8 @@ pub enum PublicationError {
 enum FailurePhase {
     Admit, Decode, Create, StartCopy, CopyNext, CopyCount, CopySize, CopyVerify, FinishCopy,
     ReadbackNext, ReadbackCount, ReadbackSize, ReadbackVerify, FinishReadback, Seal, FinalPostcondition,
+    ReuseSizes, ReuseStart, ReuseNext, ReuseCount, ReuseSize, ReuseVerify, ReuseFinish,
+    ReuseManifest, ReuseComplete,
 }
 impl FailurePhase {
     fn label(self) -> &'static str {
@@ -45,6 +50,9 @@ impl FailurePhase {
             Self::ReadbackNext => "readback-next", Self::ReadbackCount => "readback-count",
             Self::ReadbackSize => "readback-size", Self::ReadbackVerify => "readback-verify",
             Self::FinishReadback => "finish-readback", Self::Seal => "seal", Self::FinalPostcondition => "final-postcondition",
+            Self::ReuseSizes => "reuse-sizes", Self::ReuseStart => "reuse-start", Self::ReuseNext => "reuse-next",
+            Self::ReuseCount => "reuse-count", Self::ReuseSize => "reuse-size", Self::ReuseVerify => "reuse-verify",
+            Self::ReuseFinish => "reuse-finish", Self::ReuseManifest => "reuse-manifest", Self::ReuseComplete => "reuse-complete",
         }
     }
 }
@@ -80,6 +88,8 @@ impl PublicationError {
             Self::Profile => ("profile", "unobserved", None, "unobserved", "unobserved"),
             Self::AlreadyStarted => ("already-started", "unobserved", None, "unobserved", "unobserved"),
             Self::OwnerUnavailable => ("owner-unavailable", "unobserved", None, "unobserved", "unobserved"),
+            #[cfg(feature = "windows-installer-profile")]
+            Self::InstallerGuard => ("installer-guard", "unobserved", None, "unobserved", "unobserved"),
             Self::OccupiedTargetSettled => return None, // Expected exit2 remains silent.
             Self::Failed { cause, possibly_exposed, originals_unknown, .. } =>
                 (cause.phase.label(), cause.class(), cause.ordinal, observed(possibly_exposed), observed(originals_unknown)),
@@ -127,6 +137,61 @@ fn hex(bytes: &[u8]) -> String {
     result
 }
 
+// Closed internal choice, not an operation callback, path or configurable budget.
+// The isolated installer profile does NOT contain an unguarded standalone arm.
+enum PublicationControl<'a> {
+    #[cfg(feature = "windows-runtime-publisher")]
+    Standalone(std::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "windows-installer-profile")]
+    Installer(&'a crate::windows_installer_controller::ActiveInstallerGuard<'a>),
+}
+impl PublicationControl<'_> {
+    fn before(&self, phase: FailurePhase, ordinal: Option<usize>) -> Result<(), PublicationFailure> {
+        let admitted: Checked<()> = match self {
+            #[cfg(feature = "windows-runtime-publisher")]
+            Self::Standalone(_) => Ok(()),
+            #[cfg(feature = "windows-installer-profile")]
+            Self::Installer(guard) => guard.check().map_err(|_| ()),
+        };
+        admitted.map_err(|_| PublicationFailure::policy(phase, ordinal))
+    }
+    fn after<T>(&self, returned: Result<T, PublicationFailure>, phase: FailurePhase,
+        ordinal: Option<usize>) -> Result<T, PublicationFailure> {
+        #[cfg(feature = "windows-runtime-publisher")]
+        let _ = (phase, ordinal);
+        match self {
+            #[cfg(feature = "windows-runtime-publisher")]
+            Self::Standalone(_) => returned,
+            #[cfg(feature = "windows-installer-profile")]
+            Self::Installer(guard) => guard.after_return(returned, PublicationFailure::policy(phase, ordinal)),
+        }
+    }
+    fn settlement_boundary(&self) {
+        match self {
+            #[cfg(feature = "windows-runtime-publisher")]
+            Self::Standalone(_) => (),
+            #[cfg(feature = "windows-installer-profile")]
+            Self::Installer(guard) => guard.settlement_boundary(),
+        }
+    }
+}
+
+/// Actual original owner's returned mode DATA, not an activation/prerequisite
+/// capability. Standalone exposes only its unchanged Result<(), PublicationError>.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimePrepared {
+    PublishedNew,
+    #[cfg(feature = "windows-installer-profile")]
+    ReusedExisting,
+}
+fn runtime_settled(owner: &Publication, result: RuntimePrepared) -> bool {
+    match result {
+        RuntimePrepared::PublishedNew => owner.published_and_settled(),
+        #[cfg(feature = "windows-installer-profile")]
+        RuntimePrepared::ReusedExisting => owner.existing_runtime_and_settled(),
+    }
+}
+
 struct Expected { sizes: [u64; 47], hashes: [String; 47] }
 impl Expected {
     fn decode(spec: &VersionSpec, bytes: &[u8]) -> Checked<Self> {
@@ -168,59 +233,164 @@ impl Expected {
     }
 }
 
-fn produce(owner: &mut Publication, spec: &VersionSpec) -> Result<(), PublicationFailure> {
-    let manifest = owner.admit_once().map_err(|error| PublicationFailure::native(FailurePhase::Admit, None, error))?;
-    let expected = Expected::decode(spec, &manifest).map_err(|_| PublicationFailure::policy(FailurePhase::Decode, None))?;
-    owner.create_once(expected.sizes).map_err(|error| PublicationFailure::native(FailurePhase::Create, None, error))?;
+fn produce(owner: &mut Publication, spec: &VersionSpec, control: &PublicationControl<'_>) -> Result<RuntimePrepared, PublicationFailure> {
+    control.before(FailurePhase::Admit, None)?;
+    let manifest = control.after(owner.admit_once().map_err(|error| PublicationFailure::native(FailurePhase::Admit, None, error)), FailurePhase::Admit, None)?;
+    control.before(FailurePhase::Decode, None)?;
+    let expected = control.after(Expected::decode(spec, &manifest).map_err(|_| PublicationFailure::policy(FailurePhase::Decode, None)), FailurePhase::Decode, None)?;
+    #[cfg(feature = "windows-installer-profile")]
+    {
+        control.before(FailurePhase::Admit, None)?;
+        let mode = control.after(owner.installer_runtime_mode()
+            .map_err(|error| PublicationFailure::native(FailurePhase::Admit, None, error)), FailurePhase::Admit, None)?;
+        if mode == mrk_windows_installed_native::InstallerRuntimeMode::ReuseExisting {
+            return reuse_existing(owner, &expected, control);
+        }
+    }
+    control.before(FailurePhase::Create, None)?;
+    control.after(owner.create_once(expected.sizes).map_err(|error| PublicationFailure::native(FailurePhase::Create, None, error)), FailurePhase::Create, None)?;
     for index in 0..PUBLICATION_PAYLOADS.len() {
         let ordinal = Some(index);
-        owner.start_copy(index).map_err(|error| PublicationFailure::native(FailurePhase::StartCopy, ordinal, error))?;
+        control.before(FailurePhase::StartCopy, ordinal)?;
+        control.after(owner.start_copy(index).map_err(|error| PublicationFailure::native(FailurePhase::StartCopy, ordinal, error)), FailurePhase::StartCopy, ordinal)?;
         let mut count = 0u64;
         let mut hasher = Sha256::new();
         loop {
-            let bytes = owner.copy_next().map_err(|error| PublicationFailure::native(FailurePhase::CopyNext, ordinal, error))?;
+            control.before(FailurePhase::CopyNext, ordinal)?;
+            let bytes = control.after(owner.copy_next().map_err(|error| PublicationFailure::native(FailurePhase::CopyNext, ordinal, error)), FailurePhase::CopyNext, ordinal)?;
             if bytes.is_empty() { break; } // native original EOF, not a length guess
             count = count.checked_add(bytes.len() as u64).ok_or_else(|| PublicationFailure::policy(FailurePhase::CopyCount, ordinal))?;
             require(count <= expected.sizes[index]).map_err(|_| PublicationFailure::policy(FailurePhase::CopySize, ordinal))?;
             hasher.update(&bytes);
         }
-        expected.verify(index, count, hasher).map_err(|_| PublicationFailure::policy(FailurePhase::CopyVerify, ordinal))?;
+        control.before(FailurePhase::CopyVerify, ordinal)?;
+        control.after(expected.verify(index, count, hasher).map_err(|_| PublicationFailure::policy(FailurePhase::CopyVerify, ordinal)), FailurePhase::CopyVerify, ordinal)?;
         // No readback can replace a failed flush or actual writer CloseHandle.
-        owner.finish_copy().map_err(|error| PublicationFailure::native(FailurePhase::FinishCopy, ordinal, error))?;
+        control.before(FailurePhase::FinishCopy, ordinal)?;
+        control.after(owner.finish_copy().map_err(|error| PublicationFailure::native(FailurePhase::FinishCopy, ordinal, error)), FailurePhase::FinishCopy, ordinal)?;
         let mut count = 0u64;
         let mut hasher = Sha256::new();
         loop {
-            let bytes = owner.readback_next().map_err(|error| PublicationFailure::native(FailurePhase::ReadbackNext, ordinal, error))?;
+            control.before(FailurePhase::ReadbackNext, ordinal)?;
+            let bytes = control.after(owner.readback_next().map_err(|error| PublicationFailure::native(FailurePhase::ReadbackNext, ordinal, error)), FailurePhase::ReadbackNext, ordinal)?;
             if bytes.is_empty() { break; }
             count = count.checked_add(bytes.len() as u64).ok_or_else(|| PublicationFailure::policy(FailurePhase::ReadbackCount, ordinal))?;
             require(count <= expected.sizes[index]).map_err(|_| PublicationFailure::policy(FailurePhase::ReadbackSize, ordinal))?;
             hasher.update(&bytes);
         }
-        expected.verify(index, count, hasher).map_err(|_| PublicationFailure::policy(FailurePhase::ReadbackVerify, ordinal))?;
-        owner.finish_readback().map_err(|error| PublicationFailure::native(FailurePhase::FinishReadback, ordinal, error))?;
+        control.before(FailurePhase::ReadbackVerify, ordinal)?;
+        control.after(expected.verify(index, count, hasher).map_err(|_| PublicationFailure::policy(FailurePhase::ReadbackVerify, ordinal)), FailurePhase::ReadbackVerify, ordinal)?;
+        control.before(FailurePhase::FinishReadback, ordinal)?;
+        control.after(owner.finish_readback().map_err(|error| PublicationFailure::native(FailurePhase::FinishReadback, ordinal, error)), FailurePhase::FinishReadback, ordinal)?;
     }
-    owner.seal_once().map_err(|error| PublicationFailure::native(FailurePhase::Seal, None, error))?;
-    require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None))
+    control.before(FailurePhase::Seal, None)?;
+    control.after(owner.seal_once().map_err(|error| PublicationFailure::native(FailurePhase::Seal, None, error)), FailurePhase::Seal, None)?;
+    control.before(FailurePhase::FinalPostcondition, None)?;
+    control.after(require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None)), FailurePhase::FinalPostcondition, None)?;
+    Ok(RuntimePrepared::PublishedNew)
+}
+
+/// The manifest above came from THIS actual versions/T/D original, not from
+/// acquisition's I cache. This arm never calls create/copy/readback/seal.
+#[cfg(feature = "windows-installer-profile")]
+fn reuse_existing(owner: &mut Publication, expected: &Expected, control: &PublicationControl<'_>)
+    -> Result<RuntimePrepared, PublicationFailure> {
+    control.before(FailurePhase::ReuseSizes, None)?;
+    control.after(owner.accept_existing_sizes(expected.sizes)
+        .map_err(|error| PublicationFailure::native(FailurePhase::ReuseSizes, None, error)), FailurePhase::ReuseSizes, None)?;
+    for index in 0..PUBLICATION_PAYLOADS.len() {
+        let ordinal = Some(index);
+        if index == MANIFEST {
+            // Expected::decode authenticated the actual admitted manifest bytes.
+            // Native finishes their original EOF/Facts/once-close, not a reread.
+            control.before(FailurePhase::ReuseManifest, ordinal)?;
+            control.after(owner.finish_existing_manifest()
+                .map_err(|error| PublicationFailure::native(FailurePhase::ReuseManifest, ordinal, error)), FailurePhase::ReuseManifest, ordinal)?;
+            continue;
+        }
+        control.before(FailurePhase::ReuseStart, ordinal)?;
+        control.after(owner.start_existing_file(index)
+            .map_err(|error| PublicationFailure::native(FailurePhase::ReuseStart, ordinal, error)), FailurePhase::ReuseStart, ordinal)?;
+        let mut count = 0u64;
+        let mut hasher = Sha256::new();
+        loop {
+            control.before(FailurePhase::ReuseNext, ordinal)?;
+            let bytes = control.after(owner.read_existing_next()
+                .map_err(|error| PublicationFailure::native(FailurePhase::ReuseNext, ordinal, error)), FailurePhase::ReuseNext, ordinal)?;
+            if bytes.is_empty() { break; } // actual original EOF, not count==size
+            count = count.checked_add(bytes.len() as u64)
+                .ok_or_else(|| PublicationFailure::policy(FailurePhase::ReuseCount, ordinal))?;
+            require(count <= expected.sizes[index])
+                .map_err(|_| PublicationFailure::policy(FailurePhase::ReuseSize, ordinal))?;
+            hasher.update(&bytes);
+        }
+        control.before(FailurePhase::ReuseVerify, ordinal)?;
+        control.after(expected.verify(index, count, hasher)
+            .map_err(|_| PublicationFailure::policy(FailurePhase::ReuseVerify, ordinal)), FailurePhase::ReuseVerify, ordinal)?;
+        control.before(FailurePhase::ReuseFinish, ordinal)?;
+        control.after(owner.finish_existing_file()
+            .map_err(|error| PublicationFailure::native(FailurePhase::ReuseFinish, ordinal, error)), FailurePhase::ReuseFinish, ordinal)?;
+    }
+    control.before(FailurePhase::ReuseComplete, None)?;
+    control.after(owner.finish_existing_once()
+        .map_err(|error| PublicationFailure::native(FailurePhase::ReuseComplete, None, error)), FailurePhase::ReuseComplete, None)?;
+    control.before(FailurePhase::FinalPostcondition, None)?;
+    control.after(require(owner.existing_runtime_and_settled())
+        .map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None)), FailurePhase::FinalPostcondition, None)?;
+    Ok(RuntimePrepared::ReusedExisting)
 }
 
 /// No arguments, environment paths, current directory, self-executable lookup,
 /// MSI property or renderer input can select source/destination/target/anchors.
+#[cfg(feature = "windows-runtime-publisher")]
 pub fn publish_fixed() -> Result<(), PublicationError> {
     if !no_arguments(std::env::args_os().take(2).count()) { return Err(PublicationError::Invocation); }
+    publish_common(&PublicationControl::Standalone(std::marker::PhantomData)).map(|_| ())
+}
+
+/// Direct original-thread operation, not a public installer or prerequisite
+/// receipt. The eventual full sequencer must retain this SAME armed guard;
+/// a completed acquisition-only entry cannot create or supply it.
+#[cfg(feature = "windows-installer-profile")]
+pub(crate) fn publish_for_installer(guard: &crate::windows_installer_controller::ActiveInstallerGuard<'_>) -> Result<RuntimePrepared, PublicationError> {
+    guard.require_acquired_inputs().map_err(|_| PublicationError::InstallerGuard)?;
+    let returned = publish_common(&PublicationControl::Installer(guard));
+    // Retain the ACTUAL core return before later STOP/finality/controller checks.
+    guard.retain_publication_return(returned)
+}
+
+fn publish_common(control: &PublicationControl<'_>) -> Result<RuntimePrepared, PublicationError> {
     let spec = VersionSpec::compiled().map_err(|_| PublicationError::Profile)?;
-    let owner = Publication::new(spec.manifest_sha256()).map_err(|_| PublicationError::Profile)?;
+    let owner = match control {
+        #[cfg(feature = "windows-runtime-publisher")]
+        PublicationControl::Standalone(_) => Publication::new(spec.manifest_sha256())
+            .map_err(|_| PublicationError::Profile)?,
+        #[cfg(feature = "windows-installer-profile")]
+        PublicationControl::Installer(guard) => crate::windows_input_acquisition::publication_for_installer(guard, &spec)?,
+    };
     OWNER.set(Mutex::new(owner)).map_err(|_| PublicationError::AlreadyStarted)?;
     // No native effect has preceded OWNER.set. A rejected second call cannot
     // replace, retry, repair or settle the original owner behind this static.
     let mut original = OWNER.get().ok_or(PublicationError::OwnerUnavailable)?
         .lock().map_err(|_| PublicationError::OwnerUnavailable)?;
-    // Keep BOTH original deadline-sensitive postconditions and their short-circuit.
-    // A later finality/settlement observation cannot replace produce's first cause.
-    let cause = match produce(&mut original, &spec) {
-        Ok(()) if original.published_and_settled() => return Ok(()),
-        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),
+    // Keep BOTH actual deadline-sensitive observations and their short-circuit.
+    // Always select the actual returned error BEFORE any later guard sample.
+    let cause = match produce(&mut original, &spec, control) {
         Err(first) => first,
+        Ok(prepared) => {
+            let returned = match control.before(FailurePhase::FinalPostcondition, None) {
+                Err(first) => Err(first),
+                Ok(()) => control.after(require(runtime_settled(&original, prepared))
+                    .map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None)),
+                    FailurePhase::FinalPostcondition, None),
+            };
+            match returned { Ok(()) => return Ok(prepared), Err(first) => first }
+        },
     };
+    // STOP prevents new production, never the once-only cleanup. The installer
+    // boundary checks real caller/custody and the original hard endpoint while
+    // deliberately permitting cooperative STOP/settlement time.
+    control.settlement_boundary();
     let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown) {
         Some(original.retained_frame_observation())
     } else { None };
@@ -237,6 +407,61 @@ pub fn publish_fixed() -> Result<(), PublicationError> {
     }
     let originals_unknown = settlement == CloseOutcome::Unknown;
     Err(PublicationError::Failed { cause, possibly_exposed, originals_unknown, frame, admission, copy })
+}
+
+/// Production activation return is kept by the same OriginalAcquisition,
+/// not only by a fixture. This dormant arm still requires the full sequencer.
+#[cfg(feature = "windows-installer-selection")]
+pub(crate) fn activate_retained_for_installer(boundary: &crate::windows_installer_controller::ActiveInstallerGuard<'_>)
+    -> Result<(), NativeError> {
+    boundary.require_acquired_inputs().map_err(|_| NativeError::State)?;
+    boundary.require_publication_return().map_err(|_| NativeError::State)?;
+    let publication = OWNER.get().ok_or(NativeError::State)?.try_lock().map_err(|_| NativeError::State)?;
+    let returned = crate::windows_input_acquisition::activate_retained_once(&publication, boundary);
+    // End the Publication loan before the controller queries the actual
+    // acquisition original's completed return/finality.
+    drop(publication);
+    boundary.retain_activation_return(returned)
+}
+
+/// Named construction loan order: Publication -> Prerequisite -> Acquisition.
+/// The native constructor performs no IO. These actual mutex loans are dropped
+/// before the caller registers/observes its selection owner; watchdog is not relocked.
+#[cfg(feature = "windows-installer-selection")]
+pub(crate) fn selection_for_installer(
+    boundary: &crate::windows_installer_controller::ActiveInstallerGuard<'_>,
+    confirmed: mrk_windows_installed_native::SelectionPreview,
+    proposed: mrk_windows_installed_native::SelectionImageData)
+    -> Result<mrk_windows_installed_native::SelectionOwner, crate::windows_installer_selection::SelectionError> {
+    use crate::windows_installer_selection::SelectionError;
+    boundary.require_publication_return().map_err(|_| SelectionError::InstallerGuard)?;
+    let publication = OWNER.get().ok_or(SelectionError::OwnerUnavailable)?.try_lock()
+        .map_err(|_| SelectionError::OwnerUnavailable)?;
+    let prerequisite = crate::windows_offline_webview2::borrow_for_activation(boundary)
+        .map_err(|_| SelectionError::OwnerUnavailable)?;
+    crate::windows_input_acquisition::selection_for_installer(&publication, prerequisite.native(),
+        boundary, confirmed, proposed)
+}
+
+#[cfg(all(test, feature = "windows-installer-protected-fixture"))]
+pub(crate) fn fixture_observation(boundary: &crate::windows_installer_controller::ActiveInstallerGuard<'_>)
+    -> Option<mrk_windows_installed_native::installer_fixture_data::InstallerFixturePublicationObservation> {
+    boundary.settlement_boundary();
+    OWNER.get()?.try_lock().ok().map(|o| o.retained_fixture_observation())
+}
+#[cfg(all(test, feature = "windows-installer-protected-fixture"))]
+pub(crate) fn fixture_owner_absent() -> bool { OWNER.get().is_none() }
+#[cfg(all(test, feature = "windows-installer-protected-fixture"))]
+pub(crate) fn fixture_activate_once(boundary: &crate::windows_installer_controller::ActiveInstallerGuard<'_>)
+    -> Result<(), NativeError> {
+    boundary.require_acquired_inputs().map_err(|_| NativeError::State)?;
+    let original = OWNER.get().ok_or(NativeError::State)?.try_lock().map_err(|_| NativeError::State)?;
+    crate::windows_input_acquisition::fixture_activate_once(&original, boundary)
+}
+#[cfg(all(test, feature = "windows-installer-protected-fixture"))]
+pub(crate) fn fixture_own_manifest_decode_refusal(error: PublicationError) -> bool {
+    matches!(error, PublicationError::Failed { cause, possibly_exposed: false, originals_unknown: false, .. }
+        if cause.phase == FailurePhase::Decode && cause.native.is_none())
 }
 
 #[cfg(test)]
@@ -290,7 +515,12 @@ mod tests {
             (FailurePhase::CopySize, "copy-size"), (FailurePhase::CopyVerify, "copy-verify"), (FailurePhase::FinishCopy, "finish-copy"),
             (FailurePhase::ReadbackNext, "readback-next"), (FailurePhase::ReadbackCount, "readback-count"), (FailurePhase::ReadbackSize, "readback-size"),
             (FailurePhase::ReadbackVerify, "readback-verify"), (FailurePhase::FinishReadback, "finish-readback"),
-            (FailurePhase::Seal, "seal"), (FailurePhase::FinalPostcondition, "final-postcondition")] {
+            (FailurePhase::Seal, "seal"), (FailurePhase::FinalPostcondition, "final-postcondition"),
+            (FailurePhase::ReuseSizes, "reuse-sizes"), (FailurePhase::ReuseStart, "reuse-start"),
+            (FailurePhase::ReuseNext, "reuse-next"), (FailurePhase::ReuseCount, "reuse-count"),
+            (FailurePhase::ReuseSize, "reuse-size"), (FailurePhase::ReuseVerify, "reuse-verify"),
+            (FailurePhase::ReuseFinish, "reuse-finish"), (FailurePhase::ReuseManifest, "reuse-manifest"),
+            (FailurePhase::ReuseComplete, "reuse-complete")] {
             let error = PublicationError::Failed { cause: PublicationFailure::policy(phase, None), possibly_exposed: false, originals_unknown: true, frame: None, admission: None, copy: Some(copy) };
             assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase={label};class=policy;ordinal=none;possiblyExposed=false;originalsUnknown=true\n")));
             assert!(!PublicationFailure::policy(phase, None).admission_observation_allowed());

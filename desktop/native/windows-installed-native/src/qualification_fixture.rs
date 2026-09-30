@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "installer-protected-fixture")]
+mod installer;
+
 pub(super) const PROFILE: &str = "windows-installed-fullwalk-v1";
 pub(super) const DISPATCH: &str = "windows-installed-fullwalk";
 pub(super) const PRODUCTION_PROFILE: &str = "windows-runtime-publication-v1";
@@ -465,6 +468,12 @@ pub(super) fn profile_route(dispatch:&str,reference:&str) -> Result<&'static str
         (PRODUCTION_DISPATCH,"refs/heads/verify/desktop-windows-runtime-publication")=>Ok(PRODUCTION_PROFILE),
         (PASSIVE_DISPATCH,"refs/heads/verify/desktop-windows-installed-passive")=>Ok(PASSIVE_PROFILE),
         (NORMAL_UI_DISPATCH,"refs/heads/verify/desktop-windows-normal-project-ui")=>Ok(NORMAL_UI_PROFILE),
+        #[cfg(feature = "installer-protected-fixture")]
+        ("windows-installer-retained-shell","refs/heads/verify/desktop-windows-installer-retained-shell")
+            =>Ok(super::installer_fixture_data::INSTALLER_FIXTURE_PROFILE),
+        #[cfg(feature = "installer-selection-fixture")]
+        ("windows-installer-selection","refs/heads/verify/desktop-windows-installer-retained-shell")
+            =>Ok(super::installer_selection_fixture_data::SELECTION_FIXTURE_PROFILE),
         _=>Err(Error::Unsafe),
     }
 }
@@ -472,6 +481,10 @@ pub(super) fn active_profile() -> Result<&'static str> {
     match std::env::var("MRK_DESKTOP_DISPATCH_SCOPE").as_deref() {
         Ok(DISPATCH) => Ok(PROFILE), Ok(PRODUCTION_DISPATCH) => Ok(PRODUCTION_PROFILE),
         Ok(PASSIVE_DISPATCH) => Ok(PASSIVE_PROFILE), Ok(NORMAL_UI_DISPATCH) => Ok(NORMAL_UI_PROFILE),
+        #[cfg(feature = "installer-protected-fixture")]
+        Ok("windows-installer-retained-shell") => Ok(super::installer_fixture_data::INSTALLER_FIXTURE_PROFILE),
+        #[cfg(feature = "installer-selection-fixture")]
+        Ok("windows-installer-selection") => Ok(super::installer_selection_fixture_data::SELECTION_FIXTURE_PROFILE),
         _ => Err(Error::Unsafe),
     }
 }
@@ -1301,7 +1314,7 @@ struct Fixture {
     book:NativeBook,borrowed:Option<usize>,mutation:Option<Held<Mutation>>,
     files:Vec<OriginalFile>,paths:Vec<PathBuf>,cursors:Vec<CursorEpoch>,
     snapshots:BTreeMap<usize,Stamp>,security:BTreeMap<usize,String>,
-    opened:usize,closed:usize,source_readers:usize,writers:usize,postcheck_readers:usize,
+    opened:usize,closed:usize,lifetime_open_limit:usize,source_readers:usize,writers:usize,postcheck_readers:usize,
     objects:Vec<Object>,directories:Vec<usize>,location:Option<KnownLocation>,
     ancestors:usize,program_files:usize,occupied:bool,dispositions:usize,retired_mask:u64,
 }
@@ -1310,7 +1323,7 @@ impl Fixture {
         Ok(Self {start,end:start.checked_add(Duration::from_secs(90)).ok_or(Error::Bounds)?,latched:false,
             root,image,book:NativeBook::new(),borrowed:None,mutation:None,
             files:Vec::with_capacity(40),paths:Vec::with_capacity(40),cursors:Vec::with_capacity(40),
-            snapshots:BTreeMap::new(),security:BTreeMap::new(),opened:0,closed:0,
+            snapshots:BTreeMap::new(),security:BTreeMap::new(),opened:0,closed:0,lifetime_open_limit:256,
             source_readers:0,writers:0,postcheck_readers:0,objects:Vec::with_capacity(52),
             directories:Vec::with_capacity(5),location:None,ancestors:0,program_files:0,occupied:false,dispositions:0,retired_mask:0})
     }
@@ -1398,7 +1411,7 @@ impl Fixture {
     }
     fn append(&mut self,path:&Path,directory:bool) -> Result<usize> {
         self.gate()?;
-        need(self.files.len()<40 && self.opened<256 && self.borrowed.is_none() && self.mutation.is_none())?;
+        need(self.files.len()<40 && self.opened<self.lifetime_open_limit && self.borrowed.is_none() && self.mutation.is_none())?;
         let file=OriginalFile::fixture_new(path,directory,self.end)?;
         let index=self.files.len();self.files.push(file);self.paths.push(path.to_path_buf());self.cursors.push(CursorEpoch::default());
         Ok(index)

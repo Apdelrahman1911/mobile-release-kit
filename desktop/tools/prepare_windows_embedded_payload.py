@@ -3,7 +3,9 @@
 No acquisition, interpreter execution, installation, signature verification or
 native qualification. The whole immutable ZIP must match the separately accepted
 official HTTPS/release-checksum subject before any ZIP parsing or output. Missing
-supplementary notices fail before output; no caller/environment can supply a pin.
+supplementary notices fail before output; supplier pins are not caller-selectable.
+The separate explicit image profile admits one bounded pinned first-party bridge
+as opaque DATA, never as authority to load, execute or distribute that DLL.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -35,6 +38,11 @@ ZIP_SHA256 = "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15"
 OUTER_INVENTORY_SHA256 = "172b1201a41ba5d9b2d3fa605426a6cac9f12aeaf23616665e4c70bf8caa6000"
 STDLIB_INVENTORY_SHA256 = "a36ba4a114629fb0d42a56f0449b5ce2f14381b8a2880d9fbe1ba6b77380fcc7"
 CHUNK = 64 * 1024
+
+# Separate, explicitly selected DATA preparation; never a production activation.
+IMAGE_PROFILE = "metadata-images-v1"
+IMAGE_BRIDGE_NAME = "mrk_image_writer_native.dll"
+MAX_IMAGE_BRIDGE_BYTES = 64 * 1024 * 1024
 NOTICE_SOURCE = "desktop/licenses/windows-embedded-runtime.txt"
 NOTICE_NAME = "MRK-EMBEDDED-NOTICES.txt"
 # Independently reviewed complete recipient text for the evidence-only profile.
@@ -225,7 +233,137 @@ def check_supplier_copy(python: Path, notices: bytes) -> None:
             require(data == UNDERPTH, "Windows isolated startup policy changed")
 
 
+def _image_bridge_pin(bridge_input: dict[str, object]) -> tuple[Path, int, str]:
+    """The caller supplies build DATA, not approval to load or execute the DLL."""
+    require(type(bridge_input) is dict
+            and set(bridge_input) == {"path", "target", "size", "sha256"},
+            "Image bridge requires exactly path, target, size and sha256")
+    path, target = bridge_input["path"], bridge_input["target"]
+    size, digest = bridge_input["size"], bridge_input["sha256"]
+    require(type(target) is str and target == TARGET
+            and type(size) is int and 0 < size <= MAX_IMAGE_BRIDGE_BYTES
+            and type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+            "Image bridge target, bounded nonzero size or canonical SHA256 is invalid")
+    require(isinstance(path, Path) and path.is_absolute() and ".." not in path.parts
+            and path.name == IMAGE_BRIDGE_NAME,
+            "Image bridge must have its fixed explicit absolute DLL pathname")
+    runtime_preparation._root(path.parent)
+    return path, size, digest
+
+
+def _open_image_bridge(path: Path) -> int:
+    """Final-component no-reparse open; ancestors have separate pre/POST checks."""
+    if os.name == "nt":
+        # Built-in CPython and its ordinary CRT adapter, not ctypes/DLL loading.
+        import _winapi
+        import msvcrt
+
+        handle = _winapi.CreateFile(
+            str(path), 0x80000000, 1, 0, 3, 0x00200000, 0,
+        )  # GENERIC_READ, SHARE_READ only, NULL/noninherit, EXISTING, OPEN_REPARSE_POINT.
+        try:
+            return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT)
+        except OSError:
+            # A documented failed transfer leaves this original HANDLE ours.
+            # Unexpected/uncertain exceptions must not risk a second close.
+            _winapi.CloseHandle(handle)
+            raise
+    # Nonblocking prevents a raced FIFO from hanging before the regular-file check.
+    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+
+
+def _image_bridge_bytes(path: Path, size: int, digest: str) -> bytes:
+    before = runtime_preparation._ordinary(path)
+    require(before.st_size == size, "Image bridge size differs from its input pin")
+    # Detect ancestor replacement; final-component nofollow does not promise
+    # whole-path race immunity. The exact opened original is checked before read.
+    ancestors = [(parent, runtime_preparation._state(
+        runtime_preparation._ordinary(parent, directory=True))) for parent in path.parents]
+    fd = _open_image_bridge(path)
+    try:
+        opened = os.fstat(fd)
+        require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+                and not getattr(opened, "st_file_attributes", 0) & 0x400,
+                "Image bridge opened input is not an ordinary single-link file")
+        if os.name == "nt":
+            # This fixed .dll has no pathname executable-mode decoration.
+            # Cross-API compares birthtime; same-API POST keeps raw ChangeTime.
+            matches = (runtime_preparation._windows_identity(before, before.st_mode)
+                       == runtime_preparation._windows_identity(opened, opened.st_mode))
+        else:
+            matches = runtime_preparation._state(before) == runtime_preparation._state(opened)
+        require(matches, "Image bridge changed before reading")
+        body = bytearray()
+        while len(body) <= size:
+            chunk = os.read(fd, min(CHUNK, size + 1 - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+        require(runtime_preparation._state(os.fstat(fd)) == runtime_preparation._state(opened)
+                and runtime_preparation._state(path.lstat()) == runtime_preparation._state(before)
+                and all(runtime_preparation._state(parent.lstat()) == state
+                        for parent, state in ancestors),
+                "Image bridge or its named ancestors changed during reading")
+        require(len(body) == size and hashlib.sha256(body).hexdigest() == digest,
+                "Image bridge bytes differ from the complete size/SHA256 pin")
+        return bytes(body)
+    finally:
+        # Exactly one owner after successful open/CRT transfer. A close failure
+        # refuses even a successful read; an active read error remains chained.
+        os.close(fd)
+
+
+def _check_image_copy(python: Path, notices: bytes, bridge: bytes) -> None:
+    """Closed image roster, separate from the unchanged legacy supplier checker."""
+    expected = {name: (size, digest) for name, size, digest in MEMBERS}
+    expected[NOTICE_NAME] = (len(notices), hashlib.sha256(notices).hexdigest())
+    require(IMAGE_BRIDGE_NAME not in expected, "Image bridge conflicts with a fixed supplier member")
+    expected[IMAGE_BRIDGE_NAME] = (len(bridge), hashlib.sha256(bridge).hexdigest())
+    actual = runtime_preparation.files(python)
+    require([path.name for path in actual] == sorted(expected)
+            and all(path.parent == python for path in actual),
+            "Windows image Python payload gained, lost or aliased a member")
+    for path in actual:
+        size, digest = expected[path.name]
+        data = runtime_preparation.read_checked(path, limit=size)
+        require(len(data) == size and hashlib.sha256(data).hexdigest() == digest,
+                "Windows image copied supplier, notice or bridge bytes changed")
+        if path.name == "python314._pth":
+            require(data == UNDERPTH, "Windows isolated startup policy changed")
+
+
 def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
+    """Preserve the historical supplier-only payload and seven-field receipt."""
+    return _prepare(source, archive, runtime, bridge=None)
+
+
+def prepare_metadata_images(
+    source: Path, archive: Path, runtime: Path, bridge_input: dict[str, object],
+) -> dict[str, object]:
+    """Explicit offline image projection; the pinned bridge is opaque input DATA."""
+    path, size, digest = _image_bridge_pin(bridge_input)
+    projection = runtime.parent / SOURCE_PROJECTION_NAME
+    require(all(not path.is_relative_to(output) and not output.is_relative_to(path)
+                for output in (runtime, projection)),
+            "Image bridge input and preparation outputs must be disjoint")
+    bridge = _image_bridge_bytes(path, size, digest)
+    prepared = _prepare(source, archive, runtime, bridge=bridge)
+    manifest_bytes = runtime_preparation.read_checked(runtime / "manifest.json", limit=1024 * 1024)
+    require(hashlib.sha256(manifest_bytes).hexdigest() == prepared["manifestSha256"],
+            "Image runtime manifest changed after preparation")
+    manifest = json.loads(manifest_bytes)
+    bridge_row = {"path": "python/" + IMAGE_BRIDGE_NAME, "size": size, "sha256": digest}
+    require(manifest["target"] == TARGET and len(manifest["files"]) == 47
+            and [row for row in manifest["files"] if row["path"] == bridge_row["path"]] == [bridge_row]
+            and len(runtime_preparation.files(runtime)) == 48,
+            "Image preparation did not produce the exact 47-payload/48-physical roster")
+    return {**prepared, "profile": IMAGE_PROFILE, "bridgeTarget": TARGET,
+            "bridgeSize": size, "bridgeSha256": digest}
+
+
+def _prepare(
+    source: Path, archive: Path, runtime: Path, *, bridge: bytes | None,
+) -> dict[str, str]:
     # Notice rejection and complete immutable input admission happen BEFORE any
     # output. Do not reopen the archive pathname after hashing. Input04 already
     # bounded both ZIP layers/headers/ZIP64/overlaps; the complete digest fixes
@@ -273,6 +411,10 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
         with (python / NOTICE_NAME).open("xb") as output:
             require(output.write(notices) == len(notices), "Windows notice copy was incomplete")
         check_supplier_copy(python, notices)
+        if bridge is not None:
+            with (python / IMAGE_BRIDGE_NAME).open("xb") as output:
+                require(output.write(bridge) == len(bridge), "Windows image bridge copy was incomplete")
+            _check_image_copy(python, notices, bridge)
     prepared = runtime_preparation.prepare(projection, runtime, TARGET)
     # These are preparation bindings, not a new execution/provenance grant. The
     # existing CI receipt adds source/run/attempt and original native observations.
@@ -282,14 +424,31 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
             "noticeSha256": hashlib.sha256(notices).hexdigest()}
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--profile", choices=("supplier", IMAGE_PROFILE), default="supplier")
+    parser.add_argument("--bridge", type=Path)
+    parser.add_argument("--bridge-target", choices=(TARGET,))
+    parser.add_argument("--bridge-size", type=int)
+    parser.add_argument("--bridge-sha256")
+    args = parser.parse_args(argv)
+    options = (args.bridge, args.bridge_target, args.bridge_size, args.bridge_sha256)
+    if args.profile == "supplier" and any(value is not None for value in options):
+        parser.error("Bridge inputs require explicit --profile " + IMAGE_PROFILE)
+    if args.profile == IMAGE_PROFILE and any(value is None for value in options):
+        parser.error("Image preparation requires --bridge, --bridge-target, --bridge-size and --bridge-sha256")
     try:
-        print(json.dumps(prepare(args.source, args.archive, args.runtime_root), sort_keys=True))
+        if args.profile == IMAGE_PROFILE:
+            result = prepare_metadata_images(args.source, args.archive, args.runtime_root, {
+                "path": args.bridge, "target": args.bridge_target,
+                "size": args.bridge_size, "sha256": args.bridge_sha256,
+            })
+        else:
+            result = prepare(args.source, args.archive, args.runtime_root)
+        print(json.dumps(result, sort_keys=True))
     except (OSError, ValueError, KeyError, UnicodeError, zipfile.BadZipFile):
         parser.exit(1, "Windows preparation refused. Inputs and any partial output were preserved; no runtime was executed or qualified.\n")
 

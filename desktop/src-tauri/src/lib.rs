@@ -47,8 +47,30 @@ pub mod runtime_publication;
     feature = "ubuntu-runtime-publisher", feature = "macos-installed-installer",
     feature = "macos-installed-observation")))]
 compile_error!("windows-runtime-publisher requires the isolated Windows x64 MSVC headless producer profile");
-#[cfg(all(feature = "windows-runtime-publisher", target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[cfg(all(any(feature = "windows-runtime-publisher", feature = "windows-installer-profile"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 pub mod runtime_publication_windows;
+#[cfg(all(feature = "windows-installer-acquisition", any(
+    not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")),
+    feature = "desktop-shell", feature = "custom-protocol", feature = "development-runtime",
+    feature = "ubuntu-runtime-publisher", feature = "windows-runtime-publisher",
+    feature = "macos-installed-installer", feature = "macos-installed-installer-fixture",
+    feature = "macos-installed-observation", feature = "windows-installed-observation")))]
+compile_error!("windows-installer-acquisition requires the isolated Windows x64 MSVC headless input profile");
+#[cfg(any(test, all(feature = "windows-installer-acquisition", target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+mod windows_input_acquisition_data;
+#[cfg(all(feature = "windows-installer-acquisition", target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub mod windows_input_acquisition;
+#[cfg(any(test, all(feature = "windows-installer-profile", target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+mod windows_installer_controller_data;
+#[cfg(all(feature = "windows-installer-profile", target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+pub mod windows_installer_controller;
+#[cfg(all(feature = "windows-installer-profile", target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+mod windows_offline_webview2;
+#[cfg(all(feature = "windows-installer-selection", target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+mod windows_installer_selection;
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "../../native/windows-installed-native/src/installer_selection_data.rs"]
+mod windows_installer_selection_data_tests;
 pub mod supervisor;
 pub mod bridge;
 mod document_lifetime;

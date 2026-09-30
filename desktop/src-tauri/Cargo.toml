@@ -52,12 +52,25 @@ development-runtime = []
 # Selects the standalone privileged publisher, not any execution qualification.
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
+# Unwired fixed-input caller only; no bootstrap, process or install entry.
+windows-installer-acquisition = ["mrk-windows-installed-native/installer-acquisition"]
+# Fixed DATA/acquisition + dormant direct publication core; no bootstrap or activation.
+# Forward only the native feature, not the disjoint app standalone publisher arm.
+windows-installer-profile = ["windows-installer-acquisition", "mrk-windows-installed-native/runtime-publication"]
+# Private typed launch selection/maintenance; no shipping bridge or installer entry.
+windows-installer-selection = ["windows-installer-profile", "mrk-windows-installed-native/installer-selection"]
+# Separate exact owned-process selection regressions, never a product capability.
+windows-installer-selection-fixture = ["windows-installer-selection", "windows-installer-protected-fixture", "mrk-windows-installed-native/installer-selection-fixture"]
+# Five exact owned-process libtests, with fixed compile DATA/observation only.
+windows-installer-protected-fixture = ["windows-installer-profile", "mrk-windows-installed-native/installer-protected-fixture"]
 macos-installed-installer = []
 # Separate fixed seven-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]
 windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
+# Source-only Windows image-loader interfaces; no default/gate/publisher change.
+windows-metadata-images-loader = ["mrk-windows-installed-native/image-writer", "mrk-windows-installed-native/image-stdio"]
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }

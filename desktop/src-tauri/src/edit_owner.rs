@@ -14,6 +14,8 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, Child
 use {std::process::Stdio, tokio::process::Command};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots};
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+use crate::installed_runtime_windows::{CloseOutcome, WindowsMetadataImagesRuntimeSlots};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::installed_runtime::{GitHubWorkflowRuntimeSlots, MetadataTextRuntimeSlots, ReleaseVersionRuntimeSlots, MetadataImagesRuntimeSlots};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
@@ -92,8 +94,9 @@ fn installed_domains_match(session: EditDomain, projection: EditDomain, slots: E
 // One closed adapter in Resources, not another owner/ledger/closer. The Mac
 // facade has only its existing Configuration arm. Every borrow checks exact
 // session/slot equality; being some installed edit domain is not sufficient.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
 enum InstalledEditSlots {
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     Configuration(ConfigurationRuntimeSlots),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     GitHubWorkflows(GitHubWorkflowRuntimeSlots),
@@ -103,14 +106,17 @@ enum InstalledEditSlots {
     ReleaseVersion(ReleaseVersionRuntimeSlots),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     MetadataImages(MetadataImagesRuntimeSlots),
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    WindowsImages(WindowsMetadataImagesRuntimeSlots),
 }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
 enum InstalledPrepareFailure { CapabilityUnknown, Unavailable }
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
 impl InstalledEditSlots {
-    fn new(domain: EditDomain, runtime: &RuntimeConfig) -> Option<Self> {
-        if !installed_edit_selected(domain, runtime) { return None; }
-        match domain {
+    fn new(domain: EditDomain, runtime: &RuntimeConfig) -> Result<Option<Self>, BridgeError> {
+        if !installed_edit_selected(domain, runtime) { return Ok(None); }
+        Ok(match domain {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             EditDomain::Configuration => Some(Self::Configuration(ConfigurationRuntimeSlots::new())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             EditDomain::GitHubWorkflows => Some(Self::GitHubWorkflows(GitHubWorkflowRuntimeSlots::new())),
@@ -120,10 +126,13 @@ impl InstalledEditSlots {
             EditDomain::ReleaseVersion => Some(Self::ReleaseVersion(ReleaseVersionRuntimeSlots::new())),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             EditDomain::MetadataImages => Some(Self::MetadataImages(MetadataImagesRuntimeSlots::new())),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            EditDomain::MetadataImages => Some(Self::WindowsImages(WindowsMetadataImagesRuntimeSlots::new()?)),
             _ => None,
-        }
+        })
     }
     fn domain(&self) -> EditDomain { match self {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Self::Configuration(_) => EditDomain::Configuration,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::GitHubWorkflows(_) => EditDomain::GitHubWorkflows,
@@ -133,6 +142,8 @@ impl InstalledEditSlots {
         Self::ReleaseVersion(_) => EditDomain::ReleaseVersion,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::MetadataImages(_) => EditDomain::MetadataImages,
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(_) => EditDomain::MetadataImages,
     } }
     fn require_domain(&self, domain: EditDomain) -> Result<(), BridgeError> {
         if self.domain() == domain { Ok(()) } else { Err(edit_unknown()) }
@@ -141,6 +152,7 @@ impl InstalledEditSlots {
         end: Instant, stop: &watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         self.require_domain(domain)?;
         match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => runtime.resolve_configuration_installed(slots, end, stop),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => runtime.resolve_github_workflow_installed(slots, end, stop),
@@ -150,11 +162,14 @@ impl InstalledEditSlots {
             Self::ReleaseVersion(slots) => runtime.resolve_release_version_installed(slots, end, stop),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => runtime.resolve_metadata_images_installed(slots, end, stop),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => runtime.resolve_windows_metadata_images_installed(slots, end, stop),
         }
     }
     fn transfer_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
         self.require_domain(domain)?;
         match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
@@ -164,12 +179,15 @@ impl InstalledEditSlots {
             Self::ReleaseVersion(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.transfer_once().map_err(|_| edit_unknown()),
         }
     }
     fn prepare_once(&mut self, domain: EditDomain, end: Instant, stop: &watch::Receiver<bool>)
         -> Result<&VerifiedRuntime, InstalledPrepareFailure> {
         self.require_domain(domain).map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?;
         match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
                 .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -184,11 +202,15 @@ impl InstalledEditSlots {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
                 .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.capability().map_err(|_| InstalledPrepareFailure::CapabilityUnknown)?
+                .prepare_once(end, stop).map_err(|_| InstalledPrepareFailure::Unavailable),
         }
     }
     fn claim_once(&mut self, domain: EditDomain) -> Result<(), BridgeError> {
         self.require_domain(domain)?;
         match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
@@ -198,10 +220,13 @@ impl InstalledEditSlots {
             Self::ReleaseVersion(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.capability().map_err(|_| edit_unknown())?.claim_once().map_err(|_| edit_unknown()),
         }
     }
     fn no_child_effect(&self, domain: EditDomain) -> bool {
         self.domain() == domain && match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => slots.no_child_effect(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.no_child_effect(),
@@ -211,9 +236,12 @@ impl InstalledEditSlots {
             Self::ReleaseVersion(slots) => slots.no_child_effect(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.no_child_effect(),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.no_child_effect(),
         }
     }
     fn mark_interrupted(&mut self) { match self {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         Self::Configuration(slots) => slots.mark_interrupted(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::GitHubWorkflows(slots) => slots.mark_interrupted(),
@@ -223,10 +251,13 @@ impl InstalledEditSlots {
         Self::ReleaseVersion(slots) => slots.mark_interrupted(),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         Self::MetadataImages(slots) => slots.mark_interrupted(),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.mark_interrupted(),
     } }
     fn settle_originals(&mut self, domain: EditDomain) -> CloseOutcome {
         if self.domain() != domain { self.mark_interrupted(); return CloseOutcome::Unknown; }
         match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => slots.settle_originals(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.settle_originals(),
@@ -236,10 +267,13 @@ impl InstalledEditSlots {
             Self::ReleaseVersion(slots) => slots.settle_originals(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.settle_originals(),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.settle_originals(),
         }
     }
     fn settled(&self, domain: EditDomain) -> bool {
         self.domain() == domain && match self {
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             Self::Configuration(slots) => slots.settled(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::GitHubWorkflows(slots) => slots.settled(),
@@ -249,8 +283,19 @@ impl InstalledEditSlots {
             Self::ReleaseVersion(slots) => slots.settled(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::MetadataImages(slots) => slots.settled(),
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            Self::WindowsImages(slots) => slots.settled(),
         }
     }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    fn prepare_windows_transport(&mut self, transport: &mut mrk_windows_installed_native::image_stdio::Parent,
+        nonce: [u8; 32]) -> Result<(), BridgeError> {
+        match self {
+            Self::WindowsImages(slots) => slots.capability().map_err(|_| edit_unknown())?
+                .prepare_transport_once(transport, nonce).map_err(|_| edit_unknown()),
+        }
+    }
+
 }
 fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: bool, disabled: bool,
     domain_qualified: bool, document_live: bool) -> EditAvailability {
@@ -497,8 +542,613 @@ enum Receipt { New, Attempted, Settled, Unknown }
 enum PipeAcquisition { Pending, Available, Absent }
 struct Pipe<T> { io: Option<T>, close: Receipt }
 impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Receipt::New } } }
-struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
-impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
+
+// Closed original types: Unix keeps the exact existing Tokio objects. The only
+// Windows alternative carries loans from Startup's already-rooted native arena.
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+type OriginalChild = Child;
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+type OriginalInput = ChildStdin;
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+type OriginalOutput = ChildStdout;
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+type OriginalError = ChildStderr;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+use windows_image_transport::{ChildOriginal as OriginalChild, Input as OriginalInput,
+    Output as OriginalOutput, ErrorPipe as OriginalError};
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+mod windows_image_transport {
+    use super::*;
+    use std::{io, sync::{Weak, TryLockError}, task::{Context, Poll}};
+    use tokio::io::{AsyncWrite, ReadBuf};
+    use mrk_windows_installed_native::image_stdio::{Parent, Role, State, Process, HANDOFF_BYTES};
+
+    fn unavailable() -> io::Error { io::Error::other("Original image transport did not settle") }
+
+    // Not another supervisor/ledger: this arena is retained by the SAME Startup
+    // and Resources before inspection/acquisition. No HANDLE leaves it.
+    pub(super) struct Factory {
+        pub(super) native: Parent,
+        loaned: [bool; 4],
+        returned: [bool; 4],
+        borrowers_returned: bool,
+    }
+    impl Factory {
+        pub(super) fn new() -> Self {
+            Self { native: Parent::new(), loaned: [false; 4], returned: [false; 4], borrowers_returned: false }
+        }
+        pub(super) fn consumers_settled(&self) -> bool {
+            self.native.consumers_settled()
+                && self.loaned.iter().zip(self.returned).all(|(loaned, returned)| !*loaned || returned)
+        }
+    }
+    fn settlement_original(original: &Mutex<Factory>) -> Result<Option<MutexGuard<'_, Factory>>, ()> {
+        let factory = match original.try_lock() {
+            Ok(factory) => factory,
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Poisoned(error)) => {
+                let mut factory = error.into_inner();
+                if !factory.borrowers_returned { return Err(()); }
+                // Recover only this same original after actual startup joins.
+                // Poison/Unknown stays sticky. Native entry() independently
+                // refuses a genuinely unreturned native frame (call_seen == 1).
+                factory.native.mark_unknown();
+                factory
+            },
+        };
+        if !factory.borrowers_returned { return Err(()); }
+        Ok(Some(factory))
+    }
+    #[derive(Clone)]
+    struct Clock { inner: Weak<Inner>, owner: Weak<Session> }
+    impl Clock {
+        fn new(inner: &Arc<Inner>, owner: &Arc<Session>) -> Self {
+            Self { inner: Arc::downgrade(inner), owner: Arc::downgrade(owner) }
+        }
+        fn settlement(&self) -> io::Result<()> {
+            let inner = self.inner.upgrade().ok_or_else(unavailable)?;
+            let owner = self.owner.upgrade().ok_or_else(unavailable)?;
+            inner.expire(&owner.id, Instant::now());
+            let late = {
+                let r = inner.lock();
+                let a = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)).ok_or_else(unavailable)?;
+                !a.unknown && a.cleanup_start.is_some_and(|start| Instant::now() >= start + FINALIZATION)
+            };
+            if late { inner.unknown(&owner.id); }
+            // Only original completion/cancel/once-close/wait/force uses this
+            // after hard expiry. It creates no new read/write or refreshed lease.
+            Ok(())
+        }
+        fn admit(&self, producing: bool) -> io::Result<()> {
+            let inner = self.inner.upgrade().ok_or_else(unavailable)?;
+            let owner = self.owner.upgrade().ok_or_else(unavailable)?;
+            let now = Instant::now();
+            inner.expire(&owner.id, now);
+            let r = inner.lock();
+            let a = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)).ok_or_else(unavailable)?;
+            let end = a.cleanup_start.map(|start| start + FINALIZATION)
+                .or_else(|| phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted))
+                .ok_or_else(unavailable)?;
+            if now >= end || producing && (a.cleanup_start.is_some() || *owner.stop.borrow()) {
+                return Err(unavailable());
+            }
+            Ok(())
+        }
+    }
+    struct Loan {
+        original: Arc<Mutex<Factory>>, role: Role, clock: Clock,
+        timer: Option<Pin<Box<tokio::time::Sleep>>>, closed: bool,
+    }
+    impl Loan {
+        fn new(original: &Arc<Mutex<Factory>>, role: Role, clock: &Clock) -> Self {
+            Self { original: original.clone(), role, clock: clock.clone(), timer: None, closed: false }
+        }
+        fn park<T>(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
+            let timer = self.timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(Duration::from_millis(100))));
+            if timer.as_mut().poll(cx).is_ready() {
+                timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(100));
+                let _ = timer.as_mut().poll(cx);
+            }
+            Poll::Pending // Existing task only. Timer/arena survive a dropped IO future.
+        }
+        fn read(&mut self, cx: &mut Context<'_>, bytes: &mut [u8]) -> Poll<io::Result<usize>> {
+            self.clock.settlement()?;
+            let original = self.original.clone(); // no new owner, just this original loan
+            let mut factory = match original.try_lock() {
+                Ok(value) => value,
+                Err(TryLockError::WouldBlock) => return self.park(cx),
+                Err(TryLockError::Poisoned(_)) => return Poll::Ready(Err(unavailable())),
+            };
+            let state = factory.native.observation(self.role).state;
+            let observed = match state {
+                State::Idle => {
+                    self.clock.admit(false)?; // new drain reads stop at the original hard endpoint
+                    factory.native.begin_read(self.role, 65_536)
+                },
+                State::Pending => factory.native.poll(self.role),
+                _ => Ok(factory.native.observation(self.role)),
+            }.map_err(|_| unavailable())?;
+            if observed.unknown { return Poll::Ready(Err(unavailable())); }
+            match observed.state {
+                State::Pending => { drop(factory); self.park(cx) },
+                State::Eof => Poll::Ready(Ok(0)), // Only actual broken-peer EOF.
+                State::Complete => {
+                    let count = factory.native.take_read(self.role, bytes).map_err(|_| unavailable())?;
+                    match count {
+                        Some(0) => { drop(factory); self.park(cx) }, // Never AsyncRead EOF.
+                        Some(count) => Poll::Ready(Ok(count)),
+                        None => Poll::Ready(Err(unavailable())),
+                    }
+                },
+                _ => Poll::Ready(Err(unavailable())),
+            }
+        }
+        fn write(&mut self, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            self.clock.admit(true)?;
+            let original = self.original.clone();
+            let mut factory = match original.try_lock() {
+                Ok(value) => value,
+                Err(TryLockError::WouldBlock) => return self.park(cx),
+                Err(TryLockError::Poisoned(_)) => return Poll::Ready(Err(unavailable())),
+            };
+            let state = factory.native.observation(self.role).state;
+            let observed = match state {
+                State::Idle => factory.native.begin_write(self.role, &bytes[..bytes.len().min(65_536)]),
+                State::Pending => factory.native.poll(self.role),
+                _ => Ok(factory.native.observation(self.role)),
+            }.map_err(|_| unavailable())?;
+            if observed.unknown { return Poll::Ready(Err(unavailable())); }
+            match observed.state {
+                State::Pending => { drop(factory); self.park(cx) },
+                State::Complete => {
+                    let count = factory.native.take_write(self.role).map_err(|_| unavailable())?;
+                    if count == 0 { Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero))) }
+                    else { Poll::Ready(Ok(count)) }
+                },
+                _ => Poll::Ready(Err(unavailable())),
+            }
+        }
+        fn prepare_close(&mut self) -> Result<bool, ()> {
+            if self.closed { return Ok(true); }
+            self.clock.settlement().map_err(|_| ())?;
+            let mut factory = match settlement_original(&self.original)? {
+                Some(factory) => factory,
+                None => return Ok(false),
+            };
+            if factory.native.observation(self.role).state == State::Pending {
+                // Both CancelIoEx success and NOT_FOUND keep the SAME operation
+                // pending. No new buffer/read/write, no close under the kernel.
+                let _ = factory.native.cancel(self.role).map_err(|_| ())?;
+                let actual = factory.native.poll(self.role).map_err(|_| ())?;
+                if actual.state == State::Pending { return Ok(false); }
+            }
+            let actual = factory.native.close_once(self.role).map_err(|_| ())?;
+            if actual.state != State::Closed || actual.close_mask & 3 != 3 { return Err(()); }
+            // Positive physical close facts do not erase global Unknown/poison.
+            // Whole-factory finality still rejects native Unknown independently.
+            self.closed = true;
+            factory.returned[self.role as usize + 1] = true;
+            Ok(true)
+        }
+    }
+    pub(super) fn same_factory(book: &Resources, startup: &Startup) -> bool {
+        match (&book.windows_factory, &startup.windows_factory) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+    pub(super) fn consumers_settled(book: &Resources) -> bool {
+        book.windows_factory.as_ref().is_none_or(|original|
+            original.try_lock().is_ok_and(|factory| factory.consumers_settled()))
+    }
+    fn pending_connection(factory: &Factory) -> bool {
+        [Role::Input, Role::Output, Role::Error].iter()
+            .any(|role| factory.native.observation(*role).state == State::Pending)
+    }
+    fn cleanup_end(inner: &Inner, owner: &Arc<Session>) -> Option<Instant> {
+        inner.expire(&owner.id, Instant::now());
+        let r = inner.lock();
+        let a = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, owner))?;
+        a.cleanup_start.map(|start| start + FINALIZATION)
+            .or_else(|| phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted))
+    }
+    #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn acquire(inner: &Arc<Inner>, owner: &Arc<Session>,
+        native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
+        let original = match owner.startup.lock() {
+            Ok(startup) => startup.windows_factory.clone(),
+            Err(_) => None,
+        };
+        let Some(original) = original else {
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+        };
+        let mut factory = match original.lock() {
+            Ok(factory) => factory,
+            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+        };
+        let clock = Clock::new(inner, owner);
+        let result = (|| -> Result<(), Reason> {
+            let mut slots = native.lock().map_err(|_| Reason::CleanupUnknown)?;
+            if owner.domain != EditDomain::MetadataImages || slots.domain() != owner.domain {
+                return Err(Reason::CleanupUnknown);
+            }
+            clock.admit(true).map_err(|_| Reason::Cancelled)?;
+            let stop = owner.stop.subscribe();
+            match slots.prepare_once(owner.domain, end, &stop) {
+                Ok(_) => {}, // Do not use detached paths as process authority.
+                Err(InstalledPrepareFailure::CapabilityUnknown) => return Err(Reason::CleanupUnknown),
+                Err(InstalledPrepareFailure::Unavailable) => return Err(Reason::RuntimeUnavailable),
+            }
+            let mut nonce = [0u8; 32];
+            getrandom::fill(&mut nonce).map_err(|_| Reason::RuntimeUnavailable)?;
+            clock.admit(true).map_err(|_| Reason::Cancelled)?;
+            slots.prepare_windows_transport(&mut factory.native, nonce).map_err(|_| Reason::RuntimeUnavailable)?;
+            loop {
+                clock.admit(true).map_err(|_| Reason::Cancelled)?;
+                if Instant::now() >= end { return Err(Reason::Cancelled); }
+                if factory.native.poll_connections().map_err(|_| Reason::RuntimeUnavailable)? { break; }
+                std::thread::sleep(end.saturating_duration_since(Instant::now()).min(Duration::from_millis(100)));
+            }
+            if !factory.native.ready_to_create() { return Err(Reason::RuntimeUnavailable); }
+            let mut startup = owner.startup.lock().map_err(|_| Reason::CleanupUnknown)?;
+            if startup.attempted || startup.returned || startup.failed || startup.child.is_some()
+                || !startup.windows_factory.as_ref().is_some_and(|value| Arc::ptr_eq(value, &original)) {
+                return Err(Reason::CleanupUnknown);
+            }
+            let mut r = inner.lock();
+            let now = Instant::now();
+            inner.expire_locked(&mut r, &owner.id, now);
+            if !inner.installed_claim_clear(&r, owner, &slots, now) { return Err(Reason::Cancelled); }
+            slots.claim_once(owner.domain).map_err(|_| Reason::CleanupUnknown)?;
+            startup.attempted = true;
+            drop(r);
+            let created = factory.native.create_once(); // sole entry: no intervening allocation/callback/inspection
+            startup.native_no_child = factory.native.no_child_effect();
+            let actual_child = factory.native.has_process_original();
+            let mut loan_failed = false;
+            if actual_child {
+                // Publish custody BEFORE any startup consumer can fail. A late
+                // child still uses this same arena/process original, never a PID.
+                startup.returned = true;
+                match ChildOriginal::lend_locked(&original, &mut factory, inner, owner) {
+                    Ok(child) => startup.child = Some(child),
+                    Err(_) => loan_failed = true,
+                }
+            }
+            let retired = factory.native.retire_startup_once(); // independent client/attribute/thread receipts
+            startup.failed = loan_failed || retired.is_err() || created.is_err() && !startup.native_no_child;
+            if startup.failed { return Err(Reason::CleanupUnknown); }
+            if created.is_err() { return Err(Reason::SpawnFailed); } // positive actual no-child, not an opaque spawn
+            if !actual_child { return Err(Reason::CleanupUnknown); }
+            Ok(())
+        })();
+        if let Err(reason) = result {
+            inner.trigger(&owner.id, reason, Instant::now());
+            if reason == Reason::CleanupUnknown {
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
+            }
+        }
+        if factory.native.no_child_effect() {
+            // Inline in THIS original acquisition worker, not a new closer.
+            loop {
+                if factory.consumers_settled() { break; }
+                let Some(limit) = cleanup_end(inner, owner).filter(|limit| Instant::now() < *limit) else {
+                    inner.unknown(&owner.id); break;
+                };
+                let _ = factory.native.settle_unspawned_once();
+                if factory.consumers_settled() { break; }
+                if !pending_connection(&factory) {
+                    owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); break;
+                }
+                std::thread::sleep(limit.saturating_duration_since(Instant::now()).min(Duration::from_millis(100)));
+            }
+        }
+        owner.wake.notify_waiters();
+    }
+
+    // Called only after inspection/acquisition have actually returned (including
+    // JoinError), by the SAME original continuation. No resolve/prepare/Create.
+    pub(super) async fn retain_returned(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+        let (inspection, acquisition) = startup_workers(book);
+        if !inspection.returned() || !acquisition.returned() { return; }
+        let Some(original) = book.windows_factory.clone() else { return; };
+        {
+            let mut startup = match owner.startup.lock() {
+                Ok(startup) => startup,
+                Err(error) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); error.into_inner() },
+            };
+            if !same_factory(book, &startup) {
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+            }
+            let mut factory = match original.lock() {
+                Ok(factory) => factory,
+                Err(error) => {
+                    owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
+                    let mut factory = error.into_inner(); factory.native.mark_unknown(); factory
+                },
+            };
+            factory.borrowers_returned = true; // actual original joins + same Factory, never elapsed time
+            startup.native_no_child = factory.native.no_child_effect();
+            if factory.native.has_process_original() && startup.child.is_none() && book.child.is_none() {
+                match ChildOriginal::lend_locked(&original, &mut factory, inner, owner) {
+                    Ok(child) => { startup.child = Some(child); startup.returned = true; },
+                    Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); },
+                }
+            }
+            if factory.native.retire_startup_once().is_err() {
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
+            }
+        }
+        loop {
+            let pending = {
+                let mut factory = match original.try_lock() {
+                    Ok(factory) => factory,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+                    },
+                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                };
+                if !factory.native.no_child_effect() || factory.consumers_settled() { return; }
+                let Some(limit) = cleanup_end(inner, owner).filter(|limit| Instant::now() < *limit) else {
+                    inner.unknown(&owner.id); return;
+                };
+                let _ = factory.native.settle_unspawned_once();
+                if factory.consumers_settled() { return; }
+                if !pending_connection(&factory) {
+                    owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+                }
+                limit.min(Instant::now() + Duration::from_millis(100))
+            };
+            tokio::time::sleep_until(tokio::time::Instant::from_std(pending)).await;
+        }
+    }
+    pub(super) enum Input { Tokio(ChildStdin), Windows(NativeInput) }
+    pub(super) enum Output { Tokio(ChildStdout), Windows(NativeOutput) }
+    pub(super) enum ErrorPipe { Tokio(ChildStderr), Windows(NativeError) }
+    pub(super) struct NativeInput { io: Loan, prologue: Option<[u8; HANDOFF_BYTES]> }
+    pub(super) struct NativeOutput { io: Loan, ack: [u8; HANDOFF_BYTES], ack_len: usize, acknowledged: bool }
+    pub(super) struct NativeError { io: Loan }
+    pub(super) struct NativeChild {
+        original: Arc<Mutex<Factory>>, clock: Clock,
+        input: Option<Input>, output: Option<Output>, error: Option<ErrorPipe>,
+    }
+    pub(super) enum ChildOriginal { Tokio(Child), Windows(NativeChild) }
+    impl From<Child> for ChildOriginal { fn from(child: Child) -> Self { Self::Tokio(child) } }
+    impl ChildOriginal {
+        fn lend_locked(original: &Arc<Mutex<Factory>>, factory: &mut Factory,
+            inner: &Arc<Inner>, owner: &Arc<Session>) -> io::Result<Self> {
+            if factory.loaned != [false; 4] || !factory.native.has_process_original() { return Err(unavailable()); }
+            // Even a late actual-created child with sticky Unknown must remain
+            // reachable for original wait/force. Missing prologue forbids protocol IO,
+            // not retention of the positively established process original.
+            let prologue = factory.native.prologue().ok();
+            factory.loaned = [true; 4];
+            let clock = Clock::new(inner, owner);
+            Ok(Self::Windows(NativeChild { original: original.clone(), clock: clock.clone(),
+                input: Some(Input::Windows(NativeInput { io: Loan::new(original, Role::Input, &clock), prologue })),
+                output: Some(Output::Windows(NativeOutput { io: Loan::new(original, Role::Output, &clock), ack: [0; HANDOFF_BYTES], ack_len: 0, acknowledged: false })),
+                error: Some(ErrorPipe::Windows(NativeError { io: Loan::new(original, Role::Error, &clock) })),
+            }))
+        }
+        pub(super) fn take_input(&mut self) -> Option<Input> {
+            match self { Self::Tokio(c) => c.stdin.take().map(Input::Tokio), Self::Windows(c) => c.input.take() }
+        }
+        pub(super) fn take_output(&mut self) -> Option<Output> {
+            match self { Self::Tokio(c) => c.stdout.take().map(Output::Tokio), Self::Windows(c) => c.output.take() }
+        }
+        pub(super) fn take_error(&mut self) -> Option<ErrorPipe> {
+            match self { Self::Tokio(c) => c.stderr.take().map(ErrorPipe::Tokio), Self::Windows(c) => c.error.take() }
+        }
+        pub(super) fn has_pipes(&self) -> bool {
+            match self { Self::Tokio(c) => c.stdin.is_some() || c.stdout.is_some() || c.stderr.is_some(),
+                Self::Windows(c) => c.input.is_some() || c.output.is_some() || c.error.is_some() }
+        }
+        pub(super) fn force_once(&mut self, attempted: &mut bool) -> io::Result<()> {
+            if *attempted { return Err(unavailable()); }
+            match self {
+                Self::Tokio(c) => { *attempted = true; c.start_kill() },
+                Self::Windows(c) => {
+                    c.clock.settlement()?;
+                    let mut factory = match settlement_original(&c.original).map_err(|_| unavailable())? {
+                        Some(factory) => factory,
+                        None => return Ok(()), // no entry; existing select tick will wake the same task
+                    };
+                    *attempted = true;
+                    factory.native.terminate_once().map_err(|_| unavailable())
+                },
+            }
+        }
+        pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
+            match self {
+                Self::Tokio(c) => c.wait().await,
+                Self::Windows(c) => loop {
+                    c.clock.settlement()?;
+                    let actual = {
+                        let mut factory = settlement_original(&c.original).map_err(|_| unavailable())?;
+                        match factory.as_mut() {
+                            Some(factory) => {
+                                let actual = factory.native.process().map_err(|_| unavailable())?;
+                                if matches!(actual, Process::Exited(_)) { factory.returned[0] = true; }
+                                Some(actual)
+                            },
+                            None => None,
+                        }
+                    };
+                    match actual {
+                        Some(Process::Exited(code)) => {
+                            use std::os::windows::process::ExitStatusExt;
+                            return Ok(ExitStatus::from_raw(code));
+                        },
+                        None | Some(Process::Running) => tokio::time::sleep(Duration::from_millis(100)).await,
+                        _ => return Err(unavailable()),
+                    }
+                },
+            }
+        }
+    }
+    impl AsyncWrite for Input {
+        fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            if bytes.is_empty() { return Poll::Ready(Ok(0)); }
+            match &mut *self { Self::Tokio(io) => Pin::new(io).poll_write(cx, bytes), Self::Windows(io) => io.io.write(cx, bytes) }
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match &mut *self { Self::Tokio(io) => Pin::new(io).poll_flush(cx), Self::Windows(_) => Poll::Ready(Err(unavailable())) }
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match &mut *self { Self::Tokio(io) => Pin::new(io).poll_shutdown(cx), Self::Windows(_) => Poll::Ready(Err(unavailable())) }
+        }
+    }
+    impl AsyncRead for Output {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, destination: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            match &mut *self {
+                Self::Tokio(io) => Pin::new(io).poll_read(cx, destination),
+                Self::Windows(io) => {
+                    if destination.remaining() == 0 { return Poll::Ready(Ok(())); }
+                    while io.ack_len < HANDOFF_BYTES {
+                        let mut bytes = [0u8; HANDOFF_BYTES];
+                        let count = match io.io.read(cx, &mut bytes[..HANDOFF_BYTES - io.ack_len]) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                            Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof))),
+                            Poll::Ready(Ok(count)) => count,
+                        };
+                        io.ack[io.ack_len..io.ack_len + count].copy_from_slice(&bytes[..count]);
+                        io.ack_len += count;
+                    }
+                    if !io.acknowledged {
+                        // Same original nonce/child PID/domain, before unchanged
+                        // JSON/frame counters. Mutex contention is not a retry of
+                        // an entered acceptance call or a protocol error.
+                        let original = io.io.original.clone();
+                        let mut factory = match original.try_lock() {
+                            Ok(value) => value,
+                            Err(TryLockError::WouldBlock) => return io.io.park(cx),
+                            Err(TryLockError::Poisoned(_)) => return Poll::Ready(Err(unavailable())),
+                        };
+                        factory.native.accept_acknowledgement(&io.ack).map_err(|_| unavailable())?;
+                        io.acknowledged = true;
+                    }
+                    match io.io.read(cx, destination.initialize_unfilled()) {
+                        Poll::Pending => Poll::Pending,
+                        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(count)) => { destination.advance(count); Poll::Ready(Ok(())) },
+                    }
+                },
+            }
+        }
+    }
+    impl AsyncRead for ErrorPipe {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, destination: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            match &mut *self {
+                Self::Tokio(io) => Pin::new(io).poll_read(cx, destination),
+                Self::Windows(io) => {
+                    if destination.remaining() == 0 { return Poll::Ready(Ok(())); }
+                    match io.io.read(cx, destination.initialize_unfilled()) {
+                        Poll::Pending => Poll::Pending,
+                        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(count)) => { destination.advance(count); Poll::Ready(Ok(())) },
+                    }
+                },
+            }
+        }
+    }
+    macro_rules! original_close {
+        ($kind:ty) => { impl OriginalClose for $kind {
+            fn prepare_original_close(&mut self) -> Result<bool, ()> {
+                match self { Self::Tokio(_) => Ok(true), Self::Windows(io) => io.io.prepare_close() }
+            }
+            fn original_close(self) -> Result<(), ()> {
+                match self { Self::Tokio(io) => io.original_close(),
+                    Self::Windows(io) => if io.io.closed { Ok(()) } else { Err(()) } }
+            }
+        } };
+    }
+    #[cfg(test)]
+    mod data_tests {
+        use super::*;
+        #[test]
+        fn never_entered_factory_still_requires_every_issued_loan_return() {
+            let mut factory = Factory::new(); // allocation only, no Win32 entry
+            assert!(factory.consumers_settled());
+            assert!(!factory.native.has_process_original());
+            assert!(factory.native.prologue().is_err());
+            for index in 0..4 {
+                factory.loaned[index] = true;
+                assert!(!factory.consumers_settled());
+                factory.returned[index] = true;
+                assert!(factory.consumers_settled());
+            }
+        }
+        #[test]
+        fn poisoned_original_is_settlement_only_after_actual_borrower_return_latch() {
+            use std::panic::{catch_unwind, AssertUnwindSafe};
+            let original = Mutex::new(Factory::new()); // allocation-only original, never a fake HANDLE call
+            assert!(catch_unwind(AssertUnwindSafe(|| {
+                let mut factory = original.lock().unwrap();
+                factory.loaned[2] = true;
+                panic!("fixed original acquisition return-loss DATA");
+            })).is_err());
+            assert!(original.is_poisoned());
+            assert!(settlement_original(&original).is_err());
+            {
+                let mut factory = match original.lock() { Err(error) => error.into_inner(), Ok(_) => panic!("poison was cleared") };
+                assert!(factory.loaned[2]); // same original storage survived the borrower
+                factory.borrowers_returned = true; // DATA: the actual-join gate supplied by retain_returned
+            }
+            {
+                let factory = settlement_original(&original).unwrap().unwrap();
+                assert!(factory.loaned[2]);
+                assert!(!factory.native.has_process_original()); // poison is NOT child authority
+                assert!(factory.native.prologue().is_err());
+                assert!(!factory.consumers_settled()); // sticky native Unknown cannot turn into finality
+            }
+            assert!(original.is_poisoned()); // producing try_lock still refuses, never clear_poison
+            assert!(matches!(original.try_lock(), Err(TryLockError::Poisoned(_))));
+        }
+        #[test]
+        fn no_child_snapshot_without_the_same_native_original_is_not_evidence() {
+            let mut startup = Startup::default();
+            assert!(!no_child_before_claim(&startup, false, false));
+            startup.native_no_child = true;
+            assert!(!no_child_before_claim(&startup, false, false));
+            startup.windows_factory = Some(Arc::new(Mutex::new(Factory::new())));
+            assert!(no_child_before_claim(&startup, false, false)); // actual never-entered original
+            assert!(!no_child_before_claim(&startup, true, false));
+            startup.failed = true;
+            assert!(!no_child_before_claim(&startup, false, false));
+        }
+    }
+    original_close!(Output);
+    original_close!(ErrorPipe);
+    impl OriginalClose for Input {
+        fn prepare_original_close(&mut self) -> Result<bool, ()> {
+            match self { Self::Tokio(_) => Ok(true), Self::Windows(io) => io.io.prepare_close() }
+        }
+        fn prologue(&mut self) -> Result<Option<[u8; 96]>, ()> {
+            match self { Self::Tokio(_) => Ok(None), Self::Windows(io) => io.prologue.take().map(Some).ok_or(()) }
+        }
+        fn original_close(self) -> Result<(), ()> {
+            match self { Self::Tokio(io) => io.original_close(),
+                Self::Windows(io) => if io.io.closed { Ok(()) } else { Err(()) } }
+        }
+    }
+}
+
+struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<OriginalChild>,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    windows_factory: Option<Arc<Mutex<windows_image_transport::Factory>>>,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    native_no_child: bool,
+}
+impl Default for Startup { fn default() -> Self { Self {
+    attempted: false, returned: false, failed: false, child: None,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    windows_factory: None,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    native_no_child: false,
+} } }
 struct Session {
     domain: EditDomain, registration: Option<WorkflowRegistration>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -526,28 +1176,30 @@ struct Session {
         target_os = "macos", target_arch = "aarch64"))]
     installed_macos_pending: Mutex<installed_macos_observation::PendingReview>,
     resource_unknown: AtomicBool, startup: Mutex<Startup>, resources: AsyncMutex<Resources>,
-    input: Arc<AsyncMutex<Pipe<ChildStdin>>>, output: Arc<AsyncMutex<Pipe<ChildStdout>>>,
-    error: Arc<AsyncMutex<Pipe<ChildStderr>>>, driver: AsyncMutex<Option<JoinHandle<()>>>,
+    input: Arc<AsyncMutex<Pipe<OriginalInput>>>, output: Arc<AsyncMutex<Pipe<OriginalOutput>>>,
+    error: Arc<AsyncMutex<Pipe<OriginalError>>>, driver: AsyncMutex<Option<JoinHandle<()>>>,
     watchdog: AsyncMutex<Option<JoinHandle<()>>>, manager: AsyncMutex<Option<JoinHandle<()>>>,
     observer: AsyncMutex<Option<JoinHandle<()>>>,
 }
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>, inspection_joined: bool,
-    acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, child: Option<Child>,
+    acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, child: Option<OriginalChild>,
     inspection_started: bool, acquisition_started: bool,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    windows_factory: Option<Arc<Mutex<windows_image_transport::Factory>>>,
     inspection_join_failed: bool, acquisition_join_failed: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     installed: Option<Arc<Mutex<InstalledEditSlots>>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     installed_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     installed_settlement_started: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     installed_settlement_joined: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     installed_settlement_failed: bool,
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     installed_settlement_outcome: Option<CloseOutcome>,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
@@ -879,6 +1531,10 @@ fn consumer_returned(handle: bool, result: bool, failed: bool) -> bool {
     matches!((handle, result, failed), (false, true, false) | (true, false, true))
 }
 fn no_child_before_claim(startup: &Startup, child_present: bool, unclaimed: bool) -> bool {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    if startup.native_no_child && !startup.returned && !startup.failed && startup.child.is_none() && !child_present
+        && startup.windows_factory.as_ref().is_some_and(|original|
+            original.try_lock().is_ok_and(|factory| factory.native.no_child_effect())) { return true; }
     unclaimed && !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none() && !child_present
 }
 fn installed_completion_clear(settlement: OriginalWorker, closed: bool, same_ledger_settled: bool) -> bool {
@@ -1071,7 +1727,7 @@ impl Inner {
         if a.cleanup_start.is_some() { return None; }
         phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     fn installed_claim_clear(&self, r: &Registry, owner: &Arc<Session>, slots: &InstalledEditSlots, now: Instant) -> bool {
         let Some(a) = r.active.as_ref() else { return false; };
         InstalledEditClaim {
@@ -1396,6 +2052,14 @@ impl EditOwner {
         let (stop, _) = watch::channel(false);
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+        let installed = InstalledEditSlots::new(domain, &self.inner.runtime)?.map(|slots| Arc::new(Mutex::new(slots)));
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+        let windows_factory = if installed.is_some() {
+            // Strongly register the ONE native factory before ANY inspection or
+            // acquisition; Startup and Resources retain exactly this same Arc.
+            Some(Arc::new(Mutex::new(windows_image_transport::Factory::new())))
+        } else { None };
         let session = Arc::new(Session { domain, registration, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture_workflow,
@@ -1419,11 +2083,17 @@ impl EditOwner {
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
                 target_os = "macos", target_arch = "aarch64"))]
             installed_macos_pending: Mutex::new(installed_macos_observation::PendingReview::default()),
-            startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
+            startup: Mutex::new(Startup {
+                #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+                windows_factory: windows_factory.clone(),
+                ..Startup::default()
+            }), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
+                #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+                windows_factory,
                 // Pure allocation BEFORE this Session is admitted or any
                 // original worker is registered/released. No passive custody.
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-                installed: InstalledEditSlots::new(domain, &self.inner.runtime).map(|slots| Arc::new(Mutex::new(slots))),
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+                installed,
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
             error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None),
@@ -1714,7 +2384,11 @@ fn register_original_tasks(executor: &tokio::runtime::Handle, inner: Arc<Inner>,
     Ok(())
 }
 
-trait OriginalClose { fn original_close(self) -> Result<(), ()>; }
+trait OriginalClose {
+    fn original_close(self) -> Result<(), ()>;
+    fn prepare_original_close(&mut self) -> Result<bool, ()> { Ok(true) }
+    fn prologue(&mut self) -> Result<Option<[u8; 96]>, ()> { Ok(None) }
+}
 macro_rules! close_pipe {
     ($kind:ty) => {
         impl OriginalClose for $kind {
@@ -1749,6 +2423,114 @@ fn close_original<T: OriginalClose>(pipe: &mut Pipe<T>) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OriginalCloseProgress { Pending, Settled, Unknown }
+fn close_original_step<T: OriginalClose>(pipe: &mut Pipe<T>) -> OriginalCloseProgress {
+    if pipe.close == Receipt::Settled { return OriginalCloseProgress::Settled; }
+    if pipe.close != Receipt::New { return OriginalCloseProgress::Unknown; }
+    match pipe.io.as_mut().map(|io| io.prepare_original_close()) {
+        Some(Ok(false)) => OriginalCloseProgress::Pending,
+        Some(Ok(true)) => if close_original(pipe) { OriginalCloseProgress::Settled } else { OriginalCloseProgress::Unknown },
+        Some(Err(())) | None => {
+            // Retain the actual original IO/loan/pinned arena on failed return.
+            pipe.close = Receipt::Unknown;
+            OriginalCloseProgress::Unknown
+        },
+    }
+}
+fn failed_original_close_step<T: OriginalClose>(failed: bool, pipe: &AsyncMutex<Pipe<T>>,
+    inner: &Inner, owner: &Session) -> bool {
+    if !failed { return false; }
+    let progress = match pipe.try_lock() {
+        Ok(mut pipe) => {
+            if pipe.close != Receipt::New { return false; } // no repeated Unknown notification/busy wake
+            close_original_step(&mut pipe)
+        },
+        Err(_) => return true, // still borrowed: no wait/close underneath that borrower
+    };
+    match progress {
+        OriginalCloseProgress::Pending => true,
+        OriginalCloseProgress::Settled => false,
+        OriginalCloseProgress::Unknown => {
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
+            false
+        },
+    }
+}
+fn original_settlement_wake(endpoint: Option<Instant>, pending: bool, now: Instant) -> Option<Instant> {
+    if pending {
+        // A poll wake for SAME originals, never a new cleanup endpoint or IO lease.
+        Some(endpoint.unwrap_or(now + Duration::from_millis(100)).min(now + Duration::from_millis(100)))
+    } else { endpoint }
+}
+async fn close_original_after_io<T: OriginalClose>(pipe: &mut Pipe<T>, inner: &Inner, owner: &Session) -> bool {
+    // Only the original dedicated IO task may remain in this completion loop.
+    // The shared child monitor uses ONE close_original_step per select turn.
+    loop {
+        match close_original_step(pipe) {
+            OriginalCloseProgress::Settled => return true,
+            OriginalCloseProgress::Unknown => {
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
+                return false;
+            },
+            OriginalCloseProgress::Pending => {},
+        }
+        let endpoint = clock_endpoint(inner, owner);
+        let wake = original_settlement_wake(endpoint, true, Instant::now());
+        clock_wait(wake).await;
+    }
+}
+
+#[cfg(test)]
+mod original_close_step_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    struct Original {
+        pending: Rc<Cell<bool>>, prepares: Rc<Cell<usize>>, closes: Rc<Cell<usize>>,
+    }
+    impl OriginalClose for Original {
+        fn prepare_original_close(&mut self) -> Result<bool, ()> {
+            self.prepares.set(self.prepares.get() + 1);
+            Ok(!self.pending.get())
+        }
+        fn original_close(self) -> Result<(), ()> {
+            self.closes.set(self.closes.get() + 1); Ok(())
+        }
+    }
+    fn original(pending: bool) -> (Pipe<Original>, Rc<Cell<bool>>, Rc<Cell<usize>>, Rc<Cell<usize>>) {
+        let p = Rc::new(Cell::new(pending)); let calls = Rc::new(Cell::new(0)); let closes = Rc::new(Cell::new(0));
+        (Pipe { io: Some(Original { pending: p.clone(), prepares: calls.clone(), closes: closes.clone() }), close: Receipt::New }, p, calls, closes)
+    }
+    #[test]
+    fn pending_original_returns_one_step_before_independent_siblings() {
+        let (mut lost_writer, pending, calls, closes) = original(true);
+        let (mut stdout, _, stdout_calls, stdout_closes) = original(false);
+        let (mut stderr, _, stderr_calls, stderr_closes) = original(false);
+        assert_eq!(close_original_step(&mut lost_writer), OriginalCloseProgress::Pending);
+        assert_eq!(calls.get(), 1); assert_eq!(closes.get(), 0);
+        // Actual nonawaiting helper returned: the existing monitor is free to
+        // service its same-child wait/force and both sibling slots this turn.
+        assert_eq!(close_original_step(&mut stdout), OriginalCloseProgress::Settled);
+        assert_eq!(close_original_step(&mut stderr), OriginalCloseProgress::Settled);
+        assert_eq!(stdout_calls.get(), 1); assert_eq!(stderr_calls.get(), 1);
+        assert_eq!(stdout_closes.get(), 1); assert_eq!(stderr_closes.get(), 1);
+        assert!(lost_writer.io.is_some()); assert!(lost_writer.close == Receipt::New);
+        pending.set(false);
+        assert_eq!(close_original_step(&mut lost_writer), OriginalCloseProgress::Settled);
+        assert_eq!(calls.get(), 2); assert_eq!(closes.get(), 1);
+        assert_eq!(close_original_step(&mut lost_writer), OriginalCloseProgress::Settled);
+        assert_eq!(closes.get(), 1); // no replay of the consuming original close
+    }
+    #[test]
+    fn settlement_tick_does_not_replace_the_original_phase_or_hard_endpoint() {
+        let now = Instant::now(); let original = now + Duration::from_millis(40);
+        assert_eq!(original_settlement_wake(Some(original), true, now), Some(original));
+        assert_eq!(original_settlement_wake(Some(original), false, now), Some(original));
+        assert_eq!(original_settlement_wake(None, true, now), Some(now + Duration::from_millis(100)));
+        assert_eq!(original_settlement_wake(None, false, now), None);
+    }
+}
+
 async fn original_pipes(inner: &Inner, owner: &Session) -> Result<bool, ()> {
     let mut acquisition = owner.pipes.subscribe();
     loop {
@@ -1776,12 +2558,35 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
     let Some(receiver) = receiver.as_mut() else {
         owner.resource_unknown.store(true, Ordering::SeqCst);
         inner.unknown(&owner.id);
-        return WriteEnd { frames: 0, closed: close_original(&mut pipe), failed: true };
+        return WriteEnd { frames: 0, closed: close_original_after_io(&mut pipe, &inner, &owner).await, failed: true };
     };
     let mut stop = owner.stop.subscribe();
     let mut failed = false;
     let mut sent = 0usize;
     let mut completed = 0usize;
+    let initial = match pipe.io.as_mut() { Some(io) => io.prologue(), None => Err(()) };
+    let initial_complete = match initial {
+        Ok(None) => true, // The unchanged Unix/Tokio route has no binary prefix.
+        Ok(Some(bytes)) if !*stop.borrow() => {
+            let Some(writer) = pipe.io.as_mut() else {
+                return WriteEnd { frames: 0, closed: close_original_after_io(&mut pipe, &inner, &owner).await, failed: true };
+            };
+            tokio::select! {
+                biased;
+                _ = stop.changed() => false,
+                result = writer.write_all(&bytes) => { if result.is_err() { failed = true; } result.is_ok() },
+            }
+        },
+        Ok(Some(_)) => false,
+        Err(()) => { failed = true; false },
+    };
+    if !initial_complete {
+        while receiver.try_recv().is_ok() {}
+        if failed { inner.trigger(&owner.id, Reason::IoError, Instant::now()); }
+        let closed = close_original_after_io(&mut pipe, &inner, &owner).await;
+        if !closed { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); }
+        return WriteEnd { frames: 0, closed, failed };
+    }
     loop {
         if *stop.borrow() { break; }
         let bytes = tokio::select! {
@@ -1793,8 +2598,9 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
         sent += 1;
         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
         // A blocked/partial write never delays the independently sticky STOP.
-        // Cancelling write_all discards its partial frame, then closes the sole
-        // original writer once; the child cannot apply an incomplete request.
+        // Cancelling write_all abandons its partial protocol frame, NOT the
+        // native operation. close_original_after_io explicitly cancels/polls
+        // that SAME Windows OVERLAPPED before any endpoint/event consumer.
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         let write = owner.fixture_schedule.write_original(writer, &bytes, sent);
         #[cfg(not(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos"))))]
@@ -1813,8 +2619,8 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
         // Normal early EOF would be indistinguishable from cancellation.
     }
     while receiver.try_recv().is_ok() {} // Retire bounded unsent draft bytes.
-    let closed = close_original(&mut pipe);
     if failed { inner.trigger(&owner.id, Reason::IoError, Instant::now()); }
+    let closed = close_original_after_io(&mut pipe, &inner, &owner).await;
     if !closed { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); }
     WriteEnd { frames: completed, closed, failed }
 }
@@ -1924,7 +2730,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
             }
         }
     }
-    let closed = close_original(&mut pipe);
+    let closed = close_original_after_io(&mut pipe, &inner, &owner).await;
     if !closed { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); }
     ReadEnd { frames: observed_frames, bytes: total, eof, closed, failed }
 }
@@ -2232,8 +3038,15 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>) {
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
 fn installed_worker_lost(book: &Resources) {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    if let Some(original) = &book.windows_factory {
+        match original.lock() {
+            Ok(mut factory) => factory.native.mark_unknown(),
+            Err(error) => error.into_inner().native.mark_unknown(),
+        }
+    }
     // ONLY after this original worker returned JoinError. A watchdog endpoint
     // never borrows/closes the ledger out from under inspection/acquisition.
     if let Some(native) = &book.installed {
@@ -2244,8 +3057,13 @@ fn installed_worker_lost(book: &Resources) {
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
 fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    {
+        let startup = owner.startup.try_lock().map_err(|_| edit_unknown())?;
+        if !windows_image_transport::same_factory(book, &startup) || book.windows_factory.is_none() { return Err(edit_unknown()); }
+    }
     let (inspection, acquisition) = startup_workers(book);
     if !inspection.started || !inspection.positive() || acquisition.started || !acquisition.positive() {
         return Err(edit_unknown());
@@ -2261,8 +3079,8 @@ fn transfer_installed_edit(book: &Resources, inner: &Inner, owner: &Arc<Session>
     slots.transfer_once(owner.domain)
 }
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
-fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+fn acquire_installed_edit(inner: &Arc<Inner>, owner: &Arc<Session>, native: &Arc<Mutex<InstalledEditSlots>>, end: Instant) {
     if !installed_edit_selected(owner.domain, &inner.runtime) {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
@@ -2273,7 +3091,11 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return; // No feature-off/development/publisher path even prepares or claims.
     }
-    #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    { windows_image_transport::acquire(inner, owner, native, end); }
+    #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+        not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))))]
     {
         let mut slots = match native.lock() {
             Ok(slots) => slots,
@@ -2321,7 +3143,7 @@ fn acquire_installed_edit(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mute
         startup.attempted = true;
         drop(r);
         match command.spawn() { // No intervening callback, await or IO after the consumed claim.
-            Ok(child) => { startup.child = Some(child); startup.returned = true; },
+            Ok(child) => { startup.child = Some(child.into()); startup.returned = true; },
             Err(_) => {
                 startup.failed = true; // Opaque creation error is NEVER no-child/close evidence.
                 owner.resource_unknown.store(true, Ordering::SeqCst);
@@ -2410,7 +3232,7 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
         if stopped || inner.deadline(&owner.id).is_none_or(|end| now >= end) { return; }
         slot.attempted = true;
         match command.spawn() {
-            Ok(child) => { slot.child = Some(child); slot.returned = true; }
+            Ok(child) => { slot.child = Some(child.into()); slot.returned = true; }
             Err(_) => {
                 slot.failed = true;
                 // Command does not expose failed-acquisition pipe-close
@@ -2438,7 +3260,7 @@ async fn join_with_clock<T>(slot: &mut Option<JoinHandle<T>>, inner: &Inner, own
         }
     }
 }
-async fn wait_child(child: &mut Option<Child>) -> std::io::Result<ExitStatus> {
+async fn wait_child(child: &mut Option<OriginalChild>) -> std::io::Result<ExitStatus> {
     match child { Some(child) => child.wait().await, None => pending().await }
 }
 async fn next_frame(frames: &mut Option<mpsc::Receiver<ChildFrame>>) -> Option<ChildFrame> {
@@ -2467,7 +3289,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     }
     let endpoint = match endpoint { Some(end) => end, None => return };
     let runtime = inner.runtime.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     let installed = {
         let selected = installed_edit_selected(owner.domain, &runtime);
         if selected != book.installed.is_some() {
@@ -2483,14 +3305,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return Err(edit_unknown()); }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
         let result = if let Some(native) = installed {
             match native.lock() {
                 Ok(mut originals) => originals.inspect_once(domain, &runtime, endpoint, &stop),
                 Err(_) => Err(edit_unknown()),
             }
         } else { runtime.resolve_edit(endpoint) };
-        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))))]
         let result = { let _ = stop; runtime.resolve_edit(endpoint) };
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         schedule.inspected(result.is_ok());
@@ -2507,7 +3329,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         }
         Err(_) => {
             book.inspection_join_failed = true;
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
             installed_worker_lost(&book);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
         }
@@ -2525,9 +3347,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     // The caller supplies the original registry Arc; there is only this one
     // acquisition site. Survivors never call start_original or resolve/spawn.
     let startup_inner = inner.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     let installed = book.installed.clone();
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     if installed.is_some() && transfer_installed_edit(&book, inner, owner).is_err() {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
@@ -2536,7 +3358,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return; }
-        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
         if let Some(native) = installed {
             // The worker's inspection return is DATA only. The original slots,
             // not these paths, supply the separately prepared one-use claim.
@@ -2559,10 +3381,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
 }
 
 fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    if !windows_image_transport::consumers_settled(book) { return false; }
     let selected = installed_edit_selected(owner.domain, &inner.runtime);
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))))]
     { let _ = book; !selected }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     {
         if !selected {
             return book.installed.is_none() && !book.installed_settlement_started
@@ -2577,9 +3401,9 @@ fn installed_edit_settled(book: &Resources, inner: &Inner, owner: &Session) -> b
 }
 
 async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, owner: &Arc<Session>) {
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))))]
     { let _ = (book, inner, owner); }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
     {
         let selected = installed_edit_selected(owner.domain, &inner.runtime);
         let Some(native) = book.installed.clone() else {
@@ -2599,6 +3423,9 @@ async fn settle_installed_edit_originals(book: &mut Resources, inner: &Inner, ow
                     Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                     Err(std::sync::TryLockError::WouldBlock) => return false,
                 };
+                #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+                if !windows_image_transport::same_factory(book, &startup)
+                    || !windows_image_transport::consumers_settled(book) { return false; }
                 let io_returned = consumer_returned(book.writer.is_some(), book.write_end.is_some(), book.write_join_failed)
                     && consumer_returned(book.stdout.is_some(), book.out_end.is_some(), book.out_join_failed)
                     && consumer_returned(book.stderr.is_some(), book.err_end.is_some(), book.err_join_failed);
@@ -2668,7 +3495,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); },
             Err(_) => {
                 book.inspection_join_failed = true;
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
             },
@@ -2680,13 +3507,15 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
             Err(_) => {
                 book.acquisition_join_failed = true;
-                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
                 installed_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
             },
         }
     }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+    windows_image_transport::retain_returned(&mut book, &inner, &owner).await;
     let child_expected = {
         let mut startup = match owner.startup.lock() {
             Ok(startup) => startup,
@@ -2704,11 +3533,21 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             let mut input = owner.input.lock().await;
             let mut output = owner.output.lock().await;
             let mut error = owner.error.lock().await;
-            if input.io.is_none() && input.close == Receipt::New { input.io = child.stdin.take(); }
-            if output.io.is_none() && output.close == Receipt::New { output.io = child.stdout.take(); }
-            if error.io.is_none() && error.close == Receipt::New { error.io = child.stderr.take(); }
-            if input.io.is_none() || output.io.is_none() || error.io.is_none()
-                || child.stdin.is_some() || child.stdout.is_some() || child.stderr.is_some() {
+            #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+            let child_has_pipes = {
+                if input.io.is_none() && input.close == Receipt::New { input.io = child.stdin.take(); }
+                if output.io.is_none() && output.close == Receipt::New { output.io = child.stdout.take(); }
+                if error.io.is_none() && error.close == Receipt::New { error.io = child.stderr.take(); }
+                child.stdin.is_some() || child.stdout.is_some() || child.stderr.is_some()
+            };
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            let child_has_pipes = {
+                if input.io.is_none() && input.close == Receipt::New { input.io = child.take_input(); }
+                if output.io.is_none() && output.close == Receipt::New { output.io = child.take_output(); }
+                if error.io.is_none() && error.close == Receipt::New { error.io = child.take_error(); }
+                child.has_pipes()
+            };
+            if input.io.is_none() || output.io.is_none() || error.io.is_none() || child_has_pipes {
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
             }
@@ -2720,12 +3559,9 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         }
     }
-    // A prior monitor may have been lost after recording a failed IO join but
-    // before dispatching its independent close. Resume only an unattempted
-    // original slot; an ambiguous close is never retried.
-    if book.write_join_failed { let mut pipe = owner.input.lock().await; let _ = close_original(&mut pipe); }
-    if book.out_join_failed { let mut pipe = owner.output.lock().await; let _ = close_original(&mut pipe); }
-    if book.err_join_failed { let mut pipe = owner.error.lock().await; let _ = close_original(&mut pipe); }
+    // Failed joins leave their original slots registered. Recover at most one
+    // cancellation/completion/close step per channel in the SAME select loop,
+    // never await one pending OVERLAPPED ahead of child force/wait or siblings.
     let mut frames_open = book.frames.is_some();
     loop {
         let wake = owner.wake.notified();
@@ -2737,17 +3573,35 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
                 target_os = "macos", target_arch = "aarch64"))]
             installed_macos_observation::retire(&owner);
-            book.force_attempted = true;
-            if let Some(child) = book.child.as_mut() {
-                if child.start_kill().is_err() { inner.unknown(&owner.id); }
-            } else { inner.unknown(&owner.id); }
+            #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+            {
+                book.force_attempted = true;
+                if let Some(child) = book.child.as_mut() {
+                    if child.start_kill().is_err() { inner.unknown(&owner.id); }
+                } else { inner.unknown(&owner.id); }
+            }
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+            {
+                let Resources { child, force_attempted, .. } = &mut *book;
+                if let Some(child) = child {
+                    if child.force_once(force_attempted).is_err() {
+                        *force_attempted = true; inner.unknown(&owner.id);
+                    }
+                } else { *force_attempted = true; inner.unknown(&owner.id); }
+            }
         }
+        // All three calls run independently; short-circuiting would starve a
+        // sibling behind one permanently pending original.
+        let input_close_pending = failed_original_close_step(book.write_join_failed, &owner.input, &inner, &owner);
+        let output_close_pending = failed_original_close_step(book.out_join_failed, &owner.output, &inner, &owner);
+        let error_close_pending = failed_original_close_step(book.err_join_failed, &owner.error, &inner, &owner);
+        let close_pending = input_close_pending || output_close_pending || error_close_pending;
         let wait_pending = book.child.is_some() && book.waited.is_none() && !book.wait_failed;
         let write_pending = book.writer.is_some() && !book.write_join_failed;
         let out_pending = book.stdout.is_some() && !book.out_join_failed;
         let err_pending = book.stderr.is_some() && !book.err_join_failed;
         let force_pending = book.child.is_some() && book.waited.is_none() && !book.force_attempted;
-        if !wait_pending && !write_pending && !out_pending && !err_pending && !force_pending {
+        if !wait_pending && !write_pending && !out_pending && !err_pending && !force_pending && !close_pending {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
                 target_os = "macos", target_arch = "aarch64"))]
@@ -2760,6 +3614,8 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
             target_os = "macos", target_arch = "aarch64"))]
         installed_macos_observation::publish(&inner, &owner, &book, _original_driver);
+        let endpoint = original_settlement_wake(endpoint,
+            close_pending || force_pending && owner.force_due.load(Ordering::SeqCst), Instant::now());
         let event = {
             let Resources { child, writer, stdout, stderr, frames, .. } = &mut *book;
             tokio::select! {
@@ -2798,22 +3654,16 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
                 book.write_join_failed = true;
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
-                let mut pipe = owner.input.lock().await;
-                let _ = close_original(&mut pipe);
             }
             Event::Out(Err(_)) => {
                 book.out_join_failed = true;
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
-                let mut pipe = owner.output.lock().await;
-                let _ = close_original(&mut pipe);
             }
             Event::Err(Err(_)) => {
                 book.err_join_failed = true;
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
-                let mut pipe = owner.error.lock().await;
-                let _ = close_original(&mut pipe);
             }
             Event::Frame(Some(frame)) => accept_frame(&inner, &owner, frame),
             Event::Frame(None) => frames_open = false,
@@ -2977,8 +3827,14 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             Err(error) => { owner.resource_unknown.store(true, Ordering::SeqCst); error.into_inner() }
         };
         let (inspection, acquisition) = startup_workers(&book);
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader")))]
+        let actual_no_child = false;
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-metadata-images-loader"))]
+        let actual_no_child = windows_image_transport::same_factory(&book, &startup)
+            && no_child_before_claim(&startup, book.child.is_some(), false)
+            && windows_image_transport::consumers_settled(&book);
         let startup_settled = inspection.positive() && acquisition.positive() && !startup.failed
-            && (!startup.attempted || startup.returned && book.acquisition_joined);
+            && (!startup.attempted || (startup.returned || actual_no_child) && book.acquisition_joined);
         let io_joined = book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
             && !book.write_join_failed && !book.out_join_failed && !book.err_join_failed
             && book.write_end.is_some() && book.out_end.is_some() && book.err_end.is_some();
@@ -3757,7 +4613,7 @@ mod workflow_domain_tests {
         assert!(!runtime.metadata_images_edit_profile_available());
         assert!(!installed_edit_selected(EditDomain::MetadataImages,&runtime));
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        assert!(InstalledEditSlots::new(EditDomain::MetadataImages,&runtime).is_none());
+        assert!(matches!(InstalledEditSlots::new(EditDomain::MetadataImages,&runtime), Ok(None)));
         assert_eq!(installed_bootstrap_argument(EditDomain::MetadataImages),Some("metadata_images"));
         assert!(request_bytes(EditDomain::MetadataImages,SESSION,0,"open",json!({"root":"/inert/project"})).is_err());
     }
@@ -3773,7 +4629,7 @@ mod workflow_domain_tests {
         assert_eq!(installed_edit_selected(EditDomain::ReleaseVersion,&runtime),selected);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         {
-            let slots = InstalledEditSlots::new(EditDomain::ReleaseVersion,&runtime);
+            let slots = InstalledEditSlots::new(EditDomain::ReleaseVersion,&runtime).unwrap_or_else(|_| panic!("inert constructor failed"));
             assert_eq!(slots.is_some(),selected);
             if let Some(slots) = slots {
                 assert_eq!(slots.domain(),EditDomain::ReleaseVersion);

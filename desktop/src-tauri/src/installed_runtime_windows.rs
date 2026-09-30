@@ -65,7 +65,67 @@ pub(crate) struct VersionObservation {
     pub(crate) selected_identities: [native::FileIdentity; 3],
 }
 
+enum InspectionDomain {
+    Legacy,
+    #[cfg(feature = "windows-metadata-images-loader")]
+    MetadataImages(ImageInspection),
+}
+#[cfg(feature = "windows-metadata-images-loader")]
+use native::image_loader_budget::{self as image_budget, ImageWalk, Payload};
+#[cfg(feature = "windows-metadata-images-loader")]
+struct ImageInspection {
+    selected: [Option<usize>; image_budget::CATALOG_COUNT],
+    walk: ImageWalk,
+    observation: Option<ImageVersionObservation>,
+}
+/// A separate image observation, never converted to legacy VersionObservation
+/// or FullwalkFacts (whose selected identities remain exactly three).
+#[cfg(feature = "windows-metadata-images-loader")]
+#[derive(Debug)]
+pub(crate) struct ImageVersionObservation {
+    pub(crate) target: &'static str,
+    pub(crate) manifest_sha256: String,
+    pub(crate) protocol_sha256: String,
+    pub(crate) inventory_sha256: String,
+    pub(crate) core_sha256: String,
+    pub(crate) closure_sha256: &'static str,
+    pub(crate) files: usize,
+    pub(crate) entries: usize,
+    pub(crate) payload_bytes: u64,
+    pub(crate) version_identity: native::FileIdentity,
+    pub(crate) selected_mask: u64,
+    pub(crate) selected_identities: [Option<native::FileIdentity>; image_budget::CATALOG_COUNT],
+    pub(crate) resources: ImageResourceFacts,
+}
+#[cfg(feature = "windows-metadata-images-loader")]
+#[derive(Debug)]
+pub(crate) struct ImageResourceFacts {
+    pub(crate) native: image_budget::NativeResourceFacts,
+    pub(crate) compiled: image_budget::CompileResourceFacts,
+    pub(crate) security: image_budget::SecurityResourceFacts,
+    pub(crate) record_count: usize,
+    pub(crate) record_capacity: usize,
+    pub(crate) record_vector_bytes: usize,
+    pub(crate) record_paths_and_rosters_bytes: usize,
+    pub(crate) selector_nodes: usize,
+    pub(crate) selector_payload_bytes: usize,
+    pub(crate) identity_nodes: usize,
+    pub(crate) manifest_buffer_capacity: usize,
+    pub(crate) inventory_file_capacity: usize,
+    pub(crate) inventory_file_payload_bytes: usize,
+    pub(crate) inventory_progress_nodes_bound: usize,
+    pub(crate) known_location_storage_bytes: usize,
+    pub(crate) loader_path_capacity_units: [usize; 4],
+    pub(crate) inventory_directory_nodes: usize,
+    pub(crate) directory_envelope: usize,
+    pub(crate) known_locations: usize,
+    // BTree allocator/node overhead is NOT an observed whole-heap measurement.
+    // Counts and existing string/file/entry bounds are separately reported.
+    pub(crate) allocator_overhead_measured: bool,
+}
+
 pub(crate) struct WindowsVersionBook {
+    domain: InspectionDomain,
     native: native::NativeBook,
     phase: Phase,
     call_pending: bool,
@@ -137,6 +197,7 @@ struct LoaderPlan {
     selectors: BTreeMap<(u8, Vec<String>), Vec<String>>,
     selection: crate::runtime::VerifiedRuntime,
     system_root: String,
+    directory_count: usize,
 }
 impl LoaderPlan {
     fn new(locations: &native::KnownLocations, spec: &VersionSpec) -> Result<Self> {
@@ -161,13 +222,7 @@ impl LoaderPlan {
         let mut directories = BTreeSet::new();
         for (root, branch) in [(roots[0], &python), (roots[1], &windows),
             (roots[2], &system), (roots[1], &legacy)] {
-            directories.insert(Self::key(root, &[]));
-            let mut path = Vec::new();
-            for component in branch {
-                Self::select(&mut selectors, (root, path.clone()), component)?;
-                path.push(component.clone()); directories.insert(Self::key(root, &path));
-                if directories.len() > native::MAX_ORIGINALS { return Err(InspectionFailure::Bounds); }
-            }
+            Self::add_branch(&mut selectors, &mut directories, root, branch)?;
         }
         // Every future OS image open and the acquisition-thread token check
         // already has space. NativeBook also enforces the real peak per reserve.
@@ -178,7 +233,30 @@ impl LoaderPlan {
         let root = PathBuf::from(&layout.root);
         let selection = crate::runtime::VerifiedRuntime { python: PathBuf::from(layout.python),
             bootstrap: root.join("engine_bootstrap.py"), core: root.join("core.zip"), cwd: root };
-        Ok(Self { roots, selectors, selection, system_root: locations.windows.path().to_owned() })
+        Ok(Self { roots, selectors, selection, system_root: locations.windows.path().to_owned(),
+            directory_count: directories.len() })
+    }
+    fn add_branch(selectors: &mut BTreeMap<(u8, Vec<String>), Vec<String>>,
+        directories: &mut BTreeSet<(u8, Vec<String>)>, root: u8, branch: &[String]) -> Result<()> {
+        if root >= 3 { return Err(InspectionFailure::Binding); }
+        directories.insert(Self::key(root, &[]));
+        let mut path = Vec::new();
+        for component in branch {
+            Self::select(selectors, (root, path.clone()), component)?;
+            path.push(component.clone()); directories.insert(Self::key(root, &path));
+            if directories.len() > native::MAX_ORIGINALS { return Err(InspectionFailure::Bounds); }
+        }
+        Ok(())
+    }
+    #[cfg(feature = "windows-metadata-images-loader")]
+    fn new_images(locations: &native::KnownLocations, spec: &VersionSpec,
+        image: &image_budget::ImageLoaderSelection) -> Result<Self> {
+        let mut plan = Self::new(locations, spec)?;
+        // The parent union/envelope is unchanged; only the closed complete
+        // payload count differs. The native book was already born image-purpose.
+        image.peak(plan.directory_count).map_err(native_failure)?;
+        plan.selection.bootstrap = plan.selection.cwd.join("config_edit_bootstrap.py");
+        Ok(plan)
     }
     fn select(selectors: &mut BTreeMap<(u8, Vec<String>), Vec<String>>, key: (u8, Vec<String>), name: &str) -> Result<()> {
         let names = selectors.entry(Self::key(key.0, &key.1)).or_default();
@@ -201,10 +279,200 @@ impl LoaderPlan {
 }
 
 impl WindowsVersionBook {
-    pub(crate) fn new() -> Self {
-        Self { native: native::NativeBook::new(), phase: Phase::New, call_pending: false,
+    pub(crate) fn new() -> Self { Self::with_native(native::NativeBook::new(), InspectionDomain::Legacy) }
+    fn with_native(native: native::NativeBook, domain: InspectionDomain) -> Self {
+        Self { native, domain, phase: Phase::New, call_pending: false,
             settlement_attempted: false, records: Vec::new(), identities: BTreeSet::new(), locations: None,
             selected: [None; 3], entries: 0, observation: None, loader: None, volumes: [None; 3], loader_ready: false }
+    }
+    fn legacy_domain(&self) -> bool { matches!(self.domain, InspectionDomain::Legacy) }
+    #[cfg(feature = "windows-metadata-images-loader")]
+    fn image(&self) -> Option<&ImageInspection> {
+        match &self.domain {
+            InspectionDomain::MetadataImages(image) => Some(image),
+            InspectionDomain::Legacy => None,
+        }
+    }
+    #[cfg(feature = "windows-metadata-images-loader")]
+    fn image_mut(&mut self) -> Option<&mut ImageInspection> {
+        match &mut self.domain {
+            InspectionDomain::MetadataImages(image) => Some(image),
+            InspectionDomain::Legacy => None,
+        }
+    }
+    #[cfg(feature = "windows-metadata-images-loader")]
+    fn new_metadata_images(profile: crate::runtime::WindowsMetadataImagesProfile) -> Result<Self> {
+        let selection = profile.into_selection();
+        let image = ImageInspection { selected: [None; image_budget::CATALOG_COUNT],
+            walk: ImageWalk::new(&selection), observation: None };
+        // The ONE native book is born image-purpose. Never construct/promote/
+        // discard a standard book, including before it has done any work.
+        let native = native::NativeBook::new_metadata_images_loader(selection).map_err(native_failure)?;
+        Ok(Self::with_native(native, InspectionDomain::MetadataImages(image)))
+    }
+    #[cfg(feature = "windows-metadata-images-loader")]
+    fn inspect_images_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<&ImageVersionObservation> {
+        if self.phase == Phase::Unknown || self.native.is_unknown() { return Err(InspectionFailure::Unknown); }
+        if self.phase != Phase::New || self.image().is_none() { return Err(InspectionFailure::AlreadyUsed); }
+        self.phase = Phase::Inspecting;
+        match self.inspect(true, end, stop) {
+            Ok(()) => {
+                self.phase = Phase::Inspected;
+                self.image().and_then(|image| image.observation.as_ref()).ok_or(InspectionFailure::Unknown)
+            },
+            Err(error) => {
+                if self.native.is_unknown() || self.call_pending || error == InspectionFailure::Unknown {
+                    self.phase = Phase::Unknown; Err(InspectionFailure::Unknown)
+                } else { self.phase = Phase::Refused; Err(error) }
+            },
+        }
+    }
+    fn make_loader(&self, spec: &VersionSpec) -> Result<LoaderPlan> {
+        let locations = self.locations.as_ref().ok_or(InspectionFailure::Unknown)?;
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if self.image().is_some() {
+            return LoaderPlan::new_images(locations, spec,
+                self.native.metadata_images_selection().ok_or(InspectionFailure::Binding)?);
+        }
+        LoaderPlan::new(locations, spec)
+    }
+    fn admit_loader_inventory(&self, inventory: &Inventory) -> Result<()> {
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if self.image().is_some() {
+            return inventory.metadata_images_loader_inventory(
+                self.native.metadata_images_selection().ok_or(InspectionFailure::Binding)?)
+                .map_err(|_| InspectionFailure::Inventory);
+        }
+        inventory.passive_loader_inventory().map_err(|_| InspectionFailure::Inventory)
+    }
+    fn retain_payload(&self, path: &str) -> bool {
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if let Some(selection) = self.native.metadata_images_selection() { return selection.retained_path(path); }
+        retained_path(path)
+    }
+    fn record_selected(&mut self, path: &str, index: usize) -> Result<()> {
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if let Some(selection) = self.native.metadata_images_selection() {
+            let payload = Payload::from_name(path).filter(|payload| selection.contains(*payload));
+            if let Some(payload) = payload {
+                let image = self.image_mut().ok_or(InspectionFailure::Binding)?;
+                if image.selected[payload.ordinal()].replace(index).is_some() { return Err(InspectionFailure::Inventory); }
+            }
+            return Ok(());
+        }
+        if let Some(selected) = SELECTED.iter().position(|selected| *selected == path) {
+            if self.selected[selected].replace(index).is_some() { return Err(InspectionFailure::Inventory); }
+        }
+        Ok(())
+    }
+    fn before_directory(&mut self) -> Result<()> {
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if let Some(image) = self.image_mut() { image.walk.before_directory().map_err(native_failure)?; }
+        Ok(())
+    }
+    fn before_payload(&mut self, path: &str) -> Result<()> {
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if let Some(selection) = self.native.metadata_images_selection() {
+            let payload = Payload::from_name(path).filter(|payload| selection.contains(*payload));
+            self.image_mut().ok_or(InspectionFailure::Binding)?.walk.before_payload(payload).map_err(native_failure)?;
+        }
+        #[cfg(not(feature = "windows-metadata-images-loader"))]
+        let _ = path;
+        Ok(())
+    }
+    fn inventory_complete(&mut self, eof: bool) -> Result<()> {
+        if !eof { return Err(InspectionFailure::Inventory); }
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if self.image().is_some() {
+            let image = self.image().ok_or(InspectionFailure::Binding)?;
+            let mut selected_mask = 0u64;
+            for payload in Payload::ALL {
+                if let Some(index) = image.selected[payload.ordinal()] {
+                    let record = self.records.get(index).ok_or(InspectionFailure::Unknown)?;
+                    if record.closed || !record.keep || record.metadata.is_none() || record.security.is_none()
+                        || self.native.state(&record.original).map_err(native_failure)? != native::SlotState::Owned {
+                        return Err(InspectionFailure::Identity);
+                    }
+                    selected_mask |= 1u64 << payload.ordinal();
+                }
+            }
+            let nonselected_still_live = self.records.iter().any(|record| !record.keep && !record.closed);
+            self.image_mut().ok_or(InspectionFailure::Binding)?.walk
+                .enter_loader(eof, selected_mask, nonselected_still_live).map_err(native_failure)?;
+        }
+        Ok(())
+    }
+    fn before_system_image(&mut self, image: native::SystemImage) -> Result<()> {
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if let Some(state) = self.image_mut() { state.walk.before_os(image).map_err(native_failure)?; }
+        #[cfg(not(feature = "windows-metadata-images-loader"))]
+        let _ = image;
+        Ok(())
+    }
+    fn sample_security(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<native::SecurityFacts> {
+        let record = self.records.get(index).ok_or(InspectionFailure::Unknown)?;
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if self.image().is_some() {
+            let records = &self.records;
+            return method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
+                |book| book.metadata_images_security(&record.original, record.scope,
+                    records.iter().filter_map(|record| record.security.as_ref())));
+        }
+        method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
+            |book| book.security(&record.original, record.scope))
+    }
+    #[cfg(feature = "windows-metadata-images-loader")]
+    fn image_resource_facts(&self, manifest_buffer_capacity: usize, inventory: &Inventory) -> Result<ImageResourceFacts> {
+        use std::mem::size_of;
+        fn add(total: &mut usize, bytes: usize) -> Result<()> {
+            *total = total.checked_add(bytes).ok_or(InspectionFailure::Bounds)?; Ok(())
+        }
+        fn strings(total: &mut usize, values: &Vec<String>) -> Result<()> {
+            add(total, values.capacity().checked_mul(size_of::<String>()).ok_or(InspectionFailure::Bounds)?)?;
+            for value in values { add(total, value.capacity())?; }
+            Ok(())
+        }
+        let mut record_bytes = 0usize;
+        for record in &self.records {
+            strings(&mut record_bytes, &record.path)?;
+            if let Some(entries) = &record.entries {
+                add(&mut record_bytes, entries.capacity().checked_mul(size_of::<native::DirectoryEntry>())
+                    .ok_or(InspectionFailure::Bounds)?)?;
+                for entry in entries { add(&mut record_bytes, entry.name.capacity())?; }
+            }
+        }
+        let loader = self.loader.as_ref().ok_or(InspectionFailure::Binding)?;
+        let mut selector_bytes = 0usize;
+        for ((_, path), names) in &loader.selectors {
+            strings(&mut selector_bytes, path)?; strings(&mut selector_bytes, names)?;
+        }
+        let files = &inventory.manifest.files;
+        let row_size = std::mem::size_of_val(files.first().ok_or(InspectionFailure::Inventory)?);
+        let mut inventory_file_bytes = files.capacity().checked_mul(row_size).ok_or(InspectionFailure::Bounds)?;
+        for file in files { add(&mut inventory_file_bytes, file.path.capacity())?; add(&mut inventory_file_bytes, file.sha256.capacity())?; }
+        for directory in &inventory.directories { add(&mut inventory_file_bytes, directory.capacity())?; }
+        let progress_nodes = files.len().checked_add(inventory.directories.len())
+            .and_then(|n| n.checked_add(1)).ok_or(InspectionFailure::Bounds)?;
+        Ok(ImageResourceFacts {
+            native: self.native.metadata_images_resource_facts().map_err(native_failure)?,
+            compiled: self.native.metadata_images_selection().ok_or(InspectionFailure::Binding)?
+                .compile_resource_facts().map_err(native_failure)?,
+            security: self.native.metadata_images_security_facts(self.records.iter().filter_map(|record| record.security.as_ref()))
+                .map_err(native_failure)?,
+            record_count: self.records.len(), record_capacity: self.records.capacity(),
+            record_vector_bytes: self.records.capacity().checked_mul(size_of::<Record>()).ok_or(InspectionFailure::Bounds)?,
+            record_paths_and_rosters_bytes: record_bytes, selector_nodes: loader.selectors.len(),
+            selector_payload_bytes: selector_bytes, identity_nodes: self.identities.len(),
+            manifest_buffer_capacity, inventory_file_capacity: inventory.manifest.files.capacity(),
+            inventory_file_payload_bytes: inventory_file_bytes, inventory_progress_nodes_bound: progress_nodes,
+            known_location_storage_bytes: self.native.metadata_images_location_storage(
+                self.locations.as_ref().ok_or(InspectionFailure::Binding)?).map_err(native_failure)?,
+            loader_path_capacity_units: [loader.selection.python.capacity(), loader.selection.bootstrap.capacity(),
+                loader.selection.core.capacity(), loader.selection.cwd.capacity()],
+            inventory_directory_nodes: inventory.directories.len(),
+            directory_envelope: image_budget::DIRECTORY_ENVELOPE, known_locations: 3,
+            allocator_overhead_measured: false,
+        })
     }
     pub(crate) fn never_started(&self) -> bool {
         self.phase == Phase::New && !self.call_pending && !self.settlement_attempted
@@ -216,11 +484,11 @@ impl WindowsVersionBook {
     }
     fn inspect_kind(&mut self, passive: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<&VersionObservation> {
         if self.phase == Phase::Unknown || self.native.is_unknown() { return Err(InspectionFailure::Unknown); }
-        if self.phase != Phase::New { return Err(InspectionFailure::AlreadyUsed); }
+        if self.phase != Phase::New || !self.legacy_domain() { return Err(InspectionFailure::AlreadyUsed); }
         self.phase = Phase::Inspecting;
         match self.inspect(passive, end, stop) {
-            Ok(observation) => {
-                self.observation = Some(observation); self.phase = Phase::Inspected;
+            Ok(()) => {
+                self.phase = Phase::Inspected;
                 self.observation.as_ref().ok_or(InspectionFailure::Unknown)
             },
             Err(error) => {
@@ -230,9 +498,14 @@ impl WindowsVersionBook {
             },
         }
     }
-    fn inspect(&mut self, passive: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<VersionObservation> {
+    fn inspect(&mut self, passive: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         checkpoint(end, stop)?;
         let spec = VersionSpec::compiled().map_err(|_| InspectionFailure::Binding)?;
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if self.image().is_some() && !self.native.metadata_images_selection().is_some_and(|selection|
+            selection.matches_version(windows_version::TARGET, spec.manifest_sha256(), spec.protocol_sha256())) {
+            return Err(InspectionFailure::Binding);
+        }
         #[cfg(test)]
         let mut account_sid_sha256 = None;
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
@@ -249,7 +522,7 @@ impl WindowsVersionBook {
             *locations = Some(book.known_locations_once()?); Ok(())
         })?;
         if passive {
-            self.loader = Some(LoaderPlan::new(self.locations.as_ref().ok_or(InspectionFailure::Unknown)?, &spec)?);
+            self.loader = Some(self.make_loader(&spec)?);
         }
         let mut components = self.locations.as_ref().ok_or(InspectionFailure::Unknown)?.program_files.components().to_vec();
         components.extend(spec.components().into_iter().map(str::to_owned));
@@ -270,6 +543,7 @@ impl WindowsVersionBook {
         let entries = self.enumerate(version, None, end, stop)?;
         let entry = entries.iter().find(|entry| entry.name == "manifest.json").ok_or(InspectionFailure::Manifest)?;
         if entry.kind != native::FileKind::File { return Err(InspectionFailure::Manifest); }
+        self.before_payload("manifest.json")?;
         let manifest = self.open_child(version, entry, native::AuthorityScope::ImmutableVersion, false, false, end, stop)?;
         let size = self.metadata(manifest)?.size;
         if size == 0 || size > MANIFEST_BYTES { return Err(InspectionFailure::Manifest); }
@@ -279,12 +553,12 @@ impl WindowsVersionBook {
         // Includes exact byte hash before strict JSON, supplier pins and the
         // manifest's own share of NativeBook's file/read budgets.
         let inventory = spec.decode(&bytes).map_err(|_| InspectionFailure::Manifest)?;
-        if passive { inventory.passive_loader_inventory().map_err(|_| InspectionFailure::Inventory)?; }
+        if passive { self.admit_loader_inventory(&inventory)?; }
         checkpoint(end, stop)?;
         self.close_record(manifest, end, stop)?;
         let mut progress = inventory.progress();
         self.walk(version, "", entries, manifest, &inventory, &mut progress, end, stop)?;
-        if !progress.complete() { return Err(InspectionFailure::Inventory); }
+        self.inventory_complete(progress.complete())?;
         if passive { self.inspect_loader(end, stop)?; }
         // Retained prefix, version, selected images and selected ancestors all
         // get final canonical-name/identity/ACL/stream/filesystem observations.
@@ -296,19 +570,48 @@ impl WindowsVersionBook {
         for location in [&locations.program_files, &locations.windows, &locations.system] {
             method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| book.recheck_location(location))?;
         }
+        checkpoint(end, stop)?;
+        self.loader_ready = passive;
+        #[cfg(feature = "windows-metadata-images-loader")]
+        if self.image().is_some() {
+            let selected = self.image().ok_or(InspectionFailure::Binding)?.selected;
+            let selection = self.native.metadata_images_selection().ok_or(InspectionFailure::Binding)?;
+            let selected_mask = selection.selected_mask();
+            let closure_sha256 = selection.closure_fingerprint().map_err(native_failure)?;
+            let mut selected_identities = [None; image_budget::CATALOG_COUNT];
+            for payload in selection.selected() {
+                let index = selected[payload.ordinal()].ok_or(InspectionFailure::Inventory)?;
+                selected_identities[payload.ordinal()] = Some(self.metadata(index)?.identity);
+            }
+            let resources = self.image_resource_facts(bytes.capacity(), &inventory)?;
+            let version_identity = self.metadata(version)?.identity;
+            let all_originals_admitted = self.records.iter().filter(|record| record.keep).all(|record|
+                !record.closed && record.metadata.is_some() && record.security.is_some()
+                    && self.native.state(&record.original) == Ok(native::SlotState::Owned));
+            let image = self.image_mut().ok_or(InspectionFailure::Binding)?;
+            image.walk.ready(all_originals_admitted).map_err(native_failure)?;
+            image.observation = Some(ImageVersionObservation {
+                target: windows_version::TARGET, manifest_sha256: spec.manifest_sha256().to_owned(),
+                protocol_sha256: inventory.manifest.protocol_sha256.clone(),
+                inventory_sha256: inventory.manifest.inventory_sha256.clone(),
+                core_sha256: inventory.manifest.core_sha256.clone(), closure_sha256,
+                files: inventory.manifest.files.len(), entries: self.entries, payload_bytes: inventory.payload_bytes,
+                version_identity, selected_mask, selected_identities, resources,
+            });
+            return Ok(());
+        }
         let selected = self.selected.map(|index| index.ok_or(InspectionFailure::Inventory));
         let selected_identities = [self.metadata(selected[0]?)?.identity,
             self.metadata(selected[1]?)?.identity, self.metadata(selected[2]?)?.identity];
-        checkpoint(end, stop)?;
-        self.loader_ready = passive;
-        Ok(VersionObservation { target: windows_version::TARGET, manifest_sha256: spec.manifest_sha256().to_owned(),
+        self.observation = Some(VersionObservation { target: windows_version::TARGET, manifest_sha256: spec.manifest_sha256().to_owned(),
             #[cfg(test)]
             protocol_sha256: inventory.manifest.protocol_sha256.clone(),
             #[cfg(test)]
             account_sid_sha256: account_sid_sha256.ok_or(InspectionFailure::Unknown)?,
             inventory_sha256: inventory.manifest.inventory_sha256.clone(), core_sha256: inventory.manifest.core_sha256.clone(),
             files: inventory.manifest.files.len(), entries: self.entries, payload_bytes: inventory.payload_bytes,
-            version_identity: self.metadata(version)?.identity, selected_identities })
+            version_identity: self.metadata(version)?.identity, selected_identities });
+        Ok(())
     }
     fn metadata(&self, index: usize) -> Result<&native::Metadata> {
         self.records.get(index).and_then(|record| record.metadata.as_ref()).ok_or(InspectionFailure::Unknown)
@@ -356,6 +659,7 @@ impl WindowsVersionBook {
         let entries = self.enumerate(system, Some("kernel32.dll"), end, stop)?;
         for image in native::SystemImage::ALL {
             checkpoint(end, stop)?;
+            self.before_system_image(*image)?;
             let entry = entries.iter().find(|entry| entry.name.eq_ignore_ascii_case(image.name()))
                 .ok_or(InspectionFailure::Inventory)?;
             if entry.kind != native::FileKind::File { return Err(InspectionFailure::Inventory); }
@@ -411,6 +715,7 @@ impl WindowsVersionBook {
         if let Some(index) = self.volumes[root as usize] {
             self.postcheck(index, end, stop)?; return Ok(index);
         }
+        self.before_directory()?;
         self.records.try_reserve(1).map_err(|_| InspectionFailure::Bounds)?;
         let selected = location_at(self.locations.as_ref().ok_or(InspectionFailure::Unknown)?, location)?;
         let records = &mut self.records;
@@ -427,6 +732,7 @@ impl WindowsVersionBook {
     }
     fn open_child(&mut self, parent: usize, entry: &native::DirectoryEntry, scope: native::AuthorityScope,
         protected: bool, keep: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
+        if entry.kind == native::FileKind::Directory { self.before_directory()?; }
         self.records.try_reserve(1).map_err(|_| InspectionFailure::Bounds)?;
         let parent_record = self.records.get(parent).ok_or(InspectionFailure::Unknown)?;
         let volume = parent_record.volume;
@@ -448,13 +754,14 @@ impl WindowsVersionBook {
         // metadata() also requires the retained canonical name, not a path reopen.
         let metadata = method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
             |book| book.metadata(&record.original))?;
-        let security = method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
-            |book| book.security(&record.original, record.scope))?;
+        let protected_boundary = record.protected_boundary;
+        let security = self.sample_security(index, end, stop)?;
+        let record = self.records.get(index).ok_or(InspectionFailure::Unknown)?;
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop,
             |book| book.no_alternate_streams(&record.original))?;
         // SECURITY_DESCRIPTOR_CONTROL's SE_DACL_PROTECTED DATA bit. The native
         // decoder has already checked owner, ACE structure/rights and control.
-        if record.protected_boundary && security.control & 0x1000 == 0 { return Err(InspectionFailure::Unsafe); }
+        if protected_boundary && security.control & 0x1000 == 0 { return Err(InspectionFailure::Unsafe); }
         Ok((metadata, security))
     }
     fn admit(&mut self, index: usize, entry: Option<&native::DirectoryEntry>, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
@@ -557,7 +864,8 @@ impl WindowsVersionBook {
                 if self.metadata(manifest)?.identity.file_id != entry.file_id { return Err(InspectionFailure::Identity); }
                 continue;
             }
-            let keep = retained_path(&path);
+            let keep = self.retain_payload(&path);
+            if entry.kind == native::FileKind::File { self.before_payload(&path)?; }
             let index = self.open_child(directory, &entry, native::AuthorityScope::ImmutableVersion, false, keep, end, stop)?;
             match entry.kind {
                 native::FileKind::Directory => {
@@ -567,9 +875,7 @@ impl WindowsVersionBook {
                 native::FileKind::File => {
                     let expected = inventory.file(&path).ok_or(InspectionFailure::Inventory)?;
                     if self.read(index, expected.size, None, end, stop)? != expected.sha256 { return Err(InspectionFailure::Inventory); }
-                    if let Some(selected) = SELECTED.iter().position(|selected| *selected == path) {
-                        if self.selected[selected].replace(index).is_some() { return Err(InspectionFailure::Inventory); }
-                    }
+                    self.record_selected(&path, index)?;
                     if keep { self.postcheck(index, end, stop)?; } else { self.close_record(index, end, stop)?; }
                 },
             }
@@ -583,6 +889,8 @@ impl WindowsVersionBook {
     fn close_record(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.postcheck(index, end, stop)?;
         let records = &mut self.records;
+        #[cfg(feature = "windows-metadata-images-loader")]
+        let domain = &mut self.domain;
         method(&mut self.native, &mut self.phase, &mut self.call_pending, end, stop, |book| {
             let record = records.get_mut(index).ok_or(native::Error::State)?;
             book.close_once(&record.original)?;
@@ -590,6 +898,12 @@ impl WindowsVersionBook {
             // Completed ACL DATA can be released; the original key/full metadata
             // and positive close stay retained. This is not native output memory.
             record.security = None;
+            #[cfg(feature = "windows-metadata-images-loader")]
+            if let InspectionDomain::MetadataImages(image) = domain {
+                if !record.keep && record.metadata.as_ref().is_some_and(|facts| facts.kind == native::FileKind::File) {
+                    image.walk.transient_closed(book.state(&record.original)?)?;
+                }
+            }
             Ok(()) // record actual close before post-call STOP
         })
     }
@@ -636,7 +950,7 @@ pub(crate) struct PassiveInstalledRuntime {
 }
 impl WindowsVersionBook {
     fn transfer_ready(&self) -> bool {
-        self.phase == Phase::Inspected && self.loader_ready && self.loader.is_some()
+        self.legacy_domain() && self.phase == Phase::Inspected && self.loader_ready && self.loader.is_some()
             && self.observation.is_some() && self.selected.iter().all(Option::is_some)
             && !self.call_pending && !self.settlement_attempted && !self.native.is_unknown()
             && self.records.iter().filter(|r| r.keep).all(|r| !r.closed && r.metadata.is_some() && r.security.is_some())
@@ -764,10 +1078,215 @@ impl PassiveRuntimeSlots {
     }
 }
 
+// This is the image-specific slot carried by the EXISTING EditOwner resources,
+// not another worker/process owner. No code in this SOURCE wires it into a gate.
+// The only construction path first obtains closed compile-bound image DATA and
+// creates exactly one correctly purposed book, before any native operation.
+#[cfg(feature = "windows-metadata-images-loader")]
+pub(crate) struct WindowsMetadataImagesRuntimeSlots {
+    inspection: Option<WindowsVersionBook>,
+    acquisition: Option<WindowsMetadataImagesRuntime>,
+    inspection_started: bool,
+    settlement_started: bool,
+}
+#[cfg(feature = "windows-metadata-images-loader")]
+pub(crate) struct WindowsMetadataImagesRuntime {
+    original: WindowsVersionBook,
+    claimed: bool,
+}
+#[cfg(feature = "windows-metadata-images-loader")]
+impl WindowsVersionBook {
+    fn image_transfer_ready(&self) -> bool {
+        let Some(image) = self.image() else { return false; };
+        let Some(selection) = self.native.metadata_images_selection() else { return false; };
+        self.phase == Phase::Inspected && self.loader_ready && self.loader.is_some()
+            && image.walk.is_ready() && image.observation.is_some() && self.observation.is_none()
+            && selection.selected().all(|payload| image.selected[payload.ordinal()].is_some())
+            && !self.call_pending && !self.settlement_attempted && !self.native.is_unknown()
+            && self.records.iter().filter(|record| record.keep).all(|record|
+                !record.closed && record.metadata.is_some() && record.security.is_some())
+    }
+}
+#[cfg(feature = "windows-metadata-images-loader")]
+impl WindowsMetadataImagesRuntimeSlots {
+    pub(crate) fn new() -> std::result::Result<Self, crate::error::BridgeError> {
+        let profile = crate::runtime::WindowsMetadataImagesProfile::compiled()?;
+        let original = WindowsVersionBook::new_metadata_images(profile)
+            .map_err(|_| crate::error::BridgeError::unavailable("The Windows image loader profile is not admitted."))?;
+        Ok(Self { inspection: Some(original), acquisition: None,
+            inspection_started: false, settlement_started: false })
+    }
+    pub(crate) fn never_started(&self) -> bool {
+        !self.inspection_started && !self.settlement_started && self.acquisition.is_none()
+            && self.inspection.as_ref().is_some_and(|book| book.image().is_some() && book.never_started())
+    }
+    pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>)
+        -> std::result::Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        use crate::error::BridgeError;
+        if !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
+        self.inspection_started = true;
+        let original = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
+        match original.inspect_images_once(end, stop) {
+            Ok(_) => {
+                let selection = &original.loader.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.selection;
+                Ok(crate::runtime::VerifiedRuntime { python: selection.python.clone(), bootstrap: selection.bootstrap.clone(),
+                    core: selection.core.clone(), cwd: selection.cwd.clone() }) // DATA only
+            },
+            Err(InspectionFailure::Unknown) => Err(BridgeError::cleanup_unknown()),
+            Err(InspectionFailure::Deadline) => Err(BridgeError::timeout()),
+            Err(_) => Err(BridgeError::unavailable("The Windows image loader originals failed admission.")),
+        }
+    }
+    pub(crate) fn transfer_once(&mut self) -> Result<()> {
+        if self.acquisition.is_some() || !self.inspection_started || self.settlement_started
+            || !self.inspection.as_ref().is_some_and(WindowsVersionBook::image_transfer_ready) {
+            return Err(InspectionFailure::AlreadyUsed);
+        }
+        let Some(mut original) = self.inspection.take() else { return Err(InspectionFailure::AlreadyUsed); };
+        original.phase = Phase::Transferred;
+        self.acquisition = Some(WindowsMetadataImagesRuntime { original, claimed: false });
+        Ok(()) // No fallible work, native entry, allocation or await after take.
+    }
+    pub(crate) fn capability(&mut self) -> Result<&mut WindowsMetadataImagesRuntime> {
+        if self.settlement_started { return Err(InspectionFailure::AlreadyUsed); }
+        self.acquisition.as_mut().ok_or(InspectionFailure::AlreadyUsed)
+    }
+    pub(crate) fn no_child_effect(&self) -> bool {
+        match (&self.inspection, &self.acquisition) {
+            (Some(_), None) => true,
+            (None, Some(runtime)) => !runtime.claimed,
+            _ => false,
+        }
+    }
+    /// Only after actual borrower return/unwind. A clock or STOP is not a join.
+    pub(crate) fn mark_interrupted(&mut self) {
+        if let Some(original) = &mut self.inspection { original.mark_interrupted(); }
+        if let Some(runtime) = &mut self.acquisition { runtime.original.mark_interrupted(); }
+    }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.settlement_started { self.mark_interrupted(); return CloseOutcome::Unknown; }
+        self.settlement_started = true;
+        let mut count = 0usize; let mut positive = true;
+        if let Some(original) = &mut self.inspection { count += 1; positive &= original.settle_originals() == CloseOutcome::Settled; }
+        if let Some(runtime) = &mut self.acquisition { count += 1; positive &= runtime.original.settle_originals() == CloseOutcome::Settled; }
+        if count == 1 && positive && self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.settlement_started && match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => original.settled(),
+            (None, Some(runtime)) => runtime.original.settled(),
+            _ => false,
+        }
+    }
+    // No conversion to passive/native qualification result DATA is supplied.
+}
+#[cfg(feature = "windows-metadata-images-loader")]
+impl WindowsMetadataImagesRuntime {
+    fn ready(&self) -> bool {
+        self.original.phase == Phase::Prepared && self.original.loader_ready
+            && self.original.image().is_some_and(|image| image.walk.is_ready() && image.observation.is_some())
+            && self.original.observation.is_none() && self.original.loader.is_some()
+            && !self.original.call_pending && !self.original.settlement_attempted
+            && !self.original.native.is_unknown() && !self.claimed
+    }
+    pub(crate) fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<&crate::runtime::VerifiedRuntime> {
+        if self.claimed || self.original.image().is_none() { return Err(InspectionFailure::AlreadyUsed); }
+        self.original.prepare_once(end, stop)?;
+        if !self.ready() { return Err(InspectionFailure::AlreadyUsed); }
+        Ok(&self.original.loader.as_ref().ok_or(InspectionFailure::Unknown)?.selection)
+    }
+    pub(crate) fn system_root(&self) -> Result<&str> {
+        if !self.ready() { return Err(InspectionFailure::AlreadyUsed); }
+        Ok(self.original.loader.as_ref().ok_or(InspectionFailure::Unknown)?.system_root.as_str())
+    }
+    /// Only this PREPARED typed capability may lend its original native token
+    /// and selected retained loader paths to the already-registered factory.
+    /// A detached VerifiedRuntime/path list has no corresponding launch API.
+    pub(crate) fn prepare_transport_once(&mut self, transport: &mut native::image_stdio::Parent,
+        nonce: [u8; 32]) -> Result<()> {
+        if !self.ready() { return Err(InspectionFailure::AlreadyUsed); }
+        let loader = self.original.loader.as_ref().ok_or(InspectionFailure::Unknown)?;
+        let selected = &loader.selection;
+        let python = selected.python.to_str().ok_or(InspectionFailure::Binding)?;
+        let bootstrap = selected.bootstrap.to_str().ok_or(InspectionFailure::Binding)?;
+        let core = selected.core.to_str().ok_or(InspectionFailure::Binding)?;
+        let cwd = selected.cwd.to_str().ok_or(InspectionFailure::Binding)?;
+        transport.prepare_once(&mut self.original.native, python, bootstrap, core, cwd,
+            &loader.system_root, nonce).map_err(|error| match error {
+                native::Error::Unknown => InspectionFailure::Unknown,
+                _ => InspectionFailure::NativeUnavailable,
+            })
+    }
+    pub(crate) fn claim_once(&mut self) -> Result<()> {
+        if !self.ready() { return Err(InspectionFailure::AlreadyUsed); }
+        self.claimed = true; Ok(())
+    }
+    // No shipping image permit is supplied by this SOURCE-only integration.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[cfg(feature = "windows-metadata-images-loader")]
+    #[test]
+    fn c04_image_directory_union_reuses_case_prefixes_counts_split_volumes_and_legacy_system() {
+        fn graph(split: bool, extra: usize) -> (BTreeMap<(u8, Vec<String>), Vec<String>>, BTreeSet<(u8, Vec<String>)>) {
+            let mut selectors = BTreeMap::new(); let mut directories = BTreeSet::new();
+            let mut python: Vec<String> = (0..extra).map(|index| format!("ancestor-{index}")).collect();
+            python.extend(["Program Files", "Mobile Release Kit", "versions", "x86_64-pc-windows-msvc", "version", "python"]
+                .into_iter().map(str::to_owned));
+            LoaderPlan::add_branch(&mut selectors, &mut directories, 0, &python).unwrap();
+            let root = if split { 1 } else { 0 };
+            for branch in [vec!["Windows"], vec!["Windows", "System32"], vec!["Windows", "System"]] {
+                let branch: Vec<String> = branch.into_iter().map(str::to_owned).collect();
+                LoaderPlan::add_branch(&mut selectors, &mut directories, root, &branch).unwrap();
+            }
+            (selectors, directories)
+        }
+        let (mut selectors, mut directories) = graph(false, 0);
+        assert_eq!(directories.len(), 10);
+        assert!(directories.contains(&LoaderPlan::key(0, &["Windows".to_owned(), "System".to_owned()])));
+        LoaderPlan::add_branch(&mut selectors, &mut directories, 0, &["WINDOWS".to_owned(), "SYSTEM32".to_owned()]).unwrap();
+        assert_eq!(directories.len(), 10); // same case-folded originals, no alias credit
+        assert_eq!(graph(true, 0).1.len(), 11);
+        assert_eq!(graph(true, 1).1.len(), 12);
+        assert_eq!(LoaderPlan::peak(graph(true, 1).1.len()), Ok(48));
+        assert_eq!(LoaderPlan::peak(graph(true, 2).1.len()), Err(InspectionFailure::Bounds));
+        // Legacy System stays in the conservative plan even when the real
+        // protected EOF later admits its absence. This is graph DATA, not a walk.
+    }
+
+    #[cfg(feature = "windows-metadata-images-loader")]
+    #[test]
+    fn c11_image_typed_slots_reject_legacy_partial_settled_and_unknown_custody() {
+        assert_eq!(SELECTED.len(), 3);
+        assert!(WindowsMetadataImagesRuntimeSlots::new().is_err()); // no compiled real bridge/closure
+        let mut slots = WindowsMetadataImagesRuntimeSlots {
+            inspection: Some(WindowsVersionBook::new()), acquisition: None,
+            inspection_started: false, settlement_started: false,
+        };
+        // Deliberate wrong-domain fixture, not a public image constructor.
+        assert!(!slots.never_started());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        slots.inspection_started = true;
+        for phase in [Phase::New, Phase::Inspecting, Phase::Inspected, Phase::Transferred,
+            Phase::Preparing, Phase::Prepared, Phase::Refused, Phase::Settled, Phase::Unknown] {
+            let original = slots.inspection.as_mut().unwrap(); original.phase = phase;
+            assert_eq!(original.selected.len(), 3);
+            assert!(!original.image_transfer_ready());
+            assert!(slots.transfer_once().is_err() && slots.acquisition.is_none());
+            assert!(slots.inspection.as_ref().unwrap().native.never_started());
+        }
+        let original = slots.inspection.as_ref().unwrap() as *const WindowsVersionBook;
+        slots.mark_interrupted(); // only after this inert borrower has returned
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert!(!slots.settled() && slots.capability().is_err());
+        assert_eq!(slots.inspection.as_ref().unwrap() as *const WindowsVersionBook, original);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert!(slots.inspection.is_some() && slots.acquisition.is_none());
+    }
 
     #[test]
     fn passive_slots_cannot_transfer_partial_inspection_or_settled_books() {

@@ -37,7 +37,7 @@ on:
         required: true
         type: choice
         default: foundation
-        options: [foundation, windows-snapshot, windows-installed-native, windows-installed-fullwalk, windows-runtime-publication, windows-installed-passive, windows-normal-project-ui, conventional-prepare, conventional-smoke]
+        options: [foundation, windows-snapshot, windows-installed-native, windows-installed-fullwalk, windows-runtime-publication, windows-installed-passive, windows-normal-project-ui, windows-installer-retained-shell, windows-installer-selection, windows-image-writer-b2-native22, conventional-prepare, conventional-smoke]
       expected_sha:
         description: Exact reviewed commit on the selected ref (verification only)
         required: true
@@ -61,7 +61,8 @@ jobs:
        github.ref != 'refs/heads/verify/desktop-windows-installed-native' &&
        github.ref != 'refs/heads/verify/desktop-windows-runtime-publication' &&
        github.ref != 'refs/heads/verify/desktop-windows-installed-passive' &&
-       github.ref != 'refs/heads/verify/desktop-windows-normal-project-ui')
+       github.ref != 'refs/heads/verify/desktop-windows-normal-project-ui' &&
+       github.ref != 'refs/heads/verify/desktop-windows-installer-retained-shell')
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -519,9 +520,15 @@ jobs:
       (github.ref == 'refs/heads/verify/desktop-windows-installed-passive' &&
        github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-installed-passive') ||
       (github.ref == 'refs/heads/verify/desktop-windows-normal-project-ui' &&
-       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-normal-project-ui')
+       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-normal-project-ui') ||
+      (github.ref == 'refs/heads/verify/desktop-windows-installer-retained-shell' &&
+       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-installer-retained-shell') ||
+      (github.ref == 'refs/heads/verify/desktop-windows-installer-retained-shell' &&
+       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-installer-selection') ||
+      (github.ref == 'refs/heads/verify/desktop-windows-image-writer-b2-native22' &&
+       github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-image-writer-b2-native22')
     runs-on: windows-2025-vs2026
-    timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || 35 }}
+    timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || inputs.scope == 'windows-installer-retained-shell' && 65 || inputs.scope == 'windows-installer-selection' && 340 || 35 }}
     env:
       MRK_DESKTOP_PLATFORM: windows
       MRK_DESKTOP_HOSTED_CHECKS: windows-installed-native-v1
@@ -555,7 +562,13 @@ jobs:
                  ( "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-installed-passive &&
                    "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installed-passive ) ||
                  ( "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-normal-project-ui &&
-                   "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-normal-project-ui ) ) ]] || {
+                   "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-normal-project-ui ) ||
+                 ( "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-installer-retained-shell &&
+                   "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installer-retained-shell ) ||
+                 ( "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-installer-retained-shell &&
+                   "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installer-selection ) ||
+                 ( "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-image-writer-b2-native22 &&
+                   "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-image-writer-b2-native22 ) ) ]] || {
               printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=dispatch' >&2; exit 1;
             }
           else
@@ -586,25 +599,1115 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Own one fixed retained-shell probe-balanced original through actual raw EOF and exit
+        id: retained-probe-balanced
+        if: success() && (inputs.scope == 'windows-installer-retained-shell' || inputs.scope == 'windows-installer-selection') && steps.prepare.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.prepare.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'probe-balanced'
+      - name: Own one fixed retained-shell probe-overflow original through actual raw EOF and exit
+        id: retained-probe-overflow
+        if: success() && (inputs.scope == 'windows-installer-retained-shell' || inputs.scope == 'windows-installer-selection') && steps.retained-probe-balanced.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-probe-balanced.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'probe-overflow'
+      - name: Own one fixed retained-shell probe-writer-fault original through actual raw EOF and exit
+        id: retained-probe-writer-fault
+        if: success() && (inputs.scope == 'windows-installer-retained-shell' || inputs.scope == 'windows-installer-selection') && steps.retained-probe-overflow.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-probe-overflow.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'probe-writer-fault'
+      - name: Verify separately closed raw-pipe probe originals before acquisition
+        id: retained-probes-finalize
+        if: success() && (inputs.scope == 'windows-installer-retained-shell' || inputs.scope == 'windows-installer-selection') && steps.retained-probe-writer-fault.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_PROBE_OUTCOMES: >-
+            {"balanced":"${{ steps.retained-probe-balanced.outcome }}","overflow":"${{ steps.retained-probe-overflow.outcome }}","writer-fault":"${{ steps.retained-probe-writer-fault.outcome }}"}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-retained-probes-finalize'
       - name: Acquire only the fixed selected graphs (native-only before the UI prerequisite)
+        id: native-acquire
         timeout-minutes: 15
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_PROBE_OUTCOMES: >-
+            {"balanced":"${{ steps.retained-probe-balanced.outcome }}","overflow":"${{ steps.retained-probe-overflow.outcome }}","writer-fault":"${{ steps.retained-probe-writer-fault.outcome }}"}
+          MRK_RETAINED_PROBES_OUTCOME: ${{ steps.retained-probes-finalize.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
       - name: Compile exact originals and run the selected inert UI/native policies before the native prerequisite
+        id: native-compile
         timeout-minutes: 12
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_ACQUIRE_OUTCOME: ${{ steps.native-acquire.outcome }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Run exactly 16 image stdio, 3 bridge ABI and 3 Factory original DATA contracts
+        id: image-writer-b2-native22
+        if: success() && inputs.scope == 'windows-image-writer-b2-native22'
+        timeout-minutes: 4
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-image-writer-b2-native22'
+      - name: Bind exact source compiler and fixed inert fixture inputs before native use
+        id: retained-precheck
+        if: success() && (inputs.scope == 'windows-installer-retained-shell' || inputs.scope == 'windows-installer-selection') && steps.native-compile.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_COMPILE_OUTCOME: ${{ steps.native-compile.outcome }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-retained-precheck'
+      - name: Own one fixed retained-shell fresh-stage original through actual raw EOF and exit
+        id: retained-fresh-stage
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-precheck.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-precheck.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'fresh-stage'
+      - name: Own one fixed retained-shell fresh-app original through actual raw EOF and exit
+        id: retained-fresh-app
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-fresh-stage.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-fresh-stage.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'fresh-app'
+      - name: Own one fixed retained-shell fresh-observe original through actual raw EOF and exit
+        id: retained-fresh-observe
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-fresh-app.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-fresh-app.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'fresh-observe'
+      - name: Own one fixed retained-shell reuse-stage original through actual raw EOF and exit
+        id: retained-reuse-stage
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-fresh-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-fresh-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'reuse-stage'
+      - name: Own one fixed retained-shell reuse-app original through actual raw EOF and exit
+        id: retained-reuse-app
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-reuse-stage.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-reuse-stage.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'reuse-app'
+      - name: Own one fixed retained-shell reuse-observe original through actual raw EOF and exit
+        id: retained-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-reuse-app.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-reuse-app.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'reuse-observe'
+      - name: Own one fixed retained-shell stop-copy-stage original through actual raw EOF and exit
+        id: retained-stop-copy-stage
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-reuse-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-copy-stage'
+      - name: Own one fixed retained-shell stop-copy-app original through actual raw EOF and exit
+        id: retained-stop-copy-app
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-stop-copy-stage.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-stop-copy-stage.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-copy-app'
+      - name: Own one fixed retained-shell stop-copy-observe original through actual raw EOF and exit
+        id: retained-stop-copy-observe
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-stop-copy-app.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-stop-copy-app.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-copy-observe'
+      - name: Own one fixed retained-shell wrong-caller-stage original through actual raw EOF and exit
+        id: retained-wrong-caller-stage
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-stop-copy-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-stop-copy-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'wrong-caller-stage'
+      - name: Own one fixed retained-shell wrong-caller-app original through actual raw EOF and exit
+        id: retained-wrong-caller-app
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-wrong-caller-stage.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-wrong-caller-stage.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'wrong-caller-app'
+      - name: Own one fixed retained-shell wrong-caller-observe original through actual raw EOF and exit
+        id: retained-wrong-caller-observe
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-wrong-caller-app.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-wrong-caller-app.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'wrong-caller-observe'
+      - name: Own one fixed retained-shell bad-manifest-stage original through actual raw EOF and exit
+        id: retained-bad-manifest-stage
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-wrong-caller-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-wrong-caller-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'bad-manifest-stage'
+      - name: Own one fixed retained-shell bad-manifest-corrupt original through actual raw EOF and exit
+        id: retained-bad-manifest-corrupt
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-bad-manifest-stage.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-bad-manifest-stage.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'bad-manifest-corrupt'
+      - name: Own one fixed retained-shell bad-manifest-app original through actual raw EOF and exit
+        id: retained-bad-manifest-app
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-bad-manifest-corrupt.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-bad-manifest-corrupt.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'bad-manifest-app'
+      - name: Own one fixed retained-shell bad-manifest-observe original through actual raw EOF and exit
+        id: retained-bad-manifest-observe
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-bad-manifest-app.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-bad-manifest-app.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'bad-manifest-observe'
+      - name: Finalize actual16 retained-shell originals as bounded DATA only
+        id: retained-finalize
+        if: success() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-bad-manifest-observe.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_PROBE_OUTCOMES: >-
+            {"balanced":"${{ steps.retained-probe-balanced.outcome }}","overflow":"${{ steps.retained-probe-overflow.outcome }}","writer-fault":"${{ steps.retained-probe-writer-fault.outcome }}"}
+          MRK_RETAINED_PROBES_OUTCOME: ${{ steps.retained-probes-finalize.outcome }}
+          MRK_RETAINED_PRECHECK_OUTCOME: ${{ steps.retained-precheck.outcome }}
+          MRK_RETAINED_OUTCOMES: >-
+            {"fresh-stage":"${{ steps.retained-fresh-stage.outcome }}","fresh-app":"${{ steps.retained-fresh-app.outcome }}","fresh-observe":"${{ steps.retained-fresh-observe.outcome }}","reuse-stage":"${{ steps.retained-reuse-stage.outcome }}","reuse-app":"${{ steps.retained-reuse-app.outcome }}","reuse-observe":"${{ steps.retained-reuse-observe.outcome }}","stop-copy-stage":"${{ steps.retained-stop-copy-stage.outcome }}","stop-copy-app":"${{ steps.retained-stop-copy-app.outcome }}","stop-copy-observe":"${{ steps.retained-stop-copy-observe.outcome }}","wrong-caller-stage":"${{ steps.retained-wrong-caller-stage.outcome }}","wrong-caller-app":"${{ steps.retained-wrong-caller-app.outcome }}","wrong-caller-observe":"${{ steps.retained-wrong-caller-observe.outcome }}","bad-manifest-stage":"${{ steps.retained-bad-manifest-stage.outcome }}","bad-manifest-corrupt":"${{ steps.retained-bad-manifest-corrupt.outcome }}","bad-manifest-app":"${{ steps.retained-bad-manifest-app.outcome }}","bad-manifest-observe":"${{ steps.retained-bad-manifest-observe.outcome }}"}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-retained-finalize'
+      - name: Own one fixed selection stage-fresh original through actual raw EOF and exit
+        id: selection-stage-fresh
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.retained-precheck.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.retained-precheck.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stage-fresh'
+      - name: Own one fixed selection preview-fresh original through actual raw EOF and exit
+        id: selection-preview-fresh
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stage-fresh.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stage-fresh.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-fresh'
+      - name: Own one fixed selection preview-fresh-observe original through actual raw EOF and exit
+        id: selection-preview-fresh-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-fresh.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-fresh.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-fresh-observe'
+      - name: Own one fixed selection select-fresh original through actual raw EOF and exit
+        id: selection-select-fresh
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-fresh-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-fresh-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'select-fresh'
+      - name: Own one fixed selection select-fresh-observe original through actual raw EOF and exit
+        id: selection-select-fresh-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-select-fresh.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-select-fresh.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'select-fresh-observe'
+      - name: Own one fixed selection stage-reuse original through actual raw EOF and exit
+        id: selection-stage-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-select-fresh-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-select-fresh-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stage-reuse'
+      - name: Own one fixed selection preview-reuse original through actual raw EOF and exit
+        id: selection-preview-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stage-reuse.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stage-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-reuse'
+      - name: Own one fixed selection preview-reuse-observe original through actual raw EOF and exit
+        id: selection-preview-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-reuse-observe'
+      - name: Own one fixed selection select-reuse original through actual raw EOF and exit
+        id: selection-select-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'select-reuse'
+      - name: Own one fixed selection select-reuse-observe original through actual raw EOF and exit
+        id: selection-select-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-select-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-select-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'select-reuse-observe'
+      - name: Own one fixed selection preview-verify-reuse original through actual raw EOF and exit
+        id: selection-preview-verify-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-select-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-select-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-verify-reuse'
+      - name: Own one fixed selection preview-verify-reuse-observe original through actual raw EOF and exit
+        id: selection-preview-verify-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-verify-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-verify-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-verify-reuse-observe'
+      - name: Own one fixed selection verify-reuse original through actual raw EOF and exit
+        id: selection-verify-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-verify-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-verify-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'verify-reuse'
+      - name: Own one fixed selection verify-reuse-observe original through actual raw EOF and exit
+        id: selection-verify-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-verify-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-verify-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'verify-reuse-observe'
+      - name: Own one fixed selection preview-remove-reuse original through actual raw EOF and exit
+        id: selection-preview-remove-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-verify-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-verify-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-remove-reuse'
+      - name: Own one fixed selection preview-remove-reuse-observe original through actual raw EOF and exit
+        id: selection-preview-remove-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-remove-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-remove-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-remove-reuse-observe'
+      - name: Own one fixed selection remove-reuse original through actual raw EOF and exit
+        id: selection-remove-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-remove-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-remove-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'remove-reuse'
+      - name: Own one fixed selection remove-reuse-observe original through actual raw EOF and exit
+        id: selection-remove-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-remove-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-remove-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'remove-reuse-observe'
+      - name: Own one fixed selection refuse-stale-repair original through actual raw EOF and exit
+        id: selection-refuse-stale-repair
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-remove-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-remove-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'refuse-stale-repair'
+      - name: Own one fixed selection refuse-stale-repair-observe original through actual raw EOF and exit
+        id: selection-refuse-stale-repair-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-refuse-stale-repair.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-refuse-stale-repair.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'refuse-stale-repair-observe'
+      - name: Own one fixed selection preview-repair-reuse original through actual raw EOF and exit
+        id: selection-preview-repair-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-refuse-stale-repair-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-refuse-stale-repair-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-repair-reuse'
+      - name: Own one fixed selection preview-repair-reuse-observe original through actual raw EOF and exit
+        id: selection-preview-repair-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-repair-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-repair-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-repair-reuse-observe'
+      - name: Own one fixed selection repair-reuse original through actual raw EOF and exit
+        id: selection-repair-reuse
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-repair-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-repair-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'repair-reuse'
+      - name: Own one fixed selection repair-reuse-observe original through actual raw EOF and exit
+        id: selection-repair-reuse-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-repair-reuse.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-repair-reuse.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'repair-reuse-observe'
+      - name: Own one fixed selection preview-registry-conflict original through actual raw EOF and exit
+        id: selection-preview-registry-conflict
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-repair-reuse-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-repair-reuse-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-registry-conflict'
+      - name: Own one fixed selection preview-registry-conflict-observe original through actual raw EOF and exit
+        id: selection-preview-registry-conflict-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-registry-conflict.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-registry-conflict.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-registry-conflict-observe'
+      - name: Own one fixed selection registry-conflict original through actual raw EOF and exit
+        id: selection-registry-conflict
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-registry-conflict-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-registry-conflict-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'registry-conflict'
+      - name: Own one fixed selection registry-conflict-observe original through actual raw EOF and exit
+        id: selection-registry-conflict-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-registry-conflict.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-registry-conflict.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'registry-conflict-observe'
+      - name: Own one fixed selection stage-wrong-caller original through actual raw EOF and exit
+        id: selection-stage-wrong-caller
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-registry-conflict-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-registry-conflict-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stage-wrong-caller'
+      - name: Own one fixed selection preview-stop-old original through actual raw EOF and exit
+        id: selection-preview-stop-old
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stage-wrong-caller.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stage-wrong-caller.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-stop-old'
+      - name: Own one fixed selection preview-stop-old-observe original through actual raw EOF and exit
+        id: selection-preview-stop-old-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-stop-old.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-stop-old.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-stop-old-observe'
+      - name: Own one fixed selection stop-old original through actual raw EOF and exit
+        id: selection-stop-old
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-stop-old-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-stop-old-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-old'
+      - name: Own one fixed selection stop-old-observe original through actual raw EOF and exit
+        id: selection-stop-old-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stop-old.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stop-old.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-old-observe'
+      - name: Own one fixed selection preview-previous original through actual raw EOF and exit
+        id: selection-preview-previous
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stop-old-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stop-old-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-previous'
+      - name: Own one fixed selection preview-previous-observe original through actual raw EOF and exit
+        id: selection-preview-previous-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-previous.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-previous.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-previous-observe'
+      - name: Own one fixed selection recover-previous original through actual raw EOF and exit
+        id: selection-recover-previous
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-previous-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-previous-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'recover-previous'
+      - name: Own one fixed selection recover-previous-observe original through actual raw EOF and exit
+        id: selection-recover-previous-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-recover-previous.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-recover-previous.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'recover-previous-observe'
+      - name: Own one fixed selection stage-bad-manifest original through actual raw EOF and exit
+        id: selection-stage-bad-manifest
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-recover-previous-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-recover-previous-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stage-bad-manifest'
+      - name: Own one fixed selection preview-stop-new original through actual raw EOF and exit
+        id: selection-preview-stop-new
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stage-bad-manifest.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stage-bad-manifest.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-stop-new'
+      - name: Own one fixed selection preview-stop-new-observe original through actual raw EOF and exit
+        id: selection-preview-stop-new-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-stop-new.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-stop-new.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-stop-new-observe'
+      - name: Own one fixed selection stop-new original through actual raw EOF and exit
+        id: selection-stop-new
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-stop-new-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-stop-new-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-new'
+      - name: Own one fixed selection stop-new-observe original through actual raw EOF and exit
+        id: selection-stop-new-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stop-new.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stop-new.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stop-new-observe'
+      - name: Own one fixed selection preview-current original through actual raw EOF and exit
+        id: selection-preview-current
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stop-new-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stop-new-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-current'
+      - name: Own one fixed selection preview-current-observe original through actual raw EOF and exit
+        id: selection-preview-current-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-current.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-current.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-current-observe'
+      - name: Own one fixed selection recover-current original through actual raw EOF and exit
+        id: selection-recover-current
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-current-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-current-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'recover-current'
+      - name: Own one fixed selection recover-current-observe original through actual raw EOF and exit
+        id: selection-recover-current-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-recover-current.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-recover-current.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'recover-current-observe'
+      - name: Own one fixed selection damage-owned-shell original through actual raw EOF and exit
+        id: selection-damage-owned-shell
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-recover-current-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-recover-current-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'damage-owned-shell'
+      - name: Own one fixed selection preview-remove-damaged original through actual raw EOF and exit
+        id: selection-preview-remove-damaged
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-damage-owned-shell.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-damage-owned-shell.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-remove-damaged'
+      - name: Own one fixed selection preview-remove-damaged-observe original through actual raw EOF and exit
+        id: selection-preview-remove-damaged-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-remove-damaged.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-remove-damaged.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'preview-remove-damaged-observe'
+      - name: Own one fixed selection remove-damaged original through actual raw EOF and exit
+        id: selection-remove-damaged
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-preview-remove-damaged-observe.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-preview-remove-damaged-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'remove-damaged'
+      - name: Own one fixed selection remove-damaged-observe original through actual raw EOF and exit
+        id: selection-remove-damaged-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-remove-damaged.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-remove-damaged.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'remove-damaged-observe'
+      - name: Own one fixed selection stage-owned-foreign-selector original through actual raw EOF and exit
+        id: selection-stage-owned-foreign-selector
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-remove-damaged-observe.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-remove-damaged-observe.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'stage-owned-foreign-selector'
+      - name: Own one fixed selection refuse-foreign-selector original through actual raw EOF and exit
+        id: selection-refuse-foreign-selector
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-stage-owned-foreign-selector.outcome == 'success'
+        timeout-minutes: 11
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-stage-owned-foreign-selector.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'refuse-foreign-selector'
+      - name: Own one fixed selection refuse-foreign-selector-observe original through actual raw EOF and exit
+        id: selection-refuse-foreign-selector-observe
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-refuse-foreign-selector.outcome == 'success'
+        timeout-minutes: 3
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_OWNER_INPUT_SHA256: ${{ steps.prepare.outputs.ownerInputSha256 }}
+          MRK_RETAINED_PRECHECK_SHA256: ${{ steps.retained-precheck.outputs.precheckSha256 }}
+          MRK_RETAINED_PREVIOUS_OUTCOME: ${{ steps.selection-refuse-foreign-selector.outcome }}
+        run: |
+          . ([System.IO.Path]::Combine($env:GITHUB_WORKSPACE, 'desktop', 'tools', 'windows_installer_fixture_owner.ps1')) -Role 'refuse-foreign-selector-observe'
+      - name: Finalize actual54 selection originals as bounded DATA only
+        id: selection-finalize
+        if: success() && inputs.scope == 'windows-installer-selection' && steps.selection-refuse-foreign-selector-observe.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_PROBE_OUTCOMES: >-
+            {"balanced":"${{ steps.retained-probe-balanced.outcome }}","overflow":"${{ steps.retained-probe-overflow.outcome }}","writer-fault":"${{ steps.retained-probe-writer-fault.outcome }}"}
+          MRK_RETAINED_PROBES_OUTCOME: ${{ steps.retained-probes-finalize.outcome }}
+          MRK_RETAINED_PRECHECK_OUTCOME: ${{ steps.retained-precheck.outcome }}
+          MRK_SELECTION_OUTCOMES: >-
+            {"stage-fresh":"${{ steps.selection-stage-fresh.outcome }}","preview-fresh":"${{ steps.selection-preview-fresh.outcome }}","preview-fresh-observe":"${{ steps.selection-preview-fresh-observe.outcome }}","select-fresh":"${{ steps.selection-select-fresh.outcome }}","select-fresh-observe":"${{ steps.selection-select-fresh-observe.outcome }}","stage-reuse":"${{ steps.selection-stage-reuse.outcome }}","preview-reuse":"${{ steps.selection-preview-reuse.outcome }}","preview-reuse-observe":"${{ steps.selection-preview-reuse-observe.outcome }}","select-reuse":"${{ steps.selection-select-reuse.outcome }}","select-reuse-observe":"${{ steps.selection-select-reuse-observe.outcome }}","preview-verify-reuse":"${{ steps.selection-preview-verify-reuse.outcome }}","preview-verify-reuse-observe":"${{ steps.selection-preview-verify-reuse-observe.outcome }}","verify-reuse":"${{ steps.selection-verify-reuse.outcome }}","verify-reuse-observe":"${{ steps.selection-verify-reuse-observe.outcome }}","preview-remove-reuse":"${{ steps.selection-preview-remove-reuse.outcome }}","preview-remove-reuse-observe":"${{ steps.selection-preview-remove-reuse-observe.outcome }}","remove-reuse":"${{ steps.selection-remove-reuse.outcome }}","remove-reuse-observe":"${{ steps.selection-remove-reuse-observe.outcome }}","refuse-stale-repair":"${{ steps.selection-refuse-stale-repair.outcome }}","refuse-stale-repair-observe":"${{ steps.selection-refuse-stale-repair-observe.outcome }}","preview-repair-reuse":"${{ steps.selection-preview-repair-reuse.outcome }}","preview-repair-reuse-observe":"${{ steps.selection-preview-repair-reuse-observe.outcome }}","repair-reuse":"${{ steps.selection-repair-reuse.outcome }}","repair-reuse-observe":"${{ steps.selection-repair-reuse-observe.outcome }}","preview-registry-conflict":"${{ steps.selection-preview-registry-conflict.outcome }}","preview-registry-conflict-observe":"${{ steps.selection-preview-registry-conflict-observe.outcome }}","registry-conflict":"${{ steps.selection-registry-conflict.outcome }}","registry-conflict-observe":"${{ steps.selection-registry-conflict-observe.outcome }}","stage-wrong-caller":"${{ steps.selection-stage-wrong-caller.outcome }}","preview-stop-old":"${{ steps.selection-preview-stop-old.outcome }}","preview-stop-old-observe":"${{ steps.selection-preview-stop-old-observe.outcome }}","stop-old":"${{ steps.selection-stop-old.outcome }}","stop-old-observe":"${{ steps.selection-stop-old-observe.outcome }}","preview-previous":"${{ steps.selection-preview-previous.outcome }}","preview-previous-observe":"${{ steps.selection-preview-previous-observe.outcome }}","recover-previous":"${{ steps.selection-recover-previous.outcome }}","recover-previous-observe":"${{ steps.selection-recover-previous-observe.outcome }}","stage-bad-manifest":"${{ steps.selection-stage-bad-manifest.outcome }}","preview-stop-new":"${{ steps.selection-preview-stop-new.outcome }}","preview-stop-new-observe":"${{ steps.selection-preview-stop-new-observe.outcome }}","stop-new":"${{ steps.selection-stop-new.outcome }}","stop-new-observe":"${{ steps.selection-stop-new-observe.outcome }}","preview-current":"${{ steps.selection-preview-current.outcome }}","preview-current-observe":"${{ steps.selection-preview-current-observe.outcome }}","recover-current":"${{ steps.selection-recover-current.outcome }}","recover-current-observe":"${{ steps.selection-recover-current-observe.outcome }}","damage-owned-shell":"${{ steps.selection-damage-owned-shell.outcome }}","preview-remove-damaged":"${{ steps.selection-preview-remove-damaged.outcome }}","preview-remove-damaged-observe":"${{ steps.selection-preview-remove-damaged-observe.outcome }}","remove-damaged":"${{ steps.selection-remove-damaged.outcome }}","remove-damaged-observe":"${{ steps.selection-remove-damaged-observe.outcome }}","stage-owned-foreign-selector":"${{ steps.selection-stage-owned-foreign-selector.outcome }}","refuse-foreign-selector":"${{ steps.selection-refuse-foreign-selector.outcome }}","refuse-foreign-selector-observe":"${{ steps.selection-refuse-foreign-selector-observe.outcome }}"}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-selection-finalize'
       - name: Preflight source-derived reader and producer policy selectors; do not launch ordinary work
         id: ordinary-preflight
-        if: success() && inputs.scope != 'windows-normal-project-ui'
+        if: success() && inputs.scope != 'windows-normal-project-ui' && inputs.scope != 'windows-installer-retained-shell' && inputs.scope != 'windows-installer-selection' && inputs.scope != 'windows-image-writer-b2-native22'
         timeout-minutes: 4
         shell: bash
         env:
@@ -2940,7 +4043,7 @@ jobs:
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-installed-fixture-finalize'
       - name: Own one fixed ordinary native child by its original logon handles
         id: ordinary-owner
-        if: success() && inputs.scope != 'windows-installed-passive' && inputs.scope != 'windows-normal-project-ui' && ((inputs.scope != 'windows-installed-fullwalk' && inputs.scope != 'windows-runtime-publication') || steps.fixture-finalize.outcome == 'success')
+        if: success() && inputs.scope != 'windows-installed-passive' && inputs.scope != 'windows-normal-project-ui' && ((inputs.scope != 'windows-installed-fullwalk' && inputs.scope != 'windows-runtime-publication') || steps.fixture-finalize.outcome == 'success') && inputs.scope != 'windows-installer-retained-shell' && inputs.scope != 'windows-installer-selection' && inputs.scope != 'windows-image-writer-b2-native22'
         timeout-minutes: 4
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
         env:
@@ -3200,7 +4303,7 @@ jobs:
           }
       - name: Observe actual PowerShell and loaded Process identity as DATA only
         id: runtime-data
-        if: always() && inputs.scope != 'windows-installed-passive' && inputs.scope != 'windows-normal-project-ui' && steps.prepare.outcome == 'success'
+        if: always() && inputs.scope != 'windows-installed-passive' && inputs.scope != 'windows-normal-project-ui' && steps.prepare.outcome == 'success' && inputs.scope != 'windows-installer-retained-shell' && inputs.scope != 'windows-installer-selection' && inputs.scope != 'windows-image-writer-b2-native22'
         continue-on-error: true
         timeout-minutes: 1
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command ". '{0}'"
@@ -3257,7 +4360,7 @@ jobs:
           }
       - name: Retain only bounded original DATA without retry or cleanup
         id: retain
-        if: always() && steps.prepare.outcome == 'success'
+        if: always() && steps.prepare.outcome == 'success' && inputs.scope != 'windows-installer-retained-shell' && inputs.scope != 'windows-installer-selection'
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -3334,6 +4437,46 @@ jobs:
         with:
           name: desktop-windows-installed-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.prepare.outputs.root }}/public/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Retain only the redacted retained-shell summary without native retry or cleanup
+        id: retained-retain
+        if: always() && inputs.scope == 'windows-installer-retained-shell' && steps.prepare.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_RETAINED_FINALIZE_OUTCOME: ${{ steps.retained-finalize.outcome }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
+      - name: Upload only the public retained-shell summary and no raw private outputs
+        if: always() && inputs.scope == 'windows-installer-retained-shell' && steps.retained-retain.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-windows-retained-shell-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.root }}/public/retained-shell-summary.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Retain only the redacted selection summary without native retry or cleanup
+        id: selection-retain
+        if: always() && inputs.scope == 'windows-installer-selection' && steps.prepare.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_SELECTION_FINALIZE_OUTCOME: ${{ steps.selection-finalize.outcome }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
+      - name: Upload only the public selection summary and no raw private outputs
+        if: always() && inputs.scope == 'windows-installer-selection' && steps.selection-retain.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-windows-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.root }}/public/selection-summary.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 1

@@ -159,7 +159,7 @@ fn maximum_scalar_journal_context_still_fits_one_fixed_frame() {
     row.startup = Some(u64::MAX); row.coverage_incomplete = false;
     let mut value = Capture::default();
     value.journal_returned(Projection { bytes: u32::MAX, records: u8::MAX, reason: u8::MAX,
-        last: Some(row), observer_refusal: Some(row), startup_refusal: Some(row), directory_fence: None });
+        last: Some(row), observer_refusal: Some(row), startup_refusal: Some(row), directory_fence: None, user_data_parent: None });
     value.record_once(Some(binding()), 16, Some((1, [2; 16])), [3; 16], "inert");
     let raw = frame(&value, &Reply::Sealed { key_id: [0xff; 32], ciphertext: [0xff; data::CIPHERTEXT_BYTES] });
     assert!(raw.len() <= 4096); assert!(raw.ends_with(b"}\n"));

@@ -1182,16 +1182,24 @@ impl ObserverDiagnostic {
         // This does not run/resample the probe or authorize any Store action.
         let value = observed_directory_fence(observed);
         if self.role != UiRole::CredentialSession || !value.publishable() { self.order.unavailable(); return; }
-        self.emit_with_fence(Event::DirectoryFence, snapshot, self.startup_word(), Some(value), permitted);
+        self.emit_with_observation(Event::DirectoryFence, snapshot, self.startup_word(), Some(value), None, permitted);
+    }
+    pub fn selected_user_data_parent(&self, selected: Option<&Path>, permitted: &dyn Fn() -> bool) {
+        // Borrow the saved selection and already admitted output; no lookup,
+        // canonicalization, path publication, new owner or filesystem access.
+        let value = data::UserDataParent::from_parents(selected.and_then(Path::parent), self.path.parent());
+        self.emit_with_observation(Event::SelectedUserDataParent, self.latch.snapshot(), self.startup_word(),
+            None, Some(value), permitted);
     }
     fn emit(&self, event: Event, snapshot: Snapshot, startup: Option<u64>, permitted: &dyn Fn() -> bool) {
-        self.emit_with_fence(event, snapshot, startup, None, permitted);
+        self.emit_with_observation(event, snapshot, startup, None, None, permitted);
     }
-    fn emit_with_fence(&self, event: Event, snapshot: Snapshot, startup: Option<u64>,
-        directory_fence: Option<data::DirectoryFence>, permitted: &dyn Fn() -> bool) {
+    fn emit_with_observation(&self, event: Event, snapshot: Snapshot, startup: Option<u64>,
+        directory_fence: Option<data::DirectoryFence>, user_data_parent: Option<data::UserDataParent>,
+        permitted: &dyn Fn() -> bool) {
         let Some(permit) = self.order.begin(event) else { return; };
         let mut raw = Frame::default();
-        if permit.record_with_fence(&mut raw, snapshot, startup, self.latch.first(), directory_fence).is_err()
+        if permit.record_with_observation(&mut raw, snapshot, startup, self.latch.first(), directory_fence, user_data_parent).is_err()
             || self.append_original(raw.bytes(), permitted).is_err() { self.order.disable(); }
         // Permit drops only an atomic gate. No mutex spans any native operation.
     }

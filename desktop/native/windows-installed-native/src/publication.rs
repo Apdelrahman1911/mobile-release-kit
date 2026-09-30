@@ -10,321 +10,25 @@ use super::{AdmissionRole as R, AdmissionOp as O, AdmissionCheck as C};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::SystemServices as SS;
+use super::installer_primitives::*;
+use super::installer_input_data::digest_name;
+pub use super::installer_input_data::PUBLICATION_PAYLOADS;
+pub use super::installer_primitives::{PublicationFrameObservation, PublicationCopyObservation};
 
 const TARGET: &str = "x86_64-pc-windows-msvc";
 const MANIFEST: usize = 7;
 const MANIFEST_LIMIT: usize = 1024 * 1024;
 const OPERATION: Duration = Duration::from_secs(180);
 
-/// Literal DATA roster, not caller-selected destinations or executable authority.
-pub const PUBLICATION_PAYLOADS: [&str; 47] = [
-    "android_build_bootstrap.py",
-    "config_edit_bootstrap.py",
-    "core.zip",
-    "engine_bootstrap.py",
-    "environment_bootstrap.py",
-    "github-ca.pem",
-    "github_connection_bootstrap.py",
-    "manifest.json",
-    "offline_preflight_bootstrap.py",
-    "python/LICENSE.txt",
-    "python/MRK-EMBEDDED-NOTICES.txt",
-    "python/_asyncio.pyd",
-    "python/_bz2.pyd",
-    "python/_ctypes.pyd",
-    "python/_decimal.pyd",
-    "python/_elementtree.pyd",
-    "python/_hashlib.pyd",
-    "python/_lzma.pyd",
-    "python/_multiprocessing.pyd",
-    "python/_overlapped.pyd",
-    "python/_queue.pyd",
-    "python/_remote_debugging.pyd",
-    "python/_socket.pyd",
-    "python/_sqlite3.pyd",
-    "python/_ssl.pyd",
-    "python/_uuid.pyd",
-    "python/_wmi.pyd",
-    "python/_zoneinfo.pyd",
-    "python/_zstd.pyd",
-    "python/libcrypto-3.dll",
-    "python/libffi-8.dll",
-    "python/libssl-3.dll",
-    "python/libtommath.dll",
-    "python/pyexpat.pyd",
-    "python/python.cat",
-    "python/python.exe",
-    "python/python3.dll",
-    "python/python314._pth",
-    "python/python314.dll",
-    "python/python314.zip",
-    "python/pythonw.exe",
-    "python/select.pyd",
-    "python/sqlite3.dll",
-    "python/unicodedata.pyd",
-    "python/vcruntime140.dll",
-    "python/vcruntime140_1.dll",
-    "python/winsound.pyd",
-];
 
-fn need(value: bool) -> Result<()> { if value { Ok(()) } else { Err(Error::Unsafe) } }
-fn digest_name(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-fn sid(authority: u8, sub: &[u32]) -> Vec<u8> {
-    let mut raw = vec![1, sub.len() as u8, 0, 0, 0, 0, 0, authority];
-    for value in sub { raw.extend(value.to_le_bytes()); }
-    raw
-}
-fn admins() -> Vec<u8> { sid(5, &[32, 544]) }
-fn system() -> Vec<u8> { sid(5, &[18]) }
-fn users() -> Vec<u8> { sid(5, &[32, 545]) }
 fn image_payload(index: usize) -> Result<bool> {
     let path = PUBLICATION_PAYLOADS.get(index).ok_or(Error::State)?;
     Ok(path.ends_with(".exe") || path.ends_with(".dll") || path.ends_with(".pyd"))
 }
-fn users_mask(kind: FileKind, image: bool) -> u32 {
-    FS::FILE_GENERIC_READ | if kind == FileKind::Directory || image { FS::FILE_GENERIC_EXECUTE } else { 0 }
-}
-
-// Exact noninheriting protected DACLs. An input or existing shared ancestor NEVER
-// enters this constructor's mutation path. The group is supplied at creation,
-// but GetKernelObjectSecurity(OWNER|DACL) does not return it: compare parsed facts.
-fn descriptor(kind: FileKind, image: bool, sealed: bool) -> Result<Vec<u8>> {
-    let owner = admins();
-    let mut entries = vec![(system(), FS::FILE_ALL_ACCESS), (owner.clone(), FS::FILE_ALL_ACCESS)];
-    if sealed { entries.push((users(), users_mask(kind, image))); }
-    let mut acl = vec![0u8; size_of::<S::ACL>()];
-    acl[0] = 2;
-    for (principal, mask) in &entries {
-        let length = 8 + principal.len();
-        acl.extend([0, 0]);
-        acl.extend((length as u16).to_le_bytes());
-        acl.extend(mask.to_le_bytes());
-        acl.extend(principal);
-    }
-    let length = acl.len() as u16;
-    acl[2..4].copy_from_slice(&length.to_le_bytes());
-    acl[4..6].copy_from_slice(&(entries.len() as u16).to_le_bytes());
-    let header = size_of::<S::SECURITY_DESCRIPTOR_RELATIVE>();
-    need(header == 20)?;
-    let mut raw = vec![0u8; header];
-    raw[0] = 1;
-    raw[2..4].copy_from_slice(&(S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT | S::SE_DACL_PROTECTED).to_le_bytes());
-    raw[4..8].copy_from_slice(&(header as u32).to_le_bytes());
-    raw[8..12].copy_from_slice(&(header as u32).to_le_bytes());
-    raw[16..20].copy_from_slice(&((header + owner.len()) as u32).to_le_bytes());
-    raw.extend(owner);
-    raw.extend(acl);
-    exact_security(&security::descriptor(&raw, kind, AuthorityScope::ImmutableVersion)?, kind, image, sealed)?;
-    Ok(raw)
-}
-fn exact_security(facts: &SecurityFacts, kind: FileKind, image: bool, sealed: bool) -> Result<()> {
-    need(facts.owner.bytes() == admins()
-        && facts.control == (S::SE_SELF_RELATIVE | S::SE_DACL_PRESENT | S::SE_DACL_PROTECTED)
-        && facts.revision == 2 && facts.aces.len() == if sealed { 3 } else { 2 })?;
-    for (i, ace) in facts.aces.iter().enumerate() {
-        let principal = match i { 0 => system(), 1 => admins(), _ => users() };
-        let mask = if i < 2 { FS::FILE_ALL_ACCESS } else { users_mask(kind, image) };
-        need(ace.allow && ace.flags == 0 && ace.sid.bytes() == principal && ace.mask == mask)?;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Facts { metadata: Metadata, security: SecurityFacts }
-fn same_object(a: &Metadata, b: &Metadata) -> bool {
-    same_object_observed(a, b, None)
-}
-fn same_object_observed(a: &Metadata, b: &Metadata, trace: Option<CopyRefusal<'_>>) -> bool {
-    copy_guard(a.identity == b.identity, CopyMember::Identity, trace)
-        && copy_guard(a.kind == b.kind, CopyMember::Kind, trace)
-        && copy_guard(a.attributes == b.attributes, CopyMember::Attributes, trace)
-        && copy_guard(a.links == b.links, CopyMember::Links, trace)
-        && copy_guard(a.creation == b.creation, CopyMember::Creation, trace)
-}
-fn child_transition(a: &Metadata, b: &Metadata) -> bool {
-    // Used ONLY immediately after one recorded successful exclusive child create.
-    // Directory index allocation/size can change in either direction on NTFS.
-    same_object(a, b) && a.kind == FileKind::Directory && b.write >= a.write && b.change >= a.change
-}
-fn write_transition(a: &Metadata, b: &Metadata, size: u64) -> bool {
-    write_transition_observed(a, b, size, None)
-}
-fn write_transition_observed(a: &Metadata, b: &Metadata, size: u64, trace: Option<CopyRefusal<'_>>) -> bool {
-    if !(same_object_observed(a, b, trace) && copy_guard(a.kind == FileKind::File, CopyMember::Kind, trace)
-        && copy_guard(a.size == 0, CopyMember::InitialSize, trace)) { return false; }
-    let written_size = b.size;
-    if !copy_guard(written_size == size, CopyMember::Size, trace) { return false; }
-    let written_allocation = b.allocation_size;
-    copy_allocation_guard(written_allocation >= size, trace, || CopyAllocation::BelowSize)
-        && copy_guard(b.write >= a.write, CopyMember::WriteTime, trace)
-        && copy_guard(b.change >= a.change, CopyMember::ChangeTime, trace)
-}
-fn writer_close_transition(a: &Metadata, b: &Metadata) -> bool {
-    writer_close_transition_observed(a, b, None)
-}
-fn writer_close_transition_observed(a: &Metadata, b: &Metadata, trace: Option<CopyRefusal<'_>>) -> bool {
-    if !(same_object_observed(a, b, trace) && copy_guard(a.kind == FileKind::File, CopyMember::Kind, trace)) { return false; }
-    let (written_size, observed_size) = (a.size, b.size);
-    if !copy_guard(written_size == observed_size, CopyMember::Size, trace) { return false; }
-    let (written_allocation, observed_allocation) = (a.allocation_size, b.allocation_size);
-    // Closing this own writer may release allocation slack, never logical data.
-    copy_allocation_guard(observed_size <= observed_allocation && observed_allocation <= written_allocation, trace,
-        || changed_allocation(observed_allocation, written_allocation, observed_size))
-        && copy_guard(b.write >= a.write, CopyMember::WriteTime, trace)
-        && copy_guard(b.change >= a.change, CopyMember::ChangeTime, trace)
-}
-fn source_unchanged_observed(new: &Facts, old: &Facts, trace: Option<CopyRefusal<'_>>) -> bool {
-    // Exactly the original derived Facts/Metadata Eq order, with new on the left.
-    // Do not reuse same_object: size/allocation precede links/creation here.
-    let (a, b) = (&new.metadata, &old.metadata);
-    if !(copy_guard(a.identity == b.identity, CopyMember::Identity, trace)
-        && copy_guard(a.kind == b.kind, CopyMember::Kind, trace)
-        && copy_guard(a.attributes == b.attributes, CopyMember::Attributes, trace)) { return false; }
-    let (new_size, old_size) = (a.size, b.size);
-    if !copy_guard(new_size == old_size, CopyMember::Size, trace) { return false; }
-    let (new_allocation, old_allocation) = (a.allocation_size, b.allocation_size);
-    copy_allocation_guard(new_allocation == old_allocation, trace,
-        || changed_allocation(new_allocation, old_allocation, new_size))
-        && copy_guard(a.links == b.links, CopyMember::Links, trace)
-        && copy_guard(a.creation == b.creation, CopyMember::Creation, trace)
-        && copy_guard(a.write == b.write, CopyMember::WriteTime, trace)
-        && copy_guard(a.change == b.change, CopyMember::ChangeTime, trace)
-        && copy_guard(new.security == old.security, CopyMember::Security, trace)
-}
-fn acl_transition(a: &Metadata, b: &Metadata) -> bool {
-    same_object(a, b) && a.size == b.size && a.allocation_size == b.allocation_size
-        && a.write == b.write && b.change >= a.change
-}
-
-// Positive privileged admission is deliberately separate from security::token_facts,
-// whose ordinary-reader policy MUST keep rejecting these contexts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Installer {
-    identity: TokenIdentity, user: Sid, integrity: Sid, elevation_type: u32,
-    groups: Vec<GroupFact>, privileges: Vec<(u64, u32)>,
-}
-#[derive(Clone, Copy)]
-struct InstallerData<'a>(Refusal<'a>);
-impl InstallerData<'_> {
-fn pointed_sid(self, raw: &[u8], field: usize, minimum: usize) -> Result<Sid> {
-    let d = decode::Observed::new(self.0);
-    let pointer = usize::try_from(d.u64_at(raw, field)?).map_err(|_| self.0.unsafe_at(C::PointerValue))?;
-    let at = pointer.checked_sub(raw.as_ptr() as usize).ok_or_else(|| self.0.unsafe_at(C::PointerOffset))?;
-    self.0.need(at >= minimum, C::PointerMinimum)?;
-    self.0.need(at % 4 == 0, C::PointerAlignment)?;
-    security::Observed::new(self.0).sid_at(raw, at, raw.len()) // no unvalidated pointer dereference
-}
-fn installer_groups(self, raw: &[u8], count: u32) -> Result<Vec<GroupFact>> {
-    let header = offset_of!(S::TOKEN_GROUPS, Groups);
-    let d = decode::Observed::new(self.0);
-    self.0.need(count <= 256, C::GroupCount)?;
-    self.0.need(raw.len() <= BUFFER, C::GroupSize)?;
-    self.0.need(d.u32_at(raw, 0)? == count, C::GroupCountMatch)?;
-    let extent = header.checked_add(count as usize * size_of::<S::SID_AND_ATTRIBUTES>()).ok_or(Error::Bounds)?;
-    d.span(raw, 0, extent)?;
-    let known = (SS::SE_GROUP_MANDATORY | SS::SE_GROUP_ENABLED_BY_DEFAULT | SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER
-        | SS::SE_GROUP_USE_FOR_DENY_ONLY | SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED
-        | SS::SE_GROUP_RESOURCE | SS::SE_GROUP_LOGON_ID) as u32;
-    let mut result: Vec<GroupFact> = Vec::new();
-    for i in 0..count as usize {
-        let trace = self.0.index(AdmissionIndex::Group, i);
-        let d = decode::Observed::new(trace);
-        let base = header + i * size_of::<S::SID_AND_ATTRIBUTES>();
-        let principal = Self(trace).pointed_sid(raw, base + offset_of!(S::SID_AND_ATTRIBUTES, Sid), extent)?;
-        let attributes = d.u32_at(raw, base + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))?;
-        trace.need(attributes & !known == 0, C::GroupFlags)?;
-        trace.need(!(attributes & SS::SE_GROUP_USE_FOR_DENY_ONLY as u32 != 0 && attributes & SS::SE_GROUP_ENABLED as u32 != 0), C::GroupDenyEnabled)?;
-        trace.need(!result.iter().any(|g| g.sid == principal), C::GroupDuplicate)?;
-        result.push(GroupFact { sid: principal, attributes });
-    }
-    // Explicit Administrators ownership in new SECURITY_ATTRIBUTES is possible
-    // without adjusting privileges only with this actually enabled owner group.
-    self.0.need(result.iter().any(|g| g.sid.bytes() == admins()
-        && g.attributes & (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32
-            == (SS::SE_GROUP_ENABLED | SS::SE_GROUP_OWNER) as u32
-        && g.attributes & (SS::SE_GROUP_USE_FOR_DENY_ONLY | SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_RESOURCE) as u32 == 0), C::AdminOwner)?;
-    Ok(result)
-}
-fn installer_privileges(self, raw: &[u8], count: u32) -> Result<Vec<(u64, u32)>> {
-    let head = offset_of!(S::TOKEN_PRIVILEGES, Privileges);
-    let step = size_of::<S::LUID_AND_ATTRIBUTES>();
-    let d = decode::Observed::new(self.0);
-    self.0.need(count <= 64, C::PrivilegesCount)?;
-    self.0.need(raw.len() == head + count as usize * step, C::PrivilegesSize)?;
-    self.0.need(d.u32_at(raw, 0)? == count, C::PrivilegesCountMatch)?;
-    let mut result = Vec::new();
-    for i in 0..count as usize {
-        let trace = self.0.index(AdmissionIndex::Privilege, i);
-        let d = decode::Observed::new(trace);
-        let at = head + i * step;
-        let luid = d.u64_at(raw, at + offset_of!(S::LUID_AND_ATTRIBUTES, Luid))?;
-        let attributes = d.u32_at(raw, at + offset_of!(S::LUID_AND_ATTRIBUTES, Attributes))?;
-        trace.need(luid != 0, C::PrivilegeLuid)?;
-        trace.need(!result.iter().any(|(prior, _)| *prior == luid), C::PrivilegeDuplicate)?;
-        trace.need(attributes & !(S::SE_PRIVILEGE_ENABLED | S::SE_PRIVILEGE_ENABLED_BY_DEFAULT | S::SE_PRIVILEGE_USED_FOR_ACCESS) == 0, C::PrivilegeFlags)?;
-        result.push((luid, attributes));
-    }
-    Ok(result)
-}
-#[allow(clippy::too_many_arguments)]
-fn installer_facts(self, identity: TokenIdentity, token_type: u32, elevated: u32, elevation_type: u32,
-    ui_access: u32, virtualization: u32, restricted: u32, app_container: u32,
-    user: &[u8], integrity: &[u8], groups: &[u8], privileges: &[u8]) -> Result<Installer> {
-    self.0.need(token_type == S::TokenPrimary as u32, C::TokenPrimary)?;
-    self.0.need(elevated == 1, C::Elevated)?;
-    self.0.need(ui_access == 0, C::UiAccess)?;
-    self.0.need(virtualization == 0, C::Virtualization)?;
-    self.0.need(restricted == 0, C::Restricted)?;
-    self.0.need(app_container == 0, C::AppContainer)?;
-    self.0.need(user.len() <= BUFFER, C::UserBuffer)?;
-    self.0.need(integrity.len() <= BUFFER, C::IntegrityBuffer)?;
-    let u = Self(self.0.role(R::User));
-    let principal = u.pointed_sid(user, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid), size_of::<S::TOKEN_USER>())?;
-    u.0.need(decode::Observed::new(u.0).u32_at(user, offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))? == 0, C::UserAttributes)?;
-    let i = Self(self.0.role(R::Integrity));
-    let label = i.pointed_sid(integrity, offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Sid), size_of::<S::TOKEN_MANDATORY_LABEL>())?;
-    i.0.need(decode::Observed::new(i.0).u32_at(integrity, offset_of!(S::TOKEN_MANDATORY_LABEL, Label) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes))?
-        == (SS::SE_GROUP_INTEGRITY | SS::SE_GROUP_INTEGRITY_ENABLED) as u32, C::IntegrityAttributes)?;
-    if principal.bytes() == system() {
-        i.0.need(label.bytes() == sid(16, &[16384]), C::SystemIntegrity)?;
-        self.0.need([S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32].contains(&elevation_type), C::SystemElevation)?;
-    } else {
-        let bytes = principal.bytes();
-        u.0.need(bytes.len() == 28 && bytes[1] == 5 && bytes[2..8] == [0, 0, 0, 0, 0, 5]
-            && decode::Observed::new(u.0).u32_at(bytes, 8)? == 21, C::AccountShape)?;
-        i.0.need(label.bytes() == sid(16, &[12288]), C::AccountIntegrity)?;
-        // Default means no linked token, not absence of elevation. The independent
-        // elevated == 1/High checks above and admin-owner/group/privilege checks below
-        // remain mandatory; no Limited/unknown kind or normalization is allowed.
-        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_elevation_type
-        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_elevation
-        self.0.need([S::TokenElevationTypeDefault as u32, S::TokenElevationTypeFull as u32].contains(&elevation_type), C::AccountElevation)?;
-    }
-    Ok(Installer { identity, user: principal, integrity: label, elevation_type,
-        groups: Self(self.0.role(R::Groups)).installer_groups(groups, identity.groups)?,
-        privileges: Self(self.0.role(R::Privileges)).installer_privileges(privileges, identity.privileges)? })
-}
-
-}
-fn installer_groups(raw: &[u8], count: u32) -> Result<Vec<GroupFact>> { InstallerData(Refusal::none()).installer_groups(raw, count) }
-#[allow(clippy::too_many_arguments)]
-fn installer_facts(identity: TokenIdentity, token_type: u32, elevated: u32, elevation_type: u32,
-    ui_access: u32, virtualization: u32, restricted: u32, app_container: u32,
-    user: &[u8], integrity: &[u8], groups: &[u8], privileges: &[u8]) -> Result<Installer> {
-    InstallerData(Refusal::none()).installer_facts(identity, token_type, elevated, elevation_type, ui_access,
-        virtualization, restricted, app_container, user, integrity, groups, privileges)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Stage { Fresh, Manifest, Copying, Sealing, ExposureAttempted, RootClosed, Complete }
-#[derive(Clone, Copy, Debug, Default)]
-struct CopyProof { source_eof: bool, flushed: bool, writer_closed: bool, source_closed: bool, readback_eof: bool, readback_closed: bool }
-impl CopyProof {
-    fn complete(self) -> bool {
-        self.source_eof && self.flushed && self.writer_closed && self.source_closed && self.readback_eof && self.readback_closed
-    }
+enum Stage { Fresh, Manifest, Copying, Sealing, ExposureAttempted, RootClosed, Complete,
+    #[cfg(feature = "installer-acquisition")]
+    Reused,
 }
 struct Order {
     stage: Stage, copies: usize, sealed_files: usize, inventories: bool, python_closed: bool,
@@ -360,176 +64,6 @@ impl Order {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Effect { Directory(usize), Writer, Control(bool), Write, Flush, Seal, Scalar(S::TOKEN_INFORMATION_CLASS) }
-
-// Normalize while copying retained Rust DATA. Neither this value nor its Debug
-// representation carries a handle, raw scalar/count magnitude, path or native buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ObservedReturn { label: &'static str, code: Option<u32> }
-impl ObservedReturn {
-    fn from_return(value: Option<Returned>) -> Self {
-        let (label, code) = match value {
-            None => ("none", None),
-            Some(Returned::Scalar(_)) => ("scalar", None),
-            Some(Returned::Boolean(value, error)) => (if value == 0 { "bool-zero" } else { "bool-nonzero" }, Some(error)),
-            Some(Returned::Count(value, error)) => (if value == 0 { "count-zero" } else { "count-positive" }, Some(error)),
-            Some(Returned::Nt(status)) => ("nt", Some(status as u32)),
-            Some(Returned::Hresult(status)) => ("hr", Some(status as u32)),
-        };
-        Self { label, code }
-    }
-    fn append(self, line: &mut String) {
-        line.push_str(self.label);
-        if let Some(code) = self.code {
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            line.push(':');
-            for shift in (0..8).rev() { line.push(HEX[((code >> (shift * 4)) & 15) as usize] as char); }
-        }
-    }
-}
-/// Closed observation of the caller's exact-four invariant, not an OS fault.
-/// Sentinel means equality to u32::MAX, not proof that output was unwritten.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ObservedScalarLength { Unobserved, Sentinel, Zero, One, Two, Three, Four, OverFour }
-impl ObservedScalarLength {
-    fn from_count(count: u32) -> Self {
-        match count {
-            u32::MAX => Self::Sentinel, 0 => Self::Zero, 1 => Self::One,
-            2 => Self::Two, 3 => Self::Three, 4 => Self::Four, _ => Self::OverFour,
-        }
-    }
-    fn label(self) -> &'static str {
-        match self {
-            Self::Unobserved => "none", Self::Sentinel => "sentinel", Self::Zero => "zero",
-            Self::One => "one", Self::Two => "two", Self::Three => "three",
-            Self::Four => "four", Self::OverFour => "over4",
-        }
-    }
-}
-fn observed_query(call: Call) -> &'static str {
-    match call {
-        Call::Architecture => "architecture", Call::Folder => "folder",
-        Call::WindowsDirectory => "windows-directory", Call::SystemDirectory => "system-directory",
-        Call::Mapping => "mapping", Call::DriveType => "drive-type", Call::Open(_) => "nt-create",
-        Call::ProcessToken(_) => "process-token", Call::ThreadToken(_) => "thread-token", Call::Close(_) => "close",
-        #[cfg(test)]
-        Call::QualificationSourceToken(_) => "qualification-source-token",
-        #[cfg(test)]
-        Call::QualificationRestrictedToken(_) => "qualification-filtered-token",
-        Call::Info(class, _) => match class {
-            FS::FileBasicInfo => "info-basic", FS::FileStandardInfo => "info-standard",
-            FS::FileAttributeTagInfo => "info-tag", FS::FileIdInfo => "info-id",
-            FS::FileCaseSensitiveInfo => "info-case", _ => "info-other",
-        },
-        Call::HandleInfo => "handle-info", Call::FinalName => "final-name", Call::FileType => "file-type",
-        Call::VolumeName => "volume-name", Call::VolumeDevice => "volume-device", Call::Streams => "streams",
-        Call::Security => "security", Call::Privilege(_) => "privilege", Call::Read(_) => "read", Call::Entries => "entries",
-        Call::Token(class) => match class {
-            S::TokenStatistics => "token-statistics", S::TokenType => "token-type",
-            S::TokenElevation => "token-elevation", S::TokenElevationType => "token-elevation-type",
-            S::TokenUIAccess => "token-ui-access", S::TokenVirtualizationEnabled => "token-virtualization",
-            S::TokenUser => "token-user", S::TokenIntegrityLevel => "token-integrity",
-            S::TokenGroups => "token-groups", S::TokenPrivileges => "token-privileges", _ => "token-other",
-        },
-    }
-}
-fn observed_mutation(effect: Effect) -> &'static str {
-    match effect {
-        Effect::Directory(_) => "directory", Effect::Writer => "writer",
-        Effect::Control(false) => "control-file", Effect::Control(true) => "control-directory",
-        Effect::Write => "write", Effect::Flush => "flush", Effect::Seal => "seal",
-        Effect::Scalar(S::TokenHasRestrictions) => "has-restrictions",
-        Effect::Scalar(S::TokenIsAppContainer) => "is-app-container", Effect::Scalar(_) => "scalar-other",
-    }
-}
-fn observed_phase(phase: Phase) -> &'static str {
-    match phase { Phase::Prepared => "prepared", Phase::Entered => "entered", Phase::Returned => "returned", Phase::Complete => "complete" }
-}
-fn observed_refusal(refusal: Option<CompletionRefusal>) -> &'static str {
-    match refusal {
-        None => "none", Some(CompletionRefusal::OpenInvalidHandle) => "open-invalid-handle",
-        Some(CompletionRefusal::OpenIoStatus) => "open-iosb-status", Some(CompletionRefusal::OpenNotOpened) => "open-not-opened",
-        Some(CompletionRefusal::OpenDuplicate) => "open-duplicate", Some(CompletionRefusal::TokenInvalidHandle) => "token-invalid-handle",
-        Some(CompletionRefusal::TokenDuplicate) => "token-duplicate",
-    }
-}
-/// Closed, copied first-failure DATA only. This is never ownership or finality.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PublicationFrameObservation {
-    qcall: &'static str, qphase: &'static str, qret: ObservedReturn, qrefusal: &'static str,
-    mcall: &'static str, mphase: &'static str, mret: ObservedReturn, mcount: ObservedScalarLength,
-}
-impl PublicationFrameObservation {
-    fn from_frames(query: Option<(Call, Phase, Option<Returned>, Option<CompletionRefusal>)>,
-        mutation: Option<(Effect, Phase, Option<Returned>, ObservedScalarLength)>) -> Self {
-        let (qcall, qphase, qret, qrefusal) = query.map_or(("none", "none", ObservedReturn::from_return(None), "none"),
-            |(call, phase, returned, refusal)| (observed_query(call), observed_phase(phase), ObservedReturn::from_return(returned), observed_refusal(refusal)));
-        let (mcall, mphase, mret, mcount) = mutation.map_or(("none", "none", ObservedReturn::from_return(None), ObservedScalarLength::Unobserved),
-            |(effect, phase, returned, length)| (observed_mutation(effect), observed_phase(phase), ObservedReturn::from_return(returned), length));
-        Self { qcall, qphase, qret, qrefusal, mcall, mphase, mret, mcount }
-    }
-    /// Bounded companion line; reads only this normalized copy, never an owner.
-    pub fn diagnostic_line(self) -> Option<String> {
-        let mut line = String::with_capacity(256);
-        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall="); line.push_str(self.qcall);
-        line.push_str(";qphase="); line.push_str(self.qphase); line.push_str(";qret="); self.qret.append(&mut line);
-        line.push_str(";qrefusal="); line.push_str(self.qrefusal);
-        line.push_str(";mcall="); line.push_str(self.mcall); line.push_str(";mphase="); line.push_str(self.mphase);
-        line.push_str(";mret="); self.mret.append(&mut line);
-        line.push_str(";mcount="); line.push_str(self.mcount.label()); line.push('\n');
-        if line.len() <= 256 { Some(line) } else { None }
-    }
-}
-struct Mutation {
-    effect: Effect, phase: Cell<Phase>, returned: Cell<Option<Returned>>, slot: Option<usize>,
-    length_observation: Cell<ObservedScalarLength>,
-    path: Vec<u16>, descriptor: UnsafeCell<Aligned>, attributes: S::SECURITY_ATTRIBUTES,
-    handle: F::HANDLE, output: *mut F::HANDLE, data: Vec<u8>, count: UnsafeCell<u32>, scalar: UnsafeCell<u32>,
-    _pin: PhantomPinned,
-}
-struct MutationComplete { frame: Pin<Box<Mutation>> }
-impl MutationComplete {
-    fn scalar(&self) -> Result<u32> {
-        need(self.frame.phase.get() == Phase::Complete
-            && matches!(self.frame.effect, Effect::Scalar(S::TokenHasRestrictions | S::TokenIsAppContainer)))?;
-        // SAFETY: definite completion ended native access to this pinned,
-        // completely initialized DWORD object. An accepted needed-size of one
-        // does NOT assert a one-byte ABI or four native-written output bytes.
-        Ok(unsafe { *self.frame.scalar.get() })
-    }
-}
-fn mutation_return(ok: i32, error: u32) -> Result<()> {
-    if ok != 0 { return if error == 0 { Ok(()) } else { Err(Error::Unknown) }; }
-    if error == 0 || error == F::ERROR_IO_PENDING { Err(Error::Unknown) } else { Err(Error::Unavailable) }
-}
-fn write_return(ok: i32, error: u32, written: u32, requested: usize) -> Result<()> {
-    mutation_return(ok, error)?;
-    if requested == 0 || requested > BUFFER || written as usize > requested { return Err(Error::Unknown); }
-    need(written as usize == requested) // short/zero is failure, never a write-repair loop
-}
-fn scalar_initial(effect: Effect) -> u32 {
-    if matches!(effect, Effect::Scalar(S::TokenHasRestrictions)) { u32::from_ne_bytes([0xff, 0, 0, 0]) }
-    else { u32::MAX }
-}
-fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }
-fn scalar_count_return(effect: Effect, count: u32, observed: &Cell<ObservedScalarLength>) -> Result<()> {
-    if observed.get() == ObservedScalarLength::Unobserved {
-        observed.set(ObservedScalarLength::from_count(count));
-    }
-    // The original count still decides admission; the first diagnostic never does.
-    let accepted = match effect {
-        Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4),
-        Effect::Scalar(S::TokenIsAppContainer) => count == 4,
-        _ => false,
-    };
-    if accepted { Ok(()) } else { Err(Error::Unknown) }
-}
-fn later_originals_closed(states: impl IntoIterator<Item = SlotState>) -> bool {
-    let mut any = false;
-    for state in states { any = true; if state != SlotState::Closed { return false; } }
-    any // NoHandle, Unknown or no earlier original never authorizes adoption
-}
 
 struct Directory {
     role: R,
@@ -537,7 +71,6 @@ struct Directory {
     scope: AuthorityScope, facts: Facts, entries: Option<Vec<DirectoryEntry>>, created: bool,
 }
 impl Directory { fn current(&self) -> usize { self.control.unwrap_or(self.initial) } }
-struct Creation { path: String, parent: usize, entered: bool, returned: Option<(i32, u32)> }
 // Set once, after BOTH shared ancestors are admitted, before the exact target-D
 // CreateDirectoryW intent. Neither a generic failure nor a last component is a role.
 struct TargetCreation { intent: usize, versions: usize, parent: usize, path: String }
@@ -552,105 +85,27 @@ struct Copied {
     proof: CopyProof, control: Option<usize>, sealed_closed: bool,
 }
 
+
+/// Chosen once from the genuine original target-name admission. This is DATA,
+/// not permission to reuse an occupied or partially published runtime.
+#[cfg(feature = "installer-acquisition")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CopyEdge {
-    Order, SourceEof, Installer, Flush, WriterCheck, WriteTransition, WriterClose, SourceCheck,
-    SourceUnchanged, SourceClose, ParentCheck, ReadbackReserve, ReadbackOpen, ReadbackNoninherited,
-    ReadbackCheck, WriterCloseTransition,
+pub enum InstallerRuntimeMode { PublishNew, ReuseExisting }
+#[cfg(feature = "installer-acquisition")]
+struct InstallerInput {
+    image: String, acquisition: Arc<()>, acquired_mrk: Facts,
+    admitted_mrk: Option<Facts>, mode: Option<InstallerRuntimeMode>,
+    existing_versions: Option<usize>, existing_target: Option<usize>,
 }
-impl CopyEdge {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Order => "order", Self::SourceEof => "source-eof", Self::Installer => "installer",
-            Self::Flush => "flush", Self::WriterCheck => "writer-check", Self::WriteTransition => "write-transition",
-            Self::WriterClose => "writer-close", Self::SourceCheck => "source-check", Self::SourceUnchanged => "source-unchanged",
-            Self::SourceClose => "source-close", Self::ParentCheck => "parent-check", Self::ReadbackReserve => "readback-reserve",
-            Self::ReadbackOpen => "readback-open", Self::ReadbackNoninherited => "readback-noninherited",
-            Self::ReadbackCheck => "readback-check", Self::WriterCloseTransition => "writer-close-transition",
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CopyMember { None, Identity, Kind, Attributes, Links, Creation, InitialSize, Size, Allocation, WriteTime, ChangeTime, Security }
-impl CopyMember {
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "none", Self::Identity => "identity", Self::Kind => "kind", Self::Attributes => "attributes",
-            Self::Links => "links", Self::Creation => "creation", Self::InitialSize => "initial-size", Self::Size => "size",
-            Self::Allocation => "allocation", Self::WriteTime => "write-time", Self::ChangeTime => "change-time", Self::Security => "security",
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CopyAllocation { None, BelowSize, Shrank, Grew }
-impl CopyAllocation {
-    fn label(self) -> &'static str {
-        match self { Self::None => "none", Self::BelowSize => "below-size", Self::Shrank => "shrank", Self::Grew => "grew" }
-    }
-}
-/// Closed first-Unsafe finish-copy DATA; no handle, raw size or native output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PublicationCopyObservation { edge: CopyEdge, member: CopyMember, allocation: CopyAllocation }
-impl PublicationCopyObservation {
-    fn legal(self) -> bool {
-        use CopyEdge as E; use CopyMember as M; use CopyAllocation as A;
-        match (self.edge, self.member, self.allocation) {
-            (E::WriteTransition, M::Allocation, A::BelowSize)
-            | (E::SourceUnchanged | E::WriterCloseTransition, M::Allocation, A::BelowSize | A::Shrank | A::Grew)
-            | (E::WriteTransition, M::Identity | M::Kind | M::Attributes | M::Links | M::Creation | M::InitialSize
-                | M::Size | M::WriteTime | M::ChangeTime | M::Security, A::None)
-            | (E::SourceUnchanged | E::WriterCloseTransition, M::Identity | M::Kind | M::Attributes | M::Links | M::Creation
-                | M::Size | M::WriteTime | M::ChangeTime | M::Security, A::None)
-            | (E::Order | E::SourceEof | E::Installer | E::Flush | E::WriterCheck | E::WriterClose | E::SourceCheck
-                | E::SourceClose | E::ParentCheck | E::ReadbackReserve | E::ReadbackOpen | E::ReadbackNoninherited
-                | E::ReadbackCheck, M::None, A::None) => true,
-            _ => false,
-        }
-    }
-    pub fn diagnostic_line(self) -> Option<String> {
-        if !self.legal() { return None; }
-        let mut line = String::with_capacity(128);
-        line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge="); line.push_str(self.edge.label());
-        line.push_str(";member="); line.push_str(self.member.label());
-        line.push_str(";allocation="); line.push_str(self.allocation.label()); line.push('\n');
-        if line.len() <= 256 { Some(line) } else { None }
-    }
-}
-#[derive(Clone, Copy)]
-struct CopyRefusal<'a> { first: &'a Cell<Option<PublicationCopyObservation>>, edge: CopyEdge }
-impl CopyRefusal<'_> {
-    fn record(self, member: CopyMember, allocation: impl FnOnce() -> CopyAllocation) {
-        if self.first.get().is_none() {
-            self.first.set(Some(PublicationCopyObservation { edge: self.edge, member, allocation: allocation() }));
-        }
-    }
-}
-// Receive each already-evaluated Result once; nested refusals are edge-only.
-fn copy_result<T>(result: Result<T>, first: &Cell<Option<PublicationCopyObservation>>, edge: CopyEdge) -> Result<T> {
-    if matches!(result.as_ref(), Err(Error::Unsafe)) {
-        CopyRefusal { first, edge }.record(CopyMember::None, || CopyAllocation::None);
-    }
-    result
-}
-fn copy_guard(value: bool, member: CopyMember, trace: Option<CopyRefusal<'_>>) -> bool {
-    if !value { if let Some(trace) = trace { trace.record(member, || CopyAllocation::None); } }
-    value
-}
-fn copy_allocation_guard(value: bool, trace: Option<CopyRefusal<'_>>, allocation: impl FnOnce() -> CopyAllocation) -> bool {
-    if !value { if let Some(trace) = trace { trace.record(CopyMember::Allocation, allocation); } }
-    value
-}
-fn changed_allocation(new: u64, old: u64, size: u64) -> CopyAllocation {
-    // Called only after a reached allocation refusal, using cached operands.
-    // Equal-but-under-EOF close observations also classify as BelowSize;
-    // passed comparisons and earlier refusals never classify here.
-    if new < size { CopyAllocation::BelowSize } else if new < old { CopyAllocation::Shrank } else { CopyAllocation::Grew }
-}
+#[cfg(feature = "installer-acquisition")]
+struct ReadonlyFile { index: usize, slot: usize, facts: Facts }
+#[cfg(feature = "installer-acquisition")]
+struct ReadonlyRuntime { current: Option<ReadonlyFile>, verified: Vec<ReadonlyFile> }
 
 /// The actual non-cloneable owner. Register it before invoking a native method;
 /// retain it after panic/poison/Unknown. Its Drop is NOT a settlement mechanism.
 pub struct Publication {
-    book: NativeBook, mutation: Option<Held<Mutation>>, end: Instant, expired: bool, order: Order,
+    book: NativeBook, mutation: MutationSlot, end: Instant, expired: bool, order: Order,
     digest: String, installer: Option<Installer>, location: Option<KnownLocation>,
     directories: Vec<Directory>, creations: Vec<Creation>, target_creation: Option<TargetCreation>, source_dirs: Vec<usize>,
     source_root: Option<usize>, source_python: Option<usize>, mrk: Option<usize>,
@@ -658,6 +113,10 @@ pub struct Publication {
     manifest: Vec<u8>, manifest_original: Option<usize>, manifest_facts: Option<Facts>,
     sizes: Option<[u64; 47]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
     copy_failure: Cell<Option<PublicationCopyObservation>>,
+    #[cfg(feature = "installer-acquisition")]
+    installer_input: Option<InstallerInput>,
+    #[cfg(feature = "installer-acquisition")]
+    readonly: Option<ReadonlyRuntime>,
 }
 // SAFETY: only the serialized owner moves. All native arguments/output cells
 // are in pinned allocations, and no borrowed handle or UnsafeCell escapes. Like
@@ -666,6 +125,26 @@ pub struct Publication {
 unsafe impl Send for Publication {}
 
 impl Publication {
+    /// Actual storage observations, available only in the fixed nonshipping tests.
+    /// This method cannot create an owner or supply publication/activation authority.
+    #[cfg(feature = "installer-protected-fixture")]
+    pub fn retained_fixture_observation(&self) -> super::installer_fixture_data::InstallerFixturePublicationObservation {
+        use super::installer_fixture_data::InstallerFixturePublicationObservation;
+        InstallerFixturePublicationObservation {
+            mode: self.installer_mode(),
+            originals_settled: self.settlement_attempted && self.book.settled() && self.mutation.is_none()
+                && !self.order.unknown,
+            published: self.order.stage == Stage::Complete && !self.order.failed,
+            reused: self.order.stage == Stage::Reused && !self.order.failed,
+            creations: self.creations.len(), target_intent: self.target_creation.is_some(),
+            directory_controls: self.directories.iter().filter(|d| d.control.is_some()).count(),
+            copied_rows: self.copied.len(), sealed_rows: self.order.sealed_files,
+            has_transfer: self.transfer.is_some(),
+            readonly_rows: self.readonly.as_ref().map_or(0, |r| r.verified.len()),
+            readonly_current: self.readonly.as_ref().is_some_and(|r| r.current.is_some()),
+            exposure_attempted: self.order.grant_attempted || self.order.exposure,
+        }
+    }
     /// Only copied first-refusal DATA, before failure settlement changes any owner.
     pub fn retained_admission_observation(&self) -> Option<PublicationAdmissionObservation> { self.book.admission.first.get() }
     /// Copy the first finish-copy refusal only; never query frames, outputs or time.
@@ -698,7 +177,12 @@ impl Publication {
             source_dirs: Vec::new(), source_root: None, source_python: None, mrk: None,
             output_dirs: Vec::new(), version: None, python: None,
             manifest: Vec::new(), manifest_original: None, manifest_facts: None,
-            sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false, copy_failure: Cell::new(None) })
+            sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false, copy_failure: Cell::new(None),
+            #[cfg(feature = "installer-acquisition")]
+            installer_input: None,
+            #[cfg(feature = "installer-acquisition")]
+            readonly: None,
+        })
     }
     fn tick(&mut self) -> Result<()> {
         self.expired |= Instant::now() >= self.end;
@@ -868,88 +352,13 @@ impl Publication {
     }
     fn mutate(&mut self, effect: Effect, slot: Option<usize>, dos: &str, raw: &[u8], data: Vec<u8>) -> Result<MutationComplete> {
         self.ready()?;
-        self.book.admission.at(O::MutationInput).need(data.len() <= BUFFER, C::MutationData)?;
-        self.book.admission.at(O::MutationInput).need(raw.len() <= BUFFER, C::MutationDescriptor)?;
-        let acquiring = matches!(effect, Effect::Writer | Effect::Control(_));
-        let handle = if acquiring || matches!(effect, Effect::Directory(_)) { null_mut() }
-            else { self.book.handle(slot.ok_or(Error::State)?)? };
-        let path = if matches!(effect, Effect::Directory(_) | Effect::Writer | Effect::Control(_)) {
-            // DOS input is derived solely from the retained OS location + literal
-            // components. All intermediate parents are held, canonical and safe.
-            need(!dos.starts_with("\\") && !dos.contains('\0') && dos.encode_utf16().count() < NAME_UNITS)?;
-            wide(&format!("\\\\?\\{dos}"))
-        } else { Vec::new() };
-        let mut frame = Box::pin(Mutation { effect, phase: Cell::new(Phase::Prepared), returned: Cell::new(None), slot,
-            length_observation: Cell::new(ObservedScalarLength::Unobserved),
-            path, descriptor: UnsafeCell::new(Aligned([0; BUFFER])), attributes: S::SECURITY_ATTRIBUTES::default(),
-            handle, output: null_mut(), data, count: UnsafeCell::new(u32::MAX), scalar: UnsafeCell::new(scalar_initial(effect)), _pin: PhantomPinned });
-        // SAFETY: pinned, exclusively held, not yet entered. Register all pointers
-        // and original output cells before publishing the mutation arena.
-        let setup = unsafe { frame.as_mut().get_unchecked_mut() };
-        if !raw.is_empty() {
-            let buffer = unsafe { &mut *setup.descriptor.get() };
-            buffer.0[..raw.len()].copy_from_slice(raw);
-            setup.attributes.lpSecurityDescriptor = setup.descriptor.get().cast();
-        }
-        setup.attributes.nLength = size_of::<S::SECURITY_ATTRIBUTES>() as u32;
-        setup.attributes.bInheritHandle = 0;
-        if acquiring {
-            let original = self.book.slot(slot.ok_or(Error::State)?)?;
-            need(original.state == SlotState::Reserved)?; setup.output = original.output.get();
-        }
-        self.mutation = Some(ManuallyDrop::new(frame));
-        if acquiring { self.book.slot_mut(slot.ok_or(Error::State)?)?.state = SlotState::Acquiring; }
-        if let Effect::Directory(i) = effect { self.creations.get_mut(i).ok_or(Error::State)?.entered = true; }
-        self.book.started = true;
-        let frame = self.mutation.as_ref().ok_or(Error::Unknown)?.as_ref().get_ref();
-        frame.phase.set(Phase::Entered);
-        // SAFETY: no overlapping call, callback or async mode. Every native
-        // pointer is pinned and already owned. The first operation after return
-        // records the actual scalar (and immediate same-thread GetLastError).
-        let returned = unsafe { invoke_mutation(frame) };
-        frame.returned.set(Some(returned)); frame.phase.set(Phase::Returned);
+        enter_registered_mutation(&mut self.book, &mut self.mutation, &mut self.creations, effect, slot, dos, raw, data)?;
         self.finish_mutation()
     }
-    fn mutation_unknown<T>(&mut self) -> Result<T> {
-        self.book.mark_interrupted(); self.order.fail(true); Err(Error::Unknown)
-    }
     fn finish_mutation(&mut self) -> Result<MutationComplete> {
-        let frame = self.mutation.as_ref().ok_or(Error::Unknown)?.as_ref().get_ref();
-        if frame.phase.get() != Phase::Returned { return self.mutation_unknown(); }
-        let (ok, error) = match frame.returned.get() { Some(Returned::Boolean(v, e)) => (v, e), _ => return self.mutation_unknown() };
-        let (effect, slot) = (frame.effect, frame.slot);
-        if let Effect::Directory(i) = effect { self.creations[i].returned = Some((ok, error)); }
-        let outcome = mutation_return(ok, error);
-        if outcome == Err(Error::Unknown) { return self.mutation_unknown(); }
-        if matches!(effect, Effect::Writer | Effect::Control(_)) {
-            let index = slot.ok_or(Error::Unknown)?;
-            if self.book.slot(index)?.state != SlotState::Acquiring { return self.mutation_unknown(); }
-            // SAFETY: only definite synchronous nonpending completion reaches the
-            // registered output. NULL contradicts CreateFileW's failure sentinel.
-            let handle = unsafe { *self.book.slot(index)?.output.get() };
-            if ok == 0 {
-                if handle != F::INVALID_HANDLE_VALUE { return self.mutation_unknown(); }
-                self.book.slot_mut(index)?.state = SlotState::NoHandle;
-            } else {
-                if !valid_handle(handle) || self.book.duplicate_live(index, handle) { return self.mutation_unknown(); }
-                self.book.slot_mut(index)?.state = SlotState::Owned;
-            }
-        }
-        let frame = self.mutation.as_ref().ok_or(Error::Unknown)?.as_ref().get_ref();
-        let outcome = if matches!(effect, Effect::Write) && outcome.is_ok() {
-            // SAFETY: known completion, not a failed or pending output count.
-            write_return(ok, error, unsafe { *frame.count.get() }, frame.data.len())
-        } else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {
-            // SAME authorized read; class-local needed-size compatibility never
-            // derives a write extent or authorizes another output observation.
-            let count = unsafe { *frame.count.get() };
-            scalar_count_return(effect, count, &frame.length_observation)
-        } else { outcome };
-        if outcome == Err(Error::Unknown) { return self.mutation_unknown(); }
-        frame.phase.set(Phase::Complete);
-        let held = self.mutation.take().ok_or(Error::Unknown)?;
-        let complete = MutationComplete { frame: ManuallyDrop::into_inner(held) };
-        outcome?; self.tick()?; Ok(complete)
+        let result = finish_registered_mutation(&mut self.book, &mut self.mutation, &mut self.creations, None);
+        if self.book.is_unknown() { self.order.fail(true); }
+        let complete = result?; self.tick()?; Ok(complete)
     }
     fn scalar(&mut self, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
         self.book.admission.at(O::Scalar).need([S::TokenHasRestrictions, S::TokenIsAppContainer].contains(&class), C::ScalarCompletion)?;
@@ -976,7 +385,17 @@ impl Publication {
         let mut entries = Vec::new();
         loop {
             this.ready()?;
-            let batch = match selected { Some(name) => this.book.next_ancestor_entries(&key, name)?, None => this.book.next_entries(&key)? };
+            #[cfg(feature = "installer-acquisition")]
+            let installer_root = this.installer_input.is_some() && this.mrk == Some(index);
+            #[cfg(not(feature = "installer-acquisition"))]
+            let installer_root = false;
+            let batch = if installer_root {
+                // Fix the finite shared-root selection on the first original
+                // cursor. Never widen/restart a cursor after inspecting D.
+                this.book.next_selected_entries(&key, &["runtime-input".to_owned(), "versions".to_owned()])?
+            } else {
+                match selected { Some(name) => this.book.next_ancestor_entries(&key, name)?, None => this.book.next_entries(&key)? }
+            };
             this.tick()?;
             match batch { Some(batch) => entries.extend(batch), None => break }
         }
@@ -1080,16 +499,17 @@ impl Publication {
             this.book.admission.role.set(R::ProgramFiles); this.recheck_location()?;
             let mrk = this.existing_dir(parent, "Mobile Release Kit", AuthorityScope::AncestorOutsideVersion, R::Mrk)?;
             this.mrk = Some(mrk);
-            let input = this.existing_dir(mrk, "runtime-input", AuthorityScope::AncestorOutsideVersion, R::RuntimeInput)?;
-            let target = this.existing_dir(input, TARGET, AuthorityScope::AncestorOutsideVersion, R::Target)?;
-            let digest = this.digest.clone();
-            let root = this.existing_dir(target, &digest, AuthorityScope::ImmutableVersion, R::Version)?;
+            let (input, target, root) = this.admit_runtime_branch(mrk)?;
             this.source_root = Some(root);
             // Strict root/python cursors are each bound exactly once, through EOF.
             let root_entries = this.entries(root, None)?;
             exact_names_in(&root_entries, false, this.book.admission.at(O::Inventory).role(R::Version))?;
             let python = this.existing_dir(root, "python", AuthorityScope::ImmutableVersion, R::Python)?;
             this.source_python = Some(python);
+            #[cfg(feature = "installer-acquisition")]
+            if this.installer_mode() == Some(InstallerRuntimeMode::ReuseExisting) {
+                exact_security(&this.directories[python].facts.security, FileKind::Directory, false, true)?;
+            }
             {
                 let python_entries = this.entries(python, None)?;
                 exact_names_in(&python_entries, true, this.book.admission.at(O::Inventory).role(R::Python))?;
@@ -1122,13 +542,25 @@ impl Publication {
     pub fn create_once(&mut self, sizes: [u64; 47]) -> Result<()> {
         self.step(|this| {
             this.order.live(Stage::Manifest)?;
+            #[cfg(feature = "installer-acquisition")]
+            need(this.installer_mode() != Some(InstallerRuntimeMode::ReuseExisting))?;
             need(sizes[MANIFEST] == this.manifest.len() as u64 && sizes.iter().all(|n| *n <= MAX_FILE_BYTES))?;
             let total = sizes.iter().try_fold(0u64, |sum, n| sum.checked_add(*n).ok_or(Error::Bounds))?;
             need(total.checked_mul(2).is_some_and(|n| n <= MAX_TOTAL_BYTES))?;
             this.sizes = Some(sizes); this.recheck_installer()?; this.recheck_location()?;
             let mrk = this.mrk.ok_or(Error::State)?;
-            let versions = this.shared_dir(mrk, "versions")?;
-            let target = this.shared_dir(versions, TARGET)?;
+            #[cfg(feature = "installer-acquisition")]
+            let retained = this.installer_input.as_ref().map(|i| (i.existing_versions, i.existing_target));
+            #[cfg(not(feature = "installer-acquisition"))]
+            let retained: Option<(Option<usize>, Option<usize>)> = None;
+            let versions = match retained.and_then(|r| r.0) {
+                Some(index) => { this.recheck_dir(index)?; index },
+                None => this.shared_dir(mrk, "versions")?,
+            };
+            let target = match retained.and_then(|r| r.1) {
+                Some(index) => { this.recheck_dir(index)?; index },
+                None => this.shared_dir(versions, TARGET)?,
+            };
             let digest = this.digest.clone();
             need(this.target_creation.is_none())?;
             this.target_creation = Some(TargetCreation { intent: this.creations.len(), versions,
@@ -1446,70 +878,233 @@ impl Publication {
     }
 }
 
-unsafe fn invoke_mutation(frame: &Mutation) -> Returned {
-    // SAFETY: mutate() pinned and registered every input/output before entry;
-    // no asynchronous flag, callback or borrowed temporary is involved.
-    unsafe {
-        match frame.effect {
-            Effect::Directory(_) => boolean(FS::CreateDirectoryW(frame.path.as_ptr(), &frame.attributes)),
-            Effect::Writer | Effect::Control(_) => {
-                let (access, disposition, flags) = match frame.effect {
-                    Effect::Writer => (F::GENERIC_WRITE | FS::READ_CONTROL | FS::FILE_READ_ATTRIBUTES,
-                        FS::CREATE_NEW, FS::FILE_ATTRIBUTE_NORMAL | FS::FILE_FLAG_OPEN_REPARSE_POINT),
-                    Effect::Control(directory) => (FS::WRITE_DAC | FS::READ_CONTROL | FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
-                        FS::OPEN_EXISTING, FS::FILE_FLAG_OPEN_REPARSE_POINT | if directory { FS::FILE_FLAG_BACKUP_SEMANTICS } else { 0 }),
-                    _ => unreachable!(),
-                };
-                // Record the actual HANDLE before GetLastError or any other work.
-                *frame.output = FS::CreateFileW(frame.path.as_ptr(), access, FS::FILE_SHARE_READ,
-                    &frame.attributes, disposition, flags, null_mut());
-                let value = *frame.output;
-                if valid_handle(value) { Returned::Boolean(1, 0) }
-                else { Returned::Boolean(0, F::GetLastError()) }
+
+impl Publication {
+    fn admit_runtime_branch(&mut self, mrk: usize) -> Result<(usize, usize, usize)> {
+        #[cfg(feature = "installer-acquisition")]
+        if self.installer_input.is_some() {
+            return self.admit_installer_runtime_branch(mrk);
+        }
+        // Standalone publication keeps its historical fixed D source exactly.
+        let input = self.existing_dir(mrk, "runtime-input", AuthorityScope::AncestorOutsideVersion, R::RuntimeInput)?;
+        let target = self.existing_dir(input, TARGET, AuthorityScope::AncestorOutsideVersion, R::Target)?;
+        let digest = self.digest.clone();
+        let root = self.existing_dir(target, &digest, AuthorityScope::ImmutableVersion, R::Version)?;
+        Ok((input, target, root))
+    }
+}
+
+#[cfg(feature = "installer-acquisition")]
+impl Publication {
+    /// No native operation. The source choice derives from the actual settled
+    /// acquisition, not a path/hash argument or a copied completion receipt.
+    pub fn for_installer(acquisition: &super::installer_acquisition::InputAcquisition) -> Result<Self> {
+        let (digest, image, identity, acquired_mrk) = acquisition.runtime_source_binding()?;
+        let mut original = Self::new(&digest)?;
+        original.installer_input = Some(InstallerInput { image, acquisition: identity, acquired_mrk,
+            admitted_mrk: None, mode: None, existing_versions: None, existing_target: None });
+        Ok(original)
+    }
+    fn installer_mode(&self) -> Option<InstallerRuntimeMode> {
+        self.installer_input.as_ref().and_then(|input| input.mode)
+    }
+    pub fn installer_runtime_mode(&self) -> Result<InstallerRuntimeMode> {
+        self.installer_mode().ok_or(Error::State)
+    }
+    fn choose_installer_mode(&mut self, mode: InstallerRuntimeMode) -> Result<()> {
+        let input = self.installer_input.as_mut().ok_or(Error::State)?;
+        need(input.mode.is_none())?;
+        input.mode = Some(mode);
+        if mode == InstallerRuntimeMode::ReuseExisting {
+            need(self.readonly.is_none() && self.creations.is_empty() && self.output_dirs.is_empty())?;
+            self.readonly = Some(ReadonlyRuntime { current: None, verified: Vec::new() });
+        }
+        Ok(())
+    }
+    fn admit_installer_runtime_branch(&mut self, mrk: usize) -> Result<(usize, usize, usize)> {
+        {
+            let facts = self.directories.get(mrk).ok_or(Error::State)?.facts.clone();
+            let input = self.installer_input.as_mut().ok_or(Error::State)?;
+            need(input.mode.is_none() && input.admitted_mrk.is_none() && facts == input.acquired_mrk)?;
+            // Retain the genuine observation BEFORE any own versions creation.
+            input.admitted_mrk = Some(facts);
+        }
+        if self.selected(mrk, "versions")?.is_some() {
+            let versions = self.existing_dir(mrk, "versions", AuthorityScope::AncestorOutsideVersion, R::Owner)?;
+            exact_security(&self.directories[versions].facts.security, FileKind::Directory, false, true)?;
+            self.installer_input.as_mut().ok_or(Error::State)?.existing_versions = Some(versions);
+            if self.selected(versions, TARGET)?.is_some() {
+                let target = self.existing_dir(versions, TARGET, AuthorityScope::AncestorOutsideVersion, R::Target)?;
+                exact_security(&self.directories[target].facts.security, FileKind::Directory, false, true)?;
+                self.installer_input.as_mut().ok_or(Error::State)?.existing_target = Some(target);
+                let digest = self.digest.clone();
+                if self.selected(target, &digest)?.is_some() {
+                    let root = self.existing_dir(target, &digest, AuthorityScope::ImmutableVersion, R::Version)?;
+                    exact_security(&self.directories[root].facts.security, FileKind::Directory, false, true)?;
+                    self.choose_installer_mode(InstallerRuntimeMode::ReuseExisting)?;
+                    // admit_once will read THIS version's manifest original.
+                    return Ok((versions, target, root));
+                }
             }
-            Effect::Write => boolean(FS::WriteFile(frame.handle, frame.data.as_ptr(), frame.data.len() as u32, frame.count.get(), null_mut())),
-            Effect::Flush => boolean(FS::FlushFileBuffers(frame.handle)),
-            Effect::Seal => boolean(S::SetKernelObjectSecurity(frame.handle,
-                S::DACL_SECURITY_INFORMATION | S::PROTECTED_DACL_SECURITY_INFORMATION, frame.descriptor.get().cast())),
-            Effect::Scalar(class) => boolean(S::GetTokenInformation(frame.handle, class, frame.scalar.get().cast(), 4, frame.count.get())),
         }
+        // A positive original absence selects creation once. If later exclusive
+        // creation collides, it remains ERROR, never a transition to readonly.
+        self.choose_installer_mode(InstallerRuntimeMode::PublishNew)?;
+        let input = self.existing_dir(mrk, "runtime-input", AuthorityScope::AncestorOutsideVersion, R::RuntimeInput)?;
+        let target = self.existing_dir(input, TARGET, AuthorityScope::AncestorOutsideVersion, R::Target)?;
+        let image = self.installer_input.as_ref().ok_or(Error::State)?.image.clone();
+        let root = self.existing_dir(target, &image, AuthorityScope::ImmutableVersion, R::Version)?;
+        Ok((input, target, root))
     }
-}
-fn check_entry_frame(entries: &[DirectoryEntry], own: &Metadata, parent: Option<&Metadata>) -> Result<()> {
-    check_entry_frame_in(entries, own, parent, Refusal::none())
-}
-fn check_entry_frame_in(entries: &[DirectoryEntry], own: &Metadata, parent: Option<&Metadata>, trace: Refusal<'_>) -> Result<()> {
-    let mut seen = BTreeSet::new();
-    for (index, entry) in entries.iter().enumerate() {
-        let row = trace.index(AdmissionIndex::Directory, index);
-        row.need(seen.insert(entry.name.to_ascii_lowercase()), C::EntryDuplicate)?;
-        if entry.name == "." || entry.name == ".." {
-            row.need(entry.kind == FileKind::Directory, C::DotKind)?;
-            let bound = if entry.name == "." { Some(own) } else { parent };
-            if let Some(bound) = bound { row.need(entry.file_id == bound.identity.file_id, C::DotIdentity)?; }
+    fn readonly_ready(&self) -> Result<()> {
+        need(self.installer_mode() == Some(InstallerRuntimeMode::ReuseExisting)
+            && self.order.stage == Stage::Manifest && self.creations.is_empty()
+            && self.output_dirs.is_empty() && self.target_creation.is_none()
+            && self.version.is_none() && self.python.is_none() && self.transfer.is_none()
+            && self.copied.is_empty() && !self.possibly_exposed())?;
+        need(self.readonly.is_some())
+    }
+    pub fn accept_existing_sizes(&mut self, sizes: [u64; 47]) -> Result<()> {
+        self.step(|this| {
+            this.readonly_ready()?;
+            need(this.sizes.is_none() && sizes[MANIFEST] == this.manifest.len() as u64
+                && sizes.iter().all(|n| *n > 0 && *n <= MAX_FILE_BYTES))?;
+            let total = sizes.iter().try_fold(0u64, |sum, n| sum.checked_add(*n).ok_or(Error::Bounds))?;
+            // Same accepted manifest capacity as new publication, never a larger
+            // payload merely because this arm performs only one complete read.
+            need(total.checked_mul(2).is_some_and(|n| n <= MAX_TOTAL_BYTES))?;
+            let facts = this.manifest_facts.as_ref().ok_or(Error::State)?;
+            exact_security(&facts.security, FileKind::File, false, true)?;
+            this.sizes = Some(sizes); Ok(())
+        })
+    }
+    pub fn start_existing_file(&mut self, index: usize) -> Result<()> {
+        self.step(|this| {
+            this.readonly_ready()?;
+            let read = this.readonly.as_ref().ok_or(Error::State)?;
+            need(index < PUBLICATION_PAYLOADS.len() && index != MANIFEST
+                && read.current.is_none() && index == read.verified.len())?;
+            let sizes = this.sizes.ok_or(Error::State)?;
+            this.recheck_installer()?; this.recheck_location()?;
+            let (slot, facts) = this.open_source(index)?;
+            need(facts.metadata.size == sizes[index])?;
+            exact_security(&facts.security, FileKind::File, image_payload(index)?, true)?;
+            let read = this.readonly.as_ref().ok_or(Error::State)?;
+            need(read.verified.iter().all(|f| f.facts.metadata.identity != facts.metadata.identity)
+                && this.manifest_facts.as_ref().is_some_and(|f| f.metadata.identity != facts.metadata.identity))?;
+            this.readonly.as_mut().ok_or(Error::State)?.current = Some(ReadonlyFile { index, slot, facts });
+            Ok(())
+        })
+    }
+    pub fn read_existing_next(&mut self) -> Result<Vec<u8>> {
+        self.step(|this| {
+            this.readonly_ready()?;
+            let file = this.readonly.as_ref().and_then(|r| r.current.as_ref()).ok_or(Error::State)?;
+            let (index, slot) = (file.index, file.slot);
+            let bytes = this.book.read_next(&this.key(slot), BUFFER)?;
+            let original = this.book.slot(slot)?;
+            let size = this.sizes.ok_or(Error::State)?[index];
+            need(original.read_bytes <= size)?;
+            if bytes.is_empty() { need(original.read_ended && original.read_bytes == size)?; }
+            Ok(bytes)
+        })
+    }
+    pub fn finish_existing_file(&mut self) -> Result<()> {
+        self.step(|this| {
+            this.readonly_ready()?;
+            let file = this.readonly.as_ref().and_then(|r| r.current.as_ref()).ok_or(Error::State)?;
+            let (index, slot, facts) = (file.index, file.slot, file.facts.clone());
+            let original = this.book.slot(slot)?;
+            need(original.read_ended && original.read_bytes == this.sizes.ok_or(Error::State)?[index])?;
+            need(this.checked(slot, AuthorityScope::ImmutableVersion)? == facts)?;
+            this.recheck_installer()?; this.recheck_location()?;
+            this.close(slot)?;
+            need(this.closed(slot))?;
+            let file = this.readonly.as_mut().ok_or(Error::State)?.current.take().ok_or(Error::State)?;
+            this.readonly.as_mut().ok_or(Error::State)?.verified.push(file);
+            Ok(())
+        })
+    }
+    /// The actual versions/T/D manifest was already consumed by admit_once to
+    /// its original EOF and authenticated by the safe caller's Expected::decode.
+    /// Never reread/relabel the acquired I manifest as reused-runtime evidence.
+    pub fn finish_existing_manifest(&mut self) -> Result<()> {
+        self.step(|this| {
+            this.readonly_ready()?;
+            let read = this.readonly.as_ref().ok_or(Error::State)?;
+            need(read.current.is_none() && read.verified.len() == MANIFEST)?;
+            let slot = this.manifest_original.ok_or(Error::State)?;
+            let facts = this.manifest_facts.clone().ok_or(Error::State)?;
+            let original = this.book.slot(slot)?;
+            need(original.read_ended && original.read_bytes == facts.metadata.size
+                && facts.metadata.size == this.sizes.ok_or(Error::State)?[MANIFEST]
+                && this.manifest.len() as u64 == facts.metadata.size)?;
+            exact_security(&facts.security, FileKind::File, false, true)?;
+            need(this.checked(slot, AuthorityScope::ImmutableVersion)? == facts)?;
+            this.close(slot)?; need(this.closed(slot))?;
+            this.readonly.as_mut().ok_or(Error::State)?.verified.push(ReadonlyFile { index: MANIFEST, slot, facts });
+            Ok(())
+        })
+    }
+    pub fn finish_existing_once(&mut self) -> Result<()> {
+        self.step(|this| {
+            this.readonly_ready()?;
+            let read = this.readonly.as_ref().ok_or(Error::State)?;
+            need(read.current.is_none() && read.verified.len() == PUBLICATION_PAYLOADS.len())?;
+            for (index, file) in read.verified.iter().enumerate() {
+                let original = this.book.slot(file.slot)?;
+                need(file.index == index && this.closed(file.slot) && original.read_ended
+                    && original.read_bytes == this.sizes.ok_or(Error::State)?[index])?;
+            }
+            for index in 0..this.directories.len() { this.recheck_dir(index)?; }
+            this.recheck_installer()?; this.recheck_location()?; this.tick()?;
+            this.settlement_attempted = true;
+            need(this.book.settle_once() == CloseOutcome::Settled && this.book.settled())?;
+            this.tick()?; this.order.stage = Stage::Reused; Ok(())
+        })
+    }
+    pub fn existing_runtime_and_settled(&self) -> bool {
+        self.installer_mode() == Some(InstallerRuntimeMode::ReuseExisting)
+            && self.order.stage == Stage::Reused && !self.order.failed && !self.order.unknown
+            && !self.expired && Instant::now() < self.end && self.mutation.is_none()
+            && self.settlement_attempted && self.book.settled()
+            && self.readonly.as_ref().is_some_and(|r| r.current.is_none() && r.verified.len() == PUBLICATION_PAYLOADS.len())
+            && self.creations.is_empty() && self.output_dirs.is_empty() && !self.possibly_exposed()
+    }
+    pub(super) fn activation_mrk(&self, acquisition: &super::installer_acquisition::InputAcquisition) -> Result<Facts> {
+        let (digest, image, identity, acquired_mrk) = acquisition.runtime_source_binding()?;
+        let input = self.installer_input.as_ref().ok_or(Error::State)?;
+        need(digest == self.digest && image == input.image && Arc::ptr_eq(&identity, &input.acquisition)
+            && acquired_mrk == input.acquired_mrk && input.admitted_mrk.as_ref() == Some(&acquired_mrk)
+            && !self.order.failed && !self.order.unknown && !self.expired && self.mutation.is_none()
+            && self.settlement_attempted && self.book.settled())?;
+        let mrk = self.mrk.ok_or(Error::State)?;
+        let current = self.directories.get(mrk).ok_or(Error::State)?.facts.clone();
+        match input.mode.ok_or(Error::State)? {
+            InstallerRuntimeMode::ReuseExisting => {
+                need(self.order.stage == Stage::Reused && self.readonly.as_ref().is_some_and(|r| r.current.is_none()
+                    && r.verified.len() == PUBLICATION_PAYLOADS.len()) && self.creations.is_empty()
+                    && self.output_dirs.is_empty() && !self.possibly_exposed() && current == acquired_mrk)?;
+            },
+            InstallerRuntimeMode::PublishNew => {
+                need(self.order.stage == Stage::Complete && self.order.exposure)?;
+                if current != acquired_mrk {
+                    let path = self.child_path(mrk, "versions")?;
+                    let mut own = self.creations.iter().filter(|c| c.parent == mrk);
+                    let change = own.next().ok_or(Error::State)?;
+                    need(own.next().is_none() && change.path == path && change.entered
+                        && change.returned.is_some_and(|(ok, error)| ok != 0 && error == 0)
+                        && child_transition(&acquired_mrk.metadata, &current.metadata)
+                        && acquired_mrk.security == current.security)?;
+                }
+            },
         }
+        // Structural historical closure is checked above. No stale resampling
+        // of published_and_settled's old180s deadline substitutes its real return.
+        Ok(current)
     }
-    Ok(())
 }
-fn selected_entry(entries: &[DirectoryEntry], name: &str) -> Result<Option<DirectoryEntry>> {
-    selected_entry_in(entries, name, Refusal::none())
-}
-fn selected_entry_in(entries: &[DirectoryEntry], name: &str, trace: Refusal<'_>) -> Result<Option<DirectoryEntry>> {
-    let mut selected = None;
-    for (index, entry) in entries.iter().enumerate().filter(|(_, entry)| entry.name.eq_ignore_ascii_case(name)) {
-        let row = trace.index(AdmissionIndex::Directory, index);
-        row.need(entry.name == name, C::SelectedCase)?;
-        row.need(selected.is_none(), C::SelectedDuplicate)?;
-        selected = Some(entry.clone());
-    }
-    Ok(selected)
-}
-fn match_entry(entry: &DirectoryEntry, metadata: &Metadata) -> Result<()> { match_entry_in(entry, metadata, Refusal::none()) }
-fn match_entry_in(entry: &DirectoryEntry, metadata: &Metadata, trace: Refusal<'_>) -> Result<()> {
-    trace.need(entry.kind == metadata.kind, C::EntryKind)?;
-    trace.need(entry.file_id == metadata.identity.file_id, C::EntryIdentity)?;
-    trace.need(entry.attributes == metadata.attributes, C::EntryAttributes)
-}
+
 fn exact_names(entries: &[DirectoryEntry], python: bool) -> Result<()> { exact_names_in(entries, python, Refusal::none()) }
 fn exact_names_in(entries: &[DirectoryEntry], python: bool, trace: Refusal<'_>) -> Result<()> {
     let mut expected: BTreeSet<String> = PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/") == python)
@@ -1522,18 +1117,56 @@ fn exact_names_in(entries: &[DirectoryEntry], python: bool, trace: Refusal<'_>) 
     }
     trace.need(expected.is_empty(), C::RosterMissing)
 }
-fn exact_entries(entries: &[DirectoryEntry], expected: &BTreeMap<String, Metadata>) -> Result<()> {
-    let mut seen = BTreeSet::new();
-    for entry in entries.iter().filter(|e| e.name != "." && e.name != "..") {
-        need(seen.insert(entry.name.clone()))?;
-        match_entry(entry, expected.get(&entry.name).ok_or(Error::Unsafe)?)?;
-    }
-    need(seen.len() == expected.len())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "installer-acquisition")]
+    fn installer_choice_data(owner: &mut Publication) -> Result<()> {
+        // Bounded DATA only; this is NOT a genuine acquisition/publication.
+        let facts = Facts { metadata: metadata(FileKind::Directory),
+            security: security::descriptor(&descriptor(FileKind::Directory, false, true)?,
+                FileKind::Directory, AuthorityScope::ImmutableVersion)? };
+        owner.installer_input = Some(InstallerInput {
+            image: "b".repeat(64), acquisition: Arc::new(()), acquired_mrk: facts,
+            admitted_mrk: None, mode: None, existing_versions: None, existing_target: None,
+        });
+        Ok(())
+    }
+    #[cfg(feature = "installer-acquisition")]
+    fn installer_mode_is_once_and_readonly_cannot_create_or_adopt_an_occupied_publication() -> Result<()> {
+        let mut readonly = Publication::new(&"a".repeat(64))?;
+        installer_choice_data(&mut readonly)?;
+        readonly.choose_installer_mode(InstallerRuntimeMode::ReuseExisting)?;
+        readonly.order.stage = Stage::Manifest;
+        assert_eq!(readonly.create_once([1; 47]), Err(Error::Unsafe));
+        assert!(readonly.book.never_started() && readonly.creations.is_empty() && readonly.mutation.is_none());
+        assert_eq!(readonly.start_copy(0), Err(Error::State));
+        assert_eq!(readonly.seal_once(), Err(Error::State));
+        assert_eq!(readonly.installer_runtime_mode(), Ok(InstallerRuntimeMode::ReuseExisting));
+        assert!(!readonly.existing_runtime_and_settled() && !readonly.possibly_exposed());
+        assert_eq!(readonly.fail_and_settle_once(), CloseOutcome::Settled);
+
+        // Existing occupied predicate fixture: the creation actually returned
+        // ERROR_ALREADY_EXISTS DATA. A mode switch cannot reinterpret it as reuse.
+        let mut occupied = occupied_owner()?;
+        installer_choice_data(&mut occupied)?;
+        occupied.choose_installer_mode(InstallerRuntimeMode::PublishNew)?;
+        assert_eq!(occupied.choose_installer_mode(InstallerRuntimeMode::ReuseExisting), Err(Error::Unsafe));
+        assert_eq!(occupied.installer_runtime_mode(), Ok(InstallerRuntimeMode::PublishNew));
+        assert!(occupied.occupied_target_and_settled());
+        assert!(!occupied.existing_runtime_and_settled() && occupied.readonly.is_none());
+
+        let mut short = Publication::new(&"a".repeat(64))?;
+        installer_choice_data(&mut short)?;
+        short.choose_installer_mode(InstallerRuntimeMode::ReuseExisting)?;
+        short.order.stage = Stage::Manifest;
+        assert_eq!(short.finish_existing_once(), Err(Error::Unsafe));
+        assert!(!short.existing_runtime_and_settled() && short.book.never_started());
+        assert_eq!(short.fail_and_settle_once(), CloseOutcome::Settled);
+        Ok(())
+    }
 
     fn token_buffer(principal: &[u8], header: usize, pointer_at: usize, attributes_at: usize, attributes: u32) -> Vec<u8> {
         let mut bytes = vec![0u8; header + principal.len()];
@@ -2123,6 +1756,8 @@ mod tests {
     fn proof() -> CopyProof { CopyProof { source_eof: true, flushed: true, writer_closed: true, source_closed: true, readback_eof: true, readback_closed: true } }
     #[test]
     fn live_order_requires_all_original_closures_and_never_relabels_exposure() -> Result<()> {
+        #[cfg(feature = "installer-acquisition")]
+        installer_mode_is_once_and_readonly_cannot_create_or_adopt_an_occupied_publication()?;
         for missing in 0..6 {
             let mut order = Order::new(); order.stage = Stage::Copying;
             let mut bad = proof();

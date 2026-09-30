@@ -1052,7 +1052,72 @@ WINDOWS_SNAPSHOT_SCOPE = "windows-snapshot-v1"
 
 # Fixed headless reader/native facts; runtime preparation is fullwalk-profile-only.
 WINDOWS_INSTALLED_SCOPE = "windows-installed-native-v1"
+WINDOWS_RETAINED_PROFILE = "windows-installer-retained-shell-v1"
+WINDOWS_RETAINED_DISPATCH = "windows-installer-retained-shell"
+WINDOWS_RETAINED_REF = "refs/heads/verify/desktop-windows-installer-retained-shell"
+WINDOWS_RETAINED_DATA_PHASES = (
+    "windows-retained-probes-finalize", "windows-retained-precheck", "windows-retained-finalize",
+)
+WINDOWS_SELECTION_PROFILE = "windows-installer-selection-v1"
+WINDOWS_SELECTION_DISPATCH = "windows-installer-selection"
+WINDOWS_SELECTION_DATA_PHASES = ("windows-selection-finalize",)
+WINDOWS_RETAINED_TOOL_CHECKS = frozenset({
+    "retained-compiler-acquire", "retained-native-locked-metadata", "retained-app-locked-metadata",
+    "retained-native-compile-only", "retained-app-compile-only",
+})
 WINDOWS_INSTALLED_CRATE = "desktop/native/windows-installed-native"
+# Nonshipping original libtest DATA only; never an ordinary/runtime/UI profile.
+WINDOWS_IMAGE_WRITER_B2_PROFILE = "windows-image-writer-b2-native22-v1"
+WINDOWS_IMAGE_WRITER_B2_DISPATCH = "windows-image-writer-b2-native22"
+WINDOWS_IMAGE_WRITER_B2_REF = "refs/heads/verify/desktop-windows-image-writer-b2-native22"
+WINDOWS_IMAGE_WRITER_B2_PHASE = "windows-image-writer-b2-native22"
+WINDOWS_IMAGE_WRITER_B2_BRIDGE = "desktop/native/windows-image-writer-bridge"
+WINDOWS_IMAGE_WRITER_B2_TARGET = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
+WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES = (
+    "Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices",
+    "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security",
+    "Win32_NetworkManagement_NetManagement", "Win32_Security_Cryptography",
+    "Win32_System_IO", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_JobObjects",
+    "Win32_System_Console", "Win32_System_Pipes",
+    "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_UI_Shell",
+    "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_LibraryLoader",
+    "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+)
+WINDOWS_IMAGE_WRITER_B2_NOT_VERIFIED = (
+    "production-named-pipe-syscall-returns", "createprocess-inherited-handle-custody",
+    "asynchronous-io-cancellation-settlement", "real-child-handoff-and-original-borrower-joins",
+    "production-bridge-dll-or-shared-ucrt-cpython-loading", "installed-edit-owner-end-to-end",
+    "whole-b2-or-stage-c", "desktop-readiness-or-delivery",
+)
+WINDOWS_IMAGE_WRITER_B2_NATIVE_INERT = (
+    "image_stdio::tests::retirement_and_each_original_receipt_revoke_creation",
+    "image_stdio::tests::original_inheritance_roster_cannot_be_changed",
+    "image_stdio::tests::rejected_process_outputs_never_authorize_control_or_ack",
+    "image_stdio::tests::precreation_and_repeated_acknowledgements_are_rejected",
+    "image_stdio::tests::successful_zero_is_complete_not_eof_and_counts_are_bounded",
+    "image_stdio::tests::cancellation_return_cannot_finish_or_replace_the_pending_operation",
+    "image_stdio::tests::first_failure_unknown_and_lifetime_budget_are_sticky",
+    "image_stdio::tests::memory_reclamation_requires_all_independent_consumers",
+    "image_stdio::tests::definitive_false_is_not_an_opaque_or_partial_create",
+    "image_stdio::tests::native_destinations_and_metadata_have_disjoint_pinned_storage",
+    "image_stdio::tests::pipe_creation_requests_documented_directional_rights_and_native_flags_only",
+    "image_stdio::tests::only_definite_nt_returns_allow_pipe_output_observation",
+    "image_stdio::tests::successful_nt_status_needs_created_iosb_and_unique_positive_output",
+    "image_stdio::tests::unreturned_and_nondefinite_pipe_creation_never_become_empty_consumed_slots",
+    "image_stdio::tests::definite_failed_pipe_creation_requires_observed_null_output_not_stale_iosb",
+    "image_stdio::tests::launch_and_reclamation_require_the_actual_pipe_creation_custody_receipt",
+)
+WINDOWS_IMAGE_WRITER_B2_BRIDGE_INERT = (
+    "stdio::tests::stdio_layout_is_separate_from_the_unchanged_writer_abi",
+    "stdio::tests::closed_direction_and_control_wire_refuses_before_any_native_entry",
+    "stdio::tests::overlap_and_extent_checks_never_form_an_aliasing_native_buffer",
+)
+WINDOWS_IMAGE_WRITER_B2_APP_INERT = (
+    "edit_owner::windows_image_transport::data_tests::never_entered_factory_still_requires_every_issued_loan_return",
+    "edit_owner::windows_image_transport::data_tests::poisoned_original_is_settlement_only_after_actual_borrower_return_latch",
+    "edit_owner::windows_image_transport::data_tests::no_child_snapshot_without_the_same_native_original_is_not_evidence",
+)
 WINDOWS_INSTALLED_TEST = "hosted_tests::hosted_native_read_only_contract"
 WINDOWS_ORDINARY_OWNER = "ordinary_owner::hosted_ordinary_original_handle_contract"
 WINDOWS_FULLWALK_TEST = "installed_runtime_windows::tests::native_protected_version_walk_and_original_settlement"
@@ -1105,10 +1170,18 @@ WINDOWS_NORMAL_UI_CASE_METHODS = {
     "normal-smoke": 0, "project-draft": 6, "quit-passive": 0, "document-loss": 0, "credential-session": 1,
 }
 WINDOWS_NATIVE_DECLARED_FEATURES = {
-    "qualification-result": [], "runtime-publication": [],
+    "qualification-result": [], "runtime-publication": [], "image-writer": [], "image-stdio": ["image-writer"],
+    "installer-acquisition": ["dep:sha2"],
+    "installer-protected-fixture": ["installer-acquisition", "runtime-publication", "qualification-result"],
+    "installer-selection": ["installer-acquisition", "runtime-publication",
+        "windows-sys/Win32_System_Com_StructuredStorage", "windows-sys/Wdk_System_Registry"],
+    "installer-selection-fixture": ["installer-selection", "installer-protected-fixture"],
     "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
     "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"],
 }
+# Optional native SHA2 is declared for acquisition, never implied by a lock row.
+WINDOWS_NATIVE_SHA2_DECLARATION = {"features": [], "kind": None, "name": "sha2", "optional": True, "registry": None, "rename": None, "req": "=0.10.9", "source": "registry+https://github.com/rust-lang/crates.io-index", "target": "cfg(all(target_os = \"windows\", target_arch = \"x86_64\", target_env = \"msvc\"))", "uses_default_features": True}
+
 WINDOWS_NORMAL_UI_NATIVE_PACKAGES = frozenset((
     ("mrk-windows-installed-native", "0.1.0"), ("proc-macro2", "1.0.107"), ("quote", "1.0.47"),
     ("syn", "2.0.119"), ("syn", "3.0.6"), ("thiserror", "2.0.20"), ("thiserror-impl", "2.0.20"),
@@ -1119,6 +1192,22 @@ WINDOWS_NORMAL_UI_NATIVE_PACKAGES = frozenset((
     ("windows-numerics", "0.2.0"), ("windows-result", "0.3.4"), ("windows-strings", "0.4.2"),
     ("windows-sys", "0.61.2"), ("windows-threading", "0.1.0"),
 ))
+# Full source lock DATA is wider than the exact active native UI24 graph.
+WINDOWS_NORMAL_UI_NATIVE_INACTIVE_LOCK = {
+    ("block-buffer", "0.10.4"): {"checksum": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71", "dependencies": ["generic-array"], "name": "block-buffer", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.10.4"},
+    ("cfg-if", "1.0.5"): {"checksum": "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600", "name": "cfg-if", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "1.0.5"},
+    ("cpufeatures", "0.2.17"): {"checksum": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280", "dependencies": ["libc"], "name": "cpufeatures", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.2.17"},
+    ("crypto-common", "0.1.7"): {"checksum": "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a", "dependencies": ["generic-array", "typenum"], "name": "crypto-common", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.1.7"},
+    ("digest", "0.10.7"): {"checksum": "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292", "dependencies": ["block-buffer", "crypto-common"], "name": "digest", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.10.7"},
+    ("generic-array", "0.14.7"): {"checksum": "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a", "dependencies": ["typenum", "version_check"], "name": "generic-array", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.14.7"},
+    ("libc", "0.2.189"): {"checksum": "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2", "name": "libc", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.2.189"},
+    ("sha2", "0.10.9"): {"checksum": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283", "dependencies": ["cfg-if", "cpufeatures", "digest"], "name": "sha2", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.10.9"},
+    ("typenum", "1.20.1"): {"checksum": "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20", "name": "typenum", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "1.20.1"},
+    ("version_check", "0.9.5"): {"checksum": "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a", "name": "version_check", "source": "registry+https://github.com/rust-lang/crates.io-index", "version": "0.9.5"},
+}
+WINDOWS_NORMAL_UI_NATIVE_LOCK_PACKAGES = WINDOWS_NORMAL_UI_NATIVE_PACKAGES | frozenset(WINDOWS_NORMAL_UI_NATIVE_INACTIVE_LOCK)
+WINDOWS_NORMAL_UI_NATIVE_EDGES = frozenset((("webview2-com", "0.38.2"), ("windows", "0.61.3"), ("windows-core", "0.61.2"), ("windows-sys", "0.61.2")))
+
 WINDOWS_NORMAL_UI_SETUP_STAGE = "qualification_fixture::hosted_stage_normal_ui_runtime_input"
 WINDOWS_NORMAL_UI_SETUP_OBSERVER = "qualification_fixture::hosted_observe_normal_ui_published_version"
 WINDOWS_NORMAL_UI_NATIVE_POLICY_TESTS = (
@@ -1624,11 +1713,12 @@ WINDOWS_NORMAL_UI_PROBE_ACLS = (
     *((role, 0x1200a9) for role, _ in WINDOWS_ORDINARY_ACLS[:-2]),
     ("artifact", 0x1200a9), ("normal-ui-output", 0x1200af),
 )
-WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native",
+WINDOWS_INSTALLED_PHASES = ("prepare", "acquire", "compile", "windows-installed-native", WINDOWS_IMAGE_WRITER_B2_PHASE,
                           "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
                           *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite",
                           *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES,
-                          *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, "retain")
+                          *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, *WINDOWS_RETAINED_DATA_PHASES,
+                          *WINDOWS_SELECTION_DATA_PHASES, "retain")
 WINDOWS_INSTALLED_APP = "desktop/src-tauri"
 WINDOWS_INSTALLED_APP_LOCALS = {
     "mobile-release-kit-desktop": "desktop/src-tauri/Cargo.toml",
@@ -1711,13 +1801,33 @@ WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
     "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
     "desktop/src-tauri/src/windows_normal_source_idle_policy.rs",
+    "desktop/src-tauri/src/edit_owner.rs",
+    *(WINDOWS_IMAGE_WRITER_B2_BRIDGE + "/" + name for name in (
+        "Cargo.toml", "Cargo.lock", "src/lib.rs", "src/tests.rs", "src/stdio.rs")),
     "desktop/src-tauri/src/installed_windows_passive_tests.rs", "tests/native_desktop_installed_windows_probe.py",
     "desktop/src-tauri/src/installed_runtime_windows.rs", "tests/desktop/test_ci_foundation_contract.py",
     "desktop/src-tauri/src/runtime_publication_windows.rs", "desktop/src-tauri/src/bin/windows_runtime_publish.rs",
+    "desktop/src-tauri/src/windows_input_acquisition.rs", "desktop/src-tauri/src/windows_input_acquisition_data.rs",
+    "desktop/src-tauri/src/windows_installer_controller.rs", "desktop/src-tauri/src/windows_installer_controller_data.rs",
+    "desktop/tools/windows_installer_profile.py", "desktop/tools/windows_installer_source.py",
+    "desktop/tools/stage_windows_installer.py", "tests/desktop/test_windows_installer_source.py",
+    "desktop/src-tauri/src/windows_installer_controller/selection_fixture.rs",
+    "desktop/src-tauri/src/windows_installer_selection.rs",
+    "desktop/tools/windows_installer_fixture_data.py",
+    "desktop/tools/windows_installer_fixture_ci.py", "desktop/tools/windows_installer_fixture_owner.ps1",
+    "desktop/tools/windows_installer_fixture_pipe_probe.py", "tests/desktop/test_windows_installer_fixture_ci.py",
+    *(WINDOWS_INSTALLED_CRATE + "/" + name for name in (
+        "src/installer_fixture_data.rs", "src/installer_selection_data.rs",
+        "src/installer_selection_fixture_data.rs", "src/installer_selection.rs",
+        "src/qualification_fixture/installer.rs", "src/qualification_fixture/installer/selection.rs")),
     *(WINDOWS_INSTALLED_CRATE + "/" + name for name in (
         "Cargo.toml", "Cargo.lock", "README.md", "src/lib.rs", "src/decode.rs",
         "src/security.rs", "src/tests.rs", "src/loader.rs", "src/hosted_tests.rs", "src/ordinary_owner.rs",
-        "src/qualification_result.rs", "src/qualification_fixture.rs", "src/publication.rs")),
+        "src/qualification_result.rs", "src/qualification_fixture.rs", "src/publication.rs",
+        "src/installer_primitives.rs", "src/installer_input_data.rs", "src/installer_acquisition.rs",
+        "src/image_writer.rs", "src/image_writer_tests.rs", "src/image_writer_namespace.rs",
+        "src/image_stdio.rs", "src/image_stdio_tests.rs",
+        "src/image_loader_budget.rs", "src/image_loader_budget_tests.rs")),
 )))
 WINDOWS_INSTALLED_NOT_VERIFIED = (
     "rust-1.88-minimum", "parent-application-cargo-graph-or-build", "production-resources-worker-joins",
@@ -2712,7 +2822,7 @@ TOOL_CHECKS = frozenset({
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
     "environment-source-status", "environment-source-inventory",
     "environment-locked-headless-metadata", "environment-headless-test-compile-only",
-})
+}) | WINDOWS_RETAINED_TOOL_CHECKS
 
 
 class CheckFailure(ValueError):
@@ -2990,7 +3100,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
         "windows-normal-ui-setup-native-metadata", "windows-normal-ui-setup-native-compile-only",
         "windows-normal-ui-gui-metadata", "windows-normal-ui-gui-compile-only",
         "windows-normal-ui-frontend-acquire", "windows-normal-ui-frontend-typecheck", "windows-normal-ui-frontend-assets",
-        "windows-fullwalk-fixed-supplier", "windows-fullwalk-fixed-offline-preparer"}),
+        "windows-fullwalk-fixed-supplier", "windows-fullwalk-fixed-offline-preparer", *WINDOWS_RETAINED_TOOL_CHECKS}),
         "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
     try:
@@ -10457,12 +10567,18 @@ def windows_fullwalk_curl_sha256(path: Path) -> str:
 def windows_installed_prepared_profile(context: dict) -> bool:
     require(type(context) is dict and ("qualificationProfile" not in context
             or context["qualificationProfile"] in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE,
-                                                   WINDOWS_INSTALLED_PASSIVE_PROFILE, WINDOWS_NORMAL_UI_PROFILE)),
+                                                   WINDOWS_INSTALLED_PASSIVE_PROFILE, WINDOWS_NORMAL_UI_PROFILE, WINDOWS_RETAINED_PROFILE,
+                                                   WINDOWS_SELECTION_PROFILE, WINDOWS_IMAGE_WRITER_B2_PROFILE)),
             "Windows prepared profile marker differs")
     # UI preparation is deliberately deferred until a separately closed cheap
     # prerequisite observation. A profile name is not a prepared runtime.
     return context.get("qualificationProfile") in (WINDOWS_FULLWALK_PROFILE, WINDOWS_RUNTIME_PUBLICATION_PROFILE,
-                                                    WINDOWS_INSTALLED_PASSIVE_PROFILE)
+                                                    WINDOWS_INSTALLED_PASSIVE_PROFILE, WINDOWS_RETAINED_PROFILE, WINDOWS_SELECTION_PROFILE)
+
+
+def windows_image_writer_b2_profile(context: dict) -> bool:
+    windows_installed_prepared_profile(context)
+    return context.get("qualificationProfile") == WINDOWS_IMAGE_WRITER_B2_PROFILE
 
 
 def windows_normal_ui_profile(context: dict) -> bool:
@@ -10501,6 +10617,9 @@ def windows_installed_publisher_required(context: dict) -> bool:
 
 
 def windows_installed_features(context: dict, role: str) -> list[str]:
+    if windows_image_writer_b2_profile(context):
+        require(type(role) is str and role in ("native", "bridge", "app"), "Windows B2 compile role differs")
+        return {"native": ["image-stdio"], "bridge": [], "app": ["windows-metadata-images-loader"]}[role]
     require(role in ("native", "app", "helper"), "Unknown Windows compile role")
     if windows_normal_ui_profile(context):
         return windows_normal_ui_features(role)
@@ -12174,7 +12293,7 @@ def windows_installed_binding() -> dict:
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
             and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
             and ref in ("refs/heads/verify/desktop-windows-installed-native", WINDOWS_RUNTIME_PUBLICATION_REF,
-                        WINDOWS_INSTALLED_PASSIVE_REF, WINDOWS_NORMAL_UI_REF)
+                        WINDOWS_INSTALLED_PASSIVE_REF, WINDOWS_NORMAL_UI_REF, WINDOWS_RETAINED_REF, WINDOWS_IMAGE_WRITER_B2_REF)
             and e.get("GITHUB_WORKFLOW_SHA") == sha
             and e.get("GITHUB_WORKFLOW_REF") == repository + "/.github/workflows/desktop-foundation.yml@" + ref
             and re.fullmatch(r"[1-9][0-9]{0,19}", e.get("GITHUB_RUN_ID", "")) is not None
@@ -12189,7 +12308,11 @@ def windows_installed_binding() -> dict:
             or ref == WINDOWS_INSTALLED_PASSIVE_REF and event == "workflow_dispatch"
             and dispatch == WINDOWS_INSTALLED_PASSIVE_DISPATCH and expected == sha
             or ref == WINDOWS_NORMAL_UI_REF and event == "workflow_dispatch"
-            and dispatch == WINDOWS_NORMAL_UI_DISPATCH and expected == sha,
+            and dispatch == WINDOWS_NORMAL_UI_DISPATCH and expected == sha
+            or ref == WINDOWS_RETAINED_REF and event == "workflow_dispatch"
+            and dispatch in (WINDOWS_RETAINED_DISPATCH, WINDOWS_SELECTION_DISPATCH) and expected == sha
+            or ref == WINDOWS_IMAGE_WRITER_B2_REF and event == "workflow_dispatch"
+            and dispatch == WINDOWS_IMAGE_WRITER_B2_DISPATCH and expected == sha,
             "Windows native dispatch differs or has partial/conflicting selectors")
     binding = {"scope": WINDOWS_INSTALLED_SCOPE, "sourceSha": sha, "repository": repository, "ref": ref,
         "workflowSha": sha, "workflowRef": e["GITHUB_WORKFLOW_REF"], "runId": e["GITHUB_RUN_ID"], "attempt": 1,
@@ -12202,6 +12325,12 @@ def windows_installed_binding() -> dict:
         binding["qualificationProfile"] = WINDOWS_INSTALLED_PASSIVE_PROFILE
     elif event == "workflow_dispatch" and dispatch == WINDOWS_NORMAL_UI_DISPATCH:
         binding["qualificationProfile"] = WINDOWS_NORMAL_UI_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_RETAINED_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_RETAINED_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_SELECTION_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_SELECTION_PROFILE
+    elif event == "workflow_dispatch" and dispatch == WINDOWS_IMAGE_WRITER_B2_DISPATCH:
+        binding["qualificationProfile"] = WINDOWS_IMAGE_WRITER_B2_PROFILE
     return binding
 
 
@@ -12227,6 +12356,7 @@ def windows_installed_inputs(context: dict, *, retention_only: bool = False) -> 
                 else windows_installed_source_files(source, root, context["git"]))
     require(observed == rows, "Windows headless source inputs changed")
     no_cargo_configuration((source / WINDOWS_INSTALLED_APP, source / WINDOWS_INSTALLED_CRATE,
+        source / WINDOWS_IMAGE_WRITER_B2_BRIDGE,
         source / "desktop/native", source / "desktop", source, *source.parents, root, *root.parents, root / "home"))
     for name in ("config", "config.toml"):
         require(not (root / "cargo" / name).exists() and not (root / "cargo" / name).is_symlink(), "Windows native Cargo home is configured")
@@ -12292,7 +12422,8 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
         write_json(root / "context.json", context)
         public = {key: context[key] for key in (*binding, "sourceTree", "sourceFiles", "pythonIdentity", "sdk", "windowsVersion")}
         public.update(rust=RUST, target=TARGETS["windows"], python=PYTHON,
-            notVerified=list(WINDOWS_NORMAL_UI_NOT_VERIFIED if windows_normal_ui_profile(context) else WINDOWS_INSTALLED_NOT_VERIFIED))
+            notVerified=list(WINDOWS_IMAGE_WRITER_B2_NOT_VERIFIED if windows_image_writer_b2_profile(context)
+                else WINDOWS_NORMAL_UI_NOT_VERIFIED if windows_normal_ui_profile(context) else WINDOWS_INSTALLED_NOT_VERIFIED))
         write_json(root / "public-bindings.json", public)
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("root=" + str(root) + "\n")
@@ -12309,13 +12440,33 @@ def windows_installed_context(*, create: bool, retention_only: bool = False) -> 
     return context
 
 
-def windows_installed_metadata(context: dict) -> dict:
-    value = read_bounded_json(Path(context["root"]) / "metadata.json", 2 << 20)
-    return windows_installed_native_graph(value, source=Path(context["source"]), features=windows_installed_features(context, "native"))
+def windows_installed_metadata(context: dict, *, bridge: bool = False) -> dict:
+    require(type(bridge) is bool and (not bridge or windows_image_writer_b2_profile(context)), "Windows bridge metadata is profile-only")
+    value = read_bounded_json(Path(context["root"]) / ("bridge-metadata.json" if bridge else "metadata.json"), 2 << 20)
+    return windows_installed_native_graph(value, source=Path(context["source"]), root=Path(context["root"]),
+        features=windows_installed_features(context, "native"), bridge=bridge)
 
 
-def windows_installed_native_graph(value: object, *, source: Path, features: list[str]) -> dict:
-    """The original three-package, lib-only native graph; never the UI graph."""
+def windows_native_declarations_valid(package: object) -> bool:
+    """Exact native optional declaration DATA; never selects a capability."""
+    if type(package) is not dict or not same_compile_json(package.get("features"), WINDOWS_NATIVE_DECLARED_FEATURES):
+        return False
+    declarations = package.get("dependencies")
+    if (type(declarations) is not list or not 0 < len(declarations) <= 256
+            or any(type(dep) is not dict or type(dep.get("name")) is not str for dep in declarations)):
+        return False
+    selected = [dep for dep in declarations if dep["name"] == "sha2" or dep.get("rename") == "sha2"]
+    return len(selected) == 1 and same_compile_json(selected[0], WINDOWS_NATIVE_SHA2_DECLARATION)
+
+
+def windows_installed_native_graph(value: object, *, source: Path, features: list[str], root: Path | None = None,
+                                   bridge: bool = False) -> dict:
+    """The runtime graph or the separately closed B2 DATA graph; never UI."""
+    require(type(bridge) is bool, "Windows native graph role differs")
+    if features == ["image-stdio"]:
+        require(root is not None, "Windows B2 graph requires the original private acquisition")
+        return windows_image_writer_b2_graph(value, source=source, root=root, bridge=bridge)["namedPackages"]
+    require(not bridge, "Windows bridge graph requires the exact B2 feature role")
     require(features in ([], ["runtime-publication"]), "Windows native runtime-only feature role differs")
     require(type(value) is dict and type(value.get("packages")) is list and len(value["packages"]) == 3,
             "Windows native standalone package graph differs")
@@ -12324,6 +12475,7 @@ def windows_installed_native_graph(value: object, *, source: Path, features: lis
     require(set(packages) == set(expected) and all(p["version"] == expected[n] for n, p in packages.items()),
             "Windows native locked package identities differ")
     native = packages["mrk-windows-installed-native"]
+    require(windows_native_declarations_valid(native), "Windows native optional SHA2 declaration differs")
     require(native.get("source") is None and native.get("manifest_path") == str(source / WINDOWS_INSTALLED_CRATE / "Cargo.toml")
             and all(packages[n].get("source") == "registry+https://github.com/rust-lang/crates.io-index" for n in ("windows-sys", "windows-link"))
             and all(p.get("targets") and all(t.get("kind") == ["lib"] for t in p["targets"]) for p in packages.values()),
@@ -12341,26 +12493,230 @@ def windows_installed_native_graph(value: object, *, source: Path, features: lis
     return packages
 
 
+def windows_image_writer_b2_graph(value: object, *, source: Path, root: Path, bridge: bool = False) -> dict:
+    """Closed original native3/bridge4 metadata DATA; no compiler/process owner."""
+    require(type(bridge) is bool and source.is_absolute() and root.is_absolute(), "Windows B2 graph role differs")
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    expected = {"mrk-windows-installed-native": "0.1.0", "windows-sys": "0.61.2", "windows-link": "0.2.1"}
+    locals_ = {"mrk-windows-installed-native": WINDOWS_INSTALLED_CRATE}
+    if bridge:
+        expected["mrk-windows-image-writer-bridge"] = "0.1.0"
+        locals_["mrk-windows-image-writer-bridge"] = WINDOWS_IMAGE_WRITER_B2_BRIDGE
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1
+            and type(value.get("packages")) is list and len(value["packages"]) == len(expected),
+            "Windows B2 original package inventory differs")
+    named, packages = {}, {}
+    for package in value["packages"]:
+        require(type(package) is dict and type(package.get("name")) is str and package["name"] in expected
+                and package["name"] not in named and package.get("version") == expected[package["name"]]
+                and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096 and package["id"] not in packages
+                and type(package.get("manifest_path")) is str and type(package.get("features")) is dict,
+                "Windows B2 package identity differs")
+        name = package["name"]
+        manifest = Path(package["manifest_path"])
+        require("\0" not in package["manifest_path"]
+                and not any(part in {".", ".."} for part in re.split(r"[\\/]", package["manifest_path"])),
+                "Windows B2 manifest spelling differs")
+        if name in locals_:
+            require(package.get("source") is None and manifest == source / locals_[name] / "Cargo.toml",
+                    "Windows B2 original local manifest differs")
+        else:
+            acquisition = root / "cargo" / "registry" / "src"
+            require(package.get("source") == registry and manifest.is_absolute() and manifest.is_relative_to(acquisition)
+                    and len(manifest.relative_to(acquisition).parts) == 3
+                    and manifest.parent.name == name + "-" + expected[name] and manifest.name == "Cargo.toml",
+                    "Windows B2 registry manifest left the private acquisition")
+        targets = package.get("targets")
+        kind = ["cdylib"] if name == "mrk-windows-image-writer-bridge" else ["lib"]
+        target_name = "mrk_image_writer_native" if name == "mrk-windows-image-writer-bridge" else name.replace("-", "_")
+        require(type(targets) is list and len(targets) == 1 and type(targets[0]) is dict
+                and targets[0].get("name") == target_name and targets[0].get("kind") == kind
+                and targets[0].get("crate_types") == kind and targets[0].get("src_path") == str(manifest.parent / "src/lib.rs"),
+                "Windows B2 graph has a foreign target or build script")
+        named[name] = package
+        packages[package["id"]] = package
+    require(set(named) == set(expected), "Windows B2 original package roles are incomplete")
+    native = named["mrk-windows-installed-native"]
+    require(windows_native_declarations_valid(native), "Windows B2 native optional SHA2 declaration differs")
+    selected = named["mrk-windows-image-writer-bridge"] if bridge else native
+    require(value.get("workspace_root") == str(source / locals_[selected["name"]])
+            and value.get("workspace_members") == [selected["id"]] and value.get("workspace_default_members") == [selected["id"]]
+            and value.get("target_directory") == str(root / "target"), "Windows B2 original workspace/target differs")
+    resolve = value.get("resolve")
+    require(type(resolve) is dict and resolve.get("root") == selected["id"] and type(resolve.get("nodes")) is list
+            and len(resolve["nodes"]) == len(expected), "Windows B2 original resolved root differs")
+    nodes = {}
+    for node in resolve["nodes"]:
+        require(type(node) is dict and type(node.get("id")) is str and node["id"] in packages and node["id"] not in nodes
+                and type(node.get("features")) is list and all(type(feature) is str for feature in node["features"])
+                and node["features"] == sorted(set(node["features"]))
+                and set(node["features"]) <= set(packages[node["id"]]["features"]), "Windows B2 active feature node differs")
+        nodes[node["id"]] = node
+    require(set(nodes) == set(packages) and native["features"] == WINDOWS_NATIVE_DECLARED_FEATURES
+            and nodes[native["id"]]["features"] == ["image-stdio", "image-writer"],
+            "Windows B2 native feature role differs")
+    if bridge:
+        require(selected["features"] == {} and nodes[selected["id"]]["features"] == [],
+                "Windows B2 bridge acquired an unrelated feature")
+    edges = {"mrk-windows-installed-native": ("windows-sys", WINDOWS_IMAGE_WRITER_B2_TARGET),
+             "windows-sys": ("windows-link", None), "windows-link": None}
+    if bridge:
+        edges["mrk-windows-image-writer-bridge"] = ("mrk-windows-installed-native", WINDOWS_IMAGE_WRITER_B2_TARGET)
+    for name, edge in edges.items():
+        node = nodes[named[name]["id"]]
+        dependencies = [] if edge is None else [named[edge[0]]["id"]]
+        deps = [] if edge is None else [{"name": edge[0].replace("-", "_"), "pkg": dependencies[0],
+                                       "dep_kinds": [{"kind": None, "target": edge[1]}]}]
+        require(same_compile_json(node.get("dependencies"), dependencies) and same_compile_json(node.get("deps"), deps),
+                "Windows B2 original normal dependency edge differs")
+    declarations = native.get("dependencies")
+    require(type(declarations) is list and all(type(dep) is dict for dep in declarations),
+            "Windows B2 native dependency declarations differ")
+    platform = [dep for dep in declarations if dep.get("name") == "windows-sys"]
+    expected_platform = {"name": "windows-sys", "source": registry, "req": "=0.61.2", "kind": None, "rename": None,
+        "optional": False, "uses_default_features": True, "target": WINDOWS_IMAGE_WRITER_B2_TARGET, "registry": None}
+    require(len(platform) == 1 and type(platform[0].get("features")) is list
+            and len(platform[0]["features"]) == len(WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES)
+            and all(type(feature) is str for feature in platform[0]["features"])
+            and set(platform[0]["features"]) == set(WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES)
+            and same_compile_json({key: value for key, value in platform[0].items() if key != "features"}, expected_platform),
+            "Windows B2 source-declared platform feature seeds differ")
+    if bridge:
+        declarations = selected.get("dependencies")
+        expected_bridge = {"name": "mrk-windows-installed-native", "source": None, "req": "*", "kind": None, "rename": None,
+            "optional": False, "uses_default_features": False, "target": WINDOWS_IMAGE_WRITER_B2_TARGET, "registry": None,
+            "path": str(source / WINDOWS_INSTALLED_CRATE)}
+        require(type(declarations) is list and len(declarations) == 1 and type(declarations[0]) is dict
+                and type(declarations[0].get("features")) is list and len(declarations[0]["features"]) == 2
+                and all(type(feature) is str for feature in declarations[0]["features"])
+                and set(declarations[0]["features"]) == {"image-stdio", "image-writer"}
+                and same_compile_json({key: value for key, value in declarations[0].items() if key != "features"}, expected_bridge),
+                "Windows B2 bridge normal dependency declaration differs")
+    graph = {"packages": packages, "nodes": nodes, "namedPackages": named, "rootId": selected["id"], "bridge": bridge}
+    unit_features = windows_installed_platform_unit_features(graph, {key: node["features"] for key, node in nodes.items()})
+    require(all(unit_features[key] == nodes[key]["features"] for key in nodes)
+            and nodes[named["windows-link"]["id"]]["features"] == [],
+            "Windows B2 platform closure has an unrelated feature")
+    graph["unitFeatures"] = unit_features
+    return graph
+
+
+def windows_image_writer_b2_test_path(raw: bytes, graph: dict, *, source: Path, root: Path) -> Path:
+    """Admit every original Cargo unit before touching its one real libtest."""
+    require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows B2 compiler output exceeds its bound")
+    found, finished, units = None, False, set()
+    packages, nodes = graph["packages"], graph["nodes"]
+    for line in raw.splitlines():
+        require(not finished, "Windows B2 compiler output followed its final result")
+        row = bounded_json(line, 2 << 20)
+        require(type(row) is dict and row.get("reason") in {"compiler-artifact", "compiler-message", "build-finished"},
+                "Windows B2 original Cargo message differs")
+        if row["reason"] == "build-finished":
+            require(row.get("success") is True, "Windows B2 original compiler failed")
+            finished = True
+            continue
+        key, target = row.get("package_id"), row.get("target")
+        require(type(key) is str and key in nodes and type(target) is dict
+                and same_compile_json(target, packages[key]["targets"][0])
+                and (row.get("manifest_path") is None or row["manifest_path"] == packages[key]["manifest_path"]),
+                "Windows B2 compiler unit has a foreign package, target or source")
+        if row["reason"] == "compiler-message":
+            continue
+        profile = row.get("profile")
+        require(row.get("manifest_path") == packages[key]["manifest_path"]
+                and same_compile_json(row.get("features"), graph["unitFeatures"][key])
+                and type(profile) is dict and type(profile.get("test")) is bool and type(row.get("fresh")) is bool,
+                "Windows B2 compiler unit features/source/profile differ")
+        unit = (key, profile["test"])
+        require(unit not in units, "Windows B2 original compiler unit is duplicated")
+        units.add(unit)
+        if profile["test"]:
+            require(key == graph["rootId"] and found is None and profile.get("debug_assertions") is True
+                    and row["fresh"] is False and type(row.get("executable")) is str,
+                    "Windows B2 original root libtest role differs")
+            found = windows_executable_path(row["executable"], target_root=root / "target")
+            require(found.parent == root / "target" / TARGETS["windows"] / "debug" / "deps"
+                    and found.name.startswith(target["name"] + "-") and found.name != target["name"] + "-.exe",
+                    "Windows B2 executable is not the original target libtest")
+        else:
+            require(row.get("executable") is None, "Windows B2 normal dependency became an executable")
+    require(finished and found is not None and {key for key, _ in units} == set(nodes),
+            "Windows B2 compilation did not identify every unit and its one original libtest")
+    return ordinary_windows_executable(str(found), target_root=root / "target")
+
+
+def windows_image_writer_b2_artifact(context: dict, *, bridge: bool = False) -> dict:
+    require(windows_image_writer_b2_profile(context) and type(bridge) is bool, "Windows B2 artifact is profile-only")
+    root, source = Path(context["root"]), Path(context["source"])
+    prefix = "bridge-" if bridge else ""
+    graph = windows_image_writer_b2_graph(read_bounded_json(root / (prefix + "metadata.json"), 2 << 20),
+                                         source=source, root=root, bridge=bridge)
+    messages = root / (prefix + "compile-messages.jsonl")
+    path = windows_image_writer_b2_test_path(windows_installed_bytes(messages, 16 << 20), graph, source=source, root=root)
+    before = path.lstat()
+    record = windows_installed_record(path, 128 << 20)
+    require(windows_installed_state(before) == windows_installed_state(path.lstat()), "Windows B2 original artifact changed")
+    return {"path": str(path), **record, "identity": list(windows_installed_state(before)),
+            "messages": windows_installed_record(messages, 16 << 20)}
+
+
+def windows_image_writer_b2_bridge_argv(cargo: str, context: dict) -> list[str]:
+    require(windows_image_writer_b2_profile(context) and windows_installed_features(context, "bridge") == [],
+            "Windows B2 bridge compile is profile-only")
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+            "--manifest-path", str(Path(context["source"]) / WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.toml"),
+            "--target-dir", str(Path(context["root"]) / "target"), "--lib", "--no-run", "--message-format=json"]
+
+
+def windows_image_writer_b2_selectors(role: str) -> tuple[str, ...]:
+    require(type(role) is str and role in ("native", "bridge", "app"), "Windows B2 DATA selector role differs")
+    return {"native": WINDOWS_IMAGE_WRITER_B2_NATIVE_INERT, "bridge": WINDOWS_IMAGE_WRITER_B2_BRIDGE_INERT,
+            "app": WINDOWS_IMAGE_WRITER_B2_APP_INERT}[role]
+
+
+def windows_image_writer_b2_libtest(raw: bytes, role: str) -> dict:
+    names = windows_image_writer_b2_selectors(role)
+    require(type(raw) is bytes and 0 < len(raw) <= 64 << 10, "Windows B2 original libtest output exceeds its bound")
+    try:
+        lines = [line.strip() for line in raw.decode("ascii").splitlines() if line.strip()]
+    except UnicodeError:
+        raise CheckFailure("Windows B2 original libtest output is not ASCII") from None
+    require(len(lines) == len(names) + 2, "Windows B2 original libtest selection count differs")
+    result = re.fullmatch(r"test result: ok\. " + str(len(names))
+        + r" passed; 0 failed; 0 ignored; 0 measured; ([0-9]{1,6}) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
+    require(result is not None, "Windows B2 original libtest result differs")
+    filtered = int(result.group(1))
+    windows_installed_libtest(raw, names, filtered)
+    return {"names": list(names), "passed": len(names), "failed": 0, "ignored": 0, "measured": 0, "filteredObserved": filtered}
+
+
 def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path, root: Path,
                                    observer_data: bool = False) -> dict:
     """Cheap native or separately selected observer DATA; never an app graph."""
     require(type(observer_data) is bool, "Windows UI native graph role differs")
     registry = "registry+https://github.com/rust-lang/crates.io-index"
     require(type(lock) is dict and lock.get("version") == 4 and type(lock.get("package")) is list
-            and len(lock["package"]) == len(WINDOWS_NORMAL_UI_NATIVE_PACKAGES), "Windows UI native lock differs")
+            and len(lock["package"]) == len(WINDOWS_NORMAL_UI_NATIVE_LOCK_PACKAGES), "Windows UI native lock differs")
     locked = {}
     for item in lock["package"]:
         require(type(item) is dict and type(item.get("name")) is str and type(item.get("version")) is str,
                 "Windows UI native lock identity differs")
         key = (item["name"], item["version"])
-        require(key in WINDOWS_NORMAL_UI_NATIVE_PACKAGES and key not in locked
+        require(key in WINDOWS_NORMAL_UI_NATIVE_LOCK_PACKAGES and key not in locked
                 and (item.get("source") is None if key[0] == "mrk-windows-installed-native" else
                      item.get("source") == registry and sha256_value(item.get("checksum"))),
                 "Windows UI native lock contains a foreign/duplicate package")
         locked[key] = item
-    require(set(locked) == WINDOWS_NORMAL_UI_NATIVE_PACKAGES, "Windows UI native lock inventory is incomplete")
-    require(type(value) is dict and value.get("version") == 1 and type(value.get("packages")) is list
-            and len(value["packages"]) == len(locked), "Windows UI native metadata inventory differs")
+    require(set(locked) == WINDOWS_NORMAL_UI_NATIVE_LOCK_PACKAGES, "Windows UI native lock inventory is incomplete")
+    require(all(same_compile_json(locked[key], row) for key, row in WINDOWS_NORMAL_UI_NATIVE_INACTIVE_LOCK.items()),
+            "Windows UI native inactive SHA2 lock closure differs")
+    require(same_compile_json(locked[("mrk-windows-installed-native", "0.1.0")],
+            {"name": "mrk-windows-installed-native", "version": "0.1.0",
+             "dependencies": ["sha2", "webview2-com", "windows", "windows-core", "windows-sys"]}),
+            "Windows UI native locked root dependencies differ")
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1
+            and type(value.get("packages")) is list and len(value["packages"]) == len(WINDOWS_NORMAL_UI_NATIVE_PACKAGES),
+            "Windows UI native metadata inventory differs")
     packages, ids = {}, {}
     for package in value["packages"]:
         require(type(package) is dict and type(package.get("id")) is str and 0 < len(package["id"]) <= 4096
@@ -12368,12 +12724,12 @@ def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path,
                 and type(package.get("manifest_path")) is str and type(package.get("features")) is dict,
                 "Windows UI native package identity differs")
         key = (package["name"], package["version"])
-        require(key in locked and key not in ids and package["id"] not in packages
+        require(key in WINDOWS_NORMAL_UI_NATIVE_PACKAGES and key not in ids and package["id"] not in packages
                 and package.get("source") == locked[key].get("source"), "Windows UI native package is foreign/duplicated")
         manifest = Path(package["manifest_path"])
         if key[0] == "mrk-windows-installed-native":
             require(manifest == source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
-                    and package["features"] == WINDOWS_NATIVE_DECLARED_FEATURES,
+                    and windows_native_declarations_valid(package),
                     "Windows UI native root declaration differs")
         else:
             registry_root = root / "cargo/registry/src"
@@ -12413,9 +12769,16 @@ def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path,
         require(all(type(item) is str for item in features) and features == sorted(set(features))
                 and set(features) <= set(packages[node["id"]]["features"]), "Windows UI native active feature differs")
         package = packages[node["id"]]
+        if node["id"] == native:
+            require(features == (["desktop-ui", "desktop-ui-dialogs", "windows-installed-observation"]
+                    if observer_data else ["desktop-ui"]), "Windows UI native selected role differs before lock projection")
         expected = set()
         for declaration in locked[(package["name"], package["version"])].get("dependencies", []):
             require(type(declaration) is str, "Windows UI native locked dependency differs")
+            # The exact source declaration and selected role above prove only
+            # this one locked edge inactive. No other missing edge is pruned.
+            if node["id"] == native and declaration == "sha2":
+                continue
             pieces = declaration.split(" ")
             require(len(pieces) in (1, 2), "Windows UI native locked dependency spelling differs")
             candidates = [identity for key, identity in ids.items()
@@ -12441,7 +12804,7 @@ def windows_normal_ui_native_graph(value: object, lock: object, *, source: Path,
     require(nodes[native]["features"] == (["desktop-ui", "desktop-ui-dialogs", "windows-installed-observation"]
                 if observer_data else ["desktop-ui"])
             and {(packages[item]["name"], packages[item]["version"]) for item in nodes[native]["dependencies"]}
-                == {("windows-sys", "0.61.2"), ("windows", "0.61.3"), ("webview2-com", "0.38.2"), ("windows-core", "0.61.2")},
+                == WINDOWS_NORMAL_UI_NATIVE_EDGES,
             "Windows UI native graph differs from its exact selected feature role")
     seen, pending = set(), [native]
     while pending:
@@ -12501,7 +12864,7 @@ def windows_normal_ui_native_test_path(raw: bytes, graph: dict, *, source: Path,
         if executable is not None:
             require(key == native and target["kind"] == ["lib"] and profile["test"] is True
                     and message.get("fresh") is False, "Windows UI prerequisite must be the fresh original native libtest")
-            path = ordinary_windows_executable(executable, target_root=root / "target")
+            path = windows_executable_path(executable, target_root=root / "target")
             require(path.parent == root / "target/x86_64-pc-windows-msvc/debug/deps"
                     and re.fullmatch(r"mrk_windows_installed_native-[0-9a-f]{16}\.exe", path.name) is not None,
                     "Windows UI native artifact path differs")
@@ -12510,7 +12873,7 @@ def windows_normal_ui_native_test_path(raw: bytes, graph: dict, *, source: Path,
             require(profile["test"] is False, "Windows UI native unexpected test unit")
     require(finished and len(found) == 1 and compiled_packages == set(nodes),
             "Windows UI native compile did not produce its complete graph and one original libtest")
-    return found[0]
+    return ordinary_windows_executable(str(found[0]), target_root=root / "target")
 
 
 def windows_normal_ui_native_artifact(context: dict) -> dict:
@@ -12636,6 +12999,7 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
     require(set(local) == {"mobile-release-kit-desktop", "mrk-windows-installed-native"},
             "Windows GUI needs exactly its two selected local packages")
     app, native = local["mobile-release-kit-desktop"], local["mrk-windows-installed-native"]
+    require(windows_native_declarations_valid(packages[native]), "Windows GUI native optional SHA2 declaration differs")
     require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
             and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
             and value.get("target_directory") == str(root / "target"), "Windows GUI workspace/target differs")
@@ -12704,6 +13068,8 @@ def windows_normal_ui_app_graph(value: object, lock: object, *, source: Path, ro
         if key not in seen:
             seen.add(key); pending.extend(nodes[key]["dependencies"])
     require(seen == set(nodes), "Windows GUI contains disconnected resolved packages")
+    require({(packages[key]["name"], packages[key]["version"]) for key in nodes[native]["dependencies"]}
+            == WINDOWS_NORMAL_UI_NATIVE_EDGES, "Windows GUI native dependency role differs")
     require({(packages[key]["name"], packages[key]["version"]) for key in nodes[app]["dependencies"]}
         == WINDOWS_INSTALLED_APP_DIRECT_ROLES | {("rfd", "0.15.4"), ("tauri", "2.11.5"), ("tauri-build", "2.6.3")},
         "Windows GUI direct app roles differ")
@@ -12990,8 +13356,10 @@ def windows_normal_ui_pe_data(raw: bytes, *, role: str) -> dict:
         "commonControlsV6": True, "dynamicWebView2LoaderImport": False, "dllImports": sorted(set(imports))}
 
 
-def windows_installed_app_graph(value: object, lock: object, *, source: Path, root: Path, publication: bool = False) -> dict:
-    require(type(publication) is bool, "Windows app compile profile differs")
+def windows_installed_app_graph(value: object, lock: object, *, source: Path, root: Path, publication: bool = False,
+                                image_writer: bool = False) -> dict:
+    require(type(publication) is bool and type(image_writer) is bool and not (publication and image_writer),
+            "Windows app compile profile differs")
     require(type(value) is dict and type(value.get("version")) is int and value["version"] == 1 and type(value.get("packages")) is list
             and 4 <= len(value["packages"]) <= 512, "Windows app package inventory differs")
     require(type(lock) is dict and type(lock.get("version")) is int and lock["version"] == 4 and type(lock.get("package")) is list
@@ -13036,9 +13404,14 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
                     "Windows app registry manifest left the private acquisition")
         packages[package["id"]] = package
     require(set(local) == active_locals, "Windows app target must contain exactly two local packages")
+    require(windows_native_declarations_valid(packages[local["mrk-windows-installed-native"]]),
+            "Windows app native optional SHA2 declaration differs")
     app = local["mobile-release-kit-desktop"]
     require(packages[app]["features"].get("windows-runtime-publisher") == ["mrk-windows-installed-native/runtime-publication"],
             "Windows app publisher feature must forward only the production native feature")
+    require(not image_writer or packages[app]["features"].get("windows-metadata-images-loader")
+            == ["mrk-windows-installed-native/image-writer", "mrk-windows-installed-native/image-stdio"],
+            "Windows B2 app loader feature forwarding differs")
     require(value.get("workspace_root") == str(source / WINDOWS_INSTALLED_APP)
             and value.get("workspace_members") == [app] and value.get("workspace_default_members") == [app]
             and value.get("target_directory") == str(root / "target"), "Windows app original workspace/target differs")
@@ -13087,10 +13460,12 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
                 and set(features) <= set(packages[node["id"]]["features"]), "Windows app resolved features differ")
         nodes[node["id"]] = node
     require(set(nodes) & set(local.values()) == {app, local["mrk-windows-installed-native"]}
-            and nodes[app]["features"] == (["windows-runtime-publisher"] if publication else [])
+            and nodes[app]["features"] == (["windows-metadata-images-loader"] if image_writer
+                else ["windows-runtime-publisher"] if publication else [])
             and packages[local["mrk-windows-installed-native"]]["features"] == WINDOWS_NATIVE_DECLARED_FEATURES
             and nodes[local["mrk-windows-installed-native"]]["features"]
-                == (["qualification-result", "runtime-publication"] if publication else ["qualification-result"]),
+                == (["image-stdio", "image-writer", "qualification-result"] if image_writer
+                    else ["qualification-result", "runtime-publication"] if publication else ["qualification-result"]),
             "Windows app active locals/features differ")
     for node in nodes.values():
         edges = []
@@ -13124,7 +13499,8 @@ def windows_installed_app_graph(value: object, lock: object, *, source: Path, ro
             "Windows app selected direct dependencies differ")
     require({(packages[key]["name"], packages[key]["version"]) for key in nodes[local["mrk-windows-installed-native"]]["dependencies"]}
             == {("windows-sys", "0.61.2")}, "Windows app native dependency differs")
-    return {"packages": packages, "nodes": nodes, "appId": app, "localIds": local, "publication": publication}
+    return {"packages": packages, "nodes": nodes, "appId": app, "localIds": local, "publication": publication,
+            **({"imageWriter": True} if image_writer else {})}
 
 
 def windows_installed_app_metadata(context: dict) -> dict:
@@ -13135,7 +13511,8 @@ def windows_installed_app_metadata(context: dict) -> dict:
     except (ValueError, UnicodeError):
         raise CheckFailure("Windows app source-bound lock is malformed") from None
     return windows_installed_app_graph(value, lock, source=source, root=root,
-                                       publication=windows_runtime_publication_profile(context))
+                                       publication=windows_runtime_publication_profile(context),
+                                       image_writer=windows_image_writer_b2_profile(context))
 
 
 def windows_installed_helper_metadata(context: dict) -> dict:
@@ -13610,7 +13987,7 @@ def windows_installed_app_argv(cargo: str, context: dict) -> list[str]:
     return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
             "--manifest-path", str(Path(context["source"]) / WINDOWS_INSTALLED_APP / "Cargo.toml"),
             "--target-dir", str(Path(context["root"]) / "target"),
-            *(["--features", ",".join(windows_installed_features(context, "app"))] if windows_runtime_publication_profile(context) else []),
+            *(["--features", ",".join(windows_installed_features(context, "app"))] if windows_installed_features(context, "app") else []),
             "--lib", "--no-run", "--message-format=json"]
 
 
@@ -13853,13 +14230,14 @@ def windows_installed_helper_artifact(context: dict) -> dict:
 
 
 def windows_installed_native_inert(context: dict) -> tuple[str, ...]:
+    require(not windows_image_writer_b2_profile(context), "Windows B2 has no historical native selector roster")
     return (*WINDOWS_INSTALLED_INERT, *(WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT if windows_runtime_publication_profile(context) else ()),
             *(WINDOWS_INSTALLED_PASSIVE_NATIVE_INERT if windows_installed_passive_profile(context) else ()))
 
 
 def windows_installed_native_test_total(context: dict) -> int:
     """Count the reviewed fixed Rust test sources, without launching/listing a native binary."""
-    require(not windows_normal_ui_profile(context), "UI prerequisite does not use the historical inert selector roster")
+    require(not windows_normal_ui_profile(context) and not windows_image_writer_b2_profile(context), "UI prerequisite does not use the historical inert selector roster")
     names = ("tests.rs", "hosted_tests.rs", "ordinary_owner.rs", "qualification_fixture.rs")
     if windows_runtime_publication_profile(context):
         names += ("publication.rs",)
@@ -13947,7 +14325,11 @@ def windows_installed_runtime_identity(value: object, context: dict) -> tuple[di
     return public, paths
 
 
-def windows_installed_artifact(context: dict) -> dict:
+def windows_installed_artifact(context: dict, *, bridge: bool = False) -> dict:
+    require(type(bridge) is bool, "Windows native artifact role differs")
+    if windows_image_writer_b2_profile(context):
+        return windows_image_writer_b2_artifact(context, bridge=bridge)
+    require(not bridge, "Windows bridge artifact is B2-only")
     root, source = Path(context["root"]), Path(context["source"])
     packages = windows_installed_metadata(context)
     raw = windows_installed_bytes(root / "compile-messages.jsonl", 16 << 20)
@@ -13987,7 +14369,8 @@ def windows_installed_phase_receipt(context: dict, phase: str, **facts) -> dict:
             "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
             "runId": context["runId"], "attempt": 1,
             **({"qualificationProfile": context["qualificationProfile"]}
-               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context) else {}), **facts}
+               if windows_installed_prepared_profile(context) or windows_normal_ui_profile(context)
+                   or windows_image_writer_b2_profile(context) else {}), **facts}
 
 
 def windows_installed_libtest(raw: bytes, names: tuple[str, ...], filtered: int, *, native: bool = False) -> dict | None:
@@ -14870,8 +15253,9 @@ def windows_normal_ui_directory_fence(value: object) -> list:
 def windows_normal_ui_observer_row(value: object) -> dict:
     keys = {"sequence", "event", "step", "pending", "pendingStep", "dispatch", "flags", "startup", "refusal", "coverageIncomplete"}
     require(type(value) is dict, "Windows observer row is not an object")
-    closed_object(value, keys | ({"directoryFence"} if value.get("event") == 7 else set()), "Windows observer row fields differ")
-    for key, lower, upper in (("sequence", 1, 64), ("event", 1, 7), ("step", 1, 44), ("pending", 0, 4),
+    extra = {7: {"directoryFence"}, 8: {"userDataParent"}}.get(value.get("event"), set()) if type(value.get("event")) is int else set()
+    closed_object(value, keys | extra, "Windows observer row fields differ")
+    for key, lower, upper in (("sequence", 1, 64), ("event", 1, 8), ("step", 1, 44), ("pending", 0, 4),
                               ("pendingStep", 0, 44), ("dispatch", 0, 200), ("flags", 0, 65535), ("refusal", 0, 42)):
         require(integer_between(value[key], lower, upper), "Windows observer row scalar differs")
     require(type(value["coverageIncomplete"]) is bool, "Windows observer coverage is not Boolean")
@@ -14889,6 +15273,8 @@ def windows_normal_ui_observer_row(value: object) -> dict:
         require((value["step"], value["pending"], value["pendingStep"], value["dispatch"]) == (1, 2, 1, 0),
                 "Windows directory-fence snapshot is not the original Bootstrap pending claim")
         windows_normal_ui_directory_fence(value["directoryFence"])
+    if value["event"] == 8:
+        require(integer_between(value["userDataParent"], 0, 3), "Windows selected user-data parent scalar differs")
     return dict(value)
 
 
@@ -14897,10 +15283,10 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
     require(type(raw) is bytes and 0 < len(raw) <= 4096 and raw.isascii() and raw.startswith(b"\n" + WINDOWS_NORMAL_UI_OBSERVER_PREFIX)
             and raw.endswith(b"\n") and raw.count(b"\n") == 2 and b"\r" not in raw,
             "Windows observer projection envelope differs")
-    # Four copies of the same bounded A0 row can occupy the historical first/
-    # last slots:177 nodes,178 with the existing optional captureFailure:null.
+    # Four historical fence rows plus one retained selected-parent row:189
+    # nodes,190 with the existing optional captureFailure:null.
     # Keep all byte/depth/global limits; this is not a generic budget increase.
-    frame = bounded_json(raw[1 + len(WINDOWS_NORMAL_UI_OBSERVER_PREFIX):-1], 4096, max_nodes=178)
+    frame = bounded_json(raw[1 + len(WINDOWS_NORMAL_UI_OBSERVER_PREFIX):-1], 4096, max_nodes=190)
     keys = {"schema", "source", "tree", "run", "attempt", "role", "request", "diagnosticOnly", "projection"}
     require(type(frame) is dict and set(frame) in (keys, keys | {"captureFailure"}), "Windows observer projection fields differ")
     require(type(frame["schema"]) is int and frame["schema"] == 1 and type(frame["attempt"]) is int and frame["attempt"] == 1
@@ -14910,12 +15296,17 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
             and type(frame["run"]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", frame["run"]) is not None
             and sha256_value(frame["request"]), "Windows observer projection binding differs")
     projection = frame["projection"]
-    closed_object(projection, {"bytes", "records", "reason", "last", "observerRefusal", "startupRefusal", "directoryFence"},
+    require(type(projection) is dict, "Windows observer summary is not an object")
+    optional = {"userDataParent"} if "userDataParent" in projection else set()
+    closed_object(projection, {"bytes", "records", "reason", "last", "observerRefusal", "startupRefusal", "directoryFence"} | optional,
                   "Windows observer summary fields differ")
-    require(integer_between(projection["bytes"], 0, 32768) and integer_between(projection["records"], 0, 57)
+    require(integer_between(projection["bytes"], 0, 32768) and integer_between(projection["records"], 0, 58)
             and integer_between(projection["reason"], 0, 6), "Windows observer summary scalar differs")
     rows = {key: windows_normal_ui_observer_row(projection[key]) if projection[key] is not None else None
             for key in ("last", "observerRefusal", "startupRefusal", "directoryFence")}
+    if optional:
+        rows["userDataParent"] = windows_normal_ui_observer_row(projection["userDataParent"])
+        require(rows["userDataParent"]["event"] == 8, "Windows selected user-data parent retained row differs")
     last = rows["last"]
     require((last is None and projection["records"] == 0 and all(row is None for row in rows.values()))
             or (last is not None and last["sequence"] == projection["records"] and projection["bytes"] >= projection["records"]),
@@ -14939,6 +15330,9 @@ def windows_normal_ui_observer_frame(raw: bytes) -> dict:
             "Windows directory-fence observation belongs to another authenticated role")
     require(all(row is None or row["event"] != 7 or row == retained_fence for row in rows.values()),
             "Windows directory-fence first observation is missing or duplicated")
+    retained_parent = rows.get("userDataParent")
+    require(all(row is None or row["event"] != 8 or row == retained_parent for row in rows.values()),
+            "Windows selected user-data parent first observation is missing or duplicated")
     for first in rows.values():
         require(first is None or last is not None and first["sequence"] <= last["sequence"], "Windows observer first/last order differs")
         for other in rows.values():
@@ -17946,15 +18340,149 @@ def windows_normal_ui_phase(name: str, context: dict, deadline: float) -> None:
     write_json(root / (name + "-checks.json"), windows_installed_phase_receipt(context, name, **facts))
 
 
+
+def windows_retained_phase(name: str, context: dict, deadline: float) -> None:
+    """Closed fixture adapter; not a generic module, process or native route."""
+    profile = context.get("qualificationProfile")
+    allowed = ("prepare", "acquire", "compile", "retain", *WINDOWS_RETAINED_DATA_PHASES[:2],
+               *(WINDOWS_SELECTION_DATA_PHASES if profile == WINDOWS_SELECTION_PROFILE else WINDOWS_RETAINED_DATA_PHASES[2:]))
+    require(profile in (WINDOWS_RETAINED_PROFILE, WINDOWS_SELECTION_PROFILE) and name in allowed,
+            "No retained-shell phase can fall through to another fixture or legacy native route")
+    import importlib.util
+    path = Path(context["source"]) / "desktop/tools/windows_installer_fixture_ci.py"
+    spec = importlib.util.spec_from_file_location("mrk_windows_retained_fixture_ci", path)
+    require(spec is not None and spec.loader is not None, "Retained-shell DATA module unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    require(module.PROFILE == WINDOWS_RETAINED_PROFILE and module.DISPATCH == WINDOWS_RETAINED_DISPATCH
+            and module.REF == WINDOWS_RETAINED_REF and module.PHASES == WINDOWS_RETAINED_DATA_PHASES
+            and module.SELECTION_PROFILE == WINDOWS_SELECTION_PROFILE
+            and module.SELECTION_DISPATCH == WINDOWS_SELECTION_DISPATCH
+            and module.SELECTION_PHASES == WINDOWS_SELECTION_DATA_PHASES
+            and set(module.COMPILER_CHECKS.values()) == WINDOWS_RETAINED_TOOL_CHECKS,
+            "Retained-shell module route or compiler labels differ")
+    try:
+        module.phase(sys.modules[__name__], context, name, deadline)
+    except module.FixtureError as error:
+        raise CheckFailure(str(error)) from None
+
+
+def windows_image_writer_b2_compile_bindings(context: dict) -> dict:
+    """Recheck original receipts, tools and all three artifacts; never rebuild."""
+    require(windows_image_writer_b2_profile(context), "Windows B2 compile binding is profile-only")
+    root = Path(context["root"])
+    receipts = {}
+    for phase in ("acquire", "compile"):
+        claim = read_bounded_json(root / (phase + "-started.json"), 64 << 10)
+        require(same_compile_json(claim, windows_installed_phase_receipt(context, phase, claimOnly=True)),
+                "Windows B2 prior original claim differs")
+        receipt = read_bounded_json(root / (phase + "-checks.json"), 64 << 10)
+        expected = windows_installed_phase_receipt(context, phase)
+        require(type(receipt) is dict and same_compile_json({key: receipt.get(key) for key in expected}, expected),
+                "Windows B2 prior original phase did not pass")
+        receipts[phase] = receipt
+    acquired, compiled = receipts["acquire"], receipts["compile"]
+    for key, filename, limit in (("metadata", "metadata.json", 2 << 20), ("bridgeMetadata", "bridge-metadata.json", 2 << 20),
+                                ("appMetadata", "app-metadata.json", 8 << 20), ("compilerTools", "compiler-tools.json", 64 << 10)):
+        require(same_compile_json(acquired.get(key), windows_installed_record(root / filename, limit)),
+                "Windows B2 original acquisition changed")
+    for receipt in (acquired, compiled):
+        require(all(type(receipt.get(key)) is int and receipt[key] == 0
+                    for key in ("originalExitCode", "bridgeOriginalExitCode", "appOriginalExitCode")),
+                "Windows B2 original command exit differs")
+    compiler = read_bounded_json(root / "compiler-tools.json", 64 << 10)
+    require(type(compiler) is dict and set(compiler) == {"cargo", "rustc"}, "Windows B2 original compiler roles differ")
+    for role in ("cargo", "rustc"):
+        record = compiler[role]
+        require(type(record) is dict and type(record.get("path")) is str
+                and same_compile_json(record, {"path": record["path"], **windows_installed_record(Path(record["path"]), 128 << 20)}),
+                "Windows B2 original compiler changed")
+    artifacts = {
+        "native": read_bounded_json(root / "compiled-test.json", 64 << 10),
+        "bridge": read_bounded_json(root / "bridge-compiled-test.json", 64 << 10),
+        "app": read_bounded_json(root / "app-compiled-test.json", 64 << 10),
+    }
+    observed = {"native": windows_installed_artifact(context), "bridge": windows_installed_artifact(context, bridge=True),
+                "app": windows_installed_app_artifact(context)}
+    commands = {
+        "native": windows_fullwalk_native_argv(compiler["cargo"]["path"], context),
+        "bridge": windows_image_writer_b2_bridge_argv(compiler["cargo"]["path"], context),
+        "app": windows_installed_app_argv(compiler["cargo"]["path"], context),
+    }
+    fields = {"native": ("compiledTest", "invocationSha256"), "bridge": ("bridgeCompiledTest", "bridgeInvocationSha256"),
+              "app": ("appCompiledTest", "appInvocationSha256")}
+    for role, (artifact_key, command_key) in fields.items():
+        require(same_compile_json(artifacts[role], observed[role])
+                and same_compile_json(compiled.get(artifact_key), artifacts[role])
+                and compiled.get(command_key) == hashlib.sha256(canonical_json(commands[role])).hexdigest(),
+                "Windows B2 original role artifact or invocation changed")
+    require(len({artifact["path"] for artifact in artifacts.values()}) == 3, "Windows B2 original artifacts alias")
+    return {"artifacts": artifacts, "acquire": windows_installed_record(root / "acquire-checks.json", 64 << 10),
+            "compile": windows_installed_record(root / "compile-checks.json", 64 << 10),
+            "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10)}
+
+
+def windows_image_writer_b2_data(context: dict, environment: dict[str, str], deadline: float) -> dict:
+    """The existing run owner, one original deadline, three literal DATA roles."""
+    require(windows_image_writer_b2_profile(context), "Windows B2 DATA requires its explicit profile")
+    root = Path(context["root"])
+    windows_installed_remaining(deadline, 1)
+    binding = windows_image_writer_b2_compile_bindings(context)
+    results, outputs = {}, {}
+    for role in ("native", "bridge", "app"):
+        windows_installed_inputs(context)
+        source_unchanged(context)
+        names = windows_image_writer_b2_selectors(role)
+        artifact = binding["artifacts"][role]
+        stdout, stderr = "b2-" + role + ".stdout", "b2-" + role + ".stderr"
+        with (root / stdout).open("x", encoding="utf-8") as output, (root / stderr).open("x", encoding="utf-8") as diagnostics:
+            run([artifact["path"], *names, "--exact", "--test-threads=1"],
+                check="windows-installed-app-inert-contracts" if role == "app" else "windows-installed-inert-contracts",
+                cwd=root, env=environment, timeout=windows_installed_remaining(deadline, 60), output=output, diagnostics=diagnostics)
+        require(output.closed and diagnostics.closed, "Windows B2 original libtest writers are not closed")
+        require(windows_installed_bytes(root / stderr, 64 << 10) == b"", "Windows B2 original libtest stderr is not empty")
+        results[role] = {**windows_image_writer_b2_libtest(windows_installed_bytes(root / stdout, 64 << 10), role),
+                         "originalExitCode": 0, "originalWritersClosed": True,
+                         "invocationSha256": hashlib.sha256(canonical_json([artifact["path"], *names, "--exact", "--test-threads=1"])).hexdigest()}
+        outputs.update({name: windows_installed_record(root / name, 64 << 10) for name in (stdout, stderr)})
+        windows_installed_inputs(context)
+        source_unchanged(context)
+        require(same_compile_json(binding, windows_image_writer_b2_compile_bindings(context)),
+                "Windows B2 original source/compiler/artifact binding changed after DATA")
+        windows_installed_remaining(deadline, 1)
+    return {"dataContractsOnly": True, "testsPassed": 22, "roles": results, "compileBinding": binding,
+            "originalOutputs": outputs, "notVerified": list(WINDOWS_IMAGE_WRITER_B2_NOT_VERIFIED)}
+
+
 def windows_installed_phase(name: str, scope: str) -> None:
     require(scope == WINDOWS_INSTALLED_SCOPE and name in WINDOWS_INSTALLED_PHASES, "Unexpected fixed Windows headless phase")
+    dispatch = os.environ.get("MRK_DESKTOP_DISPATCH_SCOPE")
+    if dispatch in (WINDOWS_RETAINED_DISPATCH, WINDOWS_SELECTION_DISPATCH) or name in (*WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES):
+        fixture = windows_installed_binding().get("qualificationProfile")
+        allowed = ("prepare", "acquire", "compile", "retain", *WINDOWS_RETAINED_DATA_PHASES[:2],
+                   *(WINDOWS_SELECTION_DATA_PHASES if fixture == WINDOWS_SELECTION_PROFILE else WINDOWS_RETAINED_DATA_PHASES[2:]))
+        require(fixture in (WINDOWS_RETAINED_PROFILE, WINDOWS_SELECTION_PROFILE) and name in allowed,
+                "Retained-shell fixture dispatch has no cross-profile or legacy native phase")
+    if name == WINDOWS_IMAGE_WRITER_B2_PHASE or os.environ.get("MRK_DESKTOP_DISPATCH_SCOPE") == WINDOWS_IMAGE_WRITER_B2_DISPATCH:
+        require(windows_image_writer_b2_profile(windows_installed_binding())
+                and name in ("prepare", "acquire", "compile", WINDOWS_IMAGE_WRITER_B2_PHASE, "retain"),
+                "Windows B2 DATA has no historical ordinary/runtime phase")
     deadline = time.monotonic() + {"acquire": 840, "compile": 660, "windows-installed-native": 210,
+                                   WINDOWS_IMAGE_WRITER_B2_PHASE: 210,
                                    "windows-installed-runtime-data": 40,
                                    "windows-normal-ui-setup-acquire": 840, "windows-normal-ui-setup-compile": 660,
                                    "windows-normal-ui-gui-acquire": 1200, "windows-normal-ui-gui-compile": 2400}.get(name, 60)
     context = windows_installed_context(create=name == "prepare", retention_only=name in {
         "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,
-        *WINDOWS_NORMAL_UI_DATA_PHASES})
+        *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES})
+    if context.get("qualificationProfile") in (WINDOWS_RETAINED_PROFILE, WINDOWS_SELECTION_PROFILE):
+        windows_retained_phase(name, context, deadline)
+        return
+    require(name not in (*WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES),
+            "Retained-shell DATA requires its exact profile")
+    image_writer = windows_image_writer_b2_profile(context)
+    require((not image_writer or name in ("prepare", "acquire", "compile", WINDOWS_IMAGE_WRITER_B2_PHASE, "retain"))
+            and (name != WINDOWS_IMAGE_WRITER_B2_PHASE or image_writer), "Windows B2 DATA phase/profile differs")
     root, source = Path(context["root"]), Path(context["source"])
     production = windows_runtime_publication_profile(context)
     passive = windows_installed_passive_profile(context)
@@ -18021,6 +18549,22 @@ def windows_installed_phase(name: str, scope: str) -> None:
             "app-metadata.json": 8 << 20, "app-acquire.stderr": 1 << 20,
             "app-compile-messages.jsonl": 16 << 20, "app-compile.stderr": 1 << 20,
             "app-inert.stdout": 64 << 10, "app-inert.stderr": 64 << 10}
+        if image_writer:
+            files = {"public-bindings.json": 256 << 10,
+                "acquire-started.json": 64 << 10, "acquire-checks.json": 64 << 10,
+                "compile-started.json": 64 << 10, "compile-checks.json": 64 << 10,
+                "windows-image-writer-b2-native22-started.json": 64 << 10, "windows-image-writer-b2-native22-checks.json": 64 << 10,
+                "compiler-tools.json": 64 << 10, "compiled-test.json": 64 << 10,
+                "bridge-compiled-test.json": 64 << 10, "app-compiled-test.json": 64 << 10,
+                "metadata.json": 2 << 20, "acquire.stderr": 1 << 20,
+                "bridge-metadata.json": 2 << 20, "bridge-acquire.stderr": 1 << 20,
+                "app-metadata.json": 8 << 20, "app-acquire.stderr": 1 << 20,
+                "compile-messages.jsonl": 16 << 20, "compile.stderr": 1 << 20,
+                "bridge-compile-messages.jsonl": 16 << 20, "bridge-compile.stderr": 1 << 20,
+                "app-compile-messages.jsonl": 16 << 20, "app-compile.stderr": 1 << 20,
+                "b2-native.stdout": 64 << 10, "b2-native.stderr": 64 << 10,
+                "b2-bridge.stdout": 64 << 10, "b2-bridge.stderr": 64 << 10,
+                "b2-app.stdout": 64 << 10, "b2-app.stderr": 64 << 10}
         outcome = os.environ.get("MRK_WINDOWS_RUNTIME_DATA_STEP_OUTCOME", "unavailable")
         retained, omitted = [], []
         for filename, limit in files.items():
@@ -18035,6 +18579,13 @@ def windows_installed_phase(name: str, scope: str) -> None:
             with (root / "public" / filename).open("xb") as output: output.write(raw)
             require(windows_installed_bytes(root / "public" / filename, limit) == raw, "Windows native retained DATA changed")
             retained.append({"path": filename, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        if image_writer:
+            write_json(root / "public" / "retention.json", {"scope": WINDOWS_INSTALLED_SCOPE,
+                "qualificationProfile": WINDOWS_IMAGE_WRITER_B2_PROFILE, "sourceSha": context["sourceSha"],
+                "sourceTree": context["sourceTree"], "runId": context["runId"], "attempt": 1,
+                "files": retained, "omittedOverBound": omitted, "dataContractsOnly": True,
+                "retentionOnlyNotNativeSuccess": True, "notVerified": list(WINDOWS_IMAGE_WRITER_B2_NOT_VERIFIED)})
+            return  # No runtime observation, account handoff, reset or cleanup.
         runtime, runtime_record = windows_installed_retain_runtime(context, outcome)
         if runtime_record is not None:
             retained.append(runtime_record)
@@ -18042,7 +18593,7 @@ def windows_installed_phase(name: str, scope: str) -> None:
             "runId": context["runId"], "attempt": 1, "files": retained, "omittedOverBound": omitted, "runtimeIdentity": runtime,
             "retentionOnlyNotNativeSuccess": True, "notVerified": list(WINDOWS_INSTALLED_NOT_VERIFIED)})
         return
-    phases = ("acquire", "compile", "windows-installed-native")
+    phases = ("acquire", "compile", WINDOWS_IMAGE_WRITER_B2_PHASE if image_writer else "windows-installed-native")
     for previous in phases[:phases.index(name)]:
         claim = read_bounded_json(root / (previous + "-started.json"), 64 << 10)
         require(claim == windows_installed_phase_receipt(context, previous, claimOnly=True), "Windows native prior original claim differs")
@@ -18055,6 +18606,10 @@ def windows_installed_phase(name: str, scope: str) -> None:
                 and acquired["appMetadata"] == windows_installed_record(root / "app-metadata.json", 8 << 20)
                 and acquired["compilerTools"] == windows_installed_record(root / "compiler-tools.json", 64 << 10),
                 "Windows headless original acquisition changed")
+        if image_writer:
+            require(same_compile_json(acquired.get("bridgeMetadata"), windows_installed_record(root / "bridge-metadata.json", 2 << 20))
+                    and type(acquired.get("bridgeOriginalExitCode")) is int and acquired["bridgeOriginalExitCode"] == 0,
+                    "Windows B2 original bridge acquisition changed")
     write_json(root / (name + "-started.json"), windows_installed_phase_receipt(context, name, claimOnly=True))
     source_unchanged(context)
     require(context["sdk"] == {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(windows_sdk_root(), WINDOWS_SDK_HEADERS)},
@@ -18062,6 +18617,8 @@ def windows_installed_phase(name: str, scope: str) -> None:
     environment = clean_environment(root)
     environment.update(GITHUB_SHA=context["sourceSha"], GITHUB_RUN_ID=context["runId"],
                        MRK_WINDOWS_SOURCE_TREE=context["sourceTree"])
+    if image_writer:
+        environment["CARGO_TARGET_DIR"] = str(root / "target")
     manifest = source / WINDOWS_INSTALLED_CRATE / "Cargo.toml"
     if name == "acquire":
         fullwalk_acquired = windows_fullwalk_acquire(context, environment, deadline) if windows_installed_prepared_profile(context) else None
@@ -18070,17 +18627,30 @@ def windows_installed_phase(name: str, scope: str) -> None:
         cargo, rustc = tools(context, environment)
         with (root / "metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
-                *(["--features", ",".join(windows_installed_features(context, "native"))] if production else []),
+                *(["--features", ",".join(windows_installed_features(context, "native"))] if production or image_writer else []),
                 "--manifest-path", str(manifest)], check="windows-installed-locked-metadata", cwd=root, env=environment,
                 timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        if image_writer:
+            require(output.closed and diagnostics.closed, "Windows B2 native metadata writers are not closed")
         packages = windows_installed_metadata(context)
         app_environment = {**environment, "CARGO_TARGET_DIR": str(root / "target")}
         with (root / "app-metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "app-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--filter-platform", TARGETS["windows"],
-                *(["--features", ",".join(windows_installed_features(context, "app"))] if production else []),
+                *(["--features", ",".join(windows_installed_features(context, "app"))] if production or image_writer else []),
                 "--manifest-path", str(source / WINDOWS_INSTALLED_APP / "Cargo.toml")], check="windows-installed-app-locked-metadata", cwd=root,
                 env=app_environment, timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+        if image_writer:
+            require(output.closed and diagnostics.closed, "Windows B2 app metadata writers are not closed")
         graph = windows_installed_app_metadata(context)
+        if image_writer:
+            # The bridge adds no registry package: confirm its source-authored lock offline.
+            with (root / "bridge-metadata.json").open("x", encoding="utf-8", newline="\n") as output, (root / "bridge-acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+                run([cargo, "metadata", "--locked", "--offline", "--format-version", "1", "--no-default-features",
+                    "--filter-platform", TARGETS["windows"], "--manifest-path", str(source / WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.toml")],
+                    check="windows-installed-locked-metadata", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+            require(output.closed and diagnostics.closed, "Windows B2 bridge metadata writers are not closed")
+            bridge_packages = windows_installed_metadata(context, bridge=True)
         if passive:
             # Metadata is role-bound too: a publisher graph must not authorize
             # the non-publisher candidate's compiler units through feature union.
@@ -18097,6 +18667,9 @@ def windows_installed_phase(name: str, scope: str) -> None:
                  "metadata": windows_installed_record(root / "metadata.json", 2 << 20), "originalExitCode": 0,
                  "appMetadata": windows_installed_record(root / "app-metadata.json", 8 << 20), "appOriginalExitCode": 0,
                  "appActivePackageIds": sorted(graph["nodes"]), "compilerTools": windows_installed_record(root / "compiler-tools.json", 64 << 10)}
+        if image_writer:
+            facts.update(bridgeMetadata=windows_installed_record(root / "bridge-metadata.json", 2 << 20),
+                         bridgeOriginalExitCode=0, bridgePackages={name: package["version"] for name, package in bridge_packages.items()})
         if passive:
             facts.update(helperMetadata=windows_installed_record(root / "helper-metadata.json", 8 << 20),
                          helperMetadataOriginalExitCode=0, helperActivePackageIds=sorted(helper_graph["nodes"]))
@@ -18131,6 +18704,8 @@ def windows_installed_phase(name: str, scope: str) -> None:
                 # even if its own reader or stdout emission is interrupted.
                 pass
             raise
+        if image_writer:
+            require(output.closed and diagnostics.closed, "Windows B2 native compiler writers are not closed")
         artifact = windows_installed_artifact(context)
         write_json(root / "compiled-test.json", artifact)
         app_argv = windows_installed_app_argv(cargo, context)
@@ -18151,12 +18726,30 @@ def windows_installed_phase(name: str, scope: str) -> None:
             except BaseException:
                 pass  # Same failure-only, original-exception rule as above.
             raise
+        if image_writer:
+            require(output.closed and diagnostics.closed, "Windows B2 app compiler writers are not closed")
         app_artifact = windows_installed_app_artifact(context)
         write_json(root / "app-compiled-test.json", app_artifact)
         facts = {"rust": RUST, "target": TARGETS["windows"], "compiledTest": artifact, "originalExitCode": 0,
                  "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(), "standaloneOnly": False,
                  "appCompiledTest": app_artifact, "appOriginalExitCode": 0,
                  "appInvocationSha256": hashlib.sha256(canonical_json(app_argv)).hexdigest()}
+        if image_writer:
+            bridge_argv = windows_image_writer_b2_bridge_argv(cargo, context)
+            with (root / "bridge-compile-messages.jsonl").open("x", encoding="utf-8", newline="\n") as output, (root / "bridge-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+                run(bridge_argv, check="windows-installed-test-compile-only", cwd=root, env=environment,
+                    timeout=windows_installed_remaining(deadline, 600), output=output, diagnostics=diagnostics)
+            require(output.closed and diagnostics.closed, "Windows B2 bridge compiler writers are not closed")
+            bridge_artifact = windows_installed_artifact(context, bridge=True)
+            write_json(root / "bridge-compiled-test.json", bridge_artifact)
+            require(same_compile_json(artifact, windows_installed_artifact(context))
+                    and same_compile_json(app_artifact, windows_installed_app_artifact(context))
+                    and same_compile_json(bridge_artifact, windows_installed_artifact(context, bridge=True)),
+                    "Windows B2 original artifacts changed during compilation")
+            require(same_compile_json(compiler, {"cargo": {"path": cargo, **windows_installed_record(Path(cargo), 128 << 20)},
+                "rustc": {"path": rustc, **windows_installed_record(Path(rustc), 128 << 20)}}), "Windows B2 original compilers changed")
+            facts.update(bridgeCompiledTest=bridge_artifact, bridgeOriginalExitCode=0,
+                         bridgeInvocationSha256=hashlib.sha256(canonical_json(bridge_argv)).hexdigest())
         if publisher_required:
             windows_installed_helper_outputs_absent(context)
             helper_argv = windows_installed_helper_argv(cargo, context)
@@ -18188,6 +18781,9 @@ def windows_installed_phase(name: str, scope: str) -> None:
                 "preparedReceipt": prepared["receipt"], "anchoredNativeBuilds": 1, "anchoredAppBuilds": 1}
             if publisher_required:
                 facts["fullwalk"]["anchoredHelperBuilds"] = 1
+    elif image_writer:
+        # Ends before the historical ordinary request/identity/output handoff.
+        facts = windows_image_writer_b2_data(context, environment, deadline)
     else:
         artifact = read_bounded_json(root / "compiled-test.json", 64 << 10)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed")
@@ -18272,17 +18868,18 @@ def main() -> int:
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
                         "version-owner", "version-transaction-eof", "version-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-                         "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
+                         "environment-native", "offline-cli11", "retain", WINDOWS_IMAGE_WRITER_B2_PHASE, "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
                          *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,
-                         *CONVENTIONAL_PHASES))
+                         *WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES, *CONVENTIONAL_PHASES))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
-        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
+        if scope == WINDOWS_INSTALLED_SCOPE or args.phase in {WINDOWS_IMAGE_WRITER_B2_PHASE, "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", *WINDOWS_FULLWALK_DATA_PHASES,
                                                              *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,
-                                                             "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES}:
+                                                             "windows-normal-ui-prerequisite", *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES,
+                                                             *WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES}:
             windows_installed_phase(args.phase, scope)
             return 0
         if scope in CONVENTIONAL_SCOPES or args.phase in CONVENTIONAL_PHASES:

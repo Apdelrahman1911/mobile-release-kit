@@ -13,6 +13,7 @@ import importlib.util
 import io
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -41,6 +42,20 @@ WINDOWS_COMMON_PARSERS = {
     "der": {"version": "0.7.10", "rename": "der_07", "features": ["alloc", "oid", "pem"]},
     "zeroize": {"version": "1.9.0", "rename": None, "features": ["alloc"]},
 }
+
+
+# Independent declaration DATA. Source parity below reads Cargo rather than
+# constructing an accepted package from the validator's declaration object.
+WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE = {
+    "name": "sha2", "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "req": "=0.10.9", "kind": None, "rename": None, "optional": True,
+    "uses_default_features": True, "features": [], "registry": None,
+    "target": 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))',
+}
+WINDOWS_NATIVE_SHA2_INACTIVE_FIXTURE_NAMES = frozenset((
+    "block-buffer", "cfg-if", "cpufeatures", "crypto-common", "digest",
+    "generic-array", "libc", "sha2", "typenum", "version_check",
+))
 
 
 NATIVE_CASE_NAMES = (
@@ -813,12 +828,24 @@ class FixedCompilerHelperTests(unittest.TestCase):
         self.assertEqual(outer_keywords["preexec_fn"].id, "github_tls_outer_limits")
         tool_calls = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "run"]
         labels = []
+        closed_role_labels = 0
+        closed_role_label = ast.parse(
+            '"windows-installed-app-inert-contracts" if role == "app" else "windows-installed-inert-contracts"',
+            mode="eval").body
         for call in tool_calls:
             label = next(keyword.value for keyword in call.keywords if keyword.arg == "check")
-            self.assertIsInstance(label, ast.Constant)
-            self.assertIn(label.value, helper.TOOL_CHECKS)
-            labels.append(label.value)
-        self.assertEqual(set(labels), helper.TOOL_CHECKS)
+            if isinstance(label, ast.Constant):
+                self.assertIn(label.value, helper.TOOL_CHECKS)
+                labels.append(label.value)
+            else:
+                self.assertTrue(ast.dump(label) == ast.dump(closed_role_label),
+                                "Only the exact closed app/native role label is admitted")
+                closed_role_labels += 1
+                for fixed in ("windows-installed-app-inert-contracts", "windows-installed-inert-contracts"):
+                    self.assertIn(fixed, helper.TOOL_CHECKS)
+                    labels.append(fixed)
+        self.assertEqual(closed_role_labels, 1)
+        self.assertEqual(set(labels) | helper.WINDOWS_RETAINED_TOOL_CHECKS, helper.TOOL_CHECKS)
         install = next(call for call in tool_calls if any(keyword.arg == "check"
                        and isinstance(keyword.value, ast.Constant)
                        and keyword.value.value == "rust-toolchain-install" for keyword in call.keywords))
@@ -4040,22 +4067,22 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         self.assertEqual(len(argument), 1)
         choices = next(keyword.value for keyword in argument[0].keywords if keyword.arg == "choices")
         self.assertIsInstance(choices, ast.Tuple)
-        self.assertEqual(["*" + node.value.id if isinstance(node, ast.Starred) else node.value for node in choices.elts],
-            ["*BOUNDARY_PHASES", "workflow-owner", "workflow-transaction-eof", "workflow-core", "metadata-owner",
+        self.assertEqual(["*" + node.value.id if isinstance(node, ast.Starred) else node.id if isinstance(node, ast.Name) else node.value for node in choices.elts],
+            ["*BOUNDARY_PHASES", "workflow-owner", "workflow-transaction-eof", "workflow-core", "version-owner", "version-transaction-eof", "version-core", "metadata-owner",
              "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-             "environment-native", "offline-cli11", "retain", "windows-installed-native", "windows-installed-native-finalize",
+             "environment-native", "offline-cli11", "retain", "WINDOWS_IMAGE_WRITER_B2_PHASE", "windows-installed-native", "windows-installed-native-finalize",
              "windows-installed-runtime-data", "*WINDOWS_FULLWALK_DATA_PHASES", "*WINDOWS_INSTALLED_PASSIVE_DATA_PHASES",
-             "windows-normal-ui-prerequisite", "*WINDOWS_NORMAL_UI_DATA_PHASES", "*WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES", "*WINDOWS_NORMAL_UI_GUI_BUILD_PHASES", "*CONVENTIONAL_PHASES"])
+             "windows-normal-ui-prerequisite", "*WINDOWS_NORMAL_UI_DATA_PHASES", "*WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES", "*WINDOWS_NORMAL_UI_GUI_BUILD_PHASES", "*WINDOWS_RETAINED_DATA_PHASES", "*WINDOWS_SELECTION_DATA_PHASES", "*CONVENTIONAL_PHASES"])
         self.assertIn('scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")', main)
         installed = main.split("if scope == WINDOWS_INSTALLED_SCOPE", 1)[1].split("if scope in CONVENTIONAL_SCOPES", 1)[0]
         self.assertEqual(" ".join(installed.split()),
-            'or args.phase in {"windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", '
+            'or args.phase in {WINDOWS_IMAGE_WRITER_B2_PHASE, "windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data", '
             '*WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES, "windows-normal-ui-prerequisite", '
-            '*WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES}: windows_installed_phase(args.phase, scope) return 0')
+            '*WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_NORMAL_UI_SETUP_BUILD_PHASES, *WINDOWS_NORMAL_UI_GUI_BUILD_PHASES, *WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES}: windows_installed_phase(args.phase, scope) return 0')
         self.assertLess(main.index("windows_installed_phase(args.phase, scope)"), main.index("admit_phase(scope, args.phase)"))
         self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = (admitted_host("))
         self.assertLess(main.index("platform = (admitted_host("), main.index("prepare(platform, scope)"))
-        self.assertIn('platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"\n'
+        self.assertIn('platform = (admitted_host(retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and args.phase == "clean"\n'
                       '                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"\n'
                       '                    or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())', main)
         self.assertIn('prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)', main)
@@ -4064,11 +4091,11 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         self.assertIn("def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:", source)
         host = source.split("def admitted_host(*, retention_only: bool = False) -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
         self.assertEqual(host.count("admitted_scope(platform)"), 1)
-        self.assertIn('os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, '
+        self.assertIn('os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, '
                       '*ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}', host)
-        self.assertIn('require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES}', host)
+        self.assertIn('require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES}', host)
         self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:\n        admitted_scope(platform)', host)
-        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
+        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
         self.assertIn('os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"', host)
         self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")', host)
         self.assertIn('os.geteuid() != 0', host)
@@ -8072,7 +8099,7 @@ class WindowsReaderGateTests(unittest.TestCase):
             "target": None, "registry": None} for name in direct if name in versions)
         packages[1]["dependencies"] = [{"name": "windows-sys", "source": registry, "req": "=0.61.2",
             "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
-            "target": None, "registry": None}]
+            "target": None, "registry": None}, deepcopy(WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE)]
         edges = {"mobile-release-kit-desktop": direct, "mrk-windows-installed-native": ["windows-sys"], "windows-sys": ["windows-link"]}
         nodes = []
         for name in ["mobile-release-kit-desktop", "mrk-windows-installed-native", *versions]:
@@ -9303,10 +9330,10 @@ class WindowsReaderGateTests(unittest.TestCase):
     def test_windows_reader_existing_job_and_phase_routes_remain_narrow(self):
         text = HELPER.read_text(encoding="utf-8")
         phase = text.split("def windows_installed_phase(", 1)[1].split("def main(", 1)[0]
-        self.assertIn('retention_only=name in {\n        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,\n        *WINDOWS_NORMAL_UI_DATA_PHASES}', phase)
-        self.assertLess(phase.index('if name == "windows-installed-native-finalize"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
-        self.assertLess(phase.index('if name == "windows-installed-runtime-data"'), phase.index('phases = ("acquire", "compile", "windows-installed-native")'))
-        retained = phase.split('if name == "retain":', 1)[1].split('phases = ("acquire", "compile", "windows-installed-native")', 1)[0]
+        self.assertIn('retention_only=name in {\n        "retain", "windows-installed-native-finalize", *WINDOWS_FULLWALK_DATA_PHASES, *WINDOWS_INSTALLED_PASSIVE_DATA_PHASES,\n        *WINDOWS_NORMAL_UI_DATA_PHASES, *WINDOWS_RETAINED_DATA_PHASES, *WINDOWS_SELECTION_DATA_PHASES}', phase)
+        self.assertLess(phase.index('if name == "windows-installed-native-finalize"'), phase.index('phases = ("acquire", "compile", WINDOWS_IMAGE_WRITER_B2_PHASE if image_writer else "windows-installed-native")'))
+        self.assertLess(phase.index('if name == "windows-installed-runtime-data"'), phase.index('phases = ("acquire", "compile", WINDOWS_IMAGE_WRITER_B2_PHASE if image_writer else "windows-installed-native")'))
+        retained = phase.split('if name == "retain":', 1)[1].split('phases = ("acquire", "compile", WINDOWS_IMAGE_WRITER_B2_PHASE if image_writer else "windows-installed-native")', 1)[0]
         for unavailable in ('run(', 'tools(', 'runtime-identity.private.json', 'source_unchanged('): self.assertNotIn(unavailable, retained)
         self.assertNotIn('files["runtime-data-checks.json"]', retained)
         self.assertLess(retained.index('for filename, limit in files.items()'),
@@ -9341,7 +9368,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertNotIn('ordinary-owner-exit.private.json', retained)
         self.assertNotIn('windows-installed-native-preflight-checks.json', retained)
         self.assertNotIn('ordinary-output', retained)
-        self.assertLess(workflow.index('id: runtime-data'), workflow.index('id: retain'))
+        self.assertLess(workflow.index('        id: runtime-data\n'), workflow.index('        id: retain\n'))
         self.assertIn('[System.Diagnostics.Process].Assembly', workflow)
         for unavailable in ('Process.Start', 'New-LocalUser', 'Set-Acl', 'Add-Type', 'Start-Process', 'Get-Process'):
             self.assertNotIn(unavailable, workflow)
@@ -11500,6 +11527,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertEqual(helper.windows_installed_app_libtest(raw, production=True)["passed"], 14)
         with self.assertRaises(helper.CheckFailure): helper.windows_installed_app_libtest(raw)
         source = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/publication.rs").read_text(encoding="utf-8")
+        primitives = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/installer_primitives.rs").read_text(encoding="utf-8")
         bridge = (SOURCE / "desktop/src-tauri/src/runtime_publication_windows.rs").read_text(encoding="utf-8")
         binary = (SOURCE / "desktop/src-tauri/src/bin/windows_runtime_publish.rs").read_text(encoding="utf-8")
         predicate = source.split("pub fn occupied_target_and_settled(", 1)[1].split("pub fn fail_and_settle_once(", 1)[0]
@@ -11531,14 +11559,35 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("let _ = std::io::Write::write_all(&mut std::io::stderr(), frame.as_bytes());", failure)
         self.assertEqual(binary.count("std::io::Write::write_all"), 2)  # one attempt per line, not an atomic combined write
         producer = bridge.split("fn produce(", 1)[1].split("\n/// No arguments", 1)[0]
-        entry = bridge.split("pub fn publish_fixed()", 1)[1].split("\n#[cfg(test)]", 1)[0]
+        entry = bridge.split("fn publish_common(", 1)[1].split("\n#[cfg(test)]", 1)[0]
+        standalone = bridge.split("pub fn publish_fixed()", 1)[1].split("\n/// Direct", 1)[0]
+        installer = bridge.split("pub(crate) fn publish_for_installer(", 1)[1].split("\nfn publish_common(", 1)[0]
+        self.assertIn('#[cfg(feature = "windows-runtime-publisher")]\npub fn publish_fixed()', bridge)
+        self.assertLess(standalone.index("if !no_arguments("), standalone.index("publish_common("))
+        self.assertLess(installer.index("guard.require_acquired_inputs()"), installer.index("let returned = publish_common("))
+        self.assertLess(installer.index("let returned = publish_common("), installer.index("guard.retain_publication_return(returned)"))
         self.assertEqual(producer.count("owner.published_and_settled()"), 1)
-        self.assertEqual(entry.count("original.published_and_settled()"), 1)
+        self.assertEqual(entry.count("runtime_settled(&original, prepared)"), 1)
         self.assertIn("require(owner.published_and_settled()).map_err(|_| PublicationFailure::policy(FailurePhase::FinalPostcondition, None))", producer)
-        self.assertIn("let cause = match produce(&mut original, &spec) {\n"
-                      "        Ok(()) if original.published_and_settled() => return Ok(()),\n"
-                      "        Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),\n"
-                      "        Err(first) => first,", entry)
+        self.assertIn("let cause = match produce(&mut original, &spec, control) {\n"
+                      "        Err(first) => first,\n"
+                      "        Ok(prepared) => {", entry)
+        self.assertIn("control.after(require(runtime_settled(&original, prepared))", entry)
+        self.assertIn("PublicationControl::Installer(guard) => crate::windows_input_acquisition::publication_for_installer(guard, &spec)?", entry)
+        self.assertIn("return reuse_existing(owner, &expected, control);", producer)
+        reuse = bridge.split("fn reuse_existing(", 1)[1].split("\n/// No arguments", 1)[0]
+        self.assertIn("owner.finish_existing_manifest()", reuse)
+        self.assertIn("owner.read_existing_next()", reuse)
+        self.assertIn("expected.verify(index, count, hasher)", reuse)
+        self.assertIn("owner.existing_runtime_and_settled()", reuse)
+        self.assertIn("Ok(RuntimePrepared::ReusedExisting)", reuse)
+        for forbidden in ("owner.create_once(", "owner.start_copy(", "owner.copy_next(",
+                          "owner.readback_next(", "owner.seal_once("):
+            self.assertNotIn(forbidden, reuse)
+        self.assertIn("self.choose_installer_mode(InstallerRuntimeMode::ReuseExisting)?", source)
+        self.assertIn("this.installer_mode() != Some(InstallerRuntimeMode::ReuseExisting)", source)
+        self.assertLess(entry.index("let cause = match produce("), entry.index("control.settlement_boundary();"))
+        self.assertLess(entry.index("control.settlement_boundary();"), entry.index("original.fail_and_settle_once()"))
         ordered = [entry.index(part) for part in ("let cause = match produce(",
             "let frame = if cause.phase == FailurePhase::Admit && cause.native == Some(NativeError::Unknown)",
             "Some(original.retained_frame_observation())",
@@ -11580,16 +11629,16 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertEqual(copy_snapshot.strip(), "-> Option<PublicationCopyObservation> { self.copy_failure.get() }")
         self.assertEqual(source.count("copy_failure: Cell<Option<PublicationCopyObservation>>"), 1)
         self.assertEqual(source.count("copy_failure: Cell::new(None)"), 1)
-        copy_recorder = source.split("impl CopyRefusal<'_> {", 1)[1].split("fn copy_result<T>", 1)[0]
+        copy_recorder = primitives.split("impl CopyRefusal<'_> {", 1)[1].split("pub(super) fn copy_result<T>", 1)[0]
         self.assertIn("if self.first.get().is_none()", copy_recorder)
         self.assertIn("self.first.set(Some(PublicationCopyObservation { edge: self.edge, member, allocation: allocation() }))", copy_recorder)
-        copy_result = source.split("fn copy_result<T>", 1)[1].split("fn copy_guard(", 1)[0]
+        copy_result = primitives.split("pub(super) fn copy_result<T>", 1)[1].split("pub(super) fn copy_guard(", 1)[0]
         self.assertIn("if matches!(result.as_ref(), Err(Error::Unsafe))", copy_result)
         self.assertIn("CopyRefusal { first, edge }.record(CopyMember::None, || CopyAllocation::None)", copy_result)
         self.assertTrue(copy_result.rstrip().endswith("result\n}"))
         for forbidden in ("unsafe", "Instant::", ".tick(", ".clone(", "self.book", "self.mutation", "println!", "eprintln!"):
             self.assertNotIn(forbidden, copy_snapshot + copy_recorder + copy_result)
-        copy_companion = source.split("impl PublicationCopyObservation {", 1)[1].split("#[derive(Clone, Copy)]\nstruct CopyRefusal", 1)[0]
+        copy_companion = primitives.split("impl PublicationCopyObservation {", 1)[1].split("#[derive(Clone, Copy)]\npub(super) struct CopyRefusal", 1)[0]
         self.assertIn("if !self.legal() { return None; }", copy_companion)
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_COPY_V1=edge="', copy_companion)
         self.assertIn('line.push_str(";member="); line.push_str(self.member.label());', copy_companion)
@@ -11614,7 +11663,7 @@ class WindowsReaderGateTests(unittest.TestCase):
         for part in copy_edges: self.assertEqual(finish_copy.count(part), 1)
         self.assertIn("Some(CopyRefusal { first: &this.copy_failure, edge: CopyEdge::SourceUnchanged })))?;\n"
                       "            }\n            copy_result(this.close(source)", finish_copy)
-        source_same = source.split("fn source_unchanged_observed(", 1)[1].split("fn acl_transition(", 1)[0]
+        source_same = primitives.split("pub(super) fn source_unchanged_observed(", 1)[1].split("pub(super) fn acl_transition(", 1)[0]
         same_order = ("a.identity == b.identity", "a.kind == b.kind", "a.attributes == b.attributes", "(a.size, b.size)",
             "new_size == old_size", "(a.allocation_size, b.allocation_size)", "new_allocation == old_allocation",
             "changed_allocation(new_allocation, old_allocation, new_size)", "a.links == b.links", "a.creation == b.creation",
@@ -11622,17 +11671,19 @@ class WindowsReaderGateTests(unittest.TestCase):
         offsets = [source_same.index(part) for part in same_order]
         self.assertEqual(offsets, sorted(offsets))
         for part in same_order: self.assertEqual(source_same.count(part), 1)
-        companion = source.split("pub fn diagnostic_line(self)", 1)[1].split("struct Mutation {", 1)[0]
+        companion = primitives.split("pub fn diagnostic_line(self)", 1)[1].split("pub(super) struct Mutation {", 1)[0]
         self.assertIn('"MRK_WINDOWS_RUNTIME_PUBLISH_FRAME_V2=qcall="', companion)
         self.assertIn('";qrefusal="', companion)
         self.assertIn('line.push_str(";mcount="); line.push_str(self.mcount.label());', companion)
         self.assertIn("if line.len() <= 256 { Some(line) } else { None }", companion)
-        self.assertEqual(source.count("length_observation: Cell::new(ObservedScalarLength::Unobserved)"), 3)
-        scalar_branch = source.split("} else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {", 1)[1].split("} else { outcome };", 1)[0]
+        # The defining constructor moved; the two retained Publication fixtures did not.
+        self.assertEqual(source.count("length_observation: Cell::new(ObservedScalarLength::Unobserved)")
+                         + primitives.count("length_observation: Cell::new(ObservedScalarLength::Unobserved)"), 3)
+        scalar_branch = primitives.split("} else if matches!(effect, Effect::Scalar(_)) && outcome.is_ok() {", 1)[1].split("} else { outcome };", 1)[0]
         self.assertEqual(scalar_branch.count("unsafe { *frame.count.get() }"), 1)
         self.assertIn("let count = unsafe { *frame.count.get() };", scalar_branch)
         self.assertIn("scalar_count_return(effect, count, &frame.length_observation)", scalar_branch)
-        scalar_return = source.split("fn scalar_count_return(", 1)[1].split("fn later_originals_closed(", 1)[0]
+        scalar_return = primitives.split("pub(super) fn scalar_count_return(", 1)[1].split("pub(super) fn later_originals_closed(", 1)[0]
         self.assertIn("if observed.get() == ObservedScalarLength::Unobserved {", scalar_return)
         self.assertIn("observed.set(ObservedScalarLength::from_count(count));", scalar_return)
         self.assertIn("Effect::Scalar(S::TokenHasRestrictions) => matches!(count, 1 | 4)", scalar_return)
@@ -11641,16 +11692,18 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("if accepted { Ok(()) } else { Err(Error::Unknown) }", scalar_return)
         for forbidden in ("unsafe", "frame.", "Instant::", ".tick(", "GetTokenInformation"):
             self.assertNotIn(forbidden, scalar_return)
-        seed = source.split("fn scalar_initial(", 1)[1].split("fn scalar_value(", 1)[0]
+        seed = primitives.split("pub(super) fn scalar_initial(", 1)[1].split("pub(super) fn scalar_value(", 1)[0]
         self.assertIn("Effect::Scalar(S::TokenHasRestrictions)", seed)
         self.assertIn("u32::from_ne_bytes([0xff, 0, 0, 0])", seed)
         self.assertIn("else { u32::MAX }", seed)
-        self.assertEqual(source.count("scalar: UnsafeCell::new(scalar_initial("), 3)
-        consumer = source.split("impl MutationComplete {", 1)[1].split("fn mutation_return(", 1)[0]
+        self.assertEqual(source.count("scalar: UnsafeCell::new(scalar_initial(")
+                         + primitives.count("scalar: UnsafeCell::new(scalar_initial("), 3)
+        consumer = primitives.split("impl MutationComplete {", 1)[1].split("pub(super) fn mutation_return(", 1)[0]
         self.assertIn("self.frame.phase.get() == Phase::Complete", consumer)
         self.assertIn("Effect::Scalar(S::TokenHasRestrictions | S::TokenIsAppContainer)", consumer)
         self.assertIn("Ok(unsafe { *self.frame.scalar.get() })", consumer)
-        self.assertEqual(source.count("unsafe { *self.frame.scalar.get() }"), 1)
+        self.assertEqual(source.count("unsafe { *self.frame.scalar.get() }")
+                         + primitives.count("unsafe { *self.frame.scalar.get() }"), 1)
         scalar = source.split("    fn scalar(&mut self,", 1)[1].split("    fn add_directory(", 1)[0]
         self.assertIn('let complete = self.mutate(Effect::Scalar(class), Some(index), "", &[], Vec::new())?;', scalar)
         self.assertEqual(scalar.count("self.mutate("), 1)
@@ -11658,9 +11711,9 @@ class WindowsReaderGateTests(unittest.TestCase):
         self.assertIn("trace.result(scalar_value(trace.result(complete.scalar(), C::ScalarCompletion)?), C::ScalarCanonical)", scalar)
         for forbidden in ("count.get()", "scalar.get()", "GetTokenInformation(", "invoke_mutation("):
             self.assertNotIn(forbidden, scalar)
-        self.assertIn("fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }", source)
-        self.assertIn("restricted == 0", source)
-        self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", source)
+        self.assertIn("fn scalar_value(value: u32) -> Result<u32> { need(value <= 1)?; Ok(value) }", primitives)
+        self.assertIn("restricted == 0", primitives)
+        self.assertIn("frame.scalar.get().cast(), 4, frame.count.get()", primitives)
         query = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src/lib.rs").read_text(encoding="utf-8")
         self.assertIn("pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};", query)
         self.assertEqual(query.count("self.completion_unknown("), 6)
@@ -11827,7 +11880,11 @@ class WindowsReaderGateTests(unittest.TestCase):
                      helper.WINDOWS_RUNTIME_PUBLICATION_BEFORE, helper.WINDOWS_RUNTIME_PUBLICATION_AFTER):
             self.assertNotIn(test, ordinary_to_fullwalk)
         self.assertNotIn("Remove-Item", workflow)
-        self.assertIn("timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || 35 }}", workflow)
+        expected_timeout = "    timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || inputs.scope == 'windows-installer-retained-shell' && 65 || inputs.scope == 'windows-installer-selection' && 340 || 35 }}"
+        self.assertTrue(
+            [line for line in workflow.splitlines() if line.startswith("    timeout-minutes:")] == [expected_timeout],
+            "Windows installed job must retain its exact normal100/retained65/selection340/default35 timeout",
+        )
         self.assertEqual(workflow.count("runs-on:"), 1)
 
     def test_windows_reader_fullwalk_request_binds_both_originals_and_complete_inventory(self):
@@ -12691,7 +12748,11 @@ class WindowsInstalledPassiveGateTests(unittest.TestCase):
         self.assertIn("permissions:\n  contents: read", workflow)
         job = workflow.split("  windows-installed-native:\n", 1)[1]
         self.assertIn("runs-on: windows-2025-vs2026", job)
-        self.assertIn("timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || 35 }}", job)
+        expected_timeout = "    timeout-minutes: ${{ inputs.scope == 'windows-normal-project-ui' && 100 || inputs.scope == 'windows-installer-retained-shell' && 65 || inputs.scope == 'windows-installer-selection' && 340 || 35 }}"
+        self.assertTrue(
+            [line for line in job.splitlines() if line.startswith("    timeout-minutes:")] == [expected_timeout],
+            "Windows installed job must retain its exact normal100/retained65/selection340/default35 timeout",
+        )
         blocks = {}
         for block in job.split("      - name:")[1:]:
             match = helper.re.search(r"(?m)^        id: ([a-z-]+)$", block)
@@ -13052,19 +13113,27 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         # Exact declared lock DATA with synthetic metadata paths; no Cargo is run.
         lock = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_text(encoding="utf-8"))
         source, root = Path("/reviewed-source"), Path("/private-ui-compiler")
-        ids = {(row["name"], row["version"]): row["name"] + "@" + row["version"] for row in lock["package"]}
+        # This independent fixture omits only its explicitly named inactive
+        # ten from metadata, not from the supplied original full34 lock.
+        assert len(lock["package"]) == 34
+        active = [row for row in lock["package"] if row["name"] not in WINDOWS_NATIVE_SHA2_INACTIVE_FIXTURE_NAMES]
+        assert len(active) == 24
+        ids = {(row["name"], row["version"]): row["name"] + "@" + row["version"] for row in active}
         packages, nodes = [], []
         native = ids[("mrk-windows-installed-native", "0.1.0")]
-        for row in lock["package"]:
+        for row in active:
             key = (row["name"], row["version"])
             path = (source / helper.WINDOWS_INSTALLED_CRATE if ids[key] == native else
                     root / "cargo/registry/src/index.crates.io-fixed" / (key[0] + "-" + key[1]))
             features = deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES) if ids[key] == native else {}
             target = {"name": key[0].replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"], "src_path": str(path / "src/lib.rs")}
             packages.append({"id": ids[key], "name": key[0], "version": key[1], "source": row.get("source"),
-                "manifest_path": str(path / "Cargo.toml"), "features": features, "targets": [target]})
+                "manifest_path": str(path / "Cargo.toml"), "features": features, "targets": [target],
+                "dependencies": [deepcopy(WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE)] if ids[key] == native else []})
             dependencies = []
             for spelling in row.get("dependencies", []):
+                if ids[key] == native and spelling == "sha2":
+                    continue
                 pieces = spelling.split(" ")
                 matched = [value for pair, value in ids.items() if pair[0] == pieces[0] and (len(pieces) == 1 or pair[1] == pieces[1])]
                 assert len(matched) == 1
@@ -13091,7 +13160,13 @@ class WindowsNormalUiPrerequisiteTests(unittest.TestCase):
         self.assertIn("--offline", argv); self.assertIn("--no-run", argv)
         self.assertEqual(helper.WINDOWS_NATIVE_DECLARED_FEATURES, {
             "qualification-result": [], "runtime-publication": [], "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
-            "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"]})
+            "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"],
+            "installer-acquisition": ["dep:sha2"],
+            "installer-protected-fixture": ["installer-acquisition", "runtime-publication", "qualification-result"],
+            "installer-selection": ["installer-acquisition", "runtime-publication",
+                "windows-sys/Win32_System_Com_StructuredStorage", "windows-sys/Wdk_System_Registry"],
+            "installer-selection-fixture": ["installer-selection", "installer-protected-fixture"],
+            "image-writer": [], "image-stdio": ["image-writer"]})
         manifest = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertEqual(manifest["features"], helper.WINDOWS_NATIVE_DECLARED_FEATURES)
         target = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
@@ -14680,7 +14755,7 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         self.assertLessEqual(len(self.frame(frame)), 4096)
         extra = deepcopy(frame); extra["foreign"] = None
         self.assertEqual(nodes(extra), 179)
-        with self.assertRaisesRegex(helper.CheckFailure, "structure exceeds"):
+        with self.assertRaisesRegex(helper.CheckFailure, "projection fields differ"):
             helper.windows_normal_ui_observer_frame(self.frame(extra))
         for key in ("directoryFence", "observerRefusal", "startupRefusal"):
             changed = deepcopy(frame); changed["projection"][key]["sequence"] = 2
@@ -14690,6 +14765,109 @@ class WindowsNormalUiObserverDiagnosticTests(unittest.TestCase):
         later = deepcopy(row); later.pop("directoryFence"); later.update(sequence=2, event=2, step=2, pending=0, pendingStep=0)
         frame["projection"].update(last=later, records=2, bytes=550)
         self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame))["projection"]["directoryFence"], row)
+
+    def test_selected_user_data_parent_is_optional_first_only_closed_data(self):
+        legacy = self.frame_data()
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(legacy)), legacy)
+        self.assertNotIn("userDataParent", legacy["projection"])
+        for value in range(4):
+            frame = self.frame_data(); row = frame["projection"]["last"]
+            row.update(event=8, userDataParent=value)
+            frame["projection"]["userDataParent"] = deepcopy(row)
+            self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+            # Later refusal/exit cannot replace the first observed value0.
+            later = deepcopy(row); later.pop("userDataParent"); later.update(sequence=2, event=5, refusal=2)
+            frame["projection"].update(records=2, bytes=400, last=later, observerRefusal=deepcopy(later))
+            parsed = helper.windows_normal_ui_observer_frame(self.frame(frame))
+            self.assertEqual(parsed["projection"]["userDataParent"], row)
+            self.assertTrue(parsed["diagnosticOnly"])
+        frame = self.frame_data(); row = frame["projection"]["last"]
+        row.update(event=8, userDataParent=0, refusal=2, startup=(0x51 << 56) | (22 << 26) | (1 << 44))
+        frame["projection"].update(userDataParent=deepcopy(row), observerRefusal=deepcopy(row), startupRefusal=deepcopy(row))
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+        for field in ("last", "observerRefusal", "startupRefusal", "userDataParent"):
+            changed = deepcopy(frame); changed["projection"][field]["userDataParent"] = 1
+            with self.subTest(field=field), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+
+    def test_selected_user_data_parent_rejects_missing_null_foreign_and_conflicting_rows(self):
+        frame = self.frame_data(); row = frame["projection"]["last"]
+        row.update(event=8, userDataParent=0); frame["projection"]["userDataParent"] = deepcopy(row)
+        for bad in (None, True, -1, 4, "0", [], {}):
+            changed = deepcopy(frame)
+            for key in ("last", "userDataParent"): changed["projection"][key]["userDataParent"] = bad
+            with self.subTest(value=bad), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        mutations = []
+        absent = deepcopy(frame); absent["projection"].pop("userDataParent"); mutations.append(absent)
+        for value in (None, 0, True, {}, self.frame_data()["projection"]["last"]):
+            changed = deepcopy(frame); changed["projection"]["userDataParent"] = value; mutations.append(changed)
+        for field, value in (("sequence", 2), ("event", 1), ("userDataParent", 3)):
+            changed = deepcopy(frame); changed["projection"]["userDataParent"][field] = value; mutations.append(changed)
+        for event in range(1, 8):
+            changed = deepcopy(frame)
+            for key in ("last", "userDataParent"): changed["projection"][key]["event"] = event
+            mutations.append(changed)
+        for changed in mutations:
+            with self.subTest(frame=changed), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_observer_frame(self.frame(changed))
+        raw = self.frame(frame)
+        for changed in (raw.replace(b'"userDataParent":0', b'"userDataParent":0,"userDataParent":0', 1),
+                        raw.replace(b'"userDataParent":{', b'"userDataParent":null,"userDataParent":{', 1),
+                        raw[:-1], raw[:-2]):
+            with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(changed)
+
+    def test_selected_user_data_parent_exact_190_node_envelope_keeps_other_caps(self):
+        value = self.directory_fence_data(); value[1:3] = [3, [13, 1, False]]
+        value[7] = [True, 0xc00000bb, None, None]
+        frame = self.directory_fence_frame(value); row = frame["projection"]["last"]
+        row.update(sequence=2, startup=(0x51 << 56) | (22 << 26) | (1 << 44), refusal=42)
+        parent = self.frame_data()["projection"]["last"]; parent.update(event=8, userDataParent=0)
+        frame["projection"].update(records=2, bytes=550, observerRefusal=deepcopy(row),
+                                   startupRefusal=deepcopy(row), directoryFence=deepcopy(row), userDataParent=parent)
+        frame["captureFailure"] = None
+        def nodes(value):
+            return 1 + (sum(nodes(child) for child in value.values()) if type(value) is dict else
+                        sum(nodes(child) for child in value) if type(value) is list else 0)
+        self.assertEqual(nodes(frame), 190)
+        self.assertLessEqual(len(self.frame(frame)), 4096)
+        self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(frame)), frame)
+        extra = deepcopy(frame); extra["foreign"] = None
+        self.assertEqual(nodes(extra), 191)
+        with self.assertRaisesRegex(helper.CheckFailure, "structure exceeds"):
+            helper.windows_normal_ui_observer_frame(self.frame(extra))
+        for count in (58, 59):
+            changed = deepcopy(frame); changed["projection"]["records"] = count
+            for key in ("last", "observerRefusal", "startupRefusal", "directoryFence"):
+                changed["projection"][key]["sequence"] = count
+            if count == 58:
+                self.assertEqual(helper.windows_normal_ui_observer_frame(self.frame(changed)), changed)
+            else:
+                with self.assertRaises(helper.CheckFailure): helper.windows_normal_ui_observer_frame(self.frame(changed))
+
+    def test_selected_user_data_parent_uses_only_saved_path_after_bind_without_new_owner(self):
+        native = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"; app = SOURCE / helper.WINDOWS_INSTALLED_APP / "src"
+        shell = (app / "shell_windows.rs").read_text()
+        bind = shell.split("pub(super) fn bind(self:", 1)[1].split("pub(super) fn user_data(", 1)[0]
+        self.assertLess(bind.index("let path = match path"), bind.index("self.user_data.set(path)"))
+        self.assertLess(bind.index("self.user_data.set(path)"), bind.index("book.bind_context()"))
+        self.assertLess(bind.index("book.bind_context()"), bind.index("diagnostic.selected_user_data_parent("))
+        self.assertIn("self.user_data.get().map(PathBuf::as_path)", bind)
+        self.assertIn("&|| self.diagnostic_end().is_some()", bind)
+        cfg = shell.split("    fn observer_word(", 1)[0].rsplit("    #[cfg(", 1)[1].strip()
+        self.assertIn("    #[cfg(" + cfg, bind)
+        diagnostic = (native / "observer_diagnostic.rs").read_text()
+        observe = diagnostic.split("    pub fn selected_user_data_parent(", 1)[1].split("    fn emit(", 1)[0]
+        self.assertIn("selected.and_then(Path::parent), self.path.parent()", observe)
+        self.assertIn("self.emit_with_observation(Event::SelectedUserDataParent", observe)
+        emit = diagnostic.split("    fn emit_with_observation(", 1)[1].split("    fn append_original(", 1)[0]
+        self.assertIn("self.order.begin(event)", emit)
+        self.assertIn("self.append_original(raw.bytes(), permitted)", emit)
+        self.assertIn("self.order.disable()", emit)
+        for forbidden in ("canonicalize", "std::env", "std::fs", "PathBuf::from", ".to_path_buf()", ".lock()", "thread::spawn", "JournalFile::new"):
+            self.assertNotIn(forbidden, observe + emit)
+        main = (app / "shell.rs").read_text()
+        self.assertLess(main.index(".bind_observer_diagnostic("), main.index(".bind(document"))
 
     def test_directory_fence_hook_retains_owner_and_original_lifecycle_custody(self):
         native = SOURCE / helper.WINDOWS_INSTALLED_CRATE / "src"; app = SOURCE / helper.WINDOWS_INSTALLED_APP / "src"
@@ -15537,7 +15715,8 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
         direct = {"getrandom": "0.3.4", "serde": "1.0.228", "serde_json": "1.0.145", "sha2": "0.10.9", "tokio": "1.48.0",
             "mrk-windows-installed-native": "0.1.0", "rfd": "0.15.4", "tauri": "2.11.5", "tauri-build": "2.6.3",
             **{name: row["version"] for name, row in WINDOWS_COMMON_PARSERS.items()}}
-        selected = {"mobile-release-kit-desktop": "0.1.0", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES}
+        selected = {"mobile-release-kit-desktop": "0.1.0", **direct, **helper.WINDOWS_NORMAL_UI_MATERIAL_PACKAGES,
+                    "windows-sys": "0.61.2", "windows-core": "0.61.2"}
         ids = {name: name + "@" + version for name, version in selected.items()}
         app, native = ids["mobile-release-kit-desktop"], ids["mrk-windows-installed-native"]
         packages, nodes = [], []
@@ -15550,7 +15729,9 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
                 sorted(("compression", "custom-protocol", "tauri-runtime-wry", "webview2-com", "webkit2gtk", "wry")) if name == "tauri" else
                 ["os-webview", "protocol"] if name == "wry" else ["alloc"] if name == "zeroize" else [])
             declarations = app_features if ids[name] == app else deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES) if ids[name] == native else {feature: [] for feature in active}
-            dependencies = list(direct) if ids[name] == app else [item for item in selected if item not in direct and item != "mobile-release-kit-desktop"] if name == "tauri" else []
+            dependencies = (list(direct) if ids[name] == app else ["windows-sys", "windows", "webview2-com", "windows-core"]
+                if ids[name] == native else [item for item in selected if item not in direct and item != "mobile-release-kit-desktop"]
+                if name == "tauri" else [])
             targets = [{"name": name.replace("-", "_"), "kind": ["lib"], "crate_types": ["lib"], "src_path": str(manifest.parent / "src/lib.rs")}]
             if name in ("mobile-release-kit-desktop", "webview2-com-sys"):
                 targets.append({"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"], "src_path": str(manifest.parent / "build.rs")})
@@ -15565,6 +15746,12 @@ class WindowsNormalUiGuiTests(unittest.TestCase):
                         "rename": WINDOWS_COMMON_PARSERS[dependency]["rename"], "optional": False,
                         "uses_default_features": False, "features": list(WINDOWS_COMMON_PARSERS[dependency]["features"]),
                         "registry": None} if dependency in WINDOWS_COMMON_PARSERS else {})} for dependency in dependencies]})
+            if ids[name] == native:
+                for declaration in packages[-1]["dependencies"]:
+                    declaration.update(req="=" + selected[declaration["name"]], rename=None,
+                        optional=declaration["name"] != "windows-sys", uses_default_features=declaration["name"] != "windows-core",
+                        features=[], registry=None)
+                packages[-1]["dependencies"].append(deepcopy(WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE))
             nodes.append({"id": ids[name], "features": active, "dependencies": [ids[dependency] for dependency in dependencies],
                 "deps": [{"name": (WINDOWS_COMMON_PARSERS.get(dependency, {}).get("rename") or dependency).replace("-", "_"),
                           "pkg": ids[dependency], "dep_kinds": [{"kind": None, "target": None}]} for dependency in dependencies]})
@@ -17147,6 +17334,1220 @@ class WindowsNormalUiInertRegressionTests(unittest.TestCase):
             self.assertEqual(result["notVerified"],list(helper.WINDOWS_NORMAL_UI_NOT_VERIFIED))
             for private in ("PRIVATE","private-checkout","private-run"):
                 self.assertNotIn(private,raw.decode("ascii"))
+
+
+class WindowsImageWriterB2Native22Tests(unittest.TestCase):
+    """Synthetic owner DATA and SOURCE parity only; never native execution evidence."""
+
+    @staticmethod
+    def context():
+        return {**WindowsReaderGateTests.context(), "qualificationProfile": helper.WINDOWS_IMAGE_WRITER_B2_PROFILE,
+                "sdk": {"version": helper.WINDOWS_SDK_VERSION, "headers": []}}
+
+    @classmethod
+    def environment(cls):
+        context = cls.context()
+        ref = "refs/heads/verify/desktop-windows-image-writer-b2-native22"
+        return {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Windows",
+            "RUNNER_ARCH": "X64", "ImageOS": context["imageOS"], "ImageVersion": context["imageVersion"],
+            "GITHUB_JOB": "windows-installed-native", "GITHUB_RUN_ATTEMPT": "1",
+            "MRK_DESKTOP_HOSTED_CHECKS": helper.WINDOWS_INSTALLED_SCOPE, "GITHUB_SHA": context["sourceSha"],
+            "GITHUB_REPOSITORY": "example/reviewed", "GITHUB_REF": ref, "GITHUB_WORKFLOW_SHA": context["sourceSha"],
+            "GITHUB_WORKFLOW_REF": "example/reviewed/.github/workflows/desktop-foundation.yml@" + ref,
+            "GITHUB_RUN_ID": context["runId"], "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "MRK_DESKTOP_DISPATCH_SCOPE": "windows-image-writer-b2-native22", "MRK_DESKTOP_EXPECTED_SHA": context["sourceSha"]}
+
+    @classmethod
+    def native_graph_data(cls, bridge=False):
+        context = cls.context()
+        source, root = Path(context["source"]), Path(context["root"])
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        versions = {"mrk-windows-installed-native": "0.1.0", "windows-sys": "0.61.2", "windows-link": "0.2.1"}
+        locals_ = {"mrk-windows-installed-native": helper.WINDOWS_INSTALLED_CRATE}
+        if bridge:
+            versions["mrk-windows-image-writer-bridge"] = "0.1.0"
+            locals_["mrk-windows-image-writer-bridge"] = helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE
+        ids = {name: name + "@" + version for name, version in versions.items()}
+        declarations = {"mrk-windows-installed-native": [{"name": "windows-sys", "source": registry, "req": "=0.61.2",
+            "kind": None, "rename": None, "optional": False, "uses_default_features": True,
+            "features": list(helper.WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES),
+            "target": helper.WINDOWS_IMAGE_WRITER_B2_TARGET, "registry": None},
+            deepcopy(WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE)]}
+        if bridge:
+            declarations["mrk-windows-image-writer-bridge"] = [{"name": "mrk-windows-installed-native", "source": None,
+                "req": "*", "kind": None, "rename": None, "optional": False, "uses_default_features": False,
+                "features": ["image-writer", "image-stdio"], "target": helper.WINDOWS_IMAGE_WRITER_B2_TARGET,
+                "registry": None, "path": str(source / helper.WINDOWS_INSTALLED_CRATE)}]
+        packages = []
+        for name, version in versions.items():
+            directory = source / locals_[name] if name in locals_ else root / "cargo/registry/src/index.crates.io-fixed" / (name + "-" + version)
+            kind = ["cdylib"] if name == "mrk-windows-image-writer-bridge" else ["lib"]
+            features = (deepcopy(helper.WINDOWS_NATIVE_DECLARED_FEATURES) if name == "mrk-windows-installed-native" else
+                {feature: [] for feature in ("default", *helper.WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES)} if name == "windows-sys" else {})
+            packages.append({"id": ids[name], "name": name, "version": version, "source": None if name in locals_ else registry,
+                "manifest_path": str(directory / "Cargo.toml"), "features": features, "dependencies": declarations.get(name, []),
+                "targets": [{"name": "mrk_image_writer_native" if name == "mrk-windows-image-writer-bridge" else name.replace("-", "_"),
+                    "kind": kind, "crate_types": kind, "src_path": str(directory / "src/lib.rs")}]})
+        edges = {"mrk-windows-installed-native": ("windows-sys", helper.WINDOWS_IMAGE_WRITER_B2_TARGET),
+                 "windows-sys": ("windows-link", None), "windows-link": None}
+        if bridge:
+            edges["mrk-windows-image-writer-bridge"] = ("mrk-windows-installed-native", helper.WINDOWS_IMAGE_WRITER_B2_TARGET)
+        nodes = []
+        for name in versions:
+            edge = edges[name]
+            features = ["image-stdio", "image-writer"] if name == "mrk-windows-installed-native" else (
+                sorted(("default", *helper.WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES)) if name == "windows-sys" else [])
+            nodes.append({"id": ids[name], "features": features, "dependencies": [] if edge is None else [ids[edge[0]]],
+                "deps": [] if edge is None else [{"name": edge[0].replace("-", "_"), "pkg": ids[edge[0]],
+                                               "dep_kinds": [{"kind": None, "target": edge[1]}]}]})
+        selected = "mrk-windows-image-writer-bridge" if bridge else "mrk-windows-installed-native"
+        return {"version": 1, "packages": packages, "workspace_root": str(source / locals_[selected]),
+                "workspace_members": [ids[selected]], "workspace_default_members": [ids[selected]], "target_directory": str(root / "target"),
+                "resolve": {"root": ids[selected], "nodes": nodes}}, context
+
+    @classmethod
+    def graph(cls, value, context, bridge=False):
+        return helper.windows_image_writer_b2_graph(value, source=Path(context["source"]), root=Path(context["root"]), bridge=bridge)
+
+    @staticmethod
+    def compiler_rows(graph, context):
+        rows = []
+        for key in sorted(graph["nodes"], key=lambda key: (key == graph["rootId"], key)):
+            package = graph["packages"][key]
+            selected = key == graph["rootId"]
+            target = deepcopy(package["targets"][0])
+            executable = Path(context["root"]) / "target" / helper.TARGETS["windows"] / "debug/deps" / (target["name"] + "-fixed.exe")
+            rows.append({"reason": "compiler-artifact", "package_id": key, "manifest_path": package["manifest_path"],
+                         "target": target, "features": graph["unitFeatures"][key],
+                         "profile": {"test": selected, "debug_assertions": True}, "fresh": False,
+                         "executable": str(executable) if selected else None})
+        return [*rows, {"reason": "build-finished", "success": True}]
+
+    @staticmethod
+    def raw_rows(rows):
+        return b"\n".join(json.dumps(row, separators=(",", ":")).encode("ascii") for row in rows)
+
+    @staticmethod
+    def output(role, filtered=17):
+        names = helper.windows_image_writer_b2_selectors(role)
+        return ("running " + str(len(names)) + " tests\n"
+                + "\n".join("test " + name + " ... ok" for name in names)
+                + "\ntest result: ok. " + str(len(names))
+                + " passed; 0 failed; 0 ignored; 0 measured; " + str(filtered) + " filtered out; finished in 0.01s\n").encode("ascii")
+
+    def test_b2_explicit_binding_is_not_prepared_runtime_ui_or_publisher(self):
+        with patch.dict(helper.os.environ, self.environment(), clear=True), patch.object(helper.sys, "platform", "win32"), \
+                patch.object(helper.sys, "maxsize", 2**63 - 1), patch.object(helper.sys, "version", helper.PYTHON + " synthetic"):
+            binding = helper.windows_installed_binding()
+        self.assertEqual(binding["qualificationProfile"], "windows-image-writer-b2-native22-v1")
+        self.assertEqual(binding["ref"], "refs/heads/verify/desktop-windows-image-writer-b2-native22")
+        context = self.context()
+        for predicate in (helper.windows_installed_prepared_profile, helper.windows_normal_ui_profile,
+                          helper.windows_fullwalk_profile, helper.windows_installed_passive_profile,
+                          helper.windows_runtime_publication_profile, helper.windows_installed_publisher_required):
+            self.assertIs(predicate(context), False)
+        self.assertIs(helper.windows_image_writer_b2_profile(context), True)
+        receipt = helper.windows_installed_phase_receipt(context, helper.WINDOWS_IMAGE_WRITER_B2_PHASE, claimOnly=True)
+        self.assertEqual((receipt["qualificationProfile"], receipt["status"]), ("windows-image-writer-b2-native22-v1", "started"))
+
+    def test_b2_binding_refuses_partial_conflicting_or_non_native_envelopes(self):
+        changes = ({"GITHUB_EVENT_NAME": "push"}, {"GITHUB_REF": "refs/heads/verify/desktop-windows-installed-native"},
+            {"GITHUB_RUN_ATTEMPT": "2"}, {"MRK_DESKTOP_DISPATCH_SCOPE": "windows-installed-native"},
+            {"MRK_DESKTOP_EXPECTED_SHA": ""}, {"GITHUB_WORKFLOW_SHA": "9" * 40}, {"GITHUB_WORKFLOW_REF": "foreign"},
+            {"RUNNER_OS": "Linux"}, {"RUNNER_ARCH": "ARM64"}, {"RUNNER_ENVIRONMENT": "self-hosted"},
+            {"GITHUB_JOB": "other"}, {"GITHUB_RUN_ID": "0"}, {"ImageOS": "win22"})
+        for change in changes:
+            with self.subTest(change=change), patch.dict(helper.os.environ, {**self.environment(), **change}, clear=True), \
+                    patch.object(helper.sys, "platform", "win32"), patch.object(helper.sys, "maxsize", 2**63 - 1), \
+                    patch.object(helper.sys, "version", helper.PYTHON + " synthetic"), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_binding()
+        with patch.dict(helper.os.environ, self.environment(), clear=True), patch.object(helper.sys, "platform", "linux"), \
+                self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_binding()
+
+    def test_b2_roles_are_closed_and_never_union_helper_publication_or_ui_features(self):
+        context = self.context()
+        for role, wanted in (("native", ["image-stdio"]), ("bridge", []), ("app", ["windows-metadata-images-loader"])):
+            self.assertEqual(helper.windows_installed_features(context, role), wanted)
+        for role in ("helper", "observer", "other", [], None):
+            with self.subTest(role=role), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_features(context, role)
+        legacy = WindowsReaderGateTests.context()
+        self.assertEqual(helper.windows_installed_features(legacy, "native"), [])
+        self.assertEqual(helper.windows_installed_features(legacy, "app"), [])
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_features(legacy, "bridge")
+        publication = {**legacy, "qualificationProfile": helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE}
+        self.assertEqual(helper.windows_installed_features(publication, "native"), ["runtime-publication"])
+        self.assertEqual(helper.windows_installed_features(publication, "app"), ["windows-runtime-publisher"])
+        self.assertEqual(helper.windows_installed_features(publication, "helper"), ["windows-runtime-publisher"])
+        ui = {**legacy, "qualificationProfile": helper.WINDOWS_NORMAL_UI_PROFILE}
+        self.assertEqual(helper.windows_installed_features(ui, "native"), ["desktop-ui"])
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_features({**context, "qualificationProfile": "unknown-b2"}, "native")
+
+    def test_b2_exact_three_compile_argv_keep_locked_offline_lib_no_run_and_one_job(self):
+        context = self.context()
+        common = ["/fixed-cargo", "test", "--locked", "--offline", "--jobs", "1", "--no-default-features",
+                  "--target", "x86_64-pc-windows-msvc"]
+        for builder, crate, features in (
+                (helper.windows_fullwalk_native_argv, "desktop/native/windows-installed-native", ["image-stdio"]),
+                (helper.windows_image_writer_b2_bridge_argv, "desktop/native/windows-image-writer-bridge", []),
+                (helper.windows_installed_app_argv, "desktop/src-tauri", ["windows-metadata-images-loader"])):
+            wanted = [*common, "--manifest-path", "/reviewed-source/" + crate + "/Cargo.toml",
+                "--target-dir", "/owned-windows-gate/target", *(["--features", ",".join(features)] if features else []),
+                "--lib", "--no-run", "--message-format=json"]
+            self.assertEqual(builder("/fixed-cargo", context), wanted)
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_image_writer_b2_bridge_argv("/fixed-cargo", WindowsReaderGateTests.context())
+
+    def test_b2_selectors_match_original_source_methods_not_an_extracted_harness(self):
+        native = (SOURCE / "desktop/native/windows-installed-native/src/image_stdio_tests.rs").read_text(encoding="utf-8")
+        bridge = (SOURCE / "desktop/native/windows-image-writer-bridge/src/stdio.rs").read_text(encoding="utf-8").split("mod tests {", 1)[1]
+        app = (SOURCE / "desktop/src-tauri/src/edit_owner.rs").read_text(encoding="utf-8").split("mod windows_image_transport {", 1)[1].split("\n}\n", 1)[0]
+        for role, module, text, count in (("native", "image_stdio::tests", native, 16),
+                ("bridge", "stdio::tests", bridge, 3), ("app", "edit_owner::windows_image_transport::data_tests", app, 3)):
+            names = re.findall(r"(?m)^[ \t]*#\[test\]\n[ \t]*fn ([a-z_0-9]+)\(\)", text)
+            self.assertEqual(tuple(module + "::" + name for name in names), helper.windows_image_writer_b2_selectors(role))
+            self.assertEqual(len(set(names)), count)
+            self.assertNotIn("#[ignore", text)
+        self.assertEqual(sum(map(len, (helper.WINDOWS_IMAGE_WRITER_B2_NATIVE_INERT,
+            helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE_INERT, helper.WINDOWS_IMAGE_WRITER_B2_APP_INERT))), 22)
+
+    def test_b2_manifest_and_source_authored_bridge_lock_preserve_original_packages(self):
+        native = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.toml").read_text(encoding="utf-8"))
+        bridge = helper.tomllib.loads((SOURCE / helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.toml").read_text(encoding="utf-8"))
+        app = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(native["features"], helper.WINDOWS_NATIVE_DECLARED_FEATURES)
+        for name in helper.WINDOWS_INSTALLED_SOURCES:
+            self.assertTrue((SOURCE / name).is_file(), name)
+        for name in ("image_loader_budget.rs", "image_loader_budget_tests.rs"):
+            self.assertIn(helper.WINDOWS_INSTALLED_CRATE + "/src/" + name, helper.WINDOWS_INSTALLED_SOURCES)
+        platform = native["target"][helper.WINDOWS_IMAGE_WRITER_B2_TARGET]["dependencies"]["windows-sys"]
+        self.assertEqual(platform["features"], list(helper.WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES))
+        self.assertEqual(bridge["lib"], {"name": "mrk_image_writer_native", "crate-type": ["cdylib"], "path": "src/lib.rs"})
+        dependency = bridge["target"][helper.WINDOWS_IMAGE_WRITER_B2_TARGET]["dependencies"]["mrk-windows-installed-native"]
+        self.assertEqual(dependency, {"path": "../windows-installed-native", "default-features": False, "features": ["image-writer", "image-stdio"]})
+        self.assertEqual(app["features"]["windows-metadata-images-loader"],
+                         ["mrk-windows-installed-native/image-writer", "mrk-windows-installed-native/image-stdio"])
+        native_lock = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_text(encoding="utf-8")
+        bridge_lock = (SOURCE / helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.lock").read_text(encoding="utf-8")
+        original = native_lock.split("[[package]]")
+        proposed = bridge_lock.split("[[package]]")
+        added = [block for block in proposed[1:] if '\nname = "mrk-windows-image-writer-bridge"\n' in block]
+        self.assertEqual(len(added), 1)
+        self.assertEqual([proposed[0], *(block for block in proposed[1:] if block not in added)], original)
+        self.assertEqual(helper.tomllib.loads("[[package]]" + added[0])["package"],
+                         [{"name": "mrk-windows-image-writer-bridge", "version": "0.1.0", "dependencies": ["mrk-windows-installed-native"]}])
+        self.assertEqual((len(original) - 1, len(proposed) - 1), (34, 35))
+
+    def test_b2_native_three_and_bridge_four_graphs_have_distinct_original_roots(self):
+        for bridge in (False, True):
+            value, context = self.native_graph_data(bridge)
+            graph = self.graph(value, context, bridge)
+            self.assertEqual(len(graph["nodes"]), 4 if bridge else 3)
+            self.assertEqual(graph["rootId"], ("mrk-windows-image-writer-bridge" if bridge else "mrk-windows-installed-native") + "@0.1.0")
+            packages = helper.windows_installed_native_graph(value, source=Path(context["source"]), root=Path(context["root"]),
+                                                             features=["image-stdio"], bridge=bridge)
+            self.assertEqual(packages, graph["namedPackages"])
+            self.assertEqual(graph["unitFeatures"]["mrk-windows-installed-native@0.1.0"], ["image-stdio", "image-writer"])
+            if bridge:
+                self.assertEqual(graph["unitFeatures"][graph["rootId"]], [])
+                self.assertEqual(graph["packages"][graph["rootId"]]["targets"][0]["kind"], ["cdylib"])
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_native_graph(value, source=Path(context["source"]), features=["image-stdio"])
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_native_graph(value, source=Path(context["source"]), root=Path(context["root"]),
+                                                  features=["image-stdio", "image-writer"], bridge=True)
+
+    def test_b2_graph_refuses_foreign_packages_workspaces_sources_and_cdylib_drift(self):
+        value, context = self.native_graph_data(True)
+        mutations = {
+            "duplicate-package": lambda data: data["packages"].append(deepcopy(data["packages"][0])),
+            "wrong-version": lambda data: data["packages"][1].update(version="0.61.3"),
+            "foreign-registry-root": lambda data: data["packages"][1].update(manifest_path="/ambient/windows-sys-0.61.2/Cargo.toml"),
+            "foreign-native": lambda data: data["packages"][0].update(manifest_path="/other/Cargo.toml"),
+            "workspace": lambda data: data.update(workspace_root="/other"),
+            "workspace-members": lambda data: data["workspace_members"].append(data["packages"][0]["id"]),
+            "target-root": lambda data: data.update(target_directory="/other/target"),
+            "wrong-root": lambda data: data["resolve"].update(root=data["packages"][0]["id"]),
+            "bridge-rlib-substitution": lambda data: data["packages"][-1]["targets"][0].update(kind=["lib"], crate_types=["lib"]),
+            "bridge-name": lambda data: data["packages"][-1]["targets"][0].update(name="mrk_windows_image_writer_bridge"),
+            "build-script": lambda data: data["packages"][0]["targets"].append({"kind": ["custom-build"]}),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(value); change(altered)
+                with self.assertRaises(helper.CheckFailure):
+                    self.graph(altered, context, True)
+
+    def test_b2_graph_refuses_feature_unions_non_normal_edges_and_declaration_drift(self):
+        value, context = self.native_graph_data(True)
+        mutations = {
+            "qualification-dev-leak": lambda data: data["resolve"]["nodes"][0]["features"].append("qualification-result"),
+            "missing-image-writer": lambda data: data["resolve"]["nodes"][0].update(features=["image-stdio"]),
+            "native-extra-feature-map": lambda data: data["packages"][0]["features"].update(other=[]),
+            "bridge-defaults": lambda data: data["packages"][-1]["dependencies"][0].update(uses_default_features=True),
+            "bridge-feature-seed": lambda data: data["packages"][-1]["dependencies"][0].update(features=["image-stdio"]),
+            "native-platform-seed": lambda data: data["packages"][0]["dependencies"][0]["features"].pop(),
+            "wrong-platform-target": lambda data: data["resolve"]["nodes"][0]["deps"][0]["dep_kinds"][0].update(target=None),
+            "dependency-dev-unit": lambda data: data["resolve"]["nodes"][-1]["deps"][0]["dep_kinds"][0].update(kind="dev"),
+            "duplicate-dep-edge": lambda data: data["resolve"]["nodes"][0]["deps"].append(deepcopy(data["resolve"]["nodes"][0]["deps"][0])),
+            "missing-edge": lambda data: data["resolve"]["nodes"][0].update(dependencies=[]),
+            "bridge-active-feature": lambda data: (data["packages"][-1]["features"].update(other=[]), data["resolve"]["nodes"][-1].update(features=["other"])),
+            "unrelated-platform-feature": lambda data: (data["packages"][1]["features"].update(unrelated=[]),
+                data["resolve"]["nodes"][1].update(features=sorted([*data["resolve"]["nodes"][1]["features"], "unrelated"]))),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(value); change(altered)
+                with self.assertRaises(helper.CheckFailure):
+                    self.graph(altered, context, True)
+
+    def test_b2_original_compiler_units_allow_native_lib_and_bridge_cdylib_libtests(self):
+        for bridge in (False, True):
+            value, context = self.native_graph_data(bridge)
+            graph = self.graph(value, context, bridge)
+            rows = self.compiler_rows(graph, context)
+            expected = Path(rows[-2]["executable"])
+            normal_root = {**deepcopy(rows[-2]), "profile": {"test": False}, "executable": None, "fresh": True}
+            warning = {"reason": "compiler-message", "package_id": graph["rootId"], "target": rows[-2]["target"]}
+            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)) as original:
+                self.assertEqual(helper.windows_image_writer_b2_test_path(self.raw_rows([normal_root, warning, *rows]), graph,
+                    source=Path(context["source"]), root=Path(context["root"])), expected)
+                original.assert_called_once_with(str(expected), target_root=Path(context["root"]) / "target")
+
+    def test_b2_compiler_refusals_precede_any_original_executable_filesystem_admission(self):
+        value, context = self.native_graph_data(True)
+        graph = self.graph(value, context, True)
+        rows = self.compiler_rows(graph, context)
+        mutations = {
+            "duplicate-unit": lambda data: data.insert(0, deepcopy(data[0])),
+            "missing-dependency": lambda data: data.pop(0),
+            "dependency-test": lambda data: data[0]["profile"].update(test=True),
+            "dependency-executable": lambda data: data[0].update(executable=data[-2]["executable"]),
+            "native-app-feature-union": lambda data: next(row for row in data if row.get("package_id") == "mrk-windows-installed-native@0.1.0").update(features=["image-stdio", "image-writer", "qualification-result"]),
+            "root-feature": lambda data: data[-2].update(features=["default"]),
+            "root-manifest": lambda data: data[-2].update(manifest_path="/other/Cargo.toml"),
+            "root-source": lambda data: data[-2]["target"].update(src_path="/other/lib.rs"),
+            "root-fresh": lambda data: data[-2].update(fresh=True),
+            "root-profile": lambda data: data[-2]["profile"].update(test=False),
+            "root-no-executable": lambda data: data[-2].update(executable=None),
+            "root-dll-not-test": lambda data: data[-2].update(executable=data[-2]["executable"].replace(".exe", ".dll")),
+            "root-wrong-directory": lambda data: data[-2].update(executable="/owned-windows-gate/target/other/mrk_image_writer_native-fixed.exe"),
+            "bridge-lib-substitution": lambda data: data[-2]["target"].update(kind=["lib"], crate_types=["lib"]),
+            "failed-build": lambda data: data[-1].update(success=False),
+            "missing-final": lambda data: data.pop(),
+            "after-final": lambda data: data.append(deepcopy(data[-2])),
+            "script-unit": lambda data: data.insert(0, {"reason": "build-script-executed", "package_id": graph["rootId"]}),
+            "foreign-warning": lambda data: data.insert(0, {"reason": "compiler-message", "package_id": "foreign", "target": rows[-2]["target"]}),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(rows); change(altered)
+                with patch.object(helper, "ordinary_windows_executable", side_effect=AssertionError("refused DATA cannot inspect an executable")) as original:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.windows_image_writer_b2_test_path(self.raw_rows(altered), graph, source=Path(context["source"]), root=Path(context["root"]))
+                    original.assert_not_called()
+
+    @classmethod
+    def app_graph_data(cls):
+        value, lock, _ = WindowsReaderGateTests.graph_data()
+        context = cls.context()
+        packages = {row["name"]: row for row in value["packages"]}
+        nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+        app, native = packages["mobile-release-kit-desktop"], packages["mrk-windows-installed-native"]
+        app["features"]["windows-metadata-images-loader"] = ["mrk-windows-installed-native/image-writer", "mrk-windows-installed-native/image-stdio"]
+        nodes[app["id"]]["features"] = ["windows-metadata-images-loader"]
+        nodes[native["id"]]["features"] = ["image-stdio", "image-writer", "qualification-result"]
+        return value, lock, context
+
+    def test_b2_app_keeps_exact_two_locals_and_its_existing_qualification_dev_seam(self):
+        value, lock, context = self.app_graph_data()
+        def check(data, **options):
+            return helper.windows_installed_app_graph(data, lock, source=Path(context["source"]),
+                                                      root=Path(context["root"]), image_writer=True, **options)
+        graph = check(value)
+        self.assertEqual(set(graph["localIds"]), {"mobile-release-kit-desktop", "mrk-windows-installed-native"})
+        self.assertIs(graph["publication"], False)
+        features = helper.windows_installed_app_unit_features(graph)
+        self.assertEqual(features[graph["appId"]], ["windows-metadata-images-loader"])
+        self.assertEqual(features[graph["localIds"]["mrk-windows-installed-native"]], ["image-stdio", "image-writer", "qualification-result"])
+        with self.assertRaises(helper.CheckFailure):
+            check(value, publication=True)
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_app_unit_features(graph, helper=True)
+        mutations = {
+            "missing-dev-seam": lambda data: data["resolve"]["nodes"][1].update(features=["image-stdio", "image-writer"]),
+            "native-publisher-union": lambda data: data["resolve"]["nodes"][1].update(features=["image-stdio", "image-writer", "qualification-result", "runtime-publication"]),
+            "app-publisher-union": lambda data: data["resolve"]["nodes"][0].update(features=["windows-metadata-images-loader", "windows-runtime-publisher"]),
+            "loader-forwards-publication": lambda data: data["packages"][0]["features"]["windows-metadata-images-loader"].append("mrk-windows-installed-native/runtime-publication"),
+            "dev-declaration-broadening": lambda data: next(dep for dep in data["packages"][0]["dependencies"]
+                if dep["name"] == "mrk-windows-installed-native" and dep["kind"] == "dev")["features"].append("image-stdio"),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(value); change(altered)
+                with self.assertRaises(helper.CheckFailure):
+                    check(altered)
+
+    def test_b2_app_compiler_requires_loader_root_and_normal_native_dev_features(self):
+        value, lock, context = self.app_graph_data()
+        graph = helper.windows_installed_app_graph(value, lock, source=Path(context["source"]), root=Path(context["root"]), image_writer=True)
+        features = helper.windows_installed_app_unit_features(graph)
+        app, native = graph["packages"][graph["appId"]], graph["packages"][graph["localIds"]["mrk-windows-installed-native"]]
+        native_row = {"reason": "compiler-artifact", "package_id": native["id"], "manifest_path": native["manifest_path"],
+            "target": native["targets"][0], "features": features[native["id"]], "profile": {"test": False}, "executable": None, "fresh": False}
+        executable = Path(context["root"]) / "target/x86_64-pc-windows-msvc/debug/deps/mobile_release_desktop-fixed.exe"
+        app_row = {"reason": "compiler-artifact", "package_id": app["id"], "manifest_path": app["manifest_path"],
+            "target": app["targets"][0], "features": ["windows-metadata-images-loader"],
+            "profile": {"test": True, "debug_assertions": True}, "executable": str(executable), "fresh": False}
+        rows = [native_row, app_row, {"reason": "build-finished", "success": True}]
+        def check(data):
+            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+                return helper.windows_installed_app_test_path(self.raw_rows(data), graph, source=Path(context["source"]), root=Path(context["root"]))
+        self.assertEqual(check(rows), executable)
+        for role, field, value in ((0, "features", ["image-stdio", "image-writer"]), (1, "features", []),
+                                  (0, "profile", {"test": True}), (1, "fresh", True)):
+            with self.subTest(role=role, field=field), io.StringIO() as diagnostics:
+                with redirect_stdout(diagnostics), self.assertRaises(helper.CheckFailure):
+                    altered = deepcopy(rows); altered[role][field] = value
+                    check(altered)
+                if field == "features":
+                    expected = {
+                        "diagnosticOnly": True, "role": "app", "unitKind": "lib", "first": "features",
+                        "package": {"state": "admitted", "version": "0.1.0",
+                                    "name": ("mrk-windows-installed-native", "mobile-release-kit-desktop")[role]},
+                        "checks": {"features": False, "manifest": None, "profile-object": None, "test-boolean": None},
+                        "expectedFeatures": {"state": "admitted", "values": (
+                            ["image-stdio", "image-writer", "qualification-result"] if role == 0
+                            else ["windows-metadata-images-loader"])},
+                        "actualFeatures": {"state": "admitted", "values": value},
+                    }
+                    expected_line = "MRK_WINDOWS_COMPILER_UNIT_REFUSED=" + json.dumps(
+                        expected, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n"
+                    self.assertTrue(diagnostics.getvalue() == expected_line,
+                                    "Feature refusal must emit exactly its expected bounded diagnostic")
+                else:
+                    self.assertTrue(diagnostics.getvalue() == "",
+                                    "Profile/fresh refusal must not emit a compiler-unit diagnostic")
+
+    def test_b2_parser_requires_exact_positive_16_3_3_and_retains_only_observed_filtered_counts(self):
+        for role, count, filtered in (("native", 16, 0), ("bridge", 3, 999999), ("app", 3, 203)):
+            result = helper.windows_image_writer_b2_libtest(self.output(role, filtered), role)
+            self.assertEqual((result["passed"], result["failed"], result["ignored"], result["measured"], result["filteredObserved"]),
+                             (count, 0, 0, 0, filtered))
+            self.assertEqual(result["names"], list(helper.windows_image_writer_b2_selectors(role)))
+        with self.assertRaises(helper.CheckFailure):
+            helper.windows_image_writer_b2_libtest(self.output("native"), "helper")
+
+    def test_b2_parser_refuses_zero_duplicate_missing_failed_ignored_extra_and_overbound_data(self):
+        for role in ("native", "bridge", "app"):
+            raw = self.output(role)
+            names = helper.windows_image_writer_b2_selectors(role)
+            variants = (b"", b"x" * (64 * 1024 + 1), raw + b"extra\n", raw + b"\xff",
+                raw.replace(names[0].encode(), names[1].encode()), raw.replace(names[0].encode(), b"other::test"),
+                raw.replace(b"running " + str(len(names)).encode() + b" tests", b"running 0 tests"),
+                raw.replace(b"0 ignored", b"1 ignored"), raw.replace(b"0 failed", b"1 failed"),
+                raw.replace(b"0 measured", b"1 measured"), raw.replace(b" ... ok", b" ... FAILED", 1),
+                raw.replace(b"17 filtered", b"1000000 filtered"),
+                raw.replace(("test " + names[0] + " ... ok\n").encode(), b""))
+            for number, altered in enumerate(variants):
+                with self.subTest(role=role, case=number), self.assertRaises(helper.CheckFailure):
+                    helper.windows_image_writer_b2_libtest(altered, role)
+
+    @classmethod
+    def bindings_data(cls):
+        context = cls.context()
+        root = Path(context["root"])
+        def record(name):
+            return {"size": 7, "sha256": hashlib.sha256(name.encode("ascii")).hexdigest()}
+        records = {name: record(name) for name in ("metadata.json", "bridge-metadata.json", "app-metadata.json",
+            "compiler-tools.json", "acquire-checks.json", "compile-checks.json", "fixed-cargo", "fixed-rustc")}
+        artifacts = {role: {"path": str(root / "target" / (role + "-fixed.exe")), **record(role),
+                           "identity": [1, 2, 7, 11, 13], "messages": record(role + "-messages")}
+                     for role in ("native", "bridge", "app")}
+        compiler = {"cargo": {"path": "/fixed-cargo", **records["fixed-cargo"]},
+                    "rustc": {"path": "/fixed-rustc", **records["fixed-rustc"]}}
+        acquired = helper.windows_installed_phase_receipt(context, "acquire", originalExitCode=0, appOriginalExitCode=0,
+            bridgeOriginalExitCode=0, metadata=records["metadata.json"], bridgeMetadata=records["bridge-metadata.json"],
+            appMetadata=records["app-metadata.json"], compilerTools=records["compiler-tools.json"])
+        compiled = helper.windows_installed_phase_receipt(context, "compile", originalExitCode=0, appOriginalExitCode=0,
+            bridgeOriginalExitCode=0, compiledTest=artifacts["native"], bridgeCompiledTest=artifacts["bridge"], appCompiledTest=artifacts["app"],
+            invocationSha256=hashlib.sha256(helper.canonical_json(helper.windows_fullwalk_native_argv("/fixed-cargo", context))).hexdigest(),
+            bridgeInvocationSha256=hashlib.sha256(helper.canonical_json(helper.windows_image_writer_b2_bridge_argv("/fixed-cargo", context))).hexdigest(),
+            appInvocationSha256=hashlib.sha256(helper.canonical_json(helper.windows_installed_app_argv("/fixed-cargo", context))).hexdigest())
+        originals = {"acquire-started.json": helper.windows_installed_phase_receipt(context, "acquire", claimOnly=True),
+            "compile-started.json": helper.windows_installed_phase_receipt(context, "compile", claimOnly=True),
+            "acquire-checks.json": acquired, "compile-checks.json": compiled, "compiler-tools.json": compiler,
+            "compiled-test.json": artifacts["native"], "bridge-compiled-test.json": artifacts["bridge"], "app-compiled-test.json": artifacts["app"]}
+        return context, deepcopy(originals), records, deepcopy(artifacts)
+
+    @staticmethod
+    def bind(context, originals, records, artifacts):
+        with patch.object(helper, "read_bounded_json", side_effect=lambda path, *_: deepcopy(originals[path.name])), \
+                patch.object(helper, "windows_installed_record", side_effect=lambda path, *_: deepcopy(records[path.name])), \
+                patch.object(helper, "windows_installed_artifact", side_effect=lambda _, bridge=False: deepcopy(artifacts["bridge" if bridge else "native"])), \
+                patch.object(helper, "windows_installed_app_artifact", return_value=deepcopy(artifacts["app"])), \
+                patch.object(helper, "run", side_effect=AssertionError("DATA binding must not rebuild")) as run:
+            result = helper.windows_image_writer_b2_compile_bindings(context)
+            run.assert_not_called()
+            return result
+
+    def test_b2_compile_binding_rechecks_all_three_originals_without_rebuilding(self):
+        context, originals, records, artifacts = self.bindings_data()
+        result = self.bind(context, originals, records, artifacts)
+        self.assertEqual(result["artifacts"], artifacts)
+        self.assertEqual(result["acquire"], records["acquire-checks.json"])
+        self.assertEqual(result["compile"], records["compile-checks.json"])
+
+    def test_b2_compile_binding_refuses_foreign_receipts_tools_artifacts_commands_and_boolean_exits(self):
+        context, originals, records, artifacts = self.bindings_data()
+        mutations = {
+            "foreign-claim": lambda data: data["compile-started.json"].update(sourceSha="9" * 40),
+            "foreign-profile": lambda data: data["compile-checks.json"].update(qualificationProfile=helper.WINDOWS_RUNTIME_PUBLICATION_PROFILE),
+            "failed-phase": lambda data: data["acquire-checks.json"].update(status="failed"),
+            "boolean-exit": lambda data: data["compile-checks.json"].update(bridgeOriginalExitCode=False),
+            "missing-app-exit": lambda data: data["compile-checks.json"].pop("appOriginalExitCode"),
+            "bridge-metadata-change": lambda data: data["acquire-checks.json"]["bridgeMetadata"].update(sha256="9" * 64),
+            "compiler-change": lambda data: data["compiler-tools.json"]["cargo"].update(sha256="9" * 64),
+            "bridge-artifact-change": lambda data: data["bridge-compiled-test.json"].update(sha256="9" * 64),
+            "app-artifact-change": lambda data: data["app-compiled-test.json"].update(sha256="9" * 64),
+            "native-argv-change": lambda data: data["compile-checks.json"].update(invocationSha256="9" * 64),
+            "bridge-argv-change": lambda data: data["compile-checks.json"].update(bridgeInvocationSha256="9" * 64),
+            "app-argv-change": lambda data: data["compile-checks.json"].update(appInvocationSha256="9" * 64),
+        }
+        for label, change in mutations.items():
+            with self.subTest(case=label):
+                altered = deepcopy(originals); change(altered)
+                with self.assertRaises(helper.CheckFailure):
+                    self.bind(context, altered, records, artifacts)
+        altered_artifacts = deepcopy(artifacts); altered_artifacts["native"]["identity"][-1] += 1
+        with self.assertRaises(helper.CheckFailure):
+            self.bind(context, originals, records, altered_artifacts)
+
+    def exercise_data(self, mode=None, clock=None):
+        context, originals, records, artifacts = self.bindings_data()
+        binding = self.bind(context, originals, records, artifacts)
+        environment = {"PATH": "/fixed"}
+        streams, calls = {}, []
+        failure = helper.CheckFailure("original selected command refused")
+        class Stream(io.StringIO):
+            def close(stream):
+                if not stream.closed:
+                    stream.saved = stream.getvalue().encode("ascii")
+                super().close()
+            def __exit__(stream, *args):
+                if mode == "unclosed" and stream is streams.get("b2-native.stdout"):
+                    return False
+                return super().__exit__(*args)
+        def opened(path, mode_, **kwargs):
+            self.assertEqual(mode_, "x")
+            self.assertEqual(path.parent, Path(context["root"]))
+            self.assertNotIn(path.name, streams)
+            stream = Stream(); streams[path.name] = stream
+            return stream
+        def run(argv, **kwargs):
+            role = ("native", "bridge", "app")[len(calls)]
+            self.assertEqual(argv, [artifacts[role]["path"], *helper.windows_image_writer_b2_selectors(role), "--exact", "--test-threads=1"])
+            self.assertIs(kwargs["env"], environment)
+            self.assertEqual(kwargs["cwd"], Path(context["root"]))
+            self.assertEqual(kwargs["check"], "windows-installed-app-inert-contracts" if role == "app" else "windows-installed-inert-contracts")
+            self.assertFalse(kwargs["output"].closed); self.assertFalse(kwargs["diagnostics"].closed)
+            calls.append((argv, kwargs["timeout"]))
+            if mode == "failure-second" and len(calls) == 2:
+                raise failure
+            kwargs["output"].write("running 0 tests\n" if mode == "bad-output" else self.output(role).decode("ascii"))
+            if mode == "stderr":
+                kwargs["diagnostics"].write("unexpected diagnostic")
+            return ""
+        def read(path, limit):
+            self.assertEqual(limit, 64 << 10)
+            self.assertTrue(streams[path.name].closed)
+            return streams[path.name].saved
+        def record(path, limit):
+            raw = read(path, limit)
+            return {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        result, error = None, None
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(Path, "open", new=opened))
+            stack.enter_context(patch.object(helper, "run", side_effect=run))
+            stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=read))
+            stack.enter_context(patch.object(helper, "windows_installed_record", side_effect=record))
+            inputs = stack.enter_context(patch.object(helper, "windows_installed_inputs"))
+            source = stack.enter_context(patch.object(helper, "source_unchanged"))
+            bindings = stack.enter_context(patch.object(helper, "windows_image_writer_b2_compile_bindings",
+                side_effect=[binding, {**binding, "compile": {"size": 0, "sha256": "0" * 64}}] if mode == "binding-drift" else None,
+                return_value=binding))
+            stack.enter_context(patch.object(helper.time, "monotonic", side_effect=clock if clock is not None else lambda: 0.0))
+            for name in ("tools", "windows_ordinary_original", "windows_ordinary_request", "windows_installed_retain_runtime"):
+                stack.enter_context(patch.object(helper, name, side_effect=AssertionError("B2 DATA cannot enter another owner")))
+            try:
+                result = helper.windows_image_writer_b2_data(context, environment, 210.0)
+            except helper.CheckFailure as caught:
+                error = caught
+        closed = {name: stream.closed for name, stream in streams.items()}
+        for stream in streams.values():
+            stream.close()  # Test-only in-memory scratch; never a native writer join.
+        return {"result": result, "error": error, "failure": failure, "calls": calls, "closed": closed,
+                "bindings": bindings.call_count, "inputs": inputs.call_count, "sources": source.call_count}
+
+    def test_b2_data_runs_exact_originals_serially_under_the_one_210_second_deadline(self):
+        observed = self.exercise_data(clock=[0.0, 10.0, 80.0, 90.0, 150.0, 160.0, 190.0])
+        self.assertIsNone(observed["error"])
+        self.assertEqual([timeout for _, timeout in observed["calls"]], [60, 60, 50])
+        self.assertEqual((observed["bindings"], observed["inputs"], observed["sources"]), (4, 6, 6))
+        self.assertEqual(len(observed["closed"]), 6)
+        self.assertTrue(all(observed["closed"].values()))
+        result = observed["result"]
+        self.assertEqual(result["testsPassed"], 22)
+        self.assertIs(result["dataContractsOnly"], True)
+        self.assertEqual([result["roles"][role]["passed"] for role in ("native", "bridge", "app")], [16, 3, 3])
+        self.assertEqual(result["notVerified"], list(helper.WINDOWS_IMAGE_WRITER_B2_NOT_VERIFIED))
+        for role, (argv, _) in zip(("native", "bridge", "app"), observed["calls"]):
+            self.assertIs(result["roles"][role]["originalWritersClosed"], True)
+            self.assertEqual(result["roles"][role]["invocationSha256"], hashlib.sha256(helper.canonical_json(argv)).hexdigest())
+
+    def test_b2_data_stops_on_first_command_close_stream_or_post_binding_refusal(self):
+        for mode, count in (("failure-second", 2), ("unclosed", 1), ("stderr", 1), ("bad-output", 1), ("binding-drift", 1)):
+            with self.subTest(mode=mode):
+                observed = self.exercise_data(mode)
+                self.assertIsInstance(observed["error"], helper.CheckFailure)
+                self.assertIsNone(observed["result"])
+                self.assertEqual(len(observed["calls"]), count)
+                if mode == "failure-second":
+                    self.assertIs(observed["error"], observed["failure"])
+                if mode == "unclosed":
+                    self.assertIs(observed["closed"]["b2-native.stdout"], False)
+
+    def test_b2_expired_original_deadline_cannot_create_writers_or_select_another_budget(self):
+        observed = self.exercise_data(clock=lambda: 210.0)
+        self.assertIsInstance(observed["error"], helper.CheckFailure)
+        self.assertEqual((observed["calls"], observed["closed"], observed["bindings"]), ([], {}, 0))
+
+    def test_b2_forbidden_phases_refuse_before_context_tools_or_any_ordinary_owner(self):
+        context = self.context()
+        for phase in ("windows-installed-native", "windows-installed-native-finalize", "windows-installed-runtime-data",
+                      "windows-normal-ui-prerequisite", "windows-normal-ui-setup-acquire"):
+            with self.subTest(phase=phase), patch.dict(helper.os.environ, self.environment(), clear=True), \
+                    patch.object(helper, "windows_installed_binding", return_value=context), \
+                    patch.object(helper, "windows_installed_context", side_effect=AssertionError("forbidden phase cannot inspect or create context")) as original, \
+                    patch.object(helper, "run", side_effect=AssertionError("forbidden phase cannot launch")) as run:
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                original.assert_not_called(); run.assert_not_called()
+        with patch.dict(helper.os.environ, self.environment(), clear=True), \
+                patch.object(helper, "windows_installed_binding", return_value=WindowsReaderGateTests.context()), \
+                patch.object(helper, "windows_installed_context", side_effect=AssertionError("foreign profile cannot enter B2")), \
+                self.assertRaises(helper.CheckFailure):
+            helper.windows_installed_phase(helper.WINDOWS_IMAGE_WRITER_B2_PHASE, helper.WINDOWS_INSTALLED_SCOPE)
+
+    def test_b2_phase_uses_existing_context_and_ends_before_ordinary_output_handoff(self):
+        context, originals, records, _ = self.bindings_data()
+        phase = helper.WINDOWS_IMAGE_WRITER_B2_PHASE
+        facts = {"dataContractsOnly": True, "testsPassed": 22}
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(helper.os.environ, self.environment(), clear=True))
+            stack.enter_context(patch.object(helper, "windows_installed_binding", return_value=context))
+            context_reader = stack.enter_context(patch.object(helper, "windows_installed_context", return_value=context))
+            stack.enter_context(patch.object(helper.time, "monotonic", return_value=100.0))
+            stack.enter_context(patch.object(helper, "read_bounded_json", side_effect=lambda path, *_: deepcopy(originals[path.name])))
+            stack.enter_context(patch.object(helper, "windows_installed_record", side_effect=lambda path, *_: deepcopy(records[path.name])))
+            stack.enter_context(patch.object(helper, "windows_sdk_root", return_value=Path("/sdk")))
+            stack.enter_context(patch.object(helper, "fixed_file_inventory", return_value=[]))
+            stack.enter_context(patch.object(helper, "clean_environment", return_value={"PATH": "/fixed"}))
+            stack.enter_context(patch.object(helper, "windows_installed_inputs"))
+            stack.enter_context(patch.object(helper, "source_unchanged"))
+            data = stack.enter_context(patch.object(helper, "windows_image_writer_b2_data", return_value=facts))
+            writes = stack.enter_context(patch.object(helper, "write_json"))
+            for name in ("run", "tools", "windows_ordinary_original", "windows_ordinary_request", "windows_ordinary_finalize",
+                         "windows_installed_runtime_identity", "windows_normal_ui_phase"):
+                stack.enter_context(patch.object(helper, name, side_effect=AssertionError("B2 phase must not enter historical owner")))
+            stack.enter_context(patch.object(Path, "open", side_effect=AssertionError("B2 DATA has no GITHUB_OUTPUT handoff")))
+            helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+            context_reader.assert_called_once_with(create=False, retention_only=False)
+            data.assert_called_once_with(context, {"PATH": "/fixed", "GITHUB_SHA": context["sourceSha"], "GITHUB_RUN_ID": context["runId"],
+                "MRK_WINDOWS_SOURCE_TREE": context["sourceTree"], "CARGO_TARGET_DIR": "/owned-windows-gate/target"}, 310.0)
+            self.assertEqual([call.args[0].name for call in writes.call_args_list], [phase + "-started.json", phase + "-checks.json"])
+            self.assertEqual(writes.call_args.args[1], helper.windows_installed_phase_receipt(context, phase, **facts))
+
+    def test_b2_retention_copies_only_bounded_data_and_never_observes_runtime_or_claims_native_success(self):
+        context, root = self.context(), Path(self.context()["root"])
+        originals = {"public-bindings.json": b"bindings", "b2-native.stdout": self.output("native"),
+                     "b2-bridge.stderr": b"", "windows-image-writer-b2-native22-checks.json": b'{"dataContractsOnly":true}'}
+        retained = {}
+        class Writer(io.BytesIO):
+            def close(stream):
+                if not stream.closed:
+                    retained[stream.name] = stream.getvalue()
+                super().close()
+        def opened(path, mode):
+            self.assertEqual((path.parent, mode), (root / "public", "xb"))
+            stream = Writer(); stream.name = path.name
+            return stream
+        def lstat(path):
+            self.assertEqual(path.parent, root)
+            if path.name == "bridge-compile-messages.jsonl":
+                return SimpleNamespace(st_size=(16 << 20) + 1)
+            if path.name not in originals:
+                raise FileNotFoundError
+            return SimpleNamespace(st_size=len(originals[path.name]))
+        def read(path, limit):
+            raw = (retained if path.parent == root / "public" else originals)[path.name]
+            self.assertLessEqual(len(raw), limit)
+            return raw
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(helper.os.environ, self.environment(), clear=True))
+            stack.enter_context(patch.object(helper, "windows_installed_binding", return_value=context))
+            reader = stack.enter_context(patch.object(helper, "windows_installed_context", return_value=context))
+            stack.enter_context(patch.object(Path, "lstat", new=lstat))
+            stack.enter_context(patch.object(Path, "open", new=opened))
+            stack.enter_context(patch.object(helper, "ordinary"))
+            stack.enter_context(patch.object(helper, "windows_installed_bytes", side_effect=read))
+            writes = stack.enter_context(patch.object(helper, "write_json"))
+            for name in ("run", "source_unchanged", "windows_ordinary_original", "windows_installed_retain_runtime",
+                         "windows_installed_runtime_identity", "windows_installed_passive_retain", "windows_fullwalk_retain"):
+                stack.enter_context(patch.object(helper, name, side_effect=AssertionError("retained B2 DATA has no runtime authority")))
+            helper.windows_installed_phase("retain", helper.WINDOWS_INSTALLED_SCOPE)
+            reader.assert_called_once_with(create=False, retention_only=True)
+            writes.assert_called_once()
+            path, receipt = writes.call_args.args
+        self.assertEqual(path, root / "public/retention.json")
+        self.assertEqual(retained, originals)
+        self.assertEqual({item["path"] for item in receipt["files"]}, set(originals))
+        self.assertEqual(receipt["omittedOverBound"], ["bridge-compile-messages.jsonl"])
+        self.assertIs(receipt["retentionOnlyNotNativeSuccess"], True)
+        self.assertIs(receipt["dataContractsOnly"], True)
+        self.assertEqual(receipt["qualificationProfile"], helper.WINDOWS_IMAGE_WRITER_B2_PROFILE)
+        self.assertNotIn("runtimeIdentity", receipt)
+        self.assertNotIn("testsPassed", receipt)
+
+    def test_b2_source_route_preserves_aggregate_bounds_and_has_no_new_process_wrapper(self):
+        text = HELPER.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        phase = functions["windows_installed_phase"]
+        budgets = next(node for node in ast.walk(phase) if isinstance(node, ast.Dict)
+                       and any(isinstance(key, ast.Name) and key.id == "WINDOWS_IMAGE_WRITER_B2_PHASE" for key in node.keys))
+        literal = {key.value: value.value for key, value in zip(budgets.keys, budgets.values) if isinstance(key, ast.Constant)}
+        self.assertEqual({key: literal[key] for key in ("acquire", "compile", "windows-installed-native")},
+                         {"acquire": 840, "compile": 660, "windows-installed-native": 210})
+        b2_budget = next(value for key, value in zip(budgets.keys, budgets.values)
+                         if isinstance(key, ast.Name) and key.id == "WINDOWS_IMAGE_WRITER_B2_PHASE")
+        self.assertEqual(b2_budget.value, 210)
+        data_text = ast.get_source_segment(text, functions["windows_image_writer_b2_data"])
+        self.assertNotIn("time.monotonic", data_text)
+        self.assertNotIn("windows_ordinary_", data_text)
+        for name, node in functions.items():
+            if name.startswith("windows_image_writer_b2_"):
+                source = ast.get_source_segment(text, node)
+                for forbidden in ("subprocess.", "Popen(", "os.system(", "Process(", "Thread(", "shell=True", "--ignored", "--nocapture", "--list"):
+                    self.assertNotIn(forbidden, source)
+
+    def test_b2_workflow_is_explicit_dispatch_same_job_and_excludes_ordinary_and_runtime_steps(self):
+        text = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        phase = "windows-image-writer-b2-native22"
+        self.assertNotIn(phase, text.split("  workflow_dispatch:", 1)[0])
+        self.assertIn(phase, next(line for line in text.splitlines() if "options:" in line))
+        job = text.split("  windows-installed-native:\n", 1)[1]
+        admission = job.split("    runs-on:", 1)[0]
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-windows-image-writer-b2-native22'", admission)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.scope == '" + phase + "'", admission)
+        self.assertIn('MRK_DESKTOP_DISPATCH_SCOPE:-}" == ' + phase, job)
+        blocks = re.split(r"(?m)^      - name: ", job)[1:]
+        selected = [block for block in blocks if "\n        id: image-writer-b2-native22\n" in block]
+        self.assertEqual(len(selected), 1)
+        self.assertIn("if: success() && inputs.scope == '" + phase + "'", selected[0])
+        self.assertIn("timeout-minutes: 4", selected[0])
+        self.assertIn("-I -S -B desktop/tools/ci_foundation.py " + phase, selected[0])
+        self.assertIn("shell: bash", selected[0])
+        for role in ("ordinary-preflight", "ordinary-owner", "runtime-data"):
+            block = next(block for block in blocks if "\n        id: " + role + "\n" in block)
+            condition = next(line for line in block.splitlines() if "if:" in line)
+            self.assertIn("inputs.scope != '" + phase + "'", condition)
+        for historical in ("windows-installed-native", "windows-installed-fullwalk", "windows-runtime-publication",
+                           "windows-installed-passive", "windows-normal-project-ui"):
+            self.assertIn(historical, admission)
+
+
+    def test_b2_acquisition_reuses_the_existing_owner_and_resolves_bridge_only_locked_offline(self):
+        context, _, records, _ = self.bindings_data()
+        context["rustup"] = "/fixed-rustup"
+        streams = []
+        def opened(path, mode, **kwargs):
+            self.assertEqual(path.parent, Path(context["root"])); self.assertEqual(mode, "x")
+            stream = io.StringIO(); streams.append(stream)
+            return stream
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(helper.os.environ, self.environment(), clear=True))
+            stack.enter_context(patch.object(helper, "windows_installed_binding", return_value=context))
+            stack.enter_context(patch.object(helper, "windows_installed_context", return_value=context))
+            stack.enter_context(patch.object(helper.time, "monotonic", return_value=100.0))
+            stack.enter_context(patch.object(helper, "windows_installed_record", side_effect=lambda path, *_: deepcopy(records[path.name])))
+            stack.enter_context(patch.object(helper, "windows_sdk_root", return_value=Path("/sdk")))
+            stack.enter_context(patch.object(helper, "fixed_file_inventory", return_value=[]))
+            stack.enter_context(patch.object(helper, "clean_environment", return_value={"PATH": "/fixed"}))
+            stack.enter_context(patch.object(helper, "windows_installed_inputs"))
+            stack.enter_context(patch.object(helper, "source_unchanged"))
+            stack.enter_context(patch.object(helper, "tools", return_value=("/fixed-cargo", "/fixed-rustc")))
+            metadata = stack.enter_context(patch.object(helper, "windows_installed_metadata",
+                                                       return_value={"synthetic": {"version": "0.1.0"}}))
+            stack.enter_context(patch.object(helper, "windows_installed_app_metadata", return_value={"nodes": {"synthetic": {}}}))
+            stack.enter_context(patch.object(Path, "open", new=opened))
+            run = stack.enter_context(patch.object(helper, "run", return_value=""))
+            writes = stack.enter_context(patch.object(helper, "write_json"))
+            for name in ("windows_fullwalk_acquire", "windows_ordinary_original", "windows_installed_helper_metadata"):
+                stack.enter_context(patch.object(helper, name, side_effect=AssertionError("B2 acquisition cannot select another profile")))
+            helper.windows_installed_phase("acquire", helper.WINDOWS_INSTALLED_SCOPE)
+            calls = run.call_args_list
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[0].args[0], ["/fixed-rustup", "toolchain", "install", helper.RUST, "--profile", "minimal", "--no-self-update"])
+            for call in calls:
+                self.assertEqual(call.kwargs["timeout"], 600)
+                self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"], "/owned-windows-gate/target")
+            for call, crate, features, offline in zip(calls[1:], (
+                    helper.WINDOWS_INSTALLED_CRATE, helper.WINDOWS_INSTALLED_APP, helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE),
+                    (["image-stdio"], ["windows-metadata-images-loader"], []), (False, False, True)):
+                argv = call.args[0]
+                self.assertEqual(argv[:3], ["/fixed-cargo", "metadata", "--locked"])
+                self.assertEqual("--offline" in argv, offline)
+                self.assertEqual(argv[-2:], ["--manifest-path", str(Path(context["source"]) / crate / "Cargo.toml")])
+                self.assertIn("--no-default-features", argv)
+                self.assertEqual(argv[argv.index("--filter-platform") + 1], helper.TARGETS["windows"])
+                self.assertEqual([argv[argv.index("--features") + 1]] if "--features" in argv else [], features)
+            self.assertEqual(metadata.call_args_list[0].args, (context,))
+            self.assertEqual(metadata.call_args_list[1].kwargs, {"bridge": True})
+            self.assertEqual(writes.call_args.args[0].name, "acquire-checks.json")
+            self.assertEqual(writes.call_args.args[1]["bridgeOriginalExitCode"], 0)
+        self.assertEqual(len(streams), 6)
+        self.assertTrue(all(stream.closed for stream in streams))
+
+    def test_b2_compilation_reuses_three_serial_existing_no_run_commands_and_bound_receipts(self):
+        context, originals, records, artifacts = self.bindings_data()
+        streams = []
+        def opened(path, mode, **kwargs):
+            self.assertEqual(path.parent, Path(context["root"])); self.assertEqual(mode, "x")
+            stream = io.StringIO(); streams.append(stream)
+            return stream
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(helper.os.environ, self.environment(), clear=True))
+            stack.enter_context(patch.object(helper, "windows_installed_binding", return_value=context))
+            stack.enter_context(patch.object(helper, "windows_installed_context", return_value=context))
+            stack.enter_context(patch.object(helper.time, "monotonic", return_value=100.0))
+            stack.enter_context(patch.object(helper, "read_bounded_json", side_effect=lambda path, *_: deepcopy(originals[path.name])))
+            stack.enter_context(patch.object(helper, "windows_installed_record", side_effect=lambda path, *_: deepcopy(records[path.name])))
+            stack.enter_context(patch.object(helper, "windows_sdk_root", return_value=Path("/sdk")))
+            stack.enter_context(patch.object(helper, "fixed_file_inventory", return_value=[]))
+            stack.enter_context(patch.object(helper, "clean_environment", return_value={"PATH": "/fixed"}))
+            stack.enter_context(patch.object(helper, "windows_installed_inputs"))
+            stack.enter_context(patch.object(helper, "source_unchanged"))
+            stack.enter_context(patch.object(helper, "tools", return_value=("/fixed-cargo", "/fixed-rustc")))
+            stack.enter_context(patch.object(helper, "windows_installed_artifact",
+                                            side_effect=lambda _, bridge=False: deepcopy(artifacts["bridge" if bridge else "native"])))
+            stack.enter_context(patch.object(helper, "windows_installed_app_artifact", return_value=deepcopy(artifacts["app"])))
+            stack.enter_context(patch.object(Path, "open", new=opened))
+            run = stack.enter_context(patch.object(helper, "run", return_value=""))
+            writes = stack.enter_context(patch.object(helper, "write_json"))
+            for name in ("windows_fullwalk_anchors", "windows_ordinary_original", "windows_installed_helper_outputs_absent",
+                         "windows_image_writer_b2_data"):
+                stack.enter_context(patch.object(helper, name, side_effect=AssertionError("compile-only phase cannot start another owner")))
+            helper.windows_installed_phase("compile", helper.WINDOWS_INSTALLED_SCOPE)
+            expected = [helper.windows_fullwalk_native_argv("/fixed-cargo", context),
+                        helper.windows_installed_app_argv("/fixed-cargo", context),
+                        helper.windows_image_writer_b2_bridge_argv("/fixed-cargo", context)]
+            self.assertEqual([call.args[0] for call in run.call_args_list], expected)
+            self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list], [600, 600, 600])
+            self.assertEqual([call.args[0].name for call in writes.call_args_list],
+                             ["compile-started.json", "compiled-test.json", "app-compiled-test.json", "bridge-compiled-test.json", "compile-checks.json"])
+            receipt = writes.call_args.args[1]
+            self.assertEqual(receipt["bridgeCompiledTest"], artifacts["bridge"])
+            self.assertEqual(receipt["bridgeOriginalExitCode"], 0)
+            self.assertEqual(receipt["bridgeInvocationSha256"], hashlib.sha256(helper.canonical_json(expected[2])).hexdigest())
+        self.assertEqual(len(streams), 6)
+        self.assertTrue(all(stream.closed for stream in streams))
+
+
+
+class WindowsRetainedSelectionRouteTests(unittest.TestCase):
+    """Closed-profile DATA only. Native completeness needs real Windows originals."""
+    @staticmethod
+    def environment(selection=True):
+        value = WindowsImageWriterB2Native22Tests.environment()
+        ref = "refs/heads/verify/desktop-windows-installer-retained-shell"
+        value.update(GITHUB_REF=ref, GITHUB_WORKFLOW_REF="example/reviewed/.github/workflows/desktop-foundation.yml@"+ref,
+            MRK_DESKTOP_DISPATCH_SCOPE="windows-installer-selection" if selection else "windows-installer-retained-shell")
+        return value
+
+    def test_shared_ref_has_two_exact_disjoint_profile_labels(self):
+        for selection, profile in ((True, helper.WINDOWS_SELECTION_PROFILE), (False, helper.WINDOWS_RETAINED_PROFILE)):
+            with patch.dict(os.environ, self.environment(selection), clear=True), \
+                 patch.object(helper.sys, "platform", "win32"), \
+                 patch.object(helper.sys, "version", helper.PYTHON+" fixed"):
+                bound = helper.windows_installed_binding()
+                self.assertEqual(bound["qualificationProfile"], profile)
+                self.assertTrue(helper.windows_installed_prepared_profile(bound))
+                self.assertFalse(helper.windows_image_writer_b2_profile(bound))
+                self.assertFalse(helper.windows_normal_ui_profile(bound))
+        for key, value in (("GITHUB_RUN_ATTEMPT", "2"), ("GITHUB_EVENT_NAME", "push"),
+                           ("MRK_DESKTOP_DISPATCH_SCOPE", "windows-image-writer-b2-native22"),
+                           ("GITHUB_REF", "refs/heads/main"), ("MRK_DESKTOP_EXPECTED_SHA", "0"*40)):
+            env = {**self.environment(), key: value}
+            with self.subTest(key=key), patch.dict(os.environ, env, clear=True), \
+                 patch.object(helper.sys, "platform", "win32"), \
+                 patch.object(helper.sys, "version", helper.PYTHON+" fixed"), self.assertRaises(helper.CheckFailure):
+                helper.windows_installed_binding()
+
+    def test_cross_profile_and_ordinary_phases_refuse_before_original_context_or_tools(self):
+        for profile, dispatch, phases in (
+            (helper.WINDOWS_SELECTION_PROFILE, helper.WINDOWS_SELECTION_DISPATCH,
+             ("windows-retained-finalize", "windows-installed-native", helper.WINDOWS_IMAGE_WRITER_B2_PHASE)),
+            (helper.WINDOWS_RETAINED_PROFILE, helper.WINDOWS_RETAINED_DISPATCH,
+             ("windows-selection-finalize", "windows-installed-native", helper.WINDOWS_IMAGE_WRITER_B2_PHASE)),
+        ):
+            for phase in phases:
+                with self.subTest(profile=profile, phase=phase), \
+                     patch.dict(os.environ, {"MRK_DESKTOP_DISPATCH_SCOPE": dispatch}, clear=True), \
+                     patch.object(helper, "windows_installed_binding", return_value={"qualificationProfile": profile}), \
+                     patch.object(helper, "windows_installed_context", side_effect=AssertionError("no context before admission")), \
+                     self.assertRaises(helper.CheckFailure):
+                    helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+
+    def test_shared_data_and_correct_finalizer_only_delegate_to_one_existing_adapter(self):
+        for profile, dispatch, final in (
+            (helper.WINDOWS_RETAINED_PROFILE, helper.WINDOWS_RETAINED_DISPATCH, "windows-retained-finalize"),
+            (helper.WINDOWS_SELECTION_PROFILE, helper.WINDOWS_SELECTION_DISPATCH, "windows-selection-finalize"),
+        ):
+            context = {"qualificationProfile": profile}
+            for phase in ("prepare", "acquire", "compile", "retain", "windows-retained-probes-finalize",
+                          "windows-retained-precheck", final):
+                with self.subTest(profile=profile, phase=phase), \
+                     patch.dict(os.environ, {"MRK_DESKTOP_DISPATCH_SCOPE": dispatch}, clear=True), \
+                     patch.object(helper, "windows_installed_binding", return_value=context), \
+                     patch.object(helper, "windows_installed_context", return_value=context), \
+                     patch.object(helper, "windows_retained_phase") as adapter:
+                    helper.windows_installed_phase(phase, helper.WINDOWS_INSTALLED_SCOPE)
+                    adapter.assert_called_once()
+                    self.assertEqual(adapter.call_args.args[:2], (phase, context))
+
+    def test_declared_compiler_features_do_not_activate_a_product_or_image_profile(self):
+        # Complete declaration equality is checked separately against actual Cargo.
+        self.assertEqual(helper.WINDOWS_NATIVE_DECLARED_FEATURES["installer-selection-fixture"],
+                         ["installer-selection", "installer-protected-fixture"])
+        self.assertEqual(helper.WINDOWS_NATIVE_DECLARED_FEATURES["image-stdio"], ["image-writer"])
+        for context in (WindowsReaderGateTests.context(), WindowsNormalUiPrerequisiteTests.context()):
+            self.assertNotIn("installer-selection-fixture", helper.windows_installed_features(context, "native"))
+            self.assertNotIn("image-stdio", helper.windows_installed_features(context, "native"))
+        self.assertEqual(helper.WINDOWS_SELECTION_DATA_PHASES, ("windows-selection-finalize",))
+        self.assertNotIn("windows-selection-finalize", helper.WINDOWS_RETAINED_DATA_PHASES)
+
+
+class WindowsNativeProductRoleIsolationTests(unittest.TestCase):
+    """Inert role DATA regressions; no Cargo, original executable or owner runs."""
+
+    @staticmethod
+    def native(value):
+        return next(row for row in value["packages"] if row["name"] == "mrk-windows-installed-native")
+
+    @staticmethod
+    def node(value, key):
+        return next(row for row in value["resolve"]["nodes"] if row["id"] == key)
+
+    @classmethod
+    def fixtures(cls):
+        for publication in (False, True):
+            value, context = WindowsImageWriterB2Native22Tests.native_graph_data()
+            cls.node(value, cls.native(value)["id"])["features"] = ["runtime-publication"] if publication else []
+            yield ("runtime-publication" if publication else "runtime-default", value, None,
+                   Path(context["source"]), Path(context["root"]))
+        for bridge in (False, True):
+            value, context = WindowsImageWriterB2Native22Tests.native_graph_data(bridge)
+            yield ("b2-bridge" if bridge else "b2-native", value, None,
+                   Path(context["source"]), Path(context["root"]))
+        for observer in (False, True):
+            value, lock, source, root = WindowsNormalUiPrerequisiteTests.graph_data()
+            if observer:
+                cls.node(value, cls.native(value)["id"])["features"] = [
+                    "desktop-ui", "desktop-ui-dialogs", "windows-installed-observation"]
+            yield ("ui-observer" if observer else "ui-probe", value, lock, source, root)
+        for publication in (False, True):
+            value, lock, context = WindowsReaderGateTests.graph_data(publication, normal_units=False)
+            yield ("headless-publication" if publication else "headless-normal", value, lock,
+                   Path(context["source"]), Path(context["root"]))
+        value, lock, context = WindowsImageWriterB2Native22Tests.app_graph_data()
+        yield "headless-b2", value, lock, Path(context["source"]), Path(context["root"])
+        for observer in (False, True):
+            value, lock, source, root = WindowsNormalUiGuiTests.graph_fixture(observer)
+            yield ("gui-observer" if observer else "gui-normal", value, lock, source, root)
+
+    @staticmethod
+    def read(role, value, lock, source, root):
+        if role.startswith("runtime-"):
+            return helper.windows_installed_native_graph(value, source=source, root=root,
+                features=["runtime-publication"] if role == "runtime-publication" else [])
+        if role.startswith("b2-"):
+            return helper.windows_image_writer_b2_graph(value, source=source, root=root, bridge=role == "b2-bridge")
+        if role.startswith("ui-"):
+            return helper.windows_normal_ui_native_graph(value, lock, source=source, root=root, observer_data=role == "ui-observer")
+        if role.startswith("headless-"):
+            return helper.windows_installed_app_graph(value, lock, source=source, root=root,
+                publication=role == "headless-publication", image_writer=role == "headless-b2")
+        if role.startswith("gui-"):
+            return helper.windows_normal_ui_app_graph(value, lock, source=source, root=root, observer=role == "gui-observer")
+        raise AssertionError("unknown synthetic role")
+
+    def test_original_role_matrix_keeps_native_sha2_inactive_but_app_sha2_required(self):
+        seen = []
+        for role, value, lock, source, root in self.fixtures():
+            with self.subTest(role=role):
+                self.read(role, value, lock, source, root)
+                seen.append(role)
+                native = self.native(value)
+                self.assertTrue(helper.windows_native_declarations_valid(native))
+                nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+                packages = {row["id"]: row for row in value["packages"]}
+                edges = {packages[key]["name"] for key in nodes[native["id"]]["dependencies"]}
+                self.assertEqual(edges, {"windows-sys", "windows", "webview2-com", "windows-core"}
+                    if role.startswith(("ui-", "gui-")) else {"windows-sys"})
+                self.assertFalse({"installer-acquisition", "installer-selection", "sha2"}
+                    & set(nodes[native["id"]]["features"]))
+                app = next((row for row in value["packages"] if row["name"] == "mobile-release-kit-desktop"), None)
+                if app is None:
+                    self.assertNotIn("sha2", {row["name"] for row in value["packages"]})
+                    self.assertEqual(len(nodes), 24 if role.startswith("ui-") else 4 if role == "b2-bridge" else 3)
+                else:
+                    self.assertIn("sha2", {packages[key]["name"] for key in nodes[app["id"]]["dependencies"]})
+                if role.startswith("ui-"):
+                    self.assertEqual((len(lock["package"]), len(value["packages"])), (34, 24))
+                    self.assertEqual({row["name"] for row in lock["package"]}
+                        - {row["name"] for row in value["packages"]}, WINDOWS_NATIVE_SHA2_INACTIVE_FIXTURE_NAMES)
+        self.assertEqual(seen, ["runtime-default", "runtime-publication", "b2-native", "b2-bridge",
+            "ui-probe", "ui-observer", "headless-normal", "headless-publication", "headless-b2", "gui-normal", "gui-observer"])
+
+    def test_optional_declaration_is_exact_typed_and_never_an_implicit_capability(self):
+        value, _ = WindowsImageWriterB2Native22Tests.native_graph_data()
+        native = self.native(value)
+        self.assertTrue(helper.windows_native_declarations_valid(native))
+        declaration = next(row for row in native["dependencies"] if row["name"] == "sha2")
+        self.assertEqual(declaration, WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE)
+        for field, altered in (("optional", False), ("optional", 1), ("uses_default_features", False),
+                ("uses_default_features", 1), ("name", "other"), ("rename", "sha2"), ("req", "^0.10"),
+                ("source", "git+https://example.invalid/other"), ("registry", "other"), ("kind", "build"),
+                ("target", None), ("features", ["asm"]), ("path", "/other/sha2")):
+            changed = deepcopy(native)
+            next(row for row in changed["dependencies"] if row["name"] == "sha2")[field] = altered
+            with self.subTest(field=field, value=altered):
+                self.assertFalse(helper.windows_native_declarations_valid(changed))
+        for field in declaration:
+            changed = deepcopy(native)
+            del next(row for row in changed["dependencies"] if row["name"] == "sha2")[field]
+            with self.subTest(missing=field):
+                self.assertFalse(helper.windows_native_declarations_valid(changed))
+        for altered in (None, [], {}, {"features": native["features"], "dependencies": [None]}):
+            self.assertFalse(helper.windows_native_declarations_valid(altered))
+        for name in ("duplicate", "alias", "implicit-feature", "stale-acquisition", "default-forwarding"):
+            changed = deepcopy(native)
+            if name == "duplicate":
+                changed["dependencies"].append(deepcopy(declaration))
+            elif name == "alias":
+                changed["dependencies"].append({**deepcopy(declaration), "name": "other", "rename": "sha2"})
+            elif name == "implicit-feature":
+                changed["features"]["sha2"] = ["dep:sha2"]
+            elif name == "stale-acquisition":
+                changed["features"]["installer-acquisition"] = []
+            else:
+                changed["features"]["default"] = ["installer-acquisition"]
+            with self.subTest(case=name):
+                self.assertFalse(helper.windows_native_declarations_valid(changed))
+
+    def test_every_distinct_reader_proves_the_optional_declaration_and_selected_role(self):
+        for role, value, lock, source, root in self.fixtures():
+            for fault in ("required-sha2", "stale-feature-map", "selected-acquisition", "implicit-selected-sha2"):
+                changed = deepcopy(value)
+                native = self.native(changed)
+                if fault == "required-sha2":
+                    next(row for row in native["dependencies"] if row["name"] == "sha2")["optional"] = False
+                elif fault == "stale-feature-map":
+                    native["features"]["installer-acquisition"] = []
+                else:
+                    node = self.node(changed, native["id"])
+                    node["features"] = sorted([*node["features"],
+                        "installer-acquisition" if fault == "selected-acquisition" else "sha2"])
+                with self.subTest(role=role, fault=fault), self.assertRaises(helper.CheckFailure):
+                    self.read(role, changed, lock, source, root)
+
+    def test_native_ui_full_lock_rejects_inactive_row_and_collection_drift(self):
+        value, lock, source, root = WindowsNormalUiPrerequisiteTests.graph_data()
+        helper.windows_normal_ui_native_graph(value, lock, source=source, root=root)
+        for name in sorted(WINDOWS_NATIVE_SHA2_INACTIVE_FIXTURE_NAMES):
+            for field, replacement in (("checksum", "0" * 64), ("source", "git+https://example.invalid/other"),
+                    ("version", "9.9.9"), ("dependencies", ["windows-sys"])):
+                changed = deepcopy(lock)
+                next(row for row in changed["package"] if row["name"] == name)[field] = replacement
+                with self.subTest(name=name, field=field), self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_native_graph(value, changed, source=source, root=root)
+        for fault in ("missing", "duplicate", "extra", "renamed", "extra-null-key"):
+            changed = deepcopy(lock)
+            row = next(row for row in changed["package"] if row["name"] == "sha2")
+            if fault == "missing":
+                changed["package"].remove(row)
+            elif fault == "duplicate":
+                changed["package"].append(deepcopy(row))
+            elif fault == "extra":
+                changed["package"].append({**deepcopy(row), "name": "unselected-extra"})
+            elif fault == "renamed":
+                row["name"] = "unselected-extra"
+            else:
+                row["unknown"] = None
+            with self.subTest(fault=fault), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_native_graph(value, changed, source=source, root=root)
+
+    def test_native_ui_omits_only_literal_native_locked_sha2_not_other_edges(self):
+        value, lock, source, root = WindowsNormalUiPrerequisiteTests.graph_data()
+        for fault in ("missing-native-sha2", "versioned-spelling", "duplicate-native-sha2", "other-parent-sha2"):
+            changed = deepcopy(lock)
+            native = next(row for row in changed["package"] if row["name"] == "mrk-windows-installed-native")
+            if fault == "missing-native-sha2":
+                native["dependencies"].remove("sha2")
+            elif fault == "versioned-spelling":
+                native["dependencies"][native["dependencies"].index("sha2")] = "sha2 0.10.9"
+            elif fault == "duplicate-native-sha2":
+                native["dependencies"].append("sha2")
+            else:
+                next(row for row in changed["package"] if row["name"] == "windows-sys")["dependencies"].append("sha2")
+            with self.subTest(fault=fault), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_native_graph(value, changed, source=source, root=root)
+
+    def test_inactive_lock_rows_never_authorize_native_ui_metadata_or_resolved_edges(self):
+        value, lock, source, root = WindowsNormalUiPrerequisiteTests.graph_data()
+        sha_path = root / "cargo/registry/src/index.crates.io-fixed/sha2-0.10.9"
+        sha = {"id": "sha2@0.10.9", "name": "sha2", "version": "0.10.9",
+            "source": "registry+https://github.com/rust-lang/crates.io-index", "manifest_path": str(sha_path / "Cargo.toml"),
+            "features": {}, "dependencies": [], "targets": [{"name": "sha2", "kind": ["lib"],
+                "crate_types": ["lib"], "src_path": str(sha_path / "src/lib.rs")}]}
+        node = {"id": sha["id"], "features": [], "dependencies": [], "deps": []}
+        for fault in ("extra-package", "same-count-package-substitution", "extra-resolved-node", "native-edge"):
+            changed = deepcopy(value)
+            if fault == "extra-package":
+                changed["packages"].append(deepcopy(sha))
+                changed["resolve"]["nodes"].append(deepcopy(node))
+            elif fault == "same-count-package-substitution":
+                changed["packages"][-1] = deepcopy(sha)
+                changed["resolve"]["nodes"][-1] = deepcopy(node)
+            elif fault == "extra-resolved-node":
+                changed["resolve"]["nodes"].append(deepcopy(node))
+            else:
+                native = self.node(changed, self.native(changed)["id"])
+                native["dependencies"].append(sha["id"])
+                native["deps"].append({"name": "sha2", "pkg": sha["id"], "dep_kinds": [{"kind": None, "target": None}]})
+            with self.subTest(fault=fault), self.assertRaises(helper.CheckFailure):
+                helper.windows_normal_ui_native_graph(changed, lock, source=source, root=root)
+
+    def test_late_inactive_native_compiler_units_refuse_before_filesystem_admission(self):
+        value, lock, source, root = WindowsNormalUiPrerequisiteTests.graph_data()
+        graph = helper.windows_normal_ui_native_graph(value, lock, source=source, root=root)
+        native = graph["nativeId"]
+        executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mrk_windows_installed_native-aaaaaaaaaaaaaaaa.exe"
+        rows = [{"reason": "compiler-artifact", "package_id": key, "manifest_path": package["manifest_path"],
+            "target": package["targets"][0], "features": graph["nodes"][key]["features"],
+            "profile": {"test": key == native}, "fresh": False,
+            "executable": str(executable) if key == native else None} for key, package in graph["packages"].items()]
+        encode = lambda data: b"\n".join(helper.canonical_json(row) for row in data)
+        with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)) as admission:
+            self.assertEqual(helper.windows_normal_ui_native_test_path(
+                encode([*rows, {"reason": "build-finished", "success": True}]), graph, source=source, root=root), executable)
+            admission.assert_called_once()
+        for fault in ("late-inactive-package", "active-acquisition-unit", "late-failed-finality"):
+            changed = deepcopy(rows)
+            if fault == "late-inactive-package":
+                changed.append({**deepcopy(rows[-1]), "package_id": "sha2@0.10.9"})
+            elif fault == "active-acquisition-unit":
+                next(row for row in changed if row["package_id"] == native)["features"].append("installer-acquisition")
+            changed.append({"reason": "build-finished", "success": fault != "late-failed-finality"})
+            with self.subTest(role="ui", fault=fault), patch.object(helper, "ordinary_windows_executable") as admission:
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_normal_ui_native_test_path(encode(changed), graph, source=source, root=root)
+                admission.assert_not_called()
+        for bridge in (False, True):
+            value, context = WindowsImageWriterB2Native22Tests.native_graph_data(bridge)
+            graph = WindowsImageWriterB2Native22Tests.graph(value, context, bridge)
+            rows = WindowsImageWriterB2Native22Tests.compiler_rows(graph, context)
+            changed = [*rows[:-1], {**deepcopy(rows[0]), "package_id": "sha2@0.10.9"}, rows[-1]]
+            with self.subTest(role="b2", bridge=bridge), patch.object(helper, "ordinary_windows_executable") as admission:
+                with self.assertRaises(helper.CheckFailure):
+                    helper.windows_image_writer_b2_test_path(encode(changed), graph,
+                        source=Path(context["source"]), root=Path(context["root"]))
+                admission.assert_not_called()
+
+    def test_gui_native_edges_cannot_borrow_app_sha2_or_drop_a_shared_dependency(self):
+        for observer in (False, True):
+            value, lock, source, root = WindowsNormalUiGuiTests.graph_fixture(observer)
+            packages = {row["name"]: row for row in value["packages"]}
+            for fault in ("native-sha2", "missing-native-core", "missing-app-sha2"):
+                changed = deepcopy(value)
+                native = self.node(changed, packages["mrk-windows-installed-native"]["id"])
+                app = self.node(changed, packages["mobile-release-kit-desktop"]["id"])
+                sha2 = packages["sha2"]["id"]
+                if fault == "native-sha2":
+                    native["dependencies"].append(sha2)
+                    native["deps"].append({"name": "sha2", "pkg": sha2,
+                        "dep_kinds": [{"kind": None, "target": WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE["target"]}]})
+                    message = "Windows GUI native dependency role differs"
+                elif fault == "missing-native-core":
+                    core = packages["windows-core"]["id"]
+                    native["dependencies"].remove(core)
+                    native["deps"] = [edge for edge in native["deps"] if edge["pkg"] != core]
+                    message = "Windows GUI native dependency role differs"
+                else:
+                    # Keep SHA2 reachable elsewhere: this specifically tests the
+                    # app's own required edge, not disconnected-inventory failure.
+                    tauri = self.node(changed, packages["tauri"]["id"])
+                    tauri["dependencies"].append(sha2)
+                    tauri["deps"].append({"name": "sha2", "pkg": sha2, "dep_kinds": [{"kind": None, "target": None}]})
+                    next(row for row in changed["packages"] if row["id"] == packages["tauri"]["id"])["dependencies"].append({
+                        "name": "sha2", "source": packages["sha2"]["source"], "kind": None, "target": None})
+                    app["dependencies"].remove(sha2)
+                    app["deps"] = [edge for edge in app["deps"] if edge["pkg"] != sha2]
+                    message = "Windows GUI direct app roles differ"
+                with self.subTest(observer=observer, fault=fault), self.assertRaisesRegex(helper.CheckFailure, message):
+                    helper.windows_normal_ui_app_graph(changed, lock, source=source, root=root, observer=observer)
+
+    def test_source_cargo_feature_map_platform_seeds_and_bridge_lock_keep_exact_roles(self):
+        native = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.toml").read_text(encoding="utf-8"))
+        app = helper.tomllib.loads((SOURCE / helper.WINDOWS_INSTALLED_APP / "Cargo.toml").read_text(encoding="utf-8"))
+        expected = {
+            "qualification-result": [], "runtime-publication": [], "image-writer": [], "image-stdio": ["image-writer"],
+            "installer-acquisition": ["dep:sha2"],
+            "installer-protected-fixture": ["installer-acquisition", "runtime-publication", "qualification-result"],
+            "installer-selection": ["installer-acquisition", "runtime-publication",
+                "windows-sys/Win32_System_Com_StructuredStorage", "windows-sys/Wdk_System_Registry"],
+            "installer-selection-fixture": ["installer-selection", "installer-protected-fixture"],
+            "desktop-ui": ["dep:windows", "dep:webview2-com", "dep:windows-core"],
+            "desktop-ui-dialogs": ["desktop-ui"], "windows-installed-observation": ["desktop-ui-dialogs"],
+        }
+        self.assertEqual(native["features"], expected)
+        self.assertEqual(helper.WINDOWS_NATIVE_DECLARED_FEATURES, expected)
+        self.assertEqual(helper.WINDOWS_NATIVE_SHA2_DECLARATION, WINDOWS_NATIVE_SHA2_DECLARATION_FIXTURE)
+        target = 'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'
+        dependencies = native["target"][target]["dependencies"]
+        self.assertEqual(dependencies["sha2"], {"version": "=0.10.9", "optional": True})
+        self.assertEqual(app["dependencies"]["sha2"], "=0.10.9")
+        seeds = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices",
+            "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security",
+            "Win32_NetworkManagement_NetManagement", "Win32_Security_Cryptography",
+            "Win32_System_IO", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_JobObjects",
+            "Win32_System_Console", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_WindowsProgramming",
+            "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops",
+            "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant",
+            "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"]
+        self.assertEqual(dependencies["windows-sys"]["features"], seeds)
+        self.assertEqual(list(helper.WINDOWS_IMAGE_WRITER_B2_PLATFORM_FEATURES), seeds)
+        native_lock = (SOURCE / helper.WINDOWS_INSTALLED_CRATE / "Cargo.lock").read_bytes()
+        bridge_lock = (SOURCE / helper.WINDOWS_IMAGE_WRITER_B2_BRIDGE / "Cargo.lock").read_bytes()
+        self.assertEqual((len(native_lock), len(bridge_lock)), (8346, 8470))
+        self.assertEqual(hashlib.sha256(bridge_lock).hexdigest(), "187f214ec4eefa36459bd1ff9e8748aaec2f1c17cfb135606998ac7c0a13656c")
+        self.assertEqual(len(helper.tomllib.loads(native_lock.decode("utf-8"))["package"]), 34)
+        self.assertEqual(len(helper.tomllib.loads(bridge_lock.decode("utf-8"))["package"]), 35)
+
 
 
 if __name__ == "__main__":
